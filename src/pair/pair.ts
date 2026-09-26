@@ -225,7 +225,7 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
   const instance = await LibraryInstance.open({
     dataDir: options.dataDir,
     // La misma etiqueta de motor que `serve` (`src/server/serve.ts`).
-    deviceLabel: 'hebra-mcp',
+    deviceLabel: 'Claude',
     sync: linked.config,
     checkIntervalMs: options.instance?.checkIntervalMs ?? null,
     lock: options.instance?.lock

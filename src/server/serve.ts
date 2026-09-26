@@ -68,7 +68,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const [instance, privacyConfig] = await Promise.all([
     LibraryInstance.open({
       dataDir,
-      deviceLabel: 'hebra-mcp',
+      deviceLabel: 'Claude',
       sync: linked?.config ?? null,
       ...options.instance
     }),

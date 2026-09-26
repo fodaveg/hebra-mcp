@@ -3,9 +3,10 @@
  * `device-link-transport.ts` de Hebra SIN cambios: el mismo camino que el lado N de
  * `LibrarySettingsSyncIdentity.svelte` (Ajustes > Sincronización), en una terminal.
  *
- * 1. `DeviceLinkRequester.start` con plataforma `mac` (R8: el relé solo acepta `mac`,
- *    `iphone`, `ipad` y `web`) y la etiqueta saneada por `sanitizeDeviceLabel`. La terminal
- *    enseña lo que David verá en Hebra: esa etiqueta y la plataforma.
+ * 1. `DeviceLinkRequester.start` con plataforma `agent` (L5, petición P3: un dispositivo
+ *    sin pantalla que Hebra enseña como «Claude») y la etiqueta saneada por
+ *    `sanitizeDeviceLabel`. La terminal enseña lo que David verá en Hebra: esa etiqueta y
+ *    la plataforma.
  * 2. Sondeo cada `DEVICE_LINK_POLL_MS` (2 s). Un fallo pasajero (red, 429, 5xx) espera
  *    4, 8 y como mucho 16 s, como Hebra; cualquier otro cancela la solicitud.
  * 3. Al ver `granted`, el requester desenvuelve el código con SUS valores y
@@ -34,8 +35,8 @@ import { PairError } from './errors';
 import type { Fetcher } from './lumbre';
 import type { PairTerminal } from './terminal';
 
-/** Plataforma que declara hebra-mcp (SPEC.md R8; plataforma propia, petición P3). */
-export const LINK_PLATFORM = 'mac' as const;
+/** Plataforma que declara hebra-mcp (SPEC.md L5; plataforma propia, petición P3). */
+export const LINK_PLATFORM = 'agent' as const;
 const RETRY_MAX_MS = 16_000;
 
 export interface GrantedAccess {
@@ -45,7 +46,7 @@ export interface GrantedAccess {
 
 export interface RequestAccessOptions {
   connection: LumbreConnection;
-  /** Ya saneada con `sanitizeDeviceLabel(…, 'mac')`. */
+  /** Ya saneada con `sanitizeDeviceLabel(…, 'agent')`. */
   label: string;
   fetcher: Fetcher;
   terminal: PairTerminal;
@@ -114,7 +115,7 @@ export async function requestLibraryAccess(options: RequestAccessOptions): Promi
   terminal.print('');
   terminal.print('Abre Hebra en el Mac o el iPhone: Ajustes > Sincronización.');
   terminal.print('Verás una solicitud de acceso de este dispositivo:');
-  terminal.print(`  «${requester.label}» · Mac`);
+  terminal.print(`  «${requester.label}» · ${displayDeviceLabel(null, LINK_PLATFORM)}`);
   terminal.print(`Apruébala SOLO si ves exactamente ese nombre. Caduca en ${minutes} min.`);
   terminal.print('Esperando la aprobación…');
 

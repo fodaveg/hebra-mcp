@@ -207,6 +207,10 @@ async function run(engine: SqliteLibraryEngine, conn: SqliteConn, step: Step): P
         args.cursor ?? null,
         args.limit
       );
+    case 'propsKeys':
+      return engine.propsKeys(args.prefix ?? '', args.limit);
+    case 'propsValues':
+      return engine.propsValues(args.key, args.prefix ?? '', args.limit);
     case 'libraryDigest':
       return engine.libraryDigest();
     case 'importBatch':

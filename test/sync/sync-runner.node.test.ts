@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import { LibraryError } from '../../src/hebra';
 import {
@@ -11,6 +15,7 @@ import {
   mcpDevice
 } from './devices';
 import { openNodeLibraryPort } from '../../src/store/node-port';
+import { NoteWriter } from '../../src/store/writes';
 import { SyncRunner } from '../../src/sync/runner';
 
 /**
@@ -121,6 +126,58 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     const logText = JSON.stringify(mcp.logged);
     for (const secret of ['Compartida', 'texto base', 'EDICIÓN', 'AÑADIDO']) {
       expect(logText).not.toContain(secret);
+    }
+  });
+
+  it("una copia de conflicto creada por hebra-mcp lleva conflictDevice 'Claude' (L5)", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-conflict-device-'));
+    try {
+      const sqlitePath = join(dataDir, 'library.sqlite');
+      // `deviceLabel` por defecto (sin pasarlo): 'Claude' desde L5 (`src/store/node-port.ts`).
+      const port = await openNodeLibraryPort({ sqlitePath, dataDir });
+      const relay = new InMemoryLibraryRelay();
+      const runner = await SyncRunner.create({
+        port: port.syncStorePort(),
+        transport: relay,
+        identity: IDENTITY,
+        vaultKey: VAULT_KEY,
+        intervalMs: null,
+        emit: () => undefined
+      });
+      // Sin ronda automática en `onWritten`: el orden de las rondas de abajo decide
+      // a propósito quién sube primero y a quién le toca crear la copia.
+      const writer = new NoteWriter(port, { onWritten: () => undefined });
+      const app = await appDevice(relay);
+
+      const id = await appCreate(app, '# Compartida\n\ntexto base');
+      await app.sync.runRound();
+      await runner.requestRound();
+
+      // Edición concurrente en los dos lados, ninguna subida todavía.
+      await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
+      await writer.appendToNote({ id, text: 'AÑADIDO POR CLAUDE' });
+
+      // La app sube PRIMERO y no choca con nada; hebra-mcp sube DESPUÉS, contra un
+      // servidor que ya cambió: es hebra-mcp quien crea la copia, con SU deviceLabel.
+      await app.sync.runRound();
+      await runner.requestRound();
+      await app.sync.runRound();
+      await runner.requestRound();
+      port.close();
+
+      // `conflict_device` no lo expone `NodeLibraryPort` (D2: fuera de lo que ven las
+      // herramientas), así que se lee del fichero con una conexión de solo lectura aparte.
+      const raw = new DatabaseSync(sqlitePath, { readOnly: true });
+      try {
+        const row = raw
+          .prepare('SELECT conflict_device FROM notes WHERE conflict_of = ?')
+          .get(id) as { conflict_device: string } | undefined;
+        expect(row?.conflict_device).toBe('Claude');
+      } finally {
+        raw.close();
+      }
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 

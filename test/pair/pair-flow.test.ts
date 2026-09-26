@@ -145,11 +145,11 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     const verifier = exchange.body.code_verifier as string;
     expect(Buffer.from(verifier, 'base64url').byteLength).toBeGreaterThanOrEqual(32);
 
-    // Vínculo: plataforma mac, etiqueta saneada, completado en el relé.
-    expect(request.platform).toBe('mac');
+    // Vínculo: plataforma agent, etiqueta saneada, completado en el relé.
+    expect(request.platform).toBe('agent');
     expect(request.label).toBe('Claude (hebra-mcp)');
     expect(fake.deviceLinks.rows().map((row) => row.state)).toEqual(['completed']);
-    expect(terminal.lines).toContain('  «Claude (hebra-mcp)» · Mac');
+    expect(terminal.lines).toContain('  «Claude (hebra-mcp)» · Claude');
     for (const title of TITLES) expect(terminal.lines).toContain(`  · ${title}`);
 
     // Secretos en el llavero de test, y el dispositivo registrado en la bóveda.

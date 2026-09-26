@@ -84,11 +84,11 @@ export async function openNodeLibraryPort(
     // escritor).
     engine =
       mode === 'readWrite'
-        ? await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'hebra-mcp', {
+        ? await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'Claude', {
             journalMode: 'WAL',
             ...(blobs ? { blobs } : {})
           })
-        : await SqliteLibraryEngine.openReadOnly(conn, options.deviceLabel ?? 'hebra-mcp', {
+        : await SqliteLibraryEngine.openReadOnly(conn, options.deviceLabel ?? 'Claude', {
             ...(blobs ? { blobs } : {})
           });
   } catch (error) {
