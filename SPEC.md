@@ -217,19 +217,26 @@ Comando `hebra-mcp pair`, interactivo en terminal:
      `<webOrigin>/lumbre/connect#code=…`, y `webOrigin` pasa por `isAllowedHebraOrigin`
      (`hebra-http.ts:82-90`), que en producción solo admite `HEBRA_ALLOWED_ORIGINS` y
      `http://tauri.localhost`. No hay modo de mostrar el código para copiarlo.
-   - **Cambio en Lumbre** (L2a, aceptado y en curso por la sesión de Lumbre el 26 sep 2026; pasa
-     revisión de seguridad antes de desplegar). Contrato:
-     - `webOrigin` `http://127.0.0.1:<cualquier puerto>` o `http://[::1]:<puerto>`; `localhost` por
-       nombre NO (RFC 8252 §8.3).
-     - Ruta de retorno fija: `/lumbre/connect`.
-     - En loopback, PKCE S256 obligatorio en `/pair` y `code_verifier` obligatorio en `/exchange`.
-     - La credencial aparece en Integraciones > Hebra con la etiqueta del cliente y se revoca como las
-       demás.
-     - Los orígenes actuales no cambian.
-     - Retorno con el código en la **query** (`?code=…&apiOrigin=…`), porque el `#fragmento` no llega
-       al servidor.
-   - **hebra-mcp**: abre un servidor HTTP efímero en `127.0.0.1` con un puerto libre, acepta solo
-     `GET /lumbre/connect`, lee `code` y `apiOrigin` y se cierra.
+   - **Cambio en Lumbre** (L2a): pasó la auditoría de seguridad y está integrado en `main` de Lumbre
+     (`54b7aab5b`), pendiente de despliegue. Contrato:
+     - El parámetro de retorno es `webOrigin` (no hay `redirect_uri`): va en la query de
+       `GET /integrations/hebra` y en el JSON de `POST /api/integrations/hebra/pair`.
+     - Valores admitidos: `http://127.0.0.1:<puerto>` o `http://[::1]:<puerto>`, sin ruta o con
+       exactamente `/lumbre/connect`.
+     - `code_challenge` y `code_challenge_method=S256` son obligatorios.
+     - `/pair` devuelve `callbacks.web` = `http://127.0.0.1:P/lumbre/connect?code=<64 hex>&apiOrigin=…`.
+     - Canje: `POST /api/integrations/hebra/exchange` con `{code, deviceId, code_verifier}` y **sin**
+       cabecera `Origin` (con `Origin`, 403). Un verifier incorrecto da 401 y no quema el código.
+   - **Obligaciones de hebra-mcp** (de la auditoría de Lumbre; cada una con su test en L2):
+     1. Ignorar el `apiOrigin` de la query y usar el Lumbre configurado. Mientras el listener escucha,
+        cualquier web puede disparar el callback con un `apiOrigin` falso para robar el verifier.
+     2. Aceptar solo un `code` que case con `^[a-f0-9]{64}$`.
+     3. Responder una sola vez, con `Referrer-Policy: no-referrer` y sin recursos externos, y cerrar
+        el listener.
+     4. Verifier PKCE de 32 bytes aleatorios o más.
+     5. Escuchar en la IP literal `127.0.0.1` o `[::1]`, nunca en `localhost`.
+   - **hebra-mcp**: abre el listener en `127.0.0.1` con un puerto libre, solo `GET /lumbre/connect`,
+     y lo cierra tras la primera respuesta válida o al expirar (5 min).
 2. **Petición de vínculo**: `POST /device-links` con la plataforma y la etiqueta
    «Claude (hebra-mcp)», saneada con `sanitizeDeviceLabel`. El terminal muestra la verificación que
    David debe ver en Hebra.
