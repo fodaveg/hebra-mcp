@@ -1,7 +1,7 @@
 /**
  * `HebraLibraryPort` (`./types.ts`) en proceso, sobre `SqliteLibraryEngine` de Hebra y el
  * adaptador `node:sqlite` de `./sqlite-conn-node.ts`. Deliberadamente NO reutiliza
- * `LocalLibraryPort` (`$lib/library/local-port`): ese puerto implementa el
+ * `LocalLibraryPort` (`library/local-port` de Hebra): ese puerto implementa el
  * `LibraryStorePort` completo (`tagRename`, `noteMove`, `folder*`, `file*`…), y D2
  * (SPEC.md §3) prohíbe que nada de eso sea alcanzable desde las herramientas. Este puerto
  * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite.
@@ -28,22 +28,24 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { canonicalTitle, parseLinkRef, SqliteLibraryEngine } from '../hebra';
-import { cleanSearchPage } from '$lib/library/search-snippet';
-import type {
-  FoldersList,
-  LibraryOpenInfo,
-  LinkResolution,
-  NoteRow,
-  NoteSaveInput,
-  NoteSaveResult,
-  NotesPage,
-  NotesScope,
-  SearchFilters,
-  SearchPage,
-  TagsList,
-  TitleCandidates
-} from '$lib/library/types';
+import {
+  canonicalTitle,
+  cleanSearchPage,
+  parseLinkRef,
+  SqliteLibraryEngine,
+  type FoldersList,
+  type LibraryOpenInfo,
+  type LinkResolution,
+  type NoteRow,
+  type NoteSaveInput,
+  type NoteSaveResult,
+  type NotesPage,
+  type NotesScope,
+  type SearchFilters,
+  type SearchPage,
+  type TagsList,
+  type TitleCandidates
+} from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import { FsBlobStore } from './blob-store-fs';
 import { busyOtherInstance } from './errors';
@@ -71,15 +73,24 @@ export async function openNodeLibraryPort(
   if (options.sqlitePath !== ':memory:' && mode === 'readWrite') {
     await mkdir(dirname(options.sqlitePath), { recursive: true, mode: 0o700 });
   }
-  // WAL (lectores concurrentes, SPEC.md §8) lo fija el adaptador al arrancar el motor:
-  // ver la cabecera de `sqlite-conn-node.ts`. Sin efecto sobre `:memory:`.
   const { db, conn } = openNodeSqliteConn(options.sqlitePath, mode);
   const blobs = options.dataDir ? new FsBlobStore(options.dataDir) : undefined;
   let engine: SqliteLibraryEngine;
   try {
-    engine = await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'hebra-mcp', {
-      ...(blobs ? { blobs } : {})
-    });
+    // Escritor único (SPEC.md §8): `journalMode: 'WAL'` para que los lectores de las
+    // demás instancias (`openReadOnly`, cada uno su propia conexión `node:sqlite` con
+    // `readOnly: true`) convivan con esta sin bloquearse. El lector no toca pragmas ni
+    // esquema (`openReadOnly` de `SqliteLibraryEngine`: la base ya existe, la creó el
+    // escritor).
+    engine =
+      mode === 'readWrite'
+        ? await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'hebra-mcp', {
+            journalMode: 'WAL',
+            ...(blobs ? { blobs } : {})
+          })
+        : await SqliteLibraryEngine.openReadOnly(conn, options.deviceLabel ?? 'hebra-mcp', {
+            ...(blobs ? { blobs } : {})
+          });
   } catch (error) {
     db.close();
     throw error;

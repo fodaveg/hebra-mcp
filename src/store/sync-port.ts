@@ -1,7 +1,7 @@
 /**
  * `SyncStorePort`: la vista del almacén que ve el motor de sync de Hebra
- * (`LibrarySyncEngine`, `$lib/library/sync-engine`), y SOLO él. Es el `LibraryPort` de
- * Hebra (`$lib/library/types`, «el puerto estrecho de §6.1») tal cual: `sync*`,
+ * (`LibrarySyncEngine`, `library/sync-engine`), y SOLO él. Es el `LibraryPort` de
+ * Hebra (`library/types`, «el puerto estrecho de §6.1») tal cual: `sync*`,
  * `library*Binding`, `libraryConnect`, `blobPut`/`blobRead` y las cinco operaciones de
  * nota que ese interfaz exige. Delega en el MISMO `SqliteLibraryEngine` y la MISMA cola
  * (`SerialQueue`) que `NodeLibraryPort`, igual que `LocalLibraryPort` de Hebra lo hace

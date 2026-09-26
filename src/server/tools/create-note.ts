@@ -10,8 +10,7 @@
  * revela la CONFIGURACIÓN de privados (qué carpeta o etiqueta está oculta) a quien no la
  * conoce ya, porque quien escribió el cuerpo ya conoce sus propias etiquetas.
  */
-import { deriveNote } from '../../hebra';
-import { ROOT_FOLDER_ID } from '$lib/library/folder-tree';
+import { deriveNote, ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';

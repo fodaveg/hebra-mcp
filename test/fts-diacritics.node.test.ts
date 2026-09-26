@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { MemoryBlobStore } from '$lib/library/blob-store';
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
+import { SqliteLibraryEngine } from '../src/hebra';
+import { MemoryBlobStore } from './hebra-testing';
 import { openNodeSqliteConn } from '../src/store/sqlite-conn-node';
 
 /**

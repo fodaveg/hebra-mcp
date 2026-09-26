@@ -1,6 +1,6 @@
 /**
  * Errores con código cerrado propios de hebra-mcp (no de Hebra). El `message` es el
- * código, igual que `LibraryError` de Hebra (`$lib/library/library-error`), para que
+ * código, igual que `LibraryError` de Hebra (`library/library-error`), para que
  * la capa de herramientas lo traduzca sin mirar texto libre.
  */
 

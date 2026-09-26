@@ -19,8 +19,7 @@
  * recuperación ni los títulos. Lo que David tiene que leer va a `terminal`.
  */
 import { randomBytes, randomUUID } from 'node:crypto';
-import { decodeRecoveryCode } from '$lib/vault/blob-v2/crypto';
-import { sanitizeDeviceLabel } from '../hebra';
+import { decodeRecoveryCode, sanitizeDeviceLabel } from '../hebra';
 import { logEvent } from '../log/logger';
 import {
   readStoredIdentity,

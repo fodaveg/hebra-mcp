@@ -1,13 +1,14 @@
 /**
- * `BlobBytesStore` (`$lib/library/blob-store`) sobre el disco: `<dir>/blobs/aa/bb/<sha256>`,
- * escritura atómica (fichero temporal + `rename`, que en el mismo sistema de ficheros es
- * atómico en POSIX). El motor solo llama a `write` cuando el hash no está ya presente
- * (`blobPut`, `sqlite-engine.ts`), así que no hace falta comprobar duplicados aquí.
+ * `BlobBytesStore` (`library/blob-store` de Hebra, tipo reexportado por `../hebra`)
+ * sobre el disco: `<dir>/blobs/aa/bb/<sha256>`, escritura atómica (fichero temporal +
+ * `rename`, que en el mismo sistema de ficheros es atómico en POSIX). El motor solo
+ * llama a `write` cuando el hash no está ya presente (`blobPut`, `sqlite-engine.ts`), así
+ * que no hace falta comprobar duplicados aquí.
  */
 import { mkdir, open, readFile, rename, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { BlobBytesStore } from '$lib/library/blob-store';
+import type { BlobBytesStore } from '../hebra';
 
 /** Ruta relativa del adjunto dentro del directorio de datos: `blobs/aa/bb/<sha256>`. */
 export function blobStorePath(root: string, sha256: string): string {

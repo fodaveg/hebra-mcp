@@ -15,7 +15,7 @@
  * `test/store/notes-visibility-index.node.test.ts` (milisegundos de un dígito con
  * 5 000 notas).
  */
-import { ROOT_FOLDER_ID } from '$lib/library/folder-tree';
+import { ROOT_FOLDER_ID } from '../hebra';
 import type { HebraLibraryPort } from '../store/types';
 import type { PrivacyConfig } from './config';
 import { FolderIndex } from './folder-index';

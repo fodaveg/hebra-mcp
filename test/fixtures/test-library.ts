@@ -9,9 +9,7 @@
  * copia de conflicto y notas en carpeta/etiqueta privada con palabras-cebo únicas
  * (SPEC.md §10 L1).
  */
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
-import { deriveNote } from '$lib/library/derive';
-import type { NoteRow } from '$lib/library/types';
+import { deriveNote, SqliteLibraryEngine, type NoteRow } from '../../src/hebra';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 
 /** Cebo de una nota oculta por CARPETA privada (SPEC.md §10). */

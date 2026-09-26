@@ -1,20 +1,19 @@
 /**
- * Dispositivos de prueba contra el relé en memoria de Hebra
- * (`$lib/library/testing/in-memory-relay`, el mismo que usa `sync-engine.test.ts`):
+ * Dispositivos de prueba contra el relé en memoria de Hebra (`InMemoryLibraryRelay` de
+ * `node-testing.ts`, el mismo que usa `sync-engine.test.ts`):
  * - `mcpDevice`: hebra-mcp tal cual corre, `NodeLibraryPort` + `SyncRunner` + `NoteWriter`.
  * - `appDevice`: «otra app de Hebra», montada como la monta el propio Hebra en sus tests
  *   (`SqliteLibraryEngine` + `LocalLibraryPort` + `LibrarySyncEngine`), sobre
  *   `node:sqlite`. Así lo que converge lo decide el código de Hebra, no el de hebra-mcp.
  */
-import { deriveNote } from '$lib/library/derive';
-import { LocalLibraryPort } from '$lib/library/local-port';
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
 import {
+  deriveNote,
   LibrarySyncEngine,
+  SqliteLibraryEngine,
   type LibrarySyncEvent,
   type SyncEngineIdentity
-} from '$lib/library/sync-engine';
-import { InMemoryLibraryRelay } from '$lib/library/testing/in-memory-relay';
+} from '../../src/hebra';
+import { InMemoryLibraryRelay, LocalLibraryPort } from '../hebra-testing';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { NoteWriter } from '../../src/store/writes';

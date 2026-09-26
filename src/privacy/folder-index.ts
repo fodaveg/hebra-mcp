@@ -2,15 +2,16 @@
  * Índice de carpetas construido UNA vez sobre `foldersList()` (el puerto ya da el padre
  * EFECTIVO y su estado, SPEC.md §5/§6.3): rutas para enseñar (`folderPath`) y, para el
  * filtro de privados, qué carpeta corresponde a una ruta configurada y todo su subárbol.
- * Reutiliza `folderPathSegments`/`folderSubtree` de Hebra (`$lib/library/folder-tree`,
- * puro, sin CodeMirror): mismo algoritmo que la interfaz de Hebra, sin reimplementarlo.
+ * Reutiliza `folderPathSegments`/`folderSubtree` de Hebra (`../hebra`, reexportado de
+ * `library/folder-tree`, puro, sin CodeMirror): mismo algoritmo que la interfaz de
+ * Hebra, sin reimplementarlo.
  */
 import {
   folderPathSegments,
   folderSubtree,
   ROOT_FOLDER_ID,
   type EffectiveParent
-} from '$lib/library/folder-tree';
+} from '../hebra';
 import type { HebraLibraryPort } from '../store/types';
 
 export class FolderIndex {

@@ -13,8 +13,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { encodeRecoveryCode } from '$lib/vault/blob-v2/crypto';
-import { HttpDeviceLinkTransport, grantDeviceLink, type LumbreConnection } from '../../src/hebra';
+import {
+  encodeRecoveryCode,
+  grantDeviceLink,
+  HttpDeviceLinkTransport,
+  type LumbreConnection
+} from '../../src/hebra';
 import { PairError } from '../../src/pair/errors';
 import { runPair, type PairOptions } from '../../src/pair/pair';
 import { runUnpair } from '../../src/pair/unpair';

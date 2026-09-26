@@ -23,10 +23,13 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { base64FromBytes, bytesFromBase64 } from '$lib/library/envelope';
-import { DEVICE_LINKS_PATH } from '$lib/library/device-link-transport';
-import { MemoryDeviceLinkRelay } from '$lib/library/testing/memory-device-link-relay';
-import { InMemoryLibraryRelay } from '$lib/library/testing/in-memory-relay';
+import {
+  base64FromBytes,
+  bytesFromBase64,
+  DEVICE_LINKS_PATH,
+  InMemoryLibraryRelay,
+  MemoryDeviceLinkRelay
+} from '../hebra-testing';
 
 export const LUMBRE = 'https://lumbre.test';
 const LIBRARY_PATH = /^\/api\/integrations\/hebra\/library\/v1\/vaults\/([0-9a-f]{32})\/(changes|records)$/;

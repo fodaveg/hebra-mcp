@@ -19,7 +19,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
+import { SqliteLibraryEngine } from '../../src/hebra';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { openNodeLibraryPort } from '../../src/store/node-port';
 import { buildTestLibrary } from '../fixtures/test-library';

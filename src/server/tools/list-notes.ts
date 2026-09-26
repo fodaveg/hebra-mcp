@@ -7,9 +7,7 @@
  * llame puede seguir paginando aunque esta página haya tenido que saltar notas
  * ocultas o filtradas.
  */
-import { canonicalTag } from '$lib/notes/tags';
-import { encodeCursor } from '../../hebra';
-import type { NotesScope } from '$lib/library/types';
+import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import type { ToolContext } from '../context';
 
 export interface ListedNote {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { LibraryError } from '$lib/library/library-error';
+import { LibraryError } from '../../src/hebra';
 import {
   InMemoryLibraryRelay,
   IDENTITY,

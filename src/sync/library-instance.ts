@@ -30,7 +30,7 @@ import type {
   SearchPage,
   TagsList,
   TitleCandidates
-} from '$lib/library/types';
+} from '../hebra';
 import { WriterLock, type WriterLockOptions } from '../lock/writer-lock';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';

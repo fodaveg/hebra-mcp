@@ -13,11 +13,11 @@
  *   existe para esta credencial y la primera ronda recibe 404 (FUGA-SYNC-02 de Hebra). Es
  *   idempotente en el relé, así que se llama en `pair` y en cada arranque de `serve`.
  */
-import { decodeRecoveryCode } from '$lib/vault/blob-v2/crypto';
-import { buildDeviceRegistration } from '$lib/vault/blob-v2/frames';
 import {
-  HttpBlobRelayV2,
+  buildDeviceRegistration,
   classifyError,
+  decodeRecoveryCode,
+  HttpBlobRelayV2,
   type BlobRelayConnectionProviderV2,
   type SyncEngineIdentity
 } from '../hebra';

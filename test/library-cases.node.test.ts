@@ -1,21 +1,20 @@
 import { describe, expect, it } from 'vitest';
-import cases from '$lib/library/cases/library-cases.json';
-import { MemoryBlobStore } from '$lib/library/blob-store';
-import { parseLinkRef } from '$lib/library/derive';
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
+import { parseLinkRef, SqliteLibraryEngine, type NoteSaveInput, type NotesScope, type SqliteConn } from '../src/hebra';
+import { libraryCases as cases, MemoryBlobStore } from './hebra-testing';
+// `node.ts`/`node-testing.ts` (L6c) no exportan estos ocho tipos: son detalles del
+// dispatcher de casos compartidos (mutaciones fuera de D2 que hebra-mcp nunca expone,
+// SPEC.md §5), usados aquí SOLO para castear los argumentos de cada paso. Justificado:
+// entran por `$lib/library/types`, no por producción (`../src/hebra`).
 import type {
   AckEntry,
   ImportBatch,
   IncomingRecord,
   NoteRewriteEntry,
-  NoteSaveInput,
-  NotesScope,
   PendingMark,
   PropsQueryFilters,
   PropsQuerySort,
   TagsReindexEntry
 } from '$lib/library/types';
-import type { SqliteConn } from '$lib/library/sqlite-engine';
 import { openNodeSqliteConn } from '../src/store/sqlite-conn-node';
 
 /**

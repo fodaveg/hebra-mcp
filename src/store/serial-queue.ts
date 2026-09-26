@@ -1,6 +1,6 @@
 /**
  * Cola FIFO de un solo vuelo sobre el almacén, el equivalente en proceso del que usa
- * `LocalLibraryPort` de Hebra (`$lib/library/local-port`, cabecera «COLA FIFO DE UN
+ * `LocalLibraryPort` de Hebra (`library/local-port`, cabecera «COLA FIFO DE UN
  * SOLO VUELO»). Hace falta por lo mismo que allí: `SqliteLibraryEngine` abre
  * `BEGIN IMMEDIATE` y hace `await` DENTRO de la transacción (`transaction()` en
  * `sqlite-engine.ts` espera a la operación aunque sea síncrona, y `noteSave` calcula

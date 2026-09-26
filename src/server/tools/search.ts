@@ -5,7 +5,7 @@
  * filtro de privados: la paginación interna sigue pidiendo páginas hasta reunir `limit`
  * resultados visibles o agotar el almacén (SPEC.md §6.3).
  */
-import { canonicalTag } from '$lib/notes/tags';
+import { canonicalTag } from '../../hebra';
 import type { ToolContext } from '../context';
 
 export interface SearchResult {

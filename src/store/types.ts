@@ -3,7 +3,7 @@
  * (leer, buscar, crear una nota y añadir texto al final; `noteSave` cubre las dos
  * escrituras porque `hebra_append_to_note` construye `body + "\n\n" + text` en la capa
  * de herramientas y llama a lo mismo que crear, SPEC.md §5). A propósito NO es
- * `LibraryStorePort` (`$lib/library/types`): ese interfaz obliga a implementar
+ * `LibraryStorePort` (`library/types` de Hebra): ese interfaz obliga a implementar
  * `tagRename`/`tagsReindex`/`noteMove`/`noteTrash`/`folder*`/`file*`, que v1 nunca
  * expone (SPEC.md §5: «el servidor ni siquiera las importa»). Cualquier método de aquí
  * es uno que SÍ hace falta detrás de una herramienta MCP futura (L1/L3).
@@ -21,7 +21,7 @@ import type {
   SearchPage,
   TagsList,
   TitleCandidates
-} from '$lib/library/types';
+} from '../hebra';
 
 /** Una fila de `notesVisibilityIndex()`: lo mínimo para decidir si una nota está
  *  oculta (carpeta EFECTIVA y etiquetas canónicas, con sus ancestros) y para enseñar su

@@ -6,7 +6,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { canonicalTag } from '$lib/notes/tags';
+import { canonicalTag } from '../hebra';
 
 export interface PrivacyConfig {
   /** Rutas de carpeta, cada segmento en minúsculas (`diario`, `salud/médico`). */

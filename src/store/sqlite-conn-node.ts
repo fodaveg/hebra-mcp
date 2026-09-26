@@ -27,35 +27,24 @@
  * - `BLOB`: el motor nunca enlaza bytes en SQLite (los adjuntos van a un
  *   `BlobBytesStore` aparte); no hace falta traducir `Uint8Array`/`Buffer` en los binds.
  *
- * Arranque del motor y escritor único (SPEC.md §8, L3). `SqliteLibraryEngine.open`
- * ejecuta `PRAGMA journal_mode=DELETE` (pensado para la única conexión del worker web),
- * el esquema entero y, si falta, un `INSERT` de `meta.library_id`. Medido con
- * `node:sqlite` de Node 24.19 sobre una base WAL (26 sep 2026):
- * - `PRAGMA journal_mode=DELETE` falla con `database is locked` en CUALQUIER conexión
- *   mientras otra (un lector de otra instancia) tenga la base abierta: salir de WAL
- *   exige acceso exclusivo. Un escritor que toma el relevo con lectores vivos no podría
- *   ni abrir. Por eso el adaptador lo traduce a `PRAGMA journal_mode=WAL` en el
- *   escritor (WAL es persistente y es lo que hebra-mcp quiere: lectores concurrentes)
- *   y lo omite en el lector.
- * - El esquema (`CREATE … IF NOT EXISTS`, `DROP … IF EXISTS`, `INSERT OR IGNORE`) falla
- *   en una conexión `readOnly` con `attempt to write a readonly database` aunque no
- *   cambie nada. El lector lo omite: solo abre una base que ya creó un escritor. Se
- *   reconoce comparando el texto con `SCHEMA_SQL` de `schema-sql.ts`, la MISMA constante
- *   que ejecuta `SqliteLibraryEngine.open` desde L6 de Hebra (`sqlite-engine.ts:17,412`).
- *   `===` entre cadenas compara contenido, no identidad: seguiría valiendo con otra copia
- *   del mismo texto, y deja de valer (el lector intentaría escribir y fallaría al abrir,
- *   ruidoso, no silencioso) si Hebra cambiara lo que ejecuta. Lo cubre
- *   `test/sync/writer-lock.node.test.ts` (lector con la base ya creada).
- *   `node.ts` no reexporta `SCHEMA_SQL`: entra por `$lib/library/schema-sql`.
+ * Arranque del motor y escritor único (SPEC.md §8, L3). Desde L6c de Hebra (`bb0f3d13`),
+ * `EngineOptions.journalMode` y `SqliteLibraryEngine.openReadOnly` (`sqlite-engine.ts`)
+ * ya resuelven lo que antes interceptaba este adaptador a mano:
+ * - El escritor abre con `SqliteLibraryEngine.open(conn, label, { journalMode: 'WAL' })`
+ *   (`src/store/node-port.ts`): el motor ejecuta `PRAGMA journal_mode=WAL` él mismo,
+ *   persistente, para que los lectores convivan sin bloquearlo.
+ * - El lector abre con `SqliteLibraryEngine.openReadOnly(conn, label)`: no ejecuta
+ *   pragmas ni el esquema, no llama a `bootstrapLibraryId` -- no escribe nada, así que
+ *   nunca choca con `attempt to write a readonly database` contra la base que ya creó
+ *   el escritor. Es responsabilidad de quien abre `conn` (aquí, `openNodeSqliteConn`)
+ *   que la conexión sea de solo lectura de verdad: `node:sqlite` con `readOnly: true`.
+ *   Lo cubre `test/sync/writer-lock.node.test.ts` (lector con la base ya creada).
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { SCHEMA_SQL } from '$lib/library/schema-sql';
 import type { SqliteConn } from '../hebra';
 
 /** `readWrite`: el escritor único. `readOnly`: el resto de instancias (SPEC.md §8). */
 export type NodeSqliteMode = 'readWrite' | 'readOnly';
-
-const JOURNAL_MODE_DELETE = /^\s*PRAGMA\s+journal_mode\s*=\s*DELETE\s*;?\s*$/i;
 
 export type NodeSqliteBindValue = string | number | bigint | boolean | null | undefined;
 
@@ -103,14 +92,10 @@ export function openNodeSqliteConn(
     exec(sql, opts) {
       const bind = opts?.bind;
       if (!bind || bind.length === 0) {
-        // Arranque del motor: ver la cabecera (escritor único).
-        if (JOURNAL_MODE_DELETE.test(sql)) {
-          if (!readOnly) db.exec('PRAGMA journal_mode=WAL');
-          return undefined;
-        }
-        if (readOnly && sql === SCHEMA_SQL) return undefined;
         // Sin bind: puede ser un script con varias sentencias (el esquema, `BEGIN`,
-        // `COMMIT`, pragmas). `db.exec` las ejecuta todas, como `sqlite3_exec`.
+        // `COMMIT`, pragmas). `db.exec` las ejecuta todas, como `sqlite3_exec`. El lector
+        // (`readOnly`) nunca llega aquí con nada que escriba: `openReadOnly` no ejecuta
+        // pragmas ni esquema (ver la cabecera).
         db.exec(sql);
         return undefined;
       }

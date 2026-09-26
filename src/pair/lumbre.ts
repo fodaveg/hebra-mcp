@@ -20,11 +20,12 @@
  *   credencial nueva: 200 se acepta, 404 es OTRA cuenta y se rechaza, y cualquier otro
  *   fallo también rechaza (cerrado ante la duda). Se llama ANTES de guardar nada.
  */
-import { createPkceVerifier, pkceChallengeS256 } from '$lib/lumbre/pkce';
 import {
+  createPkceVerifier,
   HttpLibraryTransport,
   LibraryTransportError,
   libraryTransportHttpStatusOf,
+  pkceChallengeS256,
   type LumbreConnection
 } from '../hebra';
 import { PairError } from './errors';
