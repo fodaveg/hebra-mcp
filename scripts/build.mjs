@@ -42,8 +42,11 @@ const hebraVendorPlugin = {
 };
 
 await build({
-  // Un fichero por punto de entrada: `dist/store/index.js`.
-  entryPoints: ['store'].map((dir) => join(root, 'src', dir, 'index.ts')),
+  // Un fichero por punto de entrada: `dist/store/index.js`, `dist/sync/index.js` (motor
+  // de sync e instancia, L3) y `dist/lock/index.js` (escritor único, L3). Sin
+  // `splitting`: cada uno es autónomo (el servidor de L1 será otro punto de entrada que
+  // importe de los tres fuentes, no de estos ficheros).
+  entryPoints: ['store', 'sync', 'lock'].map((dir) => join(root, 'src', dir, 'index.ts')),
   bundle: true,
   platform: 'node',
   format: 'esm',
