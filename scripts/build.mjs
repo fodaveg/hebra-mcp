@@ -19,26 +19,31 @@ const vendorLib = join(root, 'vendor', 'hebra', 'src', 'lib');
 const hebraVendorPlugin = {
   name: 'hebra-mcp-vendor',
   setup(api) {
-    api.onResolve({ filter: /^\$lib\// }, (args) => {
-      const rest = args.path.slice('$lib/'.length);
-      return { path: join(vendorLib, rest.endsWith('.ts') ? rest : `${rest}.ts`) };
-    });
+    // `?raw` primero: `$lib/…/schema.sql?raw` (lo importa `src/store/sqlite-conn-node.ts`)
+    // también empieza por `$lib/` y el resolvedor de abajo le añadiría `.ts`.
     api.onResolve({ filter: /\.sql\?raw$/ }, (args) => {
       const withoutQuery = args.path.slice(0, -'?raw'.length);
-      const resolved = isAbsolute(withoutQuery)
-        ? withoutQuery
-        : join(args.resolveDir, withoutQuery);
+      const resolved = withoutQuery.startsWith('$lib/')
+        ? join(vendorLib, withoutQuery.slice('$lib/'.length))
+        : isAbsolute(withoutQuery)
+          ? withoutQuery
+          : join(args.resolveDir, withoutQuery);
       return { path: resolved, namespace: 'hebra-mcp-sql-raw' };
     });
     api.onLoad({ filter: /.*/, namespace: 'hebra-mcp-sql-raw' }, (args) => ({
       contents: readFileSync(args.path, 'utf8'),
       loader: 'text'
     }));
+    api.onResolve({ filter: /^\$lib\// }, (args) => {
+      const rest = args.path.slice('$lib/'.length);
+      return { path: join(vendorLib, rest.endsWith('.ts') ? rest : `${rest}.ts`) };
+    });
   }
 };
 
 await build({
-  entryPoints: [join(root, 'src', 'store', 'index.ts')],
+  // Un fichero por punto de entrada: `dist/store/index.js`.
+  entryPoints: ['store'].map((dir) => join(root, 'src', dir, 'index.ts')),
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -49,7 +54,8 @@ await build({
   // fichero que solo genera `svelte-kit sync` y que aquí no existe). El de hebra-mcp
   // no necesita nada de eso: la resolución de `$lib` y del `?raw` la hace el plugin.
   tsconfig: join(root, 'tsconfig.json'),
-  outfile: join(root, 'dist', 'store', 'index.js'),
+  outdir: join(root, 'dist'),
+  outbase: join(root, 'src'),
   plugins: [hebraVendorPlugin],
   logLevel: 'info'
 });

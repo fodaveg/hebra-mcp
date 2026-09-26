@@ -1,20 +1,29 @@
 /**
  * `HebraLibraryPort` (`./types.ts`) en proceso, sobre `SqliteLibraryEngine` de Hebra y el
  * adaptador `node:sqlite` de `./sqlite-conn-node.ts`. Deliberadamente NO reutiliza
- * `LocalLibraryPort` (`$lib/library/local-port`): ese puerto delega `tagRename` y
- * `tagsReindex` en `tag-rename.ts`/`tags-reindex.ts`, que llaman a `deriveNote` (para
- * recalcular título/etiquetas/enlaces al reescribir), y `deriveNote` importa
- * `notes/markdown.ts` → `markdown/dialect.ts` → `@codemirror/lang-markdown`, que arrastra
- * `@codemirror/view`. Medido con esbuild (26 sep 2026): ese paquete deja en el bundle
- * texto literal `document.`/`window.`/`navigator.` (guardado tras `typeof document !==
- * 'undefined'`, así que carga y analiza bien bajo Node — se probó — pero el TEXTO sigue
- * ahí), lo que el check de L0 (`scripts/check-bundle.mjs`) tiene que poder rechazar sin
- * falsos negativos. v1 nunca llama a `tagRename` ni a `tagsReindex` (D2), así que este
- * puerto usa `SqliteLibraryEngine` directamente y solo importa de `derive.ts` lo que NO
- * toca el analizador de markdown (`parseLinkRef`, `canonicalTitle`): con eso el bundle
- * queda limpio (comprobado, ver `check:bundle`). Si un lote futuro (L3) necesita derivar
- * título/etiquetas de un cuerpo Markdown para `hebra_create_note`/`hebra_append_to_note`,
- * hará falta `deriveNote` y esta nota deja de aplicar: hay que volver a medir el bundle.
+ * `LocalLibraryPort` (`$lib/library/local-port`): ese puerto implementa el
+ * `LibraryStorePort` completo (`tagRename`, `noteMove`, `folder*`, `file*`…), y D2
+ * (SPEC.md §3) prohíbe que nada de eso sea alcanzable desde las herramientas. Este puerto
+ * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite.
+ *
+ * Del mismo almacén salen tres vistas, todas por la MISMA cola (`SerialQueue`, ver su
+ * cabecera) para que una ronda de sync y una escritura nunca se crucen en la conexión:
+ * - `HebraLibraryPort` (esta clase): lo que ve la capa de herramientas.
+ * - `SyncStorePort` (`syncStorePort()`, `./sync-port.ts`): el `LibraryPort` de Hebra
+ *   que necesita `LibrarySyncEngine`; solo lo usa `src/sync/runner.ts`.
+ * - `NoteWriteStore` (`writeExclusive()`): noteCreate/noteRead/noteSave en UN turno de
+ *   la cola, para `./writes.ts` (crear = crear + guardar sin que una ronda se cuele en
+ *   medio y suba una nota vacía).
+ *
+ * Solo lectura (SPEC.md §8, escritor único): con `mode: 'readOnly'` la SQLite se abre
+ * con `readOnly: true` y toda escritura rechaza con `busy_other_instance`
+ * (`./errors.ts`) antes de llegar al motor.
+ *
+ * Derivados: este fichero solo importa de `derive.ts` lo que no toca el analizador de
+ * Markdown (`parseLinkRef`, `canonicalTitle`). `deriveNote` (que arrastra
+ * `@codemirror/lang-markdown`) entra por `./writes.ts` y por el motor de sync de Hebra,
+ * que deriva los registros entrantes él mismo (`decodeSnapshot` en `sync-engine.ts`).
+ * El check del bundle que lo admite es `scripts/check-bundle.mjs`.
  */
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -36,9 +45,13 @@ import type {
   TagsList,
   TitleCandidates
 } from '$lib/library/types';
-import { openNodeSqliteConn } from './sqlite-conn-node';
+import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import { FsBlobStore } from './blob-store-fs';
+import { busyOtherInstance } from './errors';
+import { SerialQueue } from './serial-queue';
+import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type { HebraLibraryPort } from './types';
+import type { NoteWriteStore, NoteWriteTarget } from './writes';
 
 export interface OpenNodeLibraryOptions {
   /** Ruta del fichero SQLite, o `:memory:` (tests). */
@@ -47,68 +60,95 @@ export interface OpenNodeLibraryOptions {
    *  memoria (`MemoryBlobStore` de Hebra): basta para los tests, v1 no sirve adjuntos. */
   dataDir?: string;
   deviceLabel?: string;
+  /** `readWrite` (por defecto): el escritor único. `readOnly`: otra instancia tiene el
+   *  bloqueo (SPEC.md §8); la base tiene que existir ya. */
+  mode?: NodeSqliteMode;
 }
 
 export async function openNodeLibraryPort(
   options: OpenNodeLibraryOptions
 ): Promise<NodeLibraryPort> {
-  if (options.sqlitePath !== ':memory:') {
+  const mode = options.mode ?? 'readWrite';
+  if (options.sqlitePath !== ':memory:' && mode === 'readWrite') {
     await mkdir(dirname(options.sqlitePath), { recursive: true, mode: 0o700 });
   }
-  const { db, conn } = openNodeSqliteConn(options.sqlitePath);
+  // WAL (lectores concurrentes, SPEC.md §8) lo fija el adaptador al arrancar el motor:
+  // ver la cabecera de `sqlite-conn-node.ts`. Sin efecto sobre `:memory:`.
+  const { db, conn } = openNodeSqliteConn(options.sqlitePath, mode);
   const blobs = options.dataDir ? new FsBlobStore(options.dataDir) : undefined;
-  const engine = await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'hebra-mcp', {
-    ...(blobs ? { blobs } : {})
-  });
-  // `SqliteLibraryEngine.open` ya dejó `journal_mode=DELETE` (pensado para una única
-  // conexión web, §3 de sqlite-engine.ts). hebra-mcp SÍ quiere lectores concurrentes
-  // (SPEC.md §8: un escritor, los demás en solo lectura), así que sube a WAL DESPUÉS de
-  // que el esquema exista. Sin efecto sobre `:memory:` (SQLite no hace WAL ahí).
-  db.exec('PRAGMA journal_mode=WAL');
-  return new NodeLibraryPort(engine, db);
+  let engine: SqliteLibraryEngine;
+  try {
+    engine = await SqliteLibraryEngine.open(conn, options.deviceLabel ?? 'hebra-mcp', {
+      ...(blobs ? { blobs } : {})
+    });
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  return new NodeLibraryPort(engine, db, mode);
 }
 
-export class NodeLibraryPort implements HebraLibraryPort {
+export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
+  private readonly queue = new SerialQueue();
+  private syncView: SyncStorePort | null = null;
+  private closed = false;
+
   constructor(
     private readonly engine: SqliteLibraryEngine,
-    private readonly db: DatabaseSync
+    private readonly db: DatabaseSync,
+    readonly mode: NodeSqliteMode = 'readWrite'
   ) {}
 
+  /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
+  get writable(): boolean {
+    return this.mode === 'readWrite' && !this.closed;
+  }
+
+  private read<T>(operation: () => T | Promise<T>): Promise<T> {
+    return this.queue.run(operation);
+  }
+
+  private write<T>(operation: () => T | Promise<T>): Promise<T> {
+    return this.writable ? this.queue.run(operation) : Promise.reject(busyOtherInstance());
+  }
+
   async libraryOpen(): Promise<LibraryOpenInfo> {
-    return this.engine.libraryOpen();
+    return this.read(() => this.engine.libraryOpen());
   }
 
   async noteCreate(folderId?: string | null): Promise<NoteRow> {
-    return this.engine.noteCreate(folderId ?? null);
+    return this.write(() => this.engine.noteCreate(folderId ?? null));
   }
 
   async noteRead(id: string): Promise<NoteRow | null> {
-    return this.engine.noteRead(id);
+    return this.read(() => this.engine.noteRead(id));
   }
 
   async noteSave(input: NoteSaveInput): Promise<NoteSaveResult> {
-    return this.engine.noteSave(input);
+    return this.write(() => this.engine.noteSave(input));
   }
 
   async notesPage(cursor: string | null, limit: number, scope?: NotesScope): Promise<NotesPage> {
-    return this.engine.notesPage(cursor, limit, scope);
+    return this.read(() => this.engine.notesPage(cursor, limit, scope));
   }
 
   async foldersList(): Promise<FoldersList> {
-    return this.engine.foldersList();
+    return this.read(() => this.engine.foldersList());
   }
 
   async tagsList(): Promise<TagsList> {
-    return this.engine.tagsList();
+    return this.read(() => this.engine.tagsList());
   }
 
   async resolveLink(ref: string): Promise<LinkResolution> {
     const query = parseLinkRef(ref);
-    return query ? this.engine.resolveLink(query) : { status: 'missing', candidates: [] };
+    return query
+      ? this.read(() => this.engine.resolveLink(query))
+      : { status: 'missing', candidates: [] };
   }
 
   async backlinks(id: string, cursor: string | null = null, limit?: number): Promise<NotesPage> {
-    return this.engine.backlinks(id, cursor, limit);
+    return this.read(() => this.engine.backlinks(id, cursor, limit));
   }
 
   async search(
@@ -117,14 +157,45 @@ export class NodeLibraryPort implements HebraLibraryPort {
     limit?: number,
     filters?: SearchFilters | null
   ): Promise<SearchPage> {
-    return cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null));
+    return this.read(() => cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null)));
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
-    return this.engine.notesByTitlePrefix(canonicalTitle(prefix), limit);
+    return this.read(() => this.engine.notesByTitlePrefix(canonicalTitle(prefix), limit));
   }
 
+  /**
+   * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) a las tres
+   * operaciones de nota del motor. Solo para `./writes.ts`: dentro de `operation` no se
+   * puede llamar a ningún otro método de este puerto (esperaría detrás de sí mismo).
+   */
+  writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T> {
+    return this.write(() =>
+      operation({
+        noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
+        noteRead: async (id) => this.engine.noteRead(id),
+        noteSave: (input) => this.engine.noteSave(input)
+      })
+    );
+  }
+
+  /** La vista `LibraryPort` del motor de sync (`./sync-port.ts`). Una por puerto. */
+  syncStorePort(): SyncStorePort {
+    this.syncView ??= createSyncStorePort(this.engine, this.queue, () => this.writable);
+    return this.syncView;
+  }
+
+  /** Espera a que termine lo que haya en cola y cierra la conexión. */
+  async closeWhenIdle(): Promise<void> {
+    if (this.closed) return;
+    await this.queue.whenIdle();
+    this.close();
+  }
+
+  /** Cierra la conexión SQLite ya (sin esperar a la cola). */
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db.close();
   }
 }
