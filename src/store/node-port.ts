@@ -25,7 +25,7 @@
  * que deriva los registros entrantes él mismo (`decodeSnapshot` en `sync-engine.ts`).
  * El check del bundle que lo admite es `scripts/check-bundle.mjs`.
  */
-import { mkdir } from 'node:fs/promises';
+import { chmod, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import {
@@ -95,7 +95,37 @@ export async function openNodeLibraryPort(
     db.close();
     throw error;
   }
+  if (options.sqlitePath !== ':memory:' && mode === 'readWrite') {
+    await secureSqliteFileModes(options.sqlitePath);
+  }
   return new NodeLibraryPort(engine, db, mode);
+}
+
+/**
+ * SPEC.md §6.1: ficheros de datos en 0600 (el directorio ya se crea 0700, arriba).
+ * `node:sqlite` crea `library.sqlite` con `open(2)` y el modo por defecto del SO
+ * (`0666` menos umask, típicamente 0644): no acepta un modo propio al crear el fichero.
+ * `journalMode: 'WAL'` (`SqliteLibraryEngine.open`, más arriba) añade `-wal`/`-shm` con
+ * el mismo problema, y para cuando esta función corre ya existen los tres: `open()` ya
+ * ejecutó `PRAGMA journal_mode=WAL` y escribió el esquema (`SCHEMA_SQL` +
+ * `bootstrapLibraryId`), que en WAL crea `-wal`/`-shm` de inmediato, sin esperar a la
+ * primera escritura del llamante. Se prefiere corregir aquí (en vez de
+ * `process.umask(0o077)` al arrancar el proceso) para no afectar a nada más que abra
+ * ficheros en el mismo proceso sin necesidad. `chmod` no distingue si el fichero es
+ * nuevo o ya existía con permisos más abiertos (el bug medido: 0644): lo deja en 0600
+ * en los dos casos.
+ */
+async function secureSqliteFileModes(sqlitePath: string): Promise<void> {
+  await chmod(sqlitePath, 0o600);
+  for (const suffix of ['-wal', '-shm']) {
+    try {
+      await chmod(`${sqlitePath}${suffix}`, 0o600);
+    } catch (error) {
+      // El checkpoint pudo truncar y borrar el `-wal` (o nunca hubo escritura que
+      // activara `-shm`): sin ficheros que corregir, no es un fallo.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
 }
 
 export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
