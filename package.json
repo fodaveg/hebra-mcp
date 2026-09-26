@@ -1,0 +1,25 @@
+{
+  "name": "hebra-mcp",
+  "version": "0.1.0",
+  "description": "Servidor MCP que lee y crea notas en la biblioteca de Hebra, sobre node:sqlite.",
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --maxWorkers=1",
+    "check:bundle": "npm run build && node scripts/check-bundle.mjs",
+    "check:no-hebra-code": "node scripts/check-no-hebra-code.mjs",
+    "check": "npm run typecheck && npm run check:no-hebra-code && npm run test && npm run check:bundle"
+  },
+  "devDependencies": {
+    "@codemirror/lang-markdown": "6.5.2",
+    "@lezer/common": "1.5.2",
+    "@types/node": "24.10.0",
+    "esbuild": "0.25.0",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11"
+  }
+}

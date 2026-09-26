@@ -1,0 +1,25 @@
+{
+  // "DOM" en "lib" es solo para que tsc encuentre los TIPOS que usa código vendido
+  // (`CryptoKey`, `SubtleCrypto`…, de `vault/blob-v2/crypto.ts`): Node implementa el
+  // mismo WebCrypto que un navegador. No añade ningún global en tiempo de ejecución ni
+  // autoriza a usar `document`/`window` en `src/`: esa garantía la da
+  // `scripts/check-bundle.mjs` (grep sobre el JS ya empaquetado), no este fichero.
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "$lib/*": ["vendor/hebra/src/lib/*"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs", "src/ambient.d.ts"]
+}
