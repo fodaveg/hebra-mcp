@@ -31,6 +31,12 @@
  *    borra el `navigator` que trae Node 24 y se comprueba que `window`, `document` y
  *    `navigator` son `undefined`) y ejecuta `deriveNote` sobre un Markdown con H1,
  *    `#etiqueta/anidada` y `[[enlace]]`, comparando con la salida esperada de Hebra.
+ *
+ * `zod` (peer del SDK de MCP, L1) también queda exento: `zod/v4/core/util.js` tiene
+ * `if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare"))`
+ * (detecta el runtime de Cloudflare Workers para su mapa de errores), protegido con
+ * `typeof` igual que el caso de CodeMirror de arriba — decisión del orquestador, 26 sep
+ * 2026, tras medirlo con este mismo check.
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -47,7 +53,7 @@ const FORBIDDEN_TEXT = ['@tauri-apps', '$app/'];
 /** Especificadores de import prohibidos (metafile). */
 const FORBIDDEN_IMPORT = /^(@tauri-apps\/|\$app\/|svelte(\/|$)|@sveltejs\/)/;
 /** Paquetes exentos del chequeo de globales del DOM (y solo estos). */
-const DOM_EXEMPT_PACKAGES = ['@codemirror/*', '@lezer/*'];
+const DOM_EXEMPT_PACKAGES = ['@codemirror/*', '@lezer/*', 'zod', 'zod/*'];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */
 const FORBIDDEN_EXTERNALS = ['@tauri-apps/*', '$app/*', 'svelte', 'svelte/*', '@sveltejs/*'];

@@ -6,6 +6,15 @@
   "engines": {
     "node": ">=24 <25"
   },
+  "bin": {
+    "hebra-mcp": "dist/cli.mjs"
+  },
+  "dependencies": {
+    "@codemirror/lang-markdown": "6.5.2",
+    "@lezer/common": "1.5.2",
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "zod": "4.6.5"
+  },
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
@@ -13,10 +22,6 @@
     "check:bundle": "npm run build && node scripts/check-bundle.mjs",
     "check:no-hebra-code": "node scripts/check-no-hebra-code.mjs",
     "check": "npm run typecheck && npm run check:no-hebra-code && npm run test && npm run check:bundle"
-  },
-  "dependencies": {
-    "@codemirror/lang-markdown": "6.5.2",
-    "@lezer/common": "1.5.2"
   },
   "overrides": {
     "@codemirror/autocomplete": "6.20.3",
