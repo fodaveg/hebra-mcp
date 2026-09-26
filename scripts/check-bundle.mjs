@@ -37,6 +37,14 @@
  * (detecta el runtime de Cloudflare Workers para su mapa de errores), protegido con
  * `typeof` igual que el caso de CodeMirror de arriba — decisión del orquestador, 26 sep
  * 2026, tras medirlo con este mismo check.
+ *
+ * `debug` y `object-inspect` entran con Express (C2, `serve-http`: el router OAuth del SDK
+ * de MCP es de Express) y quedan exentos por la misma razón, medido con este check el 26
+ * sep 2026:
+ * - `debug/src/index.js` solo carga `browser.js` (el que usa `window`, `document`,
+ *   `navigator` y `localStorage`) si `typeof process === 'undefined'` o el proceso es un
+ *   renderer de Electron o NW.js; en Node carga `node.js`.
+ * - `object-inspect/index.js:255`: `typeof window !== 'undefined' && obj === window`.
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -53,7 +61,16 @@ const FORBIDDEN_TEXT = ['@tauri-apps', '$app/'];
 /** Especificadores de import prohibidos (metafile). */
 const FORBIDDEN_IMPORT = /^(@tauri-apps\/|\$app\/|svelte(\/|$)|@sveltejs\/)/;
 /** Paquetes exentos del chequeo de globales del DOM (y solo estos). */
-const DOM_EXEMPT_PACKAGES = ['@codemirror/*', '@lezer/*', 'zod', 'zod/*'];
+const DOM_EXEMPT_PACKAGES = [
+  '@codemirror/*',
+  '@lezer/*',
+  'zod',
+  'zod/*',
+  'debug',
+  'debug/*',
+  'object-inspect',
+  'object-inspect/*'
+];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */
 const FORBIDDEN_EXTERNALS = ['@tauri-apps/*', '$app/*', 'svelte', 'svelte/*', '@sveltejs/*'];

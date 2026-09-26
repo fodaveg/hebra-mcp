@@ -14,6 +14,7 @@ import { registerTools } from '../src/server/register-tools';
 import type { ServerContext } from '../src/server/context';
 import { buildTestContext, UNRESOLVED_PRIVACY_CONFIG, type TestContext } from './fixtures/test-context';
 import { BAIT_FOLDER, BAIT_TAG } from './fixtures/test-library';
+import { baitCalls } from './fixtures/bait-calls';
 
 const TOOL_NAMES = [
   'hebra_search',
@@ -67,25 +68,8 @@ describe('filtro de privados y logs, por las 9 herramientas', () => {
     test = await buildTestContext();
     ({ client, server } = await connectedClient(test.serverContext));
 
-    const calls: Array<{ name: string; arguments?: Record<string, unknown> }> = [
-      { name: 'hebra_search', arguments: { query: BAIT_FOLDER } },
-      { name: 'hebra_search', arguments: { query: BAIT_TAG } },
-      { name: 'hebra_list_notes', arguments: { limit: 100 } },
-      { name: 'hebra_read_note', arguments: { id: test.library.privateFolderNoteId } },
-      { name: 'hebra_read_note', arguments: { id: test.library.privateTagNoteId } },
-      { name: 'hebra_read_note', arguments: { title: 'Nota oculta de carpeta' } },
-      { name: 'hebra_list_tags', arguments: {} },
-      { name: 'hebra_list_folders', arguments: {} },
-      { name: 'hebra_links', arguments: { id: test.library.publicNoteId } },
-      { name: 'hebra_status', arguments: {} },
-      // Las dos de escritura (L3b): el cebo va en `body`/`text`, que nunca se hace eco
-      // en la salida (`{id, title, folderPath}` / `{id, outcome, copyId?}`) ni en el log.
-      { name: 'hebra_create_note', arguments: { body: `# Nota nueva\n${BAIT_FOLDER}\n${BAIT_TAG}\n` } },
-      {
-        name: 'hebra_append_to_note',
-        arguments: { id: test.library.publicNoteId, text: `${BAIT_FOLDER} ${BAIT_TAG}` }
-      }
-    ];
+    // Las mismas llamadas que el test por Streamable HTTP (`test/http/serve-http.test.ts`).
+    const calls = baitCalls(test.library);
 
     const texts: string[] = [];
     for (const call of calls) {

@@ -8,6 +8,9 @@
  *   (`../pair/pair.ts`). Aquí stdout es la terminal de David; stderr, solo eventos cerrados.
  * - `unpair`: borra los secretos y el directorio de datos, tras confirmar
  *   (`../pair/unpair.ts`).
+ * - `serve-http`: el conector remoto de claude.ai (SPEC.md §12, `../http/`). Streamable
+ *   HTTP sin estado, siempre escritor, y no arranca sin autenticación configurada.
+ *   Configuración por entorno (`../http/config.ts`), nunca secretos.
  *
  * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
  * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
@@ -30,14 +33,17 @@ import { openInBrowser, stdioTerminal } from '../pair/terminal';
 import { runUnpair } from '../pair/unpair';
 import { resolveDataDir } from '../privacy';
 import { openSecretStoreForMode, resolveSecretStoreMode, type SecretStore } from '../secrets';
+import { HttpConfigError, readHttpConfig } from '../http/config';
+import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../http/serve-http';
 import { buildMcpServer } from './build-server';
-import { openServeContext } from './serve';
+import { openServeContext, WriterRequiredError } from './serve';
 
 const USAGE = [
   'uso:',
   '  hebra-mcp serve',
   `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
-  '  hebra-mcp unpair'
+  '  hebra-mcp unpair',
+  '  hebra-mcp serve-http'
 ].join('\n');
 
 /** El almacén del modo elegido (SPEC.md §12.3), o `null` si en modo `keychain` el
@@ -81,6 +87,50 @@ async function serve(): Promise<void> {
   await server.connect(transport);
 }
 
+/**
+ * `serve-http`: no arranca sin autenticación, siendo lector ni con configuración inválida;
+ * en esos casos lo dice en stderr (qué hacer, sin valores) y sale con 1. El almacén de
+ * secretos del dispositivo es el mismo que el de `serve` (`HEBRA_MCP_SECRET_STORE`; en el
+ * contenedor, `file`).
+ */
+async function serveHttp(): Promise<void> {
+  const dataDir = resolveDataDir();
+  let handle: ServeHttpHandle;
+  try {
+    handle = await startServeHttp({
+      dataDir,
+      secrets: await openServeSecretStore(dataDir),
+      config: readHttpConfig(),
+      version,
+      loadAuth: async () => null
+    });
+  } catch (error) {
+    if (
+      error instanceof ServeHttpError ||
+      error instanceof WriterRequiredError ||
+      error instanceof HttpConfigError
+    ) {
+      logEvent({ event: 'serve_http.failed', code: error.code });
+      process.stderr.write(`${serveHttpFailureMessage(error)}\n`);
+      process.exit(1);
+    }
+    throw error;
+  }
+  const shutdown = async (): Promise<void> => {
+    await handle.close();
+    process.exit(0);
+  };
+  process.once('SIGINT', () => void shutdown());
+  process.once('SIGTERM', () => void shutdown());
+}
+
+function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | HttpConfigError): string {
+  if (error instanceof WriterRequiredError) {
+    return 'serve-http tiene que ser el escritor único y otro proceso de hebra-mcp tiene writer.lock.';
+  }
+  return error.message;
+}
+
 async function interactive(
   dataDir: string,
   run: (secrets: SecretStore, terminal: ReturnType<typeof stdioTerminal>) => Promise<void>
@@ -104,6 +154,9 @@ async function main(): Promise<void> {
   switch (subcommand) {
     case 'serve':
       await serve();
+      return;
+    case 'serve-http':
+      await serveHttp();
       return;
     case 'pair': {
       const { values } = parseArgs({

@@ -354,6 +354,23 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - En el contenedor corre un único proceso que atiende a todas las sesiones de claude.ai y siempre es el
   escritor. `writer.sock` y el bloqueo siguen existiendo por el Mac (§8), donde hay un proceso por sesión.
 - `serve`, `pair` y `unpair` por stdio no cambian.
+- Implementado en C2 (`src/http/`):
+  - `POST /mcp` con credencial, que se comprueba antes de leer el cuerpo. `GET` y `DELETE /mcp`
+    responden 405, como lumbre-mcp. Nada bajo `/mcp/…`: el token no va nunca en la URL.
+  - Tope de cuerpo de 664 KiB (el cuerpo máximo de §5 con el peor escape JSON, más 64 KiB), con 413.
+  - `Host` y `Origin` tienen que ser el host público. Un host de loopback solo vale si la conexión
+    viene de loopback (healthcheck, tests).
+  - `GET /healthz`: 204 sin cuerpo ni autenticación.
+  - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN` (`127.0.0.1`; en
+    el contenedor, `0.0.0.0`) y `HEBRA_MCP_PUBLIC_URL` (`https://mcp.hebra.pro`, issuer y base del
+    recurso `<origen>/mcp`).
+  - Si otro proceso vivo tiene `writer.lock`, `serve-http` no arranca (`writer_lock_held`) en vez de
+    servir como lector. Sigue escuchando en `writer.sock` como cualquier escritor.
+  - Logs `http.request` con método, una etiqueta de ruta de un conjunto cerrado y el estado; nunca la
+    ruta real, la query, las cabeceras ni el cuerpo.
+  - Express entra como dependencia directa (ya lo traía el SDK, misma versión): el router OAuth del
+    SDK es de Express. `check:bundle` exime `debug` y `object-inspect`, cuyas referencias al DOM no se
+    ejecutan en Node.
 
 ### 12.2 Autenticación (D7)
 

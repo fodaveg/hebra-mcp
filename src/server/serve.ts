@@ -17,6 +17,7 @@ import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
 import { loadPrivacyConfig } from '../privacy';
 import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
+import { LibraryInstanceStatusSource } from '../status/status-source';
 import type { ServerContext } from './context';
 import {
   buildRoutedWriteContext,
@@ -38,6 +39,23 @@ export interface OpenServeOptions {
   syncIntervalMs?: number | null;
   /** Tests: tiempos de espera del reenvío al escritor. */
   forward?: ForwardOptions;
+  /**
+   * `serve-http` (SPEC.md §12.1): el proceso tiene que ser el escritor. Si otro proceso ya
+   * tiene `writer.lock`, falla con `WriterRequiredError` en vez de arrancar como lector, y
+   * sus escrituras y su `hebra_status` son siempre los locales: nunca reenvía por
+   * `writer.sock`. Sigue escuchando en `writer.sock` como cualquier escritor, para que un
+   * `serve` por stdio en la misma máquina le reenvíe las suyas (§8).
+   */
+  writerOnly?: boolean;
+}
+
+/** `writerOnly` y el bloqueo es de otro proceso vivo. */
+export class WriterRequiredError extends Error {
+  readonly code = 'writer_lock_held';
+  constructor() {
+    super('writer_lock_held');
+    this.name = 'WriterRequiredError';
+  }
 }
 
 export interface ServeContext {
@@ -97,6 +115,21 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     }),
     loadPrivacyConfig(dataDir)
   ]);
+  if (options.writerOnly) {
+    if (instance.role !== 'this') {
+      await instance.close();
+      throw new WriterRequiredError();
+    }
+    // Sin reenvío: si el bloqueo se perdiera (otro proceso lo robó), las escrituras
+    // rechazan con `busy_other_instance` en vez de saltar a `writer.sock`.
+    const ctx: ServerContext = {
+      port: instance.port,
+      privacyConfig,
+      status: new LibraryInstanceStatusSource(instance, linked !== null),
+      write: localWriteContext(instance)
+    };
+    return { ctx, instance, linked: linked !== null, close: () => instance.close() };
+  }
   // `privacyConfig` sin resolver a `PrivacyFilter` aquí: `register-tools.ts` lo hace en
   // CADA llamada, con el almacén tal como esté en ese momento (un filtro construido una
   // vez al arrancar se queda obsoleto en cuanto el sync mueve una nota a una carpeta
