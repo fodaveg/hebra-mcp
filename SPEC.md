@@ -395,18 +395,27 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
     `none` y un `issuer` sin barra final, como lumbre-mcp. PRM en `/.well-known/oauth-protected-resource`
     y en `…/mcp`, con `resource` = `<origen>/mcp` y scope `hebra:mcp`. El 401 de `/mcp` lleva
     `resource_metadata` en `WWW-Authenticate` (`requireBearerAuth` del SDK; el token solo por cabecera).
-  - Página de autorización sin recursos externos ni JavaScript, CSP cerrada, `frame-ancestors 'none'`.
-    `POST /oauth/consent` con el secreto: 5 fallos anulan la solicitud; 5 fallos por IP en 15 min
-    bloquean esa IP y 50 en total bloquean a todos (umbral global alto porque cualquiera puede abrir
-    una solicitud y dejar a David sin reconectar).
+  - Página de autorización sin recursos externos ni JavaScript, CSP cerrada, `frame-ancestors 'none'`,
+    y el aviso «Continúa solo si acabas de pulsar Conectar en claude.ai. Si alguien te ha enviado este
+    enlace, ciérralo.». `POST /oauth/consent` con el secreto, que admite `Origin: null` (la página fija
+    `no-referrer`; el CSRF lo cubre el `request` opaco de 256 bits). Ninguna otra ruta lo admite.
+  - Intentos (tras la auditoría de seguridad de C3): 5 por solicitud y 5 por IP en 15 min, reservados
+    antes del primer `await` (con envíos concurrentes no se evalúan más) y scrypt de uno en uno. Lo que
+    se rechaza sin evaluar responde igual con secreto bueno o malo. Sin bloqueo global: a partir de 50
+    fallos en la ventana solo se registra `oauth.consent.global_threshold`, porque un bloqueo global
+    dejaría a cualquiera impedir que David reconecte. Como mucho 4 solicitudes pendientes por IP: una IP
+    solo desaloja las suyas.
   - Hash del secreto con scrypt de `node:crypto` (N=2^15, r=8, p=1): argon2 solo es experimental en
-    Node 24 y lo demás exige un módulo nativo nuevo. Mínimo 32 caracteres. `oauth-set-secret` lo lee por
+    Node 24 y lo demás exige un módulo nativo nuevo. Mínimo 32 caracteres y 10 distintos. `oauth-set-secret` lo lee por
     stdin (sin eco en terminal) y revoca todos los tokens anteriores.
   - Códigos de un solo uso, 60 s, en memoria como hash. El código se consume antes de validar cliente,
     `redirect_uri`, PKCE y `resource` (`skipLocalPkceValidation`: el SDK validaría PKCE sin consumirlo).
   - La familia de refresh dura 30 días desde la autorización (vigencia absoluta, como lumbre-mcp). El
-    refresh lleva el id de su familia: presentar uno que no es el vigente revoca la familia entera.
-  - Ficheros en el directorio de datos, 0600 y escritura atómica: `oauth-owner.json` (hash y
+    refresh lleva el id de su familia: presentar uno que no es el vigente revoca la familia entera,
+    salvo el recién rotado en los 30 s siguientes (dos refresh simultáneos), que da `invalid_grant`
+    sin revocar.
+  - Ficheros en el directorio de datos, 0600 y escritura atómica (con `fsync` del fichero y del
+    directorio tras el `rename`): `oauth-owner.json` (hash y
     `revokedBefore`, solo lo escriben `oauth-set-secret` y `oauth-revoke-all`) y `oauth-tokens.json`
     (hashes de tokens, solo lo escribe `serve-http`). Un escritor por fichero evita un bloqueo entre
     procesos. `serve-http` relee `oauth-owner.json` cuando cambia, así que `oauth-revoke-all` corta al

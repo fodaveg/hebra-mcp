@@ -58,7 +58,7 @@ hebra-mcp oauth-revoke-all      # revoca todos los tokens (claude.ai tendrá que
 ```
 
 - El secreto va siempre por stdin, nunca como argumento ni variable de entorno. Mínimo
-  32 caracteres: genéralo con el gestor de contraseñas. Solo se guarda su hash (scrypt)
+  32 caracteres y 10 distintos: genéralo con el gestor de contraseñas. Solo se guarda su hash (scrypt)
   en `oauth-owner.json` del directorio de datos (0600). Fijar uno nuevo revoca los
   tokens anteriores.
 - En el contenedor, los tres van por `docker compose exec`, nunca por `run` (§12.5).

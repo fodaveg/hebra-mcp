@@ -83,6 +83,7 @@ button{margin-top:1rem;padding:.5rem 1rem;font:inherit}
 <body>
 <h1>Conectar Claude con tu biblioteca de Hebra</h1>
 <p>Claude (claude.ai) pide leer tu biblioteca y crear o ampliar notas. Solo tú tienes el secreto.</p>
+<p><strong>Continúa solo si acabas de pulsar Conectar en claude.ai. Si alguien te ha enviado este enlace, ciérralo.</strong></p>
 ${notice}
 ${form}
 </body>

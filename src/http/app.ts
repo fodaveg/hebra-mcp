@@ -19,6 +19,8 @@
  *   solo vale si la CONEXIÓN viene de loopback (healthcheck, tests), igual que en
  *   lumbre-mcp: nadie que llegue por la red `edge` puede saltarse la comprobación con un
  *   `Host: localhost`. El SDK trae `hostHeaderValidation`, pero no mira la IP del peer.
+ *   `Origin: null` solo se admite en los `POST` que declare `HttpAuth.nullOriginPostPaths`
+ *   (el formulario de consentimiento).
  * - Tope de cuerpo (`MAX_MCP_BODY_BYTES`) con 413, `cache-control: no-store`,
  *   `nosniff` y `no-referrer`.
  * - Logs (§6.4): `http.request` con método, una etiqueta de ruta de un conjunto CERRADO y
@@ -62,6 +64,9 @@ export interface HttpAuth {
   install(app: Express): void;
   /** Deja pasar a `POST /mcp` solo con credencial válida; si no, 401. */
   requireAuth: RequestHandler;
+  /** Rutas donde un `POST` con `Origin: null` se admite (formularios con `no-referrer`
+   *  cuya protección CSRF no depende del `Origin`). En el resto, `null` da 403. */
+  nullOriginPostPaths?: readonly string[];
 }
 
 export interface CreateHttpAppOptions {
@@ -122,6 +127,7 @@ function sendJsonRpcError(res: Response, status: number, code: number, message: 
 
 export function createHttpApp(options: CreateHttpAppOptions): Express {
   const { ctx, version, config, auth } = options;
+  const nullOriginPostPaths = new Set(auth.nullOriginPostPaths ?? []);
   const app = express();
   app.disable('x-powered-by');
   app.set('etag', false);
@@ -140,8 +146,12 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
     const remote = req.socket.remoteAddress;
     const hostOk = isAllowedHostname(hostnameOf(req.headers.host), remote, config.publicHostname);
     const origin = req.headers.origin;
+    const nullOriginAllowed =
+      origin === 'null' && req.method === 'POST' && nullOriginPostPaths.has(req.path);
     const originOk =
-      origin === undefined || isAllowedHostname(hostnameOf(origin), remote, config.publicHostname);
+      origin === undefined ||
+      nullOriginAllowed ||
+      isAllowedHostname(hostnameOf(origin), remote, config.publicHostname);
     if (!hostOk || !originOk) {
       res.status(403).type('text/plain').send('Host u Origin no permitido.');
       return;

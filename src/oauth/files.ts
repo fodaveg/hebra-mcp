@@ -48,6 +48,19 @@ export async function writeJsonAtomic(dataDir: string, path: string, value: unkn
     throw error;
   }
   await chmod(path, 0o600);
+  // El `rename` vive en el directorio: sin su `fsync`, un corte de luz puede devolver el
+  // fichero anterior (un refresh ya rotado, o un `revokedBefore` viejo). Hallazgo B4 de la
+  // auditoría; mismo `syncDirectory` que lumbre-mcp.
+  await syncDirectory(dataDir);
+}
+
+async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
 }
 
 /** El JSON de `path`, `null` si no existe. Un JSON corrupto lanza `SyntaxError`. */

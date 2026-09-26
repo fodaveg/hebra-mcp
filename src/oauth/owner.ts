@@ -22,6 +22,9 @@ import { ownerFilePath, readJsonOrNull, writeJsonAtomic } from './files';
 
 /** Longitud mínima del secreto: «de alta entropía», el de un gestor de contraseñas. */
 export const OWNER_SECRET_MIN_LENGTH = 32;
+/** Variedad mínima (caracteres distintos): rechaza un secreto largo pero trivial
+ *  (hallazgo B6 de la auditoría). Uno de gestor de contraseñas pasa de sobra. */
+export const OWNER_SECRET_MIN_DISTINCT = 10;
 /** Tope: por encima, ni se deriva (un formulario no puede pedir un scrypt de megabytes). */
 export const OWNER_SECRET_MAX_LENGTH = 1024;
 
@@ -99,6 +102,12 @@ export function validateOwnerSecret(secret: string): void {
   }
   if (secret.length > OWNER_SECRET_MAX_LENGTH) {
     throw new OwnerSecretError(`El secreto no puede pasar de ${OWNER_SECRET_MAX_LENGTH} caracteres.`);
+  }
+  // Largo no es lo mismo que aleatorio: `aaaa…` o una palabra repetida pasan la longitud.
+  if (new Set(secret).size < OWNER_SECRET_MIN_DISTINCT) {
+    throw new OwnerSecretError(
+      `El secreto tiene que tener al menos ${OWNER_SECRET_MIN_DISTINCT} caracteres distintos (genéralo con el gestor de contraseñas).`
+    );
   }
 }
 

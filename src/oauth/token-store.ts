@@ -11,7 +11,9 @@
  *   anterior deja de valer. Presentar uno de esa familia que no es el vigente es una
  *   reutilización (lo robó alguien, o lo usó antes): se revoca la familia ENTERA, access
  *   incluidos. Llevar el id de familia dentro del token permite detectarlo sin guardar
- *   una lista de refresh usados.
+ *   una lista de refresh usados. Excepción: el refresh recién rotado, presentado en los
+ *   30 s siguientes a la rotación (dos refresh simultáneos), da `invalid_grant` sin
+ *   revocar nada.
  * - Revocación global: una familia creada hasta `revokedBefore` del dueño
  *   (`./owner.ts`) está muerta, aunque siga en el fichero.
  * - Persistencia: `oauth-tokens.json` (0600, escritura atómica), que solo escribe este
@@ -26,6 +28,9 @@ import { readJsonOrNull, tokensFilePath, writeJsonAtomic } from './files';
 export const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
 export const REFRESH_FAMILY_TTL_MS = 30 * 24 * 60 * 60_000;
 const MAX_ACCESS_PER_FAMILY = 4;
+/** Ventana tras una rotación en la que el refresh recién rotado da `invalid_grant` sin
+ *  revocar la familia (hallazgo B3 de la auditoría). */
+export const REFRESH_REUSE_GRACE_MS = 30_000;
 /** Familias vivas a la vez: una por dispositivo de claude.ai que conecta; de sobra. */
 const MAX_FAMILIES = 32;
 
@@ -47,6 +52,9 @@ interface Family {
   createdAt: number;
   expiresAt: number;
   refreshHash: string;
+  /** Hash del refresh anterior y cuándo se rotó: la ventana de gracia (`REFRESH_REUSE_GRACE_MS`). */
+  previousRefreshHash?: string;
+  rotatedAt?: number;
   access: AccessEntry[];
 }
 
@@ -73,7 +81,7 @@ export interface VerifiedAccess {
 
 export type RefreshOutcome =
   | { ok: true; tokens: IssuedTokens }
-  | { ok: false; reason: 'invalid' | 'expired' | 'client_mismatch' | 'replay' };
+  | { ok: false; reason: 'invalid' | 'expired' | 'client_mismatch' | 'replay' | 'recently_rotated' };
 
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -97,6 +105,8 @@ function isFamily(value: unknown): value is Family {
     typeof family.createdAt === 'number' &&
     typeof family.expiresAt === 'number' &&
     typeof family.refreshHash === 'string' &&
+    (family.previousRefreshHash === undefined || typeof family.previousRefreshHash === 'string') &&
+    (family.rotatedAt === undefined || typeof family.rotatedAt === 'number') &&
     Array.isArray(family.access) &&
     family.access.every(
       (entry: unknown) =>
@@ -226,11 +236,25 @@ export class TokenStore {
         return { ok: false, reason: 'expired' };
       }
       if (family.clientId !== clientId) return { ok: false, reason: 'client_mismatch' };
-      if (!sameHash(sha256(refreshToken), family.refreshHash)) {
+      const presented = sha256(refreshToken);
+      if (!sameHash(presented, family.refreshHash)) {
+        // Dos refresh simultáneos con el mismo token (el cliente reintenta, o dos pestañas):
+        // el segundo llega con el recién rotado. Dentro de la ventana se rechaza sin tocar
+        // la familia; fuera, es una reutilización y cae entera.
+        if (
+          family.previousRefreshHash !== undefined &&
+          family.rotatedAt !== undefined &&
+          now - family.rotatedAt < REFRESH_REUSE_GRACE_MS &&
+          sameHash(presented, family.previousRefreshHash)
+        ) {
+          return { ok: false, reason: 'recently_rotated' };
+        }
         this.families = this.families.filter((candidate) => candidate !== family);
         return { ok: false, reason: 'replay' };
       }
       this.prune(revokedBefore, now);
+      family.previousRefreshHash = family.refreshHash;
+      family.rotatedAt = now;
       const accessToken = this.newAccess(family, now);
       const nextRefresh = this.newRefresh(family);
       return { ok: true, tokens: this.issued(family, accessToken, nextRefresh) };

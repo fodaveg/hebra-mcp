@@ -26,7 +26,7 @@ import type { HttpAuth } from '../http/app';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
 import { ClaudeClientsStore } from './clients';
-import { OwnerFile } from './owner';
+import { OwnerFile, type OwnerRecord } from './owner';
 import { HebraOAuthProvider, OAUTH_SCOPE } from './provider';
 import { TokenStore } from './token-store';
 
@@ -35,6 +35,8 @@ export interface OAuthHttpAuthOptions {
   fetch?: (input: string | URL, init?: RequestInit) => Promise<globalThis.Response>;
   /** Tests: reloj de tokens y códigos. */
   now?: () => number;
+  /** Tests: la verificación del secreto (por defecto, scrypt). */
+  verifySecret?: (record: OwnerRecord, candidate: string) => Promise<boolean>;
 }
 
 export interface OAuthHttpAuth extends HttpAuth {
@@ -62,7 +64,8 @@ export async function loadOAuthHttpAuth(
     owner,
     tokens,
     clients: new ClaudeClientsStore({ fetch: options.fetch, now }),
-    now
+    now,
+    verifySecret: options.verifySecret
   });
 
   const protectedResource = {
@@ -96,6 +99,10 @@ export async function loadOAuthHttpAuth(
 
   return {
     provider,
+    // Hallazgo B2: la página fija `no-referrer`, y con eso un navegador (Firefox) puede
+    // enviar el formulario con `Origin: null`. El CSRF ahí lo cubre el `request` opaco de
+    // 256 bits de la solicitud pendiente, no el `Origin`.
+    nullOriginPostPaths: ['/oauth/consent'],
     install(app: Express) {
       app.get('/.well-known/oauth-protected-resource', sendMetadata(protectedResource));
       app.get('/.well-known/oauth-protected-resource/mcp', sendMetadata(protectedResource));

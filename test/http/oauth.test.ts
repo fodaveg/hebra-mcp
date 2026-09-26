@@ -46,6 +46,8 @@ let test: TestContext | undefined;
 const apps: TestHttpApp[] = [];
 const clients: Client[] = [];
 let cimdFetch: ReturnType<typeof vi.fn>;
+/** Adelanto del reloj de tokens y códigos (la ventana de gracia del refresh). */
+let clockOffset = 0;
 
 function stderrText(): string {
   return (stderrSpy!.mock.calls as unknown as [string][]).map(([line]) => String(line)).join('');
@@ -68,6 +70,7 @@ function cimdDocument(overrides: Record<string, unknown> = {}): Response {
 
 beforeEach(() => {
   stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  clockOffset = 0;
   cimdFetch = vi.fn(async (input: string | URL) =>
     String(input) === CIMD_CLIENT_ID ? cimdDocument() : new Response('no', { status: 404 })
   );
@@ -86,7 +89,10 @@ async function startApp(): Promise<TestHttpApp> {
   test ??= await buildTestContext();
   if (!(await readOwnerRecord(test.dataDir))) await setOwnerSecret(test.dataDir, SECRET);
   const app = await startTestHttpApp(test.serverContext, async (config) => {
-    const auth = await loadOAuthHttpAuth(test!.dataDir, config, { fetch: cimdFetch as never });
+    const auth = await loadOAuthHttpAuth(test!.dataDir, config, {
+      fetch: cimdFetch as never,
+      now: () => Date.now() + clockOffset
+    });
     if (!auth) throw new Error('sin auth');
     return auth;
   });
@@ -420,6 +426,8 @@ describe('negativos', () => {
     expect(second.refresh_token).not.toBe(first.refresh_token);
     expect((await mcpStatus(app, second.access_token)).status).toBe(200);
 
+    // Pasada la ventana de gracia de 30 s (dentro, ver test/http/oauth-audit.test.ts).
+    clockOffset += 31_000;
     const replay = await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: first.refresh_token! });
     expect(replay.status).toBe(400);
     // La familia cayó entera: ni el refresh vigente ni sus access valen ya.
