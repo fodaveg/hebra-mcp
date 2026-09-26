@@ -3,37 +3,46 @@
  * L1: `serve`, que arranca el servidor MCP por stdio. Stdout es EXCLUSIVO del protocolo
  * MCP (§6.4): cualquier aviso va a stderr.
  *
- * Sin emparejado (L2) todavía no hay biblioteca real que abrir: `serve` abre (o crea,
- * vacía) la SQLite del directorio de datos. Con la biblioteca vacía, las herramientas
- * responden vacías y `hebra_status` dice `linked: false`, que es justo L1 (SPEC.md §10).
+ * Sin emparejado (L2) todavía no hay biblioteca real ni `sync` que configurar:
+ * `LibraryInstance.open` sin `sync` abre (o crea, vacía) la SQLite del directorio de
+ * datos con el escritor único de todos modos (SPEC.md §8: dos sesiones de Claude Code
+ * ya son dos procesos, aunque ninguna esté emparejada). Con la biblioteca vacía, las
+ * herramientas responden vacías y `hebra_status` dice `linked: false`, que es justo L1.
+ *
+ * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
+ * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
+ * para su prueba de humo, y arrancar el servidor ahí (esperando stdio que no existe) lo
+ * colgaría.
  */
-import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import pkg from '../../package.json';
-import { openNodeLibraryPort } from '../store';
+import { LibraryInstance } from '../sync/library-instance';
 import { loadPrivacyConfig, resolveDataDir, PrivacyFilter } from '../privacy';
-import { UnlinkedStatusSource } from '../status/status-source';
+import { LibraryInstanceStatusSource } from '../status/status-source';
 import { buildMcpServer } from './build-server';
 import type { ServerContext } from './context';
 
-const LIBRARY_FILENAME = 'library.sqlite';
-
 async function serve(): Promise<void> {
   const dataDir = resolveDataDir();
-  const [port, privacyConfig] = await Promise.all([
-    openNodeLibraryPort({ sqlitePath: join(dataDir, LIBRARY_FILENAME), dataDir }),
+  const [instance, privacyConfig] = await Promise.all([
+    LibraryInstance.open({ dataDir, deviceLabel: 'hebra-mcp' }),
     loadPrivacyConfig(dataDir)
   ]);
-  const privacy = await PrivacyFilter.build(port, privacyConfig);
-  const ctx: ServerContext = { port, privacy, status: new UnlinkedStatusSource() };
+  const privacy = await PrivacyFilter.build(instance.port, privacyConfig);
+  const ctx: ServerContext = {
+    port: instance.port,
+    privacy,
+    status: new LibraryInstanceStatusSource(instance)
+  };
 
   const server: McpServer = buildMcpServer(ctx, pkg.version);
   const transport = new StdioServerTransport();
 
   const shutdown = async (): Promise<void> => {
     await server.close();
-    port.close();
+    await instance.close();
     process.exit(0);
   };
   process.once('SIGINT', () => void shutdown());
@@ -52,7 +61,12 @@ async function main(): Promise<void> {
   await serve();
 }
 
-main().catch((error: unknown) => {
-  process.stderr.write(`${JSON.stringify({ event: 'fatal', message: String(error) })}\n`);
-  process.exit(1);
-});
+const isMainModule =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMainModule) {
+  main().catch((error: unknown) => {
+    process.stderr.write(`${JSON.stringify({ event: 'fatal', message: String(error) })}\n`);
+    process.exit(1);
+  });
+}

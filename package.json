@@ -10,6 +10,8 @@
     "hebra-mcp": "dist/cli.mjs"
   },
   "dependencies": {
+    "@codemirror/lang-markdown": "6.5.2",
+    "@lezer/common": "1.5.2",
     "@modelcontextprotocol/sdk": "1.30.1",
     "zod": "4.6.5"
   },
@@ -21,9 +23,27 @@
     "check:no-hebra-code": "node scripts/check-no-hebra-code.mjs",
     "check": "npm run typecheck && npm run check:no-hebra-code && npm run test && npm run check:bundle"
   },
+  "overrides": {
+    "@codemirror/autocomplete": "6.20.3",
+    "@codemirror/lang-css": "6.3.1",
+    "@codemirror/lang-html": "6.4.12",
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/language": "6.12.4",
+    "@codemirror/lint": "6.9.7",
+    "@codemirror/state": "6.7.1",
+    "@codemirror/view": "6.43.9",
+    "@lezer/css": "1.3.6",
+    "@lezer/highlight": "1.2.3",
+    "@lezer/html": "1.3.13",
+    "@lezer/javascript": "1.5.4",
+    "@lezer/lr": "1.4.10",
+    "@lezer/markdown": "1.7.2",
+    "@marijn/find-cluster-break": "1.0.3",
+    "crelt": "1.0.7",
+    "style-mod": "4.1.3",
+    "w3c-keyname": "2.2.8"
+  },
   "devDependencies": {
-    "@codemirror/lang-markdown": "6.5.2",
-    "@lezer/common": "1.5.2",
     "@types/node": "24.10.0",
     "esbuild": "0.25.0",
     "typescript": "5.9.3",

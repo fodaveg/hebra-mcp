@@ -26,9 +26,29 @@
  *   `boolean → 0/1` antes de enlazar, así que un valor así nunca llega a fallar aquí.
  * - `BLOB`: el motor nunca enlaza bytes en SQLite (los adjuntos van a un
  *   `BlobBytesStore` aparte); no hace falta traducir `Uint8Array`/`Buffer` en los binds.
+ *
+ * Arranque del motor y escritor único (SPEC.md §8, L3). `SqliteLibraryEngine.open`
+ * ejecuta `PRAGMA journal_mode=DELETE` (pensado para la única conexión del worker web),
+ * el esquema entero y, si falta, un `INSERT` de `meta.library_id`. Medido con
+ * `node:sqlite` de Node 24.19 sobre una base WAL (26 sep 2026):
+ * - `PRAGMA journal_mode=DELETE` falla con `database is locked` en CUALQUIER conexión
+ *   mientras otra (un lector de otra instancia) tenga la base abierta: salir de WAL
+ *   exige acceso exclusivo. Un escritor que toma el relevo con lectores vivos no podría
+ *   ni abrir. Por eso el adaptador lo traduce a `PRAGMA journal_mode=WAL` en el
+ *   escritor (WAL es persistente y es lo que hebra-mcp quiere: lectores concurrentes)
+ *   y lo omite en el lector.
+ * - El esquema (`CREATE … IF NOT EXISTS`, `DROP … IF EXISTS`, `INSERT OR IGNORE`) falla
+ *   en una conexión `readOnly` con `attempt to write a readonly database` aunque no
+ *   cambie nada. El lector lo omite: solo abre una base que ya creó un escritor.
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import SCHEMA_SQL from '$lib/library/schema.sql?raw';
 import type { SqliteConn } from '$lib/library/sqlite-engine';
+
+/** `readWrite`: el escritor único. `readOnly`: el resto de instancias (SPEC.md §8). */
+export type NodeSqliteMode = 'readWrite' | 'readOnly';
+
+const JOURNAL_MODE_DELETE = /^\s*PRAGMA\s+journal_mode\s*=\s*DELETE\s*;?\s*$/i;
 
 export type NodeSqliteBindValue = string | number | bigint | boolean | null | undefined;
 
@@ -50,12 +70,17 @@ function normalizeRow(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 /**
- * Abre `path` (o `:memory:`) con `node:sqlite` y devuelve la conexión cruda (para los
- * pragmas propios de hebra-mcp, como WAL tras el arranque del motor: ver
- * `node-port.ts`) y el `SqliteConn` que espera `SqliteLibraryEngine.open`.
+ * Abre `path` (o `:memory:`) con `node:sqlite` y devuelve la conexión cruda y el
+ * `SqliteConn` que espera `SqliteLibraryEngine.open`. En `readOnly`, la base tiene que
+ * existir ya (la crea el escritor): si no, `node:sqlite` lanza `unable to open
+ * database file`.
  */
-export function openNodeSqliteConn(path: string): { db: DatabaseSync; conn: SqliteConn } {
-  const db = new DatabaseSync(path, { readBigInts: true });
+export function openNodeSqliteConn(
+  path: string,
+  mode: NodeSqliteMode = 'readWrite'
+): { db: DatabaseSync; conn: SqliteConn } {
+  const readOnly = mode === 'readOnly';
+  const db = new DatabaseSync(path, { readBigInts: true, readOnly });
   const statements = new Map<string, StatementSync>();
 
   function statementFor(sql: string): StatementSync {
@@ -71,6 +96,12 @@ export function openNodeSqliteConn(path: string): { db: DatabaseSync; conn: Sqli
     exec(sql, opts) {
       const bind = opts?.bind;
       if (!bind || bind.length === 0) {
+        // Arranque del motor: ver la cabecera (escritor único).
+        if (JOURNAL_MODE_DELETE.test(sql)) {
+          if (!readOnly) db.exec('PRAGMA journal_mode=WAL');
+          return undefined;
+        }
+        if (readOnly && sql === SCHEMA_SQL) return undefined;
         // Sin bind: puede ser un script con varias sentencias (el esquema, `BEGIN`,
         // `COMMIT`, pragmas). `db.exec` las ejecuta todas, como `sqlite3_exec`.
         db.exec(sql);

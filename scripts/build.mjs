@@ -19,21 +19,25 @@ const vendorLib = join(root, 'vendor', 'hebra', 'src', 'lib');
 const hebraVendorPlugin = {
   name: 'hebra-mcp-vendor',
   setup(api) {
-    api.onResolve({ filter: /^\$lib\// }, (args) => {
-      const rest = args.path.slice('$lib/'.length);
-      return { path: join(vendorLib, rest.endsWith('.ts') ? rest : `${rest}.ts`) };
-    });
+    // `?raw` primero: `$lib/…/schema.sql?raw` (lo importa `src/store/sqlite-conn-node.ts`)
+    // también empieza por `$lib/` y el resolvedor de abajo le añadiría `.ts`.
     api.onResolve({ filter: /\.sql\?raw$/ }, (args) => {
       const withoutQuery = args.path.slice(0, -'?raw'.length);
-      const resolved = isAbsolute(withoutQuery)
-        ? withoutQuery
-        : join(args.resolveDir, withoutQuery);
+      const resolved = withoutQuery.startsWith('$lib/')
+        ? join(vendorLib, withoutQuery.slice('$lib/'.length))
+        : isAbsolute(withoutQuery)
+          ? withoutQuery
+          : join(args.resolveDir, withoutQuery);
       return { path: resolved, namespace: 'hebra-mcp-sql-raw' };
     });
     api.onLoad({ filter: /.*/, namespace: 'hebra-mcp-sql-raw' }, (args) => ({
       contents: readFileSync(args.path, 'utf8'),
       loader: 'text'
     }));
+    api.onResolve({ filter: /^\$lib\// }, (args) => {
+      const rest = args.path.slice('$lib/'.length);
+      return { path: join(vendorLib, rest.endsWith('.ts') ? rest : `${rest}.ts`) };
+    });
   }
 };
 
@@ -54,13 +58,21 @@ const shared = {
 
 await build({
   ...shared,
-  entryPoints: [join(root, 'src', 'store', 'index.ts')],
-  outfile: join(root, 'dist', 'store', 'index.js')
+  // Un fichero por punto de entrada: `dist/store/index.js`, `dist/sync/index.js` (motor
+  // de sync e instancia, L3) y `dist/lock/index.js` (escritor único, L3). Sin
+  // `splitting`: cada uno es autónomo (el servidor de L1 importa de las FUENTES,
+  // `src/store`/`src/sync`, no de estos `dist/*`).
+  entryPoints: ['store', 'sync', 'lock'].map((dir) => join(root, 'src', dir, 'index.ts')),
+  outdir: join(root, 'dist'),
+  outbase: join(root, 'src')
 });
 
 // Binario `hebra-mcp` (L1, SPEC.md §10): un único fichero ejecutable, con su propio
 // shebang (esbuild no lo añade solo: `packages: 'external'` deja el SDK de MCP y zod
-// como dependencias normales de `node_modules`, no los empaqueta).
+// como dependencias normales de `node_modules`, no los empaqueta). Aparte del `build()`
+// de arriba porque su nombre (`cli.mjs`, el que fija `bin` en `package.json`) no sale
+// de `outdir`/`outbase` (que daría `dist/server/main.js`); autónomo igual que los otros:
+// importa de `src/store` y `src/privacy`, no de `dist/store/index.js`.
 await build({
   ...shared,
   entryPoints: [join(root, 'src', 'server', 'main.ts')],
