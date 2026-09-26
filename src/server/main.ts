@@ -17,7 +17,10 @@
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import pkg from '../../package.json';
+// Solo `version`: esbuild recorta un JSON importado por nombre, y el `package.json`
+// entero metería en `dist/` los nombres de las devDependencies (entre ellas
+// `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
+import { version } from '../../package.json';
 import { LibraryInstance } from '../sync/library-instance';
 import { loadPrivacyConfig, resolveDataDir } from '../privacy';
 import { LibraryInstanceStatusSource } from '../status/status-source';
@@ -51,7 +54,7 @@ async function serve(): Promise<void> {
     write
   };
 
-  const server: McpServer = buildMcpServer(ctx, pkg.version);
+  const server: McpServer = buildMcpServer(ctx, version);
   const transport = new StdioServerTransport();
 
   const shutdown = async (): Promise<void> => {

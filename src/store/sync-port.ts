@@ -19,8 +19,7 @@
  * motores dentro de este proceso, no entre procesos. Entre procesos manda el bloqueo de
  * `src/lock/` (SPEC.md §8).
  */
-import type { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
-import type { LibraryPort } from '$lib/library/types';
+import type { LibraryPort, SqliteLibraryEngine } from '../hebra';
 import { busyOtherInstance } from './errors';
 import type { SerialQueue } from './serial-queue';
 

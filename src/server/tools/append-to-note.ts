@@ -16,7 +16,7 @@
  * `hidden: true` sobre el CUERPO RESULTANTE (el de la nota final: la copia si hubo
  * conflicto, la original si no), igual criterio que `create-note.ts`.
  */
-import { deriveNote } from '$lib/library/derive';
+import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';

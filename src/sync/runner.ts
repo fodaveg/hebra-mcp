@@ -1,6 +1,6 @@
 /**
  * Bucle de sync de hebra-mcp (SPEC.md §8, L3) sobre el motor de Hebra SIN cambios
- * (`LibrarySyncEngine`, `$lib/library/sync-engine`) y la vista `SyncStorePort` del
+ * (`LibrarySyncEngine`, por `node.ts` de Hebra) y la vista `SyncStorePort` del
  * almacén (`src/store/sync-port.ts`).
  *
  * Ritmo (§8):
@@ -24,15 +24,16 @@
  * llavero son L2.
  */
 import {
+  HttpLibraryTransport,
   LibrarySyncEngine,
+  type BlobRelayConnectionProviderV2,
   type LibraryBlobTransport,
   type LibrarySyncEvent,
   type LibrarySyncResultCode,
+  type LibraryTransport,
   type SyncEngineIdentity,
   type SyncRoundResult
-} from '$lib/library/sync-engine';
-import { HttpLibraryTransport, type LibraryTransport } from '$lib/library/http-transport';
-import type { BlobRelayConnectionProviderV2 } from '$lib/vault/blob-v2/http-transport';
+} from '../hebra';
 import type { SyncStorePort } from '../store/sync-port';
 
 export const SYNC_INTERVAL_MS = 30_000;

@@ -17,8 +17,7 @@
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
  */
-import { deriveNote } from '$lib/library/derive';
-import { LibraryError } from '$lib/library/library-error';
+import { deriveNote, LibraryError } from '../hebra';
 import type { NoteRow, NoteSaveInput, NoteSaveResult } from '$lib/library/types';
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */

@@ -39,11 +39,18 @@
  *   y lo omite en el lector.
  * - El esquema (`CREATE … IF NOT EXISTS`, `DROP … IF EXISTS`, `INSERT OR IGNORE`) falla
  *   en una conexión `readOnly` con `attempt to write a readonly database` aunque no
- *   cambie nada. El lector lo omite: solo abre una base que ya creó un escritor.
+ *   cambie nada. El lector lo omite: solo abre una base que ya creó un escritor. Se
+ *   reconoce comparando el texto con `SCHEMA_SQL` de `schema-sql.ts`, la MISMA constante
+ *   que ejecuta `SqliteLibraryEngine.open` desde L6 de Hebra (`sqlite-engine.ts:17,412`).
+ *   `===` entre cadenas compara contenido, no identidad: seguiría valiendo con otra copia
+ *   del mismo texto, y deja de valer (el lector intentaría escribir y fallaría al abrir,
+ *   ruidoso, no silencioso) si Hebra cambiara lo que ejecuta. Lo cubre
+ *   `test/sync/writer-lock.node.test.ts` (lector con la base ya creada).
+ *   `node.ts` no reexporta `SCHEMA_SQL`: entra por `$lib/library/schema-sql`.
  */
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import SCHEMA_SQL from '$lib/library/schema.sql?raw';
-import type { SqliteConn } from '$lib/library/sqlite-engine';
+import { SCHEMA_SQL } from '$lib/library/schema-sql';
+import type { SqliteConn } from '../hebra';
 
 /** `readWrite`: el escritor único. `readOnly`: el resto de instancias (SPEC.md §8). */
 export type NodeSqliteMode = 'readWrite' | 'readOnly';

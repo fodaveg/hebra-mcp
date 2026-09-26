@@ -28,8 +28,7 @@
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
-import { SqliteLibraryEngine } from '$lib/library/sqlite-engine';
-import { canonicalTitle, parseLinkRef } from '$lib/library/derive';
+import { canonicalTitle, parseLinkRef, SqliteLibraryEngine } from '../hebra';
 import { cleanSearchPage } from '$lib/library/search-snippet';
 import type {
   FoldersList,

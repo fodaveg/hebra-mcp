@@ -44,9 +44,12 @@
     "w3c-keyname": "2.2.8"
   },
   "devDependencies": {
+    "@tauri-apps/api": "2.11.1",
     "@types/node": "24.10.0",
     "esbuild": "0.25.0",
+    "fflate": "0.8.2",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.11",
+    "yjs": "13.6.32"
   }
 }

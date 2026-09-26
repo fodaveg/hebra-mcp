@@ -8,7 +8,7 @@
  * ocultas o filtradas.
  */
 import { canonicalTag } from '$lib/notes/tags';
-import { encodeCursor } from '$lib/library/sqlite-engine';
+import { encodeCursor } from '../../hebra';
 import type { NotesScope } from '$lib/library/types';
 import type { ToolContext } from '../context';
 

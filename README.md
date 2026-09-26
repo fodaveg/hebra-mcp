@@ -29,9 +29,10 @@ git submodule update --init --recursive
 
 Hebra es un repo privado y sin licencia; hebra-mcp es público. No se copia ni una línea
 de su código: `vendor/hebra` es un submódulo de git fijado a un commit concreto, y
-`scripts/build.mjs` lo empaqueta con esbuild (alias `$lib` → `vendor/hebra/src/lib`,
-igual que la convención de SvelteKit que usa Hebra, y un loader para los `import
-'*.sql?raw'` de Vite que esbuild no trae de fábrica). `scripts/check-no-hebra-code.mjs`
+`scripts/build.mjs` lo empaqueta con esbuild. Lo que exporta el punto de entrada Node de
+Hebra (`vendor/hebra/src/lib/library/node.ts`) entra por `src/hebra.ts`; lo que no
+exporta, por el alias `$lib` → `vendor/hebra/src/lib` (la convención de SvelteKit que
+usa Hebra). `scripts/check-no-hebra-code.mjs`
 comprueba que ningún fichero versionado fuera de `vendor/` es idéntico, byte a byte, a
 uno del submódulo.
 

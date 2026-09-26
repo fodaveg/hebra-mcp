@@ -21,5 +21,5 @@
       "$lib/*": ["vendor/hebra/src/lib/*"]
     }
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs", "src/ambient.d.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs"]
 }

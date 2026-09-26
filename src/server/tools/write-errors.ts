@@ -10,7 +10,7 @@
  * `../register-tools.ts` (`invalid_input`): aquí solo se traducen los dos casos que D2
  * espera de una escritura.
  */
-import { LibraryError } from '$lib/library/library-error';
+import { LibraryError } from '../../hebra';
 import { isBusyOtherInstance } from '../../store/errors';
 import { ToolError } from '../errors';
 

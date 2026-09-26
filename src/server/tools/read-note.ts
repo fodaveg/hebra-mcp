@@ -5,7 +5,7 @@
  * VISIBLES. Una nota en la papelera, oculta por privacidad, o simplemente inexistente,
  * responde igual: `not_found` (SPEC.md §6.3: «igual que una inexistente»).
  */
-import { canonicalTitle } from '$lib/library/derive';
+import { canonicalTitle } from '../../hebra';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 

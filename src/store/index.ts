@@ -24,4 +24,4 @@ export { StoreError, isBusyOtherInstance, type StoreErrorCode } from './errors';
 /** Derivados de Hebra (título, etiquetas, enlaces) tal cual los calculan sus apps: se
  *  reexporta para la prueba de humo de `scripts/check-bundle.mjs` (el bundle carga y
  *  deriva en Node sin DOM). Es una reexportación del submódulo, no una copia. */
-export { deriveNote } from '$lib/library/derive';
+export { deriveNote } from '../hebra';
