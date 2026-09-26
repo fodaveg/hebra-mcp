@@ -33,6 +33,16 @@ confirmes que es tu biblioteca. Los secretos van al llavero del sistema (servici
 Con una identidad ya guardada (tras revocar la conexión en Lumbre), `pair` solo renueva
 la credencial. Contrato completo: `SPEC.md` §7.
 
+## Almacén de secretos: llavero o fichero
+
+Por defecto, `serve`, `pair` y `unpair` guardan los secretos en el llavero del sistema.
+`HEBRA_MCP_SECRET_STORE=file` los guarda en su lugar en un JSON (`secrets.json`) dentro
+del directorio de datos, en 0600 y con escritura atómica: solo pensado para el
+contenedor Linux del conector remoto (`SPEC.md` §12.3), donde no hay Secret Service y
+`@napi-rs/keyring` caería en silencio a keyutils, que no persiste tras reiniciar. Nunca
+es un fallback automático: hay que pedirlo explícitamente, y un valor que no sea `file`
+ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
+
 ## Clonar
 
 ```sh

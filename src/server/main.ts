@@ -29,7 +29,7 @@ import { DEFAULT_PAIR_LABEL, runPair } from '../pair/pair';
 import { openInBrowser, stdioTerminal } from '../pair/terminal';
 import { runUnpair } from '../pair/unpair';
 import { resolveDataDir } from '../privacy';
-import { openKeyringSecretStore, type SecretStore } from '../secrets';
+import { openSecretStoreForMode, resolveSecretStoreMode, type SecretStore } from '../secrets';
 import { buildMcpServer } from './build-server';
 import { openServeContext } from './serve';
 
@@ -40,20 +40,32 @@ const USAGE = [
   '  hebra-mcp unpair'
 ].join('\n');
 
-/** El llavero, o `null` si el módulo nativo no carga en esta plataforma. */
-async function keyringOrNull(): Promise<SecretStore | null> {
+/** El almacén del modo elegido (SPEC.md §12.3), o `null` si en modo `keychain` el
+ *  módulo nativo no carga en esta plataforma: `serve` arranca igual, sin emparejar. En
+ *  modo `file` no hay ese fallo posible al abrir (solo al leer/escribir). */
+async function openServeSecretStore(dataDir: string): Promise<SecretStore | null> {
+  // Fuera del `try`: un modo inválido tiene que fallar alto (`main().catch`, abajo), no
+  // confundirse con «no hay llavero en esta plataforma» y arrancar sin emparejar.
+  const mode = resolveSecretStoreMode();
   try {
-    return await openKeyringSecretStore();
+    return await openSecretStoreForMode(mode, dataDir);
   } catch {
     logEvent({ event: 'secrets.keyring', result: 'unavailable' });
     return null;
   }
 }
 
+/** `pair` y `unpair` necesitan el almacén de verdad: a diferencia de `serve`, un fallo
+ *  aquí no se traga (sin él no hay dónde guardar ni qué borrar). */
+async function openPairingSecretStore(dataDir: string): Promise<SecretStore> {
+  return openSecretStoreForMode(resolveSecretStoreMode(), dataDir);
+}
+
 async function serve(): Promise<void> {
+  const dataDir = resolveDataDir();
   const { ctx, close } = await openServeContext({
-    dataDir: resolveDataDir(),
-    secrets: await keyringOrNull()
+    dataDir,
+    secrets: await openServeSecretStore(dataDir)
   });
   const server: McpServer = buildMcpServer(ctx, version);
   const transport = new StdioServerTransport();
@@ -69,11 +81,11 @@ async function serve(): Promise<void> {
   await server.connect(transport);
 }
 
-/** `pair` y `unpair` necesitan el llavero: sin él no hay dónde guardar ni qué borrar. */
 async function interactive(
+  dataDir: string,
   run: (secrets: SecretStore, terminal: ReturnType<typeof stdioTerminal>) => Promise<void>
 ): Promise<void> {
-  const secrets = await openKeyringSecretStore();
+  const secrets = await openPairingSecretStore(dataDir);
   const terminal = stdioTerminal();
   try {
     await run(secrets, terminal);
@@ -99,9 +111,10 @@ async function main(): Promise<void> {
         options: { lumbre: { type: 'string' }, label: { type: 'string' } },
         strict: true
       });
-      await interactive(async (secrets, terminal) => {
+      const dataDir = resolveDataDir();
+      await interactive(dataDir, async (secrets, terminal) => {
         await runPair({
-          dataDir: resolveDataDir(),
+          dataDir,
           secrets,
           terminal,
           lumbreOrigin: values.lumbre,
@@ -114,12 +127,14 @@ async function main(): Promise<void> {
       process.exit(process.exitCode ?? 0);
       return;
     }
-    case 'unpair':
-      await interactive(async (secrets, terminal) => {
-        await runUnpair({ dataDir: resolveDataDir(), secrets, terminal });
+    case 'unpair': {
+      const dataDir = resolveDataDir();
+      await interactive(dataDir, async (secrets, terminal) => {
+        await runUnpair({ dataDir, secrets, terminal });
       });
       process.exit(process.exitCode ?? 0);
       return;
+    }
     default:
       process.stderr.write(`${USAGE}\n`);
       process.exit(1);

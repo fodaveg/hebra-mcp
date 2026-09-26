@@ -370,8 +370,16 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 - En Linux sin Secret Service, `@napi-rs/keyring` cae en silencio a keyutils, que no persiste tras
   reiniciar (`node_modules/@napi-rs/keyring/README.md:23-25`). En el contenedor no se usa.
-- `FileSecretStore` implementa la interfaz de `secret-store.ts`: JSON 0600 en un directorio 0700 del
-  volumen, con escritura atómica. Se elige por una variable de modo explícita, nunca como fallback.
+- `FileSecretStore` (`src/secrets/file-secret-store.ts`) implementa la interfaz de `secret-store.ts`:
+  un único JSON (`secrets.json`) en 0600, dentro del directorio de datos
+  (`src/privacy/data-dir.ts`), que queda en 0700, con escritura atómica (fichero temporal 0600 +
+  `fsync` + `rename`). Los permisos se corrigen en cada apertura si los encuentra más abiertos, en
+  vez de fallar cerrado.
+- Se elige por `HEBRA_MCP_SECRET_STORE=file|keychain` (por defecto `keychain`), leída en `serve`,
+  `pair` y `unpair` (`src/server/main.ts`); nunca un fallback automático de uno a otro. La variable
+  solo lleva el modo, jamás un secreto, y un valor desconocido falla con un error claro
+  (`SecretStoreModeError`, `src/secrets/store-mode.ts`). En modo `file` no se importa
+  `@napi-rs/keyring`.
 - No se cifra: la SQLite ya está en claro en el mismo volumen.
 
 ### 12.4 Emparejado
