@@ -11,6 +11,8 @@
  * - `serve-http`: el conector remoto de claude.ai (SPEC.md §12, `../http/`). Streamable
  *   HTTP sin estado, siempre escritor, y no arranca sin autenticación configurada.
  *   Configuración por entorno (`../http/config.ts`), nunca secretos.
+ * - `oauth-set-secret` / `oauth-revoke-all`: el secreto del dueño del OAuth de
+ *   `serve-http` (por stdin) y la revocación de todos sus tokens (`../oauth/cli.ts`).
  *
  * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
  * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
@@ -35,6 +37,13 @@ import { resolveDataDir } from '../privacy';
 import { openSecretStoreForMode, resolveSecretStoreMode, type SecretStore } from '../secrets';
 import { HttpConfigError, readHttpConfig } from '../http/config';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../http/serve-http';
+import {
+  loadOAuthHttpAuth,
+  OAuthCliError,
+  processOAuthCliIo,
+  runOAuthRevokeAll,
+  runOAuthSetSecret
+} from '../oauth';
 import { buildMcpServer } from './build-server';
 import { openServeContext, WriterRequiredError } from './serve';
 
@@ -43,7 +52,9 @@ const USAGE = [
   '  hebra-mcp serve',
   `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
   '  hebra-mcp unpair',
-  '  hebra-mcp serve-http'
+  '  hebra-mcp serve-http',
+  '  hebra-mcp oauth-set-secret   (el secreto por stdin, nunca como argumento)',
+  '  hebra-mcp oauth-revoke-all'
 ].join('\n');
 
 /** El almacén del modo elegido (SPEC.md §12.3), o `null` si en modo `keychain` el
@@ -102,7 +113,7 @@ async function serveHttp(): Promise<void> {
       secrets: await openServeSecretStore(dataDir),
       config: readHttpConfig(),
       version,
-      loadAuth: async () => null
+      loadAuth: (authDataDir, config) => loadOAuthHttpAuth(authDataDir, config)
     });
   } catch (error) {
     if (
@@ -131,6 +142,19 @@ function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | H
   return error.message;
 }
 
+/** `oauth-set-secret` y `oauth-revoke-all`: un error de uso se dice en stderr y sale con 1. */
+async function oauthCommand(run: (dataDir: string) => Promise<void>): Promise<void> {
+  try {
+    await run(resolveDataDir());
+  } catch (error) {
+    if (!(error instanceof OAuthCliError)) throw error;
+    logEvent({ event: 'oauth.cli.failed', code: error.code });
+    process.stderr.write(`${error.message}\n`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 async function interactive(
   dataDir: string,
   run: (secrets: SecretStore, terminal: ReturnType<typeof stdioTerminal>) => Promise<void>
@@ -157,6 +181,12 @@ async function main(): Promise<void> {
       return;
     case 'serve-http':
       await serveHttp();
+      return;
+    case 'oauth-set-secret':
+      await oauthCommand((dataDir) => runOAuthSetSecret(dataDir, processOAuthCliIo()));
+      return;
+    case 'oauth-revoke-all':
+      await oauthCommand((dataDir) => runOAuthRevokeAll(dataDir, processOAuthCliIo()));
       return;
     case 'pair': {
       const { values } = parseArgs({

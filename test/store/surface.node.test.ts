@@ -25,8 +25,9 @@ const FORBIDDEN_IMPORT =
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // `src/ipc`: el socket del escritor ejecuta lo que le pide otro proceso (SPEC.md §8).
-// `src/http`: `serve-http` ejecuta lo que le pide claude.ai por la red (SPEC.md §12).
-const SURFACE_DIRS = ['src/store', 'src/sync', 'src/lock', 'src/ipc', 'src/http'];
+// `src/http` y `src/oauth`: `serve-http` ejecuta lo que le pide claude.ai por la red
+// (SPEC.md §12).
+const SURFACE_DIRS = ['src/store', 'src/sync', 'src/lock', 'src/ipc', 'src/http', 'src/oauth'];
 
 function sourceFiles(): string[] {
   const out: string[] = [];

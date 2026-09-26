@@ -43,6 +43,35 @@ contenedor Linux del conector remoto (`SPEC.md` §12.3), donde no hay Secret Ser
 es un fallback automático: hay que pedirlo explícitamente, y un valor que no sea `file`
 ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
 
+## Conector remoto de claude.ai (`serve-http`)
+
+Para claude.ai (web, móvil y sesiones en la nube), hebra-mcp corre como servidor HTTP en
+un contenedor del servidor de Lumbre, en `https://mcp.hebra.pro` (`SPEC.md` §12). Antes
+de arrancarlo hay que fijar el secreto del dueño, que es lo que pedirá claude.ai al
+conectar:
+
+```sh
+hebra-mcp oauth-set-secret      # lo pide dos veces sin eco; o por tubería:
+                                # hebra-mcp oauth-set-secret < fichero-con-el-secreto
+hebra-mcp serve-http            # no arranca sin el secreto
+hebra-mcp oauth-revoke-all      # revoca todos los tokens (claude.ai tendrá que volver a autorizarse)
+```
+
+- El secreto va siempre por stdin, nunca como argumento ni variable de entorno. Mínimo
+  32 caracteres: genéralo con el gestor de contraseñas. Solo se guarda su hash (scrypt)
+  en `oauth-owner.json` del directorio de datos (0600). Fijar uno nuevo revoca los
+  tokens anteriores.
+- En el contenedor, los tres van por `docker compose exec`, nunca por `run` (§12.5).
+- Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`
+  (`127.0.0.1`; en el contenedor, `0.0.0.0`), `HEBRA_MCP_PUBLIC_URL`
+  (`https://mcp.hebra.pro`) y, para los secretos del dispositivo,
+  `HEBRA_MCP_SECRET_STORE=file`.
+- En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. La página de
+  autorización pide el secreto; con él, claude.ai recibe un access token de 1 h y un
+  refresh rotatorio (la autorización dura 30 días).
+- `serve-http` siempre es el escritor único: si otro proceso tiene `writer.lock`, no
+  arranca.
+
 ## Clonar
 
 ```sh
