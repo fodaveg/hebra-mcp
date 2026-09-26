@@ -10,7 +10,14 @@
  * - Cada `checkIntervalMs` (30 s) se revisa el bloqueo: si el escritor murió, esta
  *   instancia lo toma, reabre la SQLite en lectura-escritura y arranca el sync; si el
  *   escritor descubre que el fichero ya no es suyo (`verify`), para el sync y pasa a
- *   solo lectura.
+ *   solo lectura. `checkWriter()` también lo llama quien reenvía una escritura cuando el
+ *   escritor no responde (`src/server/forward.ts`): el relevo se intenta EN ESE MOMENTO.
+ * - Con `writerSocket`, el escritor escucha en `writer.sock` (`src/ipc/writer-socket.ts`)
+ *   mientras tiene el papel, para que los lectores le reenvíen sus escrituras: lo abre al
+ *   pasar a escritor (borrando el de un escritor muerto) y lo cierra antes de soltar el
+ *   papel o al cerrar. Si no se puede abrir (ruta demasiado larga para un socket Unix,
+ *   por ejemplo), sigue como escritor sin socket y lo dice en stderr: los lectores
+ *   responden `busy_other_instance`, como antes de existir el reenvío.
  *
  * `port` es estable durante toda la vida de la instancia (las herramientas lo guardan
  * una vez): delega en el `NodeLibraryPort` vigente, que cambia al cambiar de papel.
@@ -31,7 +38,13 @@ import type {
   TagsList,
   TitleCandidates
 } from '../hebra';
+import {
+  WRITER_SOCKET_FILE,
+  WriterSocketServer,
+  type WriterSocketHandlers
+} from '../ipc/writer-socket';
 import { WriterLock, type WriterLockOptions } from '../lock/writer-lock';
+import { logEvent } from '../log/logger';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
@@ -74,6 +87,12 @@ export interface OpenLibraryInstanceOptions {
   checkIntervalMs?: number | null;
   /** Opciones del bloqueo para tests (`pid`, `isAlive`, `releaseOnExit`). */
   lock?: Omit<WriterLockOptions, 'dataDir'>;
+  /**
+   * Qué hace el escritor con lo que le reenvían los lectores (`src/server/forward.ts`).
+   * Sin él, no se abre `writer.sock` (tests de L3a, `pair`). Se llama cada vez que esta
+   * instancia pasa a escritor.
+   */
+  writerSocket?: (instance: LibraryInstance) => WriterSocketHandlers;
 }
 
 export interface InstanceStatus extends SyncStatusSnapshot {
@@ -83,6 +102,7 @@ export interface InstanceStatus extends SyncStatusSnapshot {
 export class LibraryInstance implements NoteWriteTarget {
   private current!: NodeLibraryPort;
   private runner: SyncRunner | null = null;
+  private socket: WriterSocketServer | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private switching: Promise<void> = Promise.resolve();
@@ -123,6 +143,16 @@ export class LibraryInstance implements NoteWriteTarget {
   /** El runner vigente (solo en el escritor con `sync`). */
   get syncRunner(): SyncRunner | null {
     return this.runner;
+  }
+
+  /** Ruta de `writer.sock` en el directorio de datos (la del escritor vigente). */
+  get writerSocketPath(): string {
+    return join(this.options.dataDir, WRITER_SOCKET_FILE);
+  }
+
+  /** ¿Escucha esta instancia en `writer.sock`? (solo el escritor con `writerSocket`) */
+  get servingWriterSocket(): boolean {
+    return this.socket !== null;
   }
 
   private async openPort(mode: 'readWrite' | 'readOnly'): Promise<NodeLibraryPort> {
@@ -171,9 +201,34 @@ export class LibraryInstance implements NoteWriteTarget {
       this.runner = runner;
       runner.start();
     }
+    await this.openWriterSocket();
+  }
+
+  private async openWriterSocket(): Promise<void> {
+    if (!this.options.writerSocket || this.socket) return;
+    try {
+      this.socket = await WriterSocketServer.listen({
+        path: this.writerSocketPath,
+        handlers: this.options.writerSocket(this)
+      });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      logEvent({
+        event: 'writer.socket',
+        result: 'failed',
+        code: typeof code === 'string' ? code : 'unknown'
+      });
+    }
+  }
+
+  private async closeWriterSocket(): Promise<void> {
+    const socket = this.socket;
+    this.socket = null;
+    await socket?.close();
   }
 
   private async becomeReader(): Promise<void> {
+    await this.closeWriterSocket();
     const runner = this.runner;
     this.runner = null;
     await runner?.stop();
@@ -250,6 +305,7 @@ export class LibraryInstance implements NoteWriteTarget {
     this.closed = true;
     if (this.timer) clearInterval(this.timer);
     await this.switching;
+    await this.closeWriterSocket();
     await this.runner?.stop();
     this.runner = null;
     await this.current.closeWhenIdle();

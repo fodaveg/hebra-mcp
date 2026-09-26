@@ -39,6 +39,45 @@ export interface WriteContext {
   awaitRound(timeoutMs: number): Promise<void>;
 }
 
+/** Cuánto espera `hebra_append_to_note` a la ronda de después de guardar (SPEC.md §5). */
+export const AWAIT_ROUND_TIMEOUT_MS = 10_000;
+
+/**
+ * Añadir y esperar la ronda (SPEC.md §5, §8), sin filtro de privados ni límites: eso es
+ * de la herramienta. Lo usan `hebra_append_to_note` en el escritor y el socket del
+ * escritor cuando se lo reenvía un lector (`./forward.ts`), para que las dos vías den
+ * el mismo `outcome`.
+ *
+ * Se suscribe a `onConflictCopy` ANTES de escribir, para no perderse una copia que la
+ * ronda produzca mientras el guardado ya está en marcha.
+ * - Si el propio guardado sale `conflict_copy` (`redirected` del almacén), se devuelve
+ *   ya, sin esperar ronda.
+ * - Si sale `saved`, se pide una ronda y se espera hasta `timeoutMs` (`awaitRound`): si
+ *   durante esa espera llega una copia de conflicto PARA ESTA nota (otro dispositivo la
+ *   editó a la vez), el resultado es igual `conflict_copy` con esa copia.
+ * El listener se da de baja siempre, gane o pierda la carrera.
+ */
+export async function appendAndAwaitRound(
+  write: WriteContext,
+  input: AppendToNoteInput,
+  timeoutMs = AWAIT_ROUND_TIMEOUT_MS
+): Promise<AppendToNoteResult> {
+  let raceCopyId: string | undefined;
+  const unsubscribe = write.onConflictCopy((copy) => {
+    if (copy.recordId === input.id && raceCopyId === undefined) raceCopyId = copy.copyId;
+  });
+  try {
+    const saved = await write.appendToNote(input);
+    if (saved.outcome === 'conflict_copy') return saved;
+    await write.awaitRound(timeoutMs);
+    return raceCopyId === undefined
+      ? saved
+      : { id: input.id, outcome: 'conflict_copy', copyId: raceCopyId };
+  } finally {
+    unsubscribe();
+  }
+}
+
 export function buildWriteContext(sources: WriteContextSources): WriteContext {
   return {
     createNote: (input) => sources.createNote(input),

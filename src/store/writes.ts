@@ -63,6 +63,14 @@ export type AppendToNoteResult =
 /** Separador entre el cuerpo existente y lo añadido (SPEC.md §5). */
 export const APPEND_SEPARATOR = '\n\n';
 
+/** Límite del cuerpo de `hebra_create_note` (SPEC.md §5), en unidades UTF-16
+ *  (`string.length`). Lo comprueban la herramienta y, otra vez, el socket del escritor
+ *  (`src/ipc/writer-socket.ts`), que no se fía de lo que le llega. */
+export const CREATE_BODY_MAX_LENGTH = 100_000;
+
+/** Límite del texto de `hebra_append_to_note` (SPEC.md §5), igual que el de arriba. */
+export const APPEND_TEXT_MAX_LENGTH = 20_000;
+
 /** `NoteSaveInput` completo para `body`: derivados de Hebra y la base leída. */
 export function saveInputFor(note: NoteRow, body: string): NoteSaveInput {
   const derived = deriveNote(body);

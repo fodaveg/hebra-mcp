@@ -252,12 +252,40 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 
 - **Escritor único**: stdio lanza **un proceso por sesión de Claude**, y dos sesiones abiertas serían
   dos escritores sobre la misma SQLite.
-  - Solución de v1: un fichero de bloqueo en el directorio de datos, con PID y comprobación de
-    vida. El proceso que lo tiene sincroniza y escribe.
-  - Los demás abren la SQLite en solo lectura (WAL), sirven las lecturas y responden a las
-    escrituras con `busy_other_instance`.
-  - `hebra_status` dice quién es el escritor.
+  - Solución de v1: un fichero de bloqueo `writer.lock` en el directorio de datos, con PID y
+    comprobación de vida. El proceso que lo tiene sincroniza y escribe.
+  - Los demás abren la SQLite en solo lectura (WAL) y sirven las lecturas.
   - `syncLeaseAcquire` del motor solo coordina dentro de un proceso, así que no basta.
+- **Escrituras desde cualquier sesión** (medido en la QA del 26 sep 2026: solo escribía la primera
+  sesión; David pidió que escriba cualquiera):
+  - El escritor escucha en un socket Unix `writer.sock` del directorio de datos (0700), con el
+    socket en 0600. Hace `bind` en una ruta temporal y la renombra a `writer.sock`: así sustituye de
+    forma atómica el socket de un escritor muerto, y al cerrar no se lleva el de un escritor nuevo
+    (libuv borra la ruta del `bind` sin mirar de quién es; `writer.sock` solo lo borra quien lo
+    creó, comprobado por inodo).
+  - Protocolo: JSON por líneas con `id` de petición. `createNote {body, folderId}`,
+    `appendToNote {id, text}` (responde `{outcome, copyId?}` con la ronda de sync ya esperada en el
+    escritor, igual que `hebra_append_to_note`) y `status` (el estado de sync del escritor). Errores
+    con código cerrado, nunca con el mensaje. Una línea de más de `MAX_MESSAGE_BYTES` (el cuerpo
+    máximo de §5 con el peor escape JSON, más 64 KiB) se rechaza sin leerla entera. El escritor
+    vuelve a comprobar los límites de §5.
+  - Un lector reenvía `hebra_create_note` y `hebra_append_to_note` al escritor. El filtro de
+    privados y los límites se aplican en la herramienta del lector, **antes** de reenviar y con su
+    configuración: el escritor no la conoce ni la supone igual.
+  - Si no hay socket, nadie escucha o no responde a tiempo, el lector intenta tomar el bloqueo en ese
+    momento. Si lo consigue, pasa a escritor (SQLite en lectura-escritura, sync y socket) y escribe
+    él; si no, `busy_other_instance`.
+  - Si la conexión se corta **después** de enviar la petición y sin respuesta, el escritor pudo
+    ejecutarla antes de morir: el lector no la repite (duplicaría el texto). Intenta el relevo para
+    la siguiente y responde `busy_other_instance`.
+  - `hebra_status` de un lector devuelve el estado de sync del escritor, pedido por el socket, con
+    `writer: "other_instance"`. Si el escritor no responde, intenta el relevo y da el estado local.
+  - Logs: `write.forward` (lector) y `writer.socket.request` (escritor) con operación, resultado y
+    códigos cerrados. Sin cuerpos, textos ni ids de nota.
+  - Límites conocidos: un timeout con el escritor vivo da `busy_other_instance` aunque el escritor
+    llegue a escribir después. Si la ruta del socket supera el límite de un socket Unix (104 bytes en
+    macOS), el escritor sigue sin socket (`writer.socket` `failed` en stderr) y los lectores
+    responden `busy_other_instance`, como antes del reenvío.
 - **Ritmo de sync**:
   - Al arrancar: una ronda, y las lecturas esperan como mucho 10 s a que termine.
   - Después, una ronda cada 30 s mientras el proceso vive.
@@ -273,7 +301,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 | R1 | El proceso tiene la clave completa de la biblioteca; revocar no la rota. | Llavero del SO, permisos 0600, `unpair` borra todo. Rotación, petición P4 a Hebra. |
 | R2 | El submódulo fija un SHA; un cambio de Hebra en el contrato del almacén o del sync deja a hebra-mcp desfasado, y un dispositivo desfasado podría escribir registros que las apps nuevas no esperan. | Mover el submódulo es un paso explícito con los casos compartidos en verde. Petición P5: Hebra avisa cuando cambie el formato del sobre o el esquema. |
 | R3 | `node:sqlite` no es `@sqlite.org/sqlite-wasm`: tipos de enlace (`undefined`, booleanos, BigInt) y `exec` con varias sentencias se comportan distinto. | L0 cierra con `cases/library-cases.json` en verde sobre el adaptador. Si no se puede, alternativa: la build de Node de sqlite-wasm que ya usan los tests de Hebra. |
-| R4 | Dos procesos escritores sobre la misma SQLite. | Bloqueo de §8. |
+| R4 | Dos procesos escritores sobre la misma SQLite. | Bloqueo de §8: solo escribe el proceso que lo tiene. Los demás le reenvían sus escrituras por `writer.sock` (0600) y toman el relevo si el escritor ya no responde; nunca escriben en la SQLite sin el bloqueo. |
 | R5 | Una configuración de privados mal escrita expone notas. | Cerrado ante la duda (§6.3) y tests de subárbol, etiqueta anidada, backlinks, fragmentos y recuentos. |
 | R6 | Un fallo de hebra-mcp en el emparejado o en las escrituras ensucia la biblioteca de David. | BEAR-22 está cerrada, así que L4 no espera a nada más que a L2 y L3. Aun así, L2 y L3 se prueban primero contra una bóveda de pruebas propia, creada en el relé de producción por la misma vía que `createTestVaultState` de Hebra (`test-vault.ts:178-189`): bóveda y credencial propias, aisladas de la biblioteca de David. No existe relé de staging. La biblioteca actual es de prueba y David la reimporta desde Obsidian, así que el riesgo es para la medición, no para los datos. |
 | R7 | Lumbre no admite hoy devolver el código de emparejado a un CLI (P2). | L2a: redirección loopback con PKCE obligatorio, pedida a la sesión de Lumbre. L2 no empieza sin ella. |
@@ -294,7 +322,7 @@ Lumbre.
 | **L1** Servidor MCP de lectura y filtro | Servidor stdio con `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links` y `hebra_status`, sobre una SQLite de prueba generada con el propio motor; `config.json` y filtro de §6.3; logs de §6.4. | 🟢 | Tests de contrato de cada herramienta; tests del filtro (subárbol, etiqueta anidada, fragmento de búsqueda, backlinks, recuentos, `not_found` y `privacy_config_unresolved`); test de notas-cebo sin texto en stderr; inspección con `npx @modelcontextprotocol/inspector`. |
 | **L2a** Retorno loopback en Lumbre (P2) | `isAllowedHebraOrigin` admite `http://127.0.0.1:<puerto>` solo con PKCE S256. La implementa la sesión de Lumbre. | 🔴 (Lumbre, no Hebra; no toca el sync ni BEAR-22) | Un cliente con `webOrigin=http://127.0.0.1:<puerto>` y PKCE recibe el código; sin PKCE se rechaza. |
 | **L2** Emparejado y secretos | `hebra-mcp pair` y `unpair`; llavero; comprobación de cuenta; `verifyGrantedAccess`; bóveda de pruebas propia. Depende de L2a. | 🟡 | Contra una bóveda de pruebas: emparejado completo, primera descarga y `hebra_status` con `linked: true`. Revocar en Lumbre deja `revoked: true`. `unpair` deja vacíos el llavero y el directorio. |
-| **L3** Sync, escritor único y escrituras | Bucle de sync de §8; bloqueo; `hebra_create_note` y `hebra_append_to_note`. | 🟢 en tests (transporte en memoria de Hebra, `memory-transport.ts`) · 🟡 en vivo | Tests: nota creada visible en un segundo motor; añadir con edición concurrente produce copia de conflicto con los dos textos; segunda instancia responde `busy_other_instance`; ninguna herramienta llama a mutaciones fuera de D2 (test de la superficie importada). |
+| **L3** Sync, escritor único y escrituras | Bucle de sync de §8; bloqueo; `hebra_create_note` y `hebra_append_to_note`; reenvío de las escrituras de los lectores al escritor por `writer.sock`. | 🟢 en tests (transporte en memoria de Hebra, `memory-transport.ts`) · 🟡 en vivo | Tests: nota creada visible en un segundo motor; añadir con edición concurrente produce copia de conflicto con los dos textos; ninguna herramienta llama a mutaciones fuera de D2 (test de la superficie importada). Con procesos `serve` reales: crear y añadir desde un lector, visible en los dos; tras un SIGKILL del escritor, la siguiente escritura del lector toma el bloqueo, y un `serve` nuevo recupera bloqueo y socket huérfanos; socket en 0600; cebos fuera de stderr. En proceso: `conflict_copy` reenviado con su `copyId` y `hebra_status` del escritor visto desde el lector. Sin escritor que responda y con el bloqueo tomado, `busy_other_instance`. |
 | **L4** Puesta en marcha con la biblioteca real | Emparejado real, configuración de privados de David, `claude mcp add`, QA de David. | 🟡 tras L2 y L3 | Los 7 puntos de §2 comprobados por David en su biblioteca. |
 | **L5** Plataforma propia del dispositivo (opcional) | `agent` en el relé, en Ajustes y en `conflictDevice` para que Hebra diga «Claude». La implementó la sesión de Hebra (`035db7e6`) y el relé, la de Lumbre; hebra-mcp cambió la plataforma que declara (`LINK_PLATFORM` y `deviceLabel`). | ✅ cerrado el 26 sep 2026 | Hebra la muestra; P3 cerrada. `LINK_PLATFORM = 'agent'`, `deviceLabel = 'Claude'` en `serve`/`pair`/`node-port.ts`, con los 68 casos compartidos, `tsc` y `npm test` en verde. |
 | **L6** Punto de entrada estable de Hebra (P1) | Hebra exporta `node.ts` o una subruta de `exports` con motor, almacén, transporte, vínculo y derivados; esquema sin `?raw`. La implementa la sesión de Hebra; hebra-mcp cambia su empaquetado para usarlo. | 🔴 sesión de Hebra, en curso desde el 26 sep 2026 | hebra-mcp compila sin alias `$lib` ni plugin de `?raw`, y los casos compartidos siguen en verde. |

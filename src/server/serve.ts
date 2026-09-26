@@ -8,15 +8,23 @@
  *   lo deja en `revoked: true` (SPEC.md §6.2).
  * - Sin secretos (o sin llavero en esta plataforma), igual que en L1: la SQLite local sin
  *   sync y `linked: false`. Lo dice en stderr con un evento cerrado, sin valores.
+ * - Escritor único (SPEC.md §8): la instancia que tiene `writer.lock` escucha en
+ *   `writer.sock`; las demás le reenvían las escrituras y le preguntan el estado de sync
+ *   (`./forward.ts`), y toman el relevo si ya no responde.
  */
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
 import { loadPrivacyConfig } from '../privacy';
 import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
-import { LibraryInstanceStatusSource } from '../status/status-source';
 import type { ServerContext } from './context';
-import { buildWriteContext } from './write-context';
+import {
+  buildRoutedWriteContext,
+  RoutedStatusSource,
+  writerSocketHandlers,
+  type ForwardOptions
+} from './forward';
+import { buildWriteContext, type WriteContext } from './write-context';
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -28,6 +36,8 @@ export interface OpenServeOptions {
   /** Tests: bloqueo, revisión del bloqueo y ritmo de sync. */
   instance?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>;
   syncIntervalMs?: number | null;
+  /** Tests: tiempos de espera del reenvío al escritor. */
+  forward?: ForwardOptions;
 }
 
 export interface ServeContext {
@@ -35,6 +45,16 @@ export interface ServeContext {
   instance: LibraryInstance;
   linked: boolean;
   close(): Promise<void>;
+}
+
+/** Las escrituras sobre esta instancia, sin reenvío: las del escritor. */
+export function localWriteContext(instance: LibraryInstance): WriteContext {
+  return buildWriteContext({
+    createNote: (input) => instance.createNote(input),
+    appendToNote: (input) => instance.appendToNote(input),
+    onConflictCopy: (listener) => instance.onConflictCopy(listener),
+    requestRound: () => instance.syncRunner?.requestRound() ?? Promise.resolve(null)
+  });
 }
 
 async function readSecretsQuietly(secrets: SecretStore | null) {
@@ -70,6 +90,9 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       dataDir,
       deviceLabel: 'Claude',
       sync: linked?.config ?? null,
+      // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
+      // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
+      writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened), opened),
       ...options.instance
     }),
     loadPrivacyConfig(dataDir)
@@ -79,16 +102,13 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // vez al arrancar se queda obsoleto en cuanto el sync mueve una nota a una carpeta
   // privada, o al revés). Sin sync, `instance.syncRunner` es `null`, `requestRound`
   // resuelve ya y las escrituras siguen funcionando sobre la SQLite local.
-  const write = buildWriteContext({
-    createNote: (input) => instance.createNote(input),
-    appendToNote: (input) => instance.appendToNote(input),
-    onConflictCopy: (listener) => instance.onConflictCopy(listener),
-    requestRound: () => instance.syncRunner?.requestRound() ?? Promise.resolve(null)
-  });
+  // En un lector, las escrituras se reenvían al escritor (o toman el relevo si ya no
+  // está), y `hebra_status` le pregunta a él por el sync.
+  const write = buildRoutedWriteContext(instance, localWriteContext(instance), options.forward);
   const ctx: ServerContext = {
     port: instance.port,
     privacyConfig,
-    status: new LibraryInstanceStatusSource(instance, linked !== null),
+    status: new RoutedStatusSource(instance, linked !== null, options.forward),
     write
   };
   return { ctx, instance, linked: linked !== null, close: () => instance.close() };

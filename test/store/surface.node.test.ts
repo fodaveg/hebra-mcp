@@ -10,7 +10,7 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  * D2 (SPEC.md §3, §5): «No se exponen `noteMove`, `noteTrash`, `notePurge`, `folder*`,
  * `file*` ni ninguna otra mutación de `LibraryStorePort`: el servidor ni siquiera las
  * importa». Tres comprobaciones sobre lo que el servidor puede alcanzar de `src/store`,
- * `src/sync` y `src/lock`:
+ * `src/sync`, `src/lock` y `src/ipc`:
  * 1. Ningún módulo EXPORTA un nombre así.
  * 2. Ningún objeto que esos módulos entregan (el puerto, su vista de sync, la instancia y
  *    su `port`) TIENE un método así.
@@ -24,7 +24,8 @@ const FORBIDDEN_IMPORT =
   /from\s+['"]\$lib\/library\/(local-port|web-port|native-port|tag-rename|tags-reindex)['"]/;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const SURFACE_DIRS = ['src/store', 'src/sync', 'src/lock'];
+// `src/ipc`: el socket del escritor ejecuta lo que le pide otro proceso (SPEC.md §8).
+const SURFACE_DIRS = ['src/store', 'src/sync', 'src/lock', 'src/ipc'];
 
 function sourceFiles(): string[] {
   const out: string[] = [];

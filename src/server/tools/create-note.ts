@@ -5,6 +5,10 @@
  * escrituras»), comprobado ANTES de tocar el almacén: un cuerpo de sobra no debe abrir
  * siquiera la escritura.
  *
+ * En una instancia lectora, `ctx.write` reenvía la creación al escritor único
+ * (`../forward.ts`): el límite y la carpeta privada se comprueban aquí ANTES, con la
+ * configuración de privados de ESTA instancia.
+ *
  * `hidden: true` en la salida si alguna etiqueta de `deriveNote(body).tags` es privada
  * (§6.3, «una nota creada con una etiqueta privada queda oculta desde ese momento»): NO
  * revela la CONFIGURACIÓN de privados (qué carpeta o etiqueta está oculta) a quien no la
@@ -14,9 +18,8 @@ import { deriveNote, ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
+import { CREATE_BODY_MAX_LENGTH as BODY_MAX_LENGTH } from '../../store/writes';
 import { mapWriteError } from './write-errors';
-
-const BODY_MAX_LENGTH = 100_000;
 
 export interface CreateNoteOutput {
   id: string;
