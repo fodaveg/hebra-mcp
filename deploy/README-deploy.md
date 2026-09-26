@@ -116,9 +116,13 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 
    ```bash
    rsync -az --delete \
-     dist/ package.json package-lock.json deploy/ \
+     dist deploy package.json package-lock.json \
      "$HEBRA_MCP_HOST:$HEBRA_MCP_DEST/"
    ```
+
+   `dist` y `deploy` van SIN barra final: con `dist/`, `rsync` copia el
+   contenido suelto en la raíz del destino y el `COPY dist/` del Dockerfile no
+   lo encuentra (visto al preparar el primer despliegue, 26 sep 2026).
 
    El `--delete` es intencional: si un despliegue anterior dejó un fichero de
    `dist/` que ya no existe, no debe seguir sirviéndose. No aplicar `--delete`
