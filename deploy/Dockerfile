@@ -3,12 +3,13 @@
 # lumbre-mcp): esta imagen NO compila TypeScript, solo instala dependencias de
 # producción y copia el `dist/` que se sube por `rsync` desde el Mac (el
 # servidor no puede clonar `vendor/hebra`, el submódulo privado). Si `dist/` no
-# trae `cli.mjs` con el subcomando HTTP, recompílalo (`npm run build`) y
-# súbelo ANTES de reconstruir la imagen — ver `deploy/README-deploy.md`.
+# trae `cli.mjs` con el subcomando `serve-http` (C2, `src/server/main.ts`),
+# recompílalo (`npm run build`) y súbelo ANTES de reconstruir la imagen — ver
+# `deploy/README-deploy.md`.
 #
-# Nombres exactos aún por confirmar (subcomando, variables de entorno): ver la
-# tabla "Variables y nombres por confirmar" al principio de README-deploy.md,
-# ÚNICO sitio donde se explican; aquí solo se usan.
+# Nombres de subcomandos y variables: confirmados contra `src/server/main.ts`,
+# `src/http/config.ts` y `src/oauth/cli.ts` (rama `c2-c3-serve-http-oauth`,
+# integrada en C4 el 26 sep 2026).
 #
 # Digest fijado (índice multi-arch, `docker buildx imagetools inspect
 # node:24-alpine`, medido el 26 sep 2026):
@@ -34,16 +35,23 @@ COPY dist/ ./dist/
 RUN chown -R node:node /app
 USER node
 
-# Puerto por defecto del proceso; el real se fija en `deploy/compose.yml`
-# (mismo valor hoy, documentado ahí para no duplicar la fuente de verdad).
-ENV PORT=8787
+# `HEBRA_MCP_HTTP_LISTEN` por defecto es `127.0.0.1` (`src/http/config.ts`,
+# pensado para tests y desarrollo local): en ESTE contenedor tiene que ser
+# `0.0.0.0`, o Caddy no podría alcanzarlo por la red `edge` (127.0.0.1 dentro
+# de un contenedor es su propio netns, inalcanzable desde otro contenedor
+# aunque estén en la misma red Docker). Repetido en `compose.yml` de forma
+# explícita; se fija también aquí para que la imagen nunca arranque con el
+# valor por defecto equivocado si alguna vez se ejecuta sin ese `environment:`.
+ENV HEBRA_MCP_HTTP_LISTEN=0.0.0.0
+ENV HEBRA_MCP_HTTP_PORT=8787
 EXPOSE 8787
 
-# `/healthz` es la ruta de liveness fijada en SPEC.md §12.8 (C2, confirmada).
-# `wget` es el applet de BusyBox que ya trae la imagen base (no hace falta
-# instalar nada), igual que en lumbre-mcp.
+# `/healthz` responde 204 sin cuerpo y sin autenticación (`src/http/app.ts`).
+# `wget --spider` da como bueno cualquier 2xx, así que un 204 basta. `wget` es
+# el applet de BusyBox que ya trae la imagen base (no hace falta instalar
+# nada), igual que en lumbre-mcp.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
-  CMD wget --quiet --spider "http://127.0.0.1:${PORT}/healthz" || exit 1
+  CMD wget --quiet --spider "http://127.0.0.1:${HEBRA_MCP_HTTP_PORT}/healthz" || exit 1
 
 # Subcomando confirmado por SPEC.md §12.1/§12.8: `serve-http`. Sin flags de
 # Node peligrosos (sin `--inspect`, sin `--experimental-*`).

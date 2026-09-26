@@ -3,3 +3,4 @@ dist/
 *.sqlite
 *.sqlite-*
 .DS_Store
+.claude/

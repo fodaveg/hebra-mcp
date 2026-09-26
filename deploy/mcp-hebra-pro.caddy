@@ -15,15 +15,15 @@
 # HTTP) puede abrir SSE, donde comprimir por buffer solo añade latencia.
 mcp.hebra.pro {
 	# Tope del cuerpo en el BORDE, para que un cuerpo desmedido ni llegue a
-	# ocupar al contenedor. TODO(C2): `serve-http` trae su propio límite de
-	# cuerpo (SPEC.md §12.8, fila C2); cuando se sepa la cifra exacta, este
-	# valor debe quedar un pelo POR DEBAJO (mismo patrón que
+	# ocupar al contenedor. `serve-http` acepta hasta `MAX_MCP_BODY_BYTES`
+	# (`src/http/app.ts`) = `CREATE_BODY_MAX_LENGTH * 6 + 64 KiB` =
+	# 100.000 * 6 + 65.536 = 665.536 bytes. 650KB decimales (650.000 bytes)
+	# queda un pelo POR DEBAJO a propósito (mismo patrón que
 	# `mcp-lumbre-pro.caddy`: el borde corta primero y el límite de la app
 	# queda como red de seguridad para quien alcance el contenedor por la
-	# red `edge` sin pasar por aquí). 2MB es un valor de partida, no medido
-	# todavía contra el límite real de hebra-mcp.
+	# red `edge` sin pasar por aquí).
 	request_body {
-		max_size 2MB
+		max_size 650KB
 	}
 
 	# Liveness: solo la consume el healthcheck interno del contenedor por
@@ -39,6 +39,21 @@ mcp.hebra.pro {
 			# la petición; sin flush inmediato los eventos se quedarían en el
 			# buffer del proxy. Mismo motivo que `mcp-lumbre-pro.caddy`.
 			flush_interval -1
+
+			# `src/http/app.ts` hace `app.set('trust proxy', 'loopback,
+			# uniquelocal')`: confía en la IP real que le llegue en
+			# `X-Forwarded-For` SOLO cuando el salto inmediato es loopback o de
+			# red privada (aquí, Caddy en `edge`, subred `172.19.0.0/16`,
+			# medida el 26 sep 2026 con `docker network inspect edge`). Eso
+			# presupone que Caddy pone ahí la IP real del cliente y no un
+			# valor que el propio cliente pudiera colar. Por defecto Caddy ya
+			# lo hace así (sin `trusted_proxies` global, que este borde no
+			# tiene configurado, sobrescribe cualquier `X-Forwarded-For`
+			# entrante con la IP real de quien conecta) — pero se fija aquí de
+			# forma EXPLÍCITA para no depender de ese default implícito ni de
+			# que nadie añada `trusted_proxies` al bloque global más adelante
+			# sin pensar en este sitio.
+			header_up X-Forwarded-For {remote_host}
 		}
 	}
 

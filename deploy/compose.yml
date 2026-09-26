@@ -16,9 +16,9 @@
 # el host abriría un segundo camino de entrada, sin TLS ni cabeceras del
 # borde, hacia un endpoint que acepta tokens OAuth.
 #
-# Nombres de variable aún por confirmar (C1/C2/C3): ver la tabla al principio
-# de `README-deploy.md`, único sitio donde se explican; aquí solo se usan con
-# el nombre más probable.
+# Nombres de variable confirmados contra `src/http/config.ts`, `src/secrets/`
+# y `src/oauth/cli.ts` (rama `c2-c3-serve-http-oauth`, integrada aquí el 26
+# sep 2026). Detalle de cada una en `README-deploy.md`.
 name: hebra-mcp
 
 services:
@@ -29,23 +29,35 @@ services:
     image: hebra-mcp:latest
     container_name: hebra-mcp
     restart: unless-stopped
+    # ⚠️ NUNCA fijar `DEBUG` aquí (ni a mano con `docker compose run -e DEBUG=...`).
+    # Express usa el paquete `debug` para sus trazas internas (`express:router`
+    # y compañía) y, si se activa, vuelca `req.url` COMPLETO a stderr — que en
+    # este proceso es justo la URI de `/oauth/authorize` con `client_id`,
+    # `redirect_uri`, `code_challenge` y `state` en la query string (auditoría
+    # de seguridad del 26 sep 2026). El log propio de la app (`src/log/logger.ts`,
+    # `http.request`) ya cubre lo que hace falta sin citar la URI.
     environment:
-      PORT: '8787'
-      # TODO(C1): confirmar el nombre exacto de la variable de modo del
-      # almacén de secretos. Tiene que ser una selección EXPLÍCITA (nunca un
-      # fallback silencioso, SPEC.md §12.3): sin ella, `serve-http` no debería
-      # arrancar o debería fallar cerrado, nunca caer solo al llavero del SO
-      # (que en este contenedor no tiene Secret Service).
+      # `src/secrets/store-mode.ts`: selección EXPLÍCITA del almacén de
+      # secretos, nunca un fallback silencioso (SPEC.md §12.3). Por defecto es
+      # `keychain`; sin Secret Service en el contenedor, `@napi-rs/keyring`
+      # caería en silencio a keyutils (no persiste tras reiniciar) si no se
+      # fijara `file` aquí.
       HEBRA_MCP_SECRET_STORE: 'file'
-      # Confirmada (`src/privacy/data-dir.ts`): el directorio de datos, con
-      # la SQLite, `config.json` de privados, los secretos de fichero (C1,
-      # JSON 0600 en subdirectorio 0700) y el store OAuth (C3).
+      # `src/privacy/data-dir.ts`: el directorio de datos, con la SQLite,
+      # `config.json` de privados, los secretos de fichero (C1, JSON 0600 en
+      # subdirectorio 0700) y `oauth-owner.json`/`oauth-tokens.json` (C3).
       HEBRA_MCP_DATA_DIR: /data
-      # TODO(C2/C3): confirmar el nombre exacto de la variable de URL pública
-      # que necesita `serve-http` para construir el issuer y la metadata
-      # PRM/AS (SPEC.md §12.2) y, si aplica, la lista `allowedHosts` (SPEC.md
-      # §12.8 fila C2). El único dato confirmado es el valor: el host es
-      # `mcp.hebra.pro` (elegido por David el 26 sep 2026, SPEC.md §12.5).
+      # `src/http/config.ts`. Por defecto `serve-http` escucha en `127.0.0.1`
+      # (pensado para tests/desarrollo local): AQUÍ tiene que ser `0.0.0.0` o
+      # Caddy no lo alcanzaría por la red `edge`. Repetido como `ENV` en el
+      # `Dockerfile` como red de seguridad si algún día se arranca esta imagen
+      # sin este `environment:`.
+      HEBRA_MCP_HTTP_LISTEN: '0.0.0.0'
+      HEBRA_MCP_HTTP_PORT: '8787'
+      # `src/http/config.ts`: origen público, a la vez issuer OAuth y base del
+      # recurso protegido (`<origen>/mcp`). Host elegido por David el 26 sep
+      # 2026 (SPEC.md §12.5); ya resuelve al servidor, falta el sitio en Caddy
+      # (`deploy/mcp-hebra-pro.caddy`).
       HEBRA_MCP_PUBLIC_URL: 'https://mcp.hebra.pro'
     volumes:
       - data:/data
