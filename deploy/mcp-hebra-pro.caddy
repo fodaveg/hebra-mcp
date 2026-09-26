@@ -1,0 +1,83 @@
+# Fragmento de Caddy del borde compartido, para `<ruta-de-conf.d>` del VPS de
+# Lumbre (ver "Cambiar el fragmento de Caddy" en README-deploy.md para el
+# procedimiento completo con la ruta real).
+#
+# Vive AQUÍ y no en el repo `edge-infra` por el mismo motivo que
+# `mcp-lumbre-pro.caddy` del repo lumbre-mcp: el árbol de configuración de
+# Caddy en el VPS no es un checkout de git de ese repo, y el servicio que
+# describe este fragmento es de ESTE repo (hebra-mcp).
+#
+# El servicio vive en su propio Compose (`deploy/compose.yml`) y no publica
+# puertos al host: se alcanza solo por el DNS de la red Docker externa
+# `edge`, igual que los demás sitios del borde compartido.
+#
+# Sin `encode`: las respuestas son JSON pequeño y el transporte (Streamable
+# HTTP) puede abrir SSE, donde comprimir por buffer solo añade latencia.
+mcp.hebra.pro {
+	# Tope del cuerpo en el BORDE, para que un cuerpo desmedido ni llegue a
+	# ocupar al contenedor. TODO(C2): `serve-http` trae su propio límite de
+	# cuerpo (SPEC.md §12.8, fila C2); cuando se sepa la cifra exacta, este
+	# valor debe quedar un pelo POR DEBAJO (mismo patrón que
+	# `mcp-lumbre-pro.caddy`: el borde corta primero y el límite de la app
+	# queda como red de seguridad para quien alcance el contenedor por la
+	# red `edge` sin pasar por aquí). 2MB es un valor de partida, no medido
+	# todavía contra el límite real de hebra-mcp.
+	request_body {
+		max_size 2MB
+	}
+
+	# Liveness: solo la consume el healthcheck interno del contenedor por
+	# `127.0.0.1`. El borde no la expone como amplificador público, igual
+	# que `mcp-lumbre-pro.caddy` hace con `/readyz`.
+	handle /healthz {
+		respond 404
+	}
+
+	handle {
+		reverse_proxy hebra-mcp:8787 {
+			# Streamable HTTP mantiene abierta la respuesta SSE mientras dura
+			# la petición; sin flush inmediato los eventos se quedarían en el
+			# buffer del proxy. Mismo motivo que `mcp-lumbre-pro.caddy`.
+			flush_interval -1
+		}
+	}
+
+	header {
+		# `includeSubDomains` alcanza solo a los subdominios de ESTE host
+		# (`*.mcp.hebra.pro`), que no existen. SIN `preload`, a propósito:
+		# eso se pide desde el ápice, afecta a todo el dominio y sacarse de
+		# la lista lleva meses.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# A diferencia de `mcp-lumbre-pro.caddy`, el diseño de hebra-mcp (SPEC.md
+	# §12.2) no tiene un `/mcp/<token>` heredado: el bearer solo viaja por la
+	# cabecera `Authorization` y el intercambio de código/refresh de OAuth va
+	# por POST (cuerpo, no query string). Con eso, HOY no hay un secreto
+	# reusable viajando en la URI de ninguna petición conocida.
+	#
+	# Aun así se mantiene el mismo bloque de discard que `mcp-lumbre-pro.caddy`,
+	# por dos motivos: (1) es la instrucción explícita de este lote (nada de
+	# logs de cuerpos ni de query strings con tokens) y (2) el `/authorize`
+	# del router OAuth del SDK sí recibe `client_id`, `redirect_uri`,
+	# `code_challenge` y `state` en la query string — ninguno es un secreto
+	# reusable por sí solo, pero tampoco hace falta que queden en un log que
+	# nadie pidió.
+	#
+	# ⚠️ PENDIENTE DE MEDIR (no se puede hacer hasta que C2/C3 estén
+	# integrados y desplegados): repetir aquí la comprobación que
+	# `README-deploy.md` de lumbre-mcp documenta para su propio host —
+	# parar el contenedor, pedir una URL con datos falsos y comprobar con
+	# `grep` en el log del borde que no aparece nada. Igual que allí, un
+	# `log { output discard }` a secas SOLO tapa `http.log.access.mcp_hebra`;
+	# lo que vuelca la URI completa en un 502 o timeout es
+	# `http.log.error.mcp_hebra`, y ESE necesita la segunda pieza en el
+	# bloque global `/srv/edge/Caddyfile` (fuera de este repo): un logger
+	# `mcp_hebra_errores` con `output discard` e
+	# `include http.log.error.mcp_hebra`. Sin esa segunda pieza, este bloque
+	# no protege nada.
+	log mcp_hebra {
+		output discard
+	}
+}

@@ -1,0 +1,86 @@
+# Servicio del transporte HTTP remoto de hebra-mcp (`mcp.hebra.pro`, SPEC.md
+# §12.5, lote C4).
+#
+# Se despliega en el VPS de Lumbre a partir de una copia de `dist/`,
+# `package.json`, `package-lock.json` y `deploy/` subida por `rsync` (el
+# servidor no clona `vendor/hebra`, el submódulo privado de Hebra) y se une a
+# la red Docker externa `edge`, la misma que usa el Caddy compartido de
+# `/srv/edge` para terminar TLS de todos los sitios del borde (Lumbre, Vega,
+# fodaveg, demos...). Ver `deploy/README-deploy.md` para el procedimiento
+# completo.
+#
+#   docker compose -f deploy/compose.yml up -d --build
+#
+# NO publica puertos al host A PROPÓSITO: Caddy lo alcanza por el DNS de la
+# red `edge` con el nombre del contenedor (`hebra-mcp:8787`). Publicar 8787 en
+# el host abriría un segundo camino de entrada, sin TLS ni cabeceras del
+# borde, hacia un endpoint que acepta tokens OAuth.
+#
+# Nombres de variable aún por confirmar (C1/C2/C3): ver la tabla al principio
+# de `README-deploy.md`, único sitio donde se explican; aquí solo se usan con
+# el nombre más probable.
+name: hebra-mcp
+
+services:
+  mcp:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: hebra-mcp:latest
+    container_name: hebra-mcp
+    restart: unless-stopped
+    environment:
+      PORT: '8787'
+      # TODO(C1): confirmar el nombre exacto de la variable de modo del
+      # almacén de secretos. Tiene que ser una selección EXPLÍCITA (nunca un
+      # fallback silencioso, SPEC.md §12.3): sin ella, `serve-http` no debería
+      # arrancar o debería fallar cerrado, nunca caer solo al llavero del SO
+      # (que en este contenedor no tiene Secret Service).
+      HEBRA_MCP_SECRET_STORE: 'file'
+      # Confirmada (`src/privacy/data-dir.ts`): el directorio de datos, con
+      # la SQLite, `config.json` de privados, los secretos de fichero (C1,
+      # JSON 0600 en subdirectorio 0700) y el store OAuth (C3).
+      HEBRA_MCP_DATA_DIR: /data
+      # TODO(C2/C3): confirmar el nombre exacto de la variable de URL pública
+      # que necesita `serve-http` para construir el issuer y la metadata
+      # PRM/AS (SPEC.md §12.2) y, si aplica, la lista `allowedHosts` (SPEC.md
+      # §12.8 fila C2). El único dato confirmado es el valor: el host es
+      # `mcp.hebra.pro` (elegido por David el 26 sep 2026, SPEC.md §12.5).
+      HEBRA_MCP_PUBLIC_URL: 'https://mcp.hebra.pro'
+    volumes:
+      - data:/data
+    networks:
+      - edge
+    # Endurecido porque este contenedor termina aceptando bearers OAuth de
+    # Internet (a través del borde): sin escritura en el resto del sistema de
+    # ficheros, sin capacidades Linux, sin escalada de privilegios. Si algo
+    # de esto rompe el arranque real (medible solo tras integrar C1-C3), se
+    # ajusta aquí con el motivo medido, no se quita a ciegas.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 128
+    healthcheck:
+      test: ['CMD-SHELL', 'wget --quiet --spider http://127.0.0.1:8787/healthz || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
+
+volumes:
+  data:
+
+networks:
+  edge:
+    external: true
+    name: edge
