@@ -37,8 +37,7 @@ const hebraVendorPlugin = {
   }
 };
 
-await build({
-  entryPoints: [join(root, 'src', 'store', 'index.ts')],
+const shared = {
   bundle: true,
   platform: 'node',
   format: 'esm',
@@ -49,7 +48,22 @@ await build({
   // fichero que solo genera `svelte-kit sync` y que aquí no existe). El de hebra-mcp
   // no necesita nada de eso: la resolución de `$lib` y del `?raw` la hace el plugin.
   tsconfig: join(root, 'tsconfig.json'),
-  outfile: join(root, 'dist', 'store', 'index.js'),
   plugins: [hebraVendorPlugin],
   logLevel: 'info'
+};
+
+await build({
+  ...shared,
+  entryPoints: [join(root, 'src', 'store', 'index.ts')],
+  outfile: join(root, 'dist', 'store', 'index.js')
+});
+
+// Binario `hebra-mcp` (L1, SPEC.md §10): un único fichero ejecutable, con su propio
+// shebang (esbuild no lo añade solo: `packages: 'external'` deja el SDK de MCP y zod
+// como dependencias normales de `node_modules`, no los empaqueta).
+await build({
+  ...shared,
+  entryPoints: [join(root, 'src', 'server', 'main.ts')],
+  outfile: join(root, 'dist', 'cli.mjs'),
+  banner: { js: '#!/usr/bin/env node' }
 });
