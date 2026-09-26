@@ -21,15 +21,19 @@ servidor MCP que **lee** la biblioteca y **crea** contenido sin riesgo de perder
 6. Los logs no contienen títulos, cuerpos, consultas ni argumentos de herramientas.
 7. Al revocar la conexión en Lumbre, el proceso deja de sincronizar y lo dice en `hebra_status`.
 
+El conector remoto (D6) añade su propia aceptación en §12.7.
+
 ## 3. Decisiones de David (26 sep 2026, cerradas)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
-| D1 | **Dispositivo propio**: proceso Node que se vincula a la biblioteca como un dispositivo más por el flujo de aprobación, con su propia SQLite y el MISMO motor de sync de Hebra. Transporte MCP: **stdio** primero; conector remoto más adelante. | El sync va cifrado de punta a punta: el relé de `app.lumbre.pro` no puede leer notas. Descartados: leer la SQLite del contenedor del Mac y un MCP en el servidor de Lumbre. |
+| D1 | **Dispositivo propio**: proceso Node que se vincula a la biblioteca como un dispositivo más por el flujo de aprobación, con su propia SQLite y el MISMO motor de sync de Hebra. Transporte MCP: **stdio** primero; conector remoto más adelante (D6). | El sync va cifrado de punta a punta: el relé de `app.lumbre.pro` no puede leer notas. Descartados: leer la SQLite del contenedor del Mac y un MCP en el servidor de Lumbre (este último, revocado por D6). |
 | D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Nunca** reescribe, mueve, etiqueta ni borra. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra). |
 | D3 | **Ve toda la biblioteca salvo** carpetas o etiquetas marcadas como privadas en la configuración del MCP. El filtro vive en el MCP y se aplica antes de devolver nada a la IA. | |
 | D4 | **Cuándo** (revisada el 26 sep 2026): **BEAR-22 queda cerrada** por decisión de David (la biblioteca actual es de prueba y la va a reimportar desde Obsidian). Se hacen **todos los lotes ya**, en orden L0 → L1 → L2 (en cuanto Lumbre despliegue L2a) → L3 → L4. Objetivo: que David use Hebra en serio con el MCP cuanto antes. | La versión anterior esperaba a BEAR-22 para todo lo que cambiara el sync o el vínculo en Hebra. |
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
+| D6 | **Conector remoto** (26 sep 2026): hebra-mcp tiene que funcionar como conector remoto de claude.ai (web, móvil, sesiones en la nube), y **corre en el servidor de Lumbre**, en un contenedor aparte. stdio sigue funcionando en local. Diseño en §12. | Revoca el descarte de D1: ese servidor guarda las claves de la biblioteca y puede leer las notas (quien tenga root en él). Descartados: una máquina de casa (Fedora o Mac) publicada con Tailscale Funnel, que mantenía el cifrado de punta a punta pero solo funcionaba con esa máquina encendida. |
+| D7 | **Autenticación del conector remoto** (26 sep 2026): servidor OAuth propio de un solo dueño dentro de hebra-mcp; claude.ai pide un secreto largo que David guarda en su gestor de contraseñas. | Descartado: el login de Lumbre, que exigía cambios en Lumbre, adaptar el servidor OAuth de lumbre-mcp y hacía de la cuenta de Lumbre la llave de la biblioteca. |
 
 ## 4. Arquitectura
 
@@ -145,7 +149,8 @@ El dispositivo acumula tres secretos:
 - **Dónde viven los secretos**: en el llavero del SO, con el servicio `hebra-mcp`, mediante
   `@napi-rs/keyring` (Keychain en macOS, libsecret en Linux, Credential Manager en Windows). Nunca en
   ficheros de configuración, variables de entorno ni argumentos de proceso (`security -w` los
-  mostraría en `ps`).
+  mostraría en `ps`). Excepción: el contenedor remoto usa un fichero 0600, elegido de forma explícita
+  (§12.3).
 - **Datos locales**:
   - SQLite en `~/Library/Application Support/hebra-mcp/` en macOS, o en `$XDG_DATA_HOME/hebra-mcp/`
     en Linux.
@@ -326,7 +331,8 @@ Lumbre.
 | **L4** Puesta en marcha con la biblioteca real | Emparejado real, configuración de privados de David, `claude mcp add`, QA de David. | 🟡 tras L2 y L3 | Los 7 puntos de §2 comprobados por David en su biblioteca. |
 | **L5** Plataforma propia del dispositivo (opcional) | `agent` en el relé, en Ajustes y en `conflictDevice` para que Hebra diga «Claude». La implementó la sesión de Hebra (`035db7e6`) y el relé, la de Lumbre; hebra-mcp cambió la plataforma que declara (`LINK_PLATFORM` y `deviceLabel`). | ✅ cerrado el 26 sep 2026 | Hebra la muestra; P3 cerrada. `LINK_PLATFORM = 'agent'`, `deviceLabel = 'Claude'` en `serve`/`pair`/`node-port.ts`, con los 68 casos compartidos, `tsc` y `npm test` en verde. |
 | **L6** Punto de entrada estable de Hebra (P1) | Hebra exporta `node.ts` o una subruta de `exports` con motor, almacén, transporte, vínculo y derivados; esquema sin `?raw`. La implementa la sesión de Hebra; hebra-mcp cambia su empaquetado para usarlo. | 🔴 sesión de Hebra, en curso desde el 26 sep 2026 | hebra-mcp compila sin alias `$lib` ni plugin de `?raw`, y los casos compartidos siguen en verde. |
-| **Después de v1** | Conector remoto (HTTP), servir adjuntos, más escrituras. | Fuera de v1 | Nueva decisión de David. |
+| **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | 🔴 sin empezar | §12.7. |
+| **Después de v1** | Servir adjuntos, más escrituras. | Fuera de v1 | Nueva decisión de David. |
 
 ## 11. Pendiente
 
@@ -336,3 +342,90 @@ Lumbre.
     hay rotación (R1); P6 bóveda de pruebas propia en el relé de producción (R6); P7 confirmada por
     David (R9 cerrado).
   - L2 no empieza sin L2a.
+
+## 12. Conector remoto (D6, D7)
+
+Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y lumbre `031031807`.
+
+### 12.1 Transporte
+
+- Subcomando nuevo `serve-http`: Streamable HTTP sin estado, un `McpServer` nuevo por petición sobre el
+  mismo `ServerContext` (`build-server.ts`), igual que lumbre-mcp (`http.ts:44-51`).
+- En el contenedor corre un único proceso que atiende a todas las sesiones de claude.ai y siempre es el
+  escritor. `writer.sock` y el bloqueo siguen existiendo por el Mac (§8), donde hay un proceso por sesión.
+- `serve`, `pair` y `unpair` por stdio no cambian.
+
+### 12.2 Autenticación (D7)
+
+- Router OAuth del SDK de MCP (1.30.1: handlers `authorize`, `token`, `register`, `revoke` y
+  `bearerAuth`), con un solo dueño.
+- Solo admite el callback `https://claude.ai/api/mcp/auth_callback` y PKCE S256.
+- La página de autorización pide el secreto del dueño, de alta entropía; el servidor guarda su hash.
+- Tokens opacos guardados como hash: access de 1 h y refresh rotatorio de 30 días (valores de lumbre-mcp
+  `oauth.ts:25-26`). Reusar un refresh revoca su familia.
+- `oauth-revoke-all` revoca todos los tokens. `serve-http` no arranca sin configuración de auth.
+- Por medir: si claude.ai acepta el registro dinámico del SDK (lumbre-mcp usa CIMD).
+
+### 12.3 Secretos
+
+- En Linux sin Secret Service, `@napi-rs/keyring` cae en silencio a keyutils, que no persiste tras
+  reiniciar (`node_modules/@napi-rs/keyring/README.md:23-25`). En el contenedor no se usa.
+- `FileSecretStore` implementa la interfaz de `secret-store.ts`: JSON 0600 en un directorio 0700 del
+  volumen, con escritura atómica. Se elige por una variable de modo explícita, nunca como fallback.
+- No se cifra: la SQLite ya está en claro en el mismo volumen.
+
+### 12.4 Emparejado
+
+- El listener tiene que estar en `127.0.0.1` de la máquina del navegador (§7), así que no se empareja
+  dentro del contenedor.
+- Se empareja en el Mac como dispositivo **nuevo**: `pair` con `HEBRA_MCP_DATA_DIR` temporal, almacén de
+  ficheros y `--label "Claude remoto"`. David aprueba en Hebra > Ajustes > Sincronización. El directorio
+  se copia al volumen por `scp` y se borra del Mac.
+- Nunca se copia la identidad del llavero del Mac: serían dos motores con el mismo dispositivo.
+- No hace falta cambiar Lumbre ni Hebra.
+
+### 12.5 Despliegue
+
+- Contenedor en el servidor de Lumbre, red externa `edge`, sin puertos publicados y con volumen de estado
+  (patrón de lumbre-mcp `deploy/compose.yml`). Imagen `node:24-alpine` fijada por digest y sin root.
+- `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
+  `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
+- Subdominio propio `hebra-mcp.lumbre.pro`, porque la metadata OAuth va en la raíz del host. El 26 sep no
+  resolvía y `lumbre.pro` no tiene comodín: hay que crear el registro A.
+- Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
+- Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
+  se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
+- `config.json` de privados vive en el volumen y se lee al arrancar: editarlo exige reiniciar.
+
+### 12.6 Qué protección se pierde
+
+- Quien tenga root en el servidor, o escape de otro contenedor de ese host, lee y escribe toda la
+  biblioteca, incluidas las notas privadas. El filtro de §6.3 solo actúa sobre la salida.
+- Revocar en Lumbre corta el sync pero **no** el acceso de claude.ai a la copia del servidor. El corte
+  real es `oauth-revoke-all` o parar el contenedor.
+- Sin rotación de clave (§6.2), retirar el dispositivo no invalida la clave que ya tuvo.
+- Se mantienen: sobres del relé cifrados, la app Lumbre sin la clave (volumen y entorno aparte), D2, el
+  filtro y los logs cerrados.
+- Por medir: si `backup-db.sh` del servidor copia el volumen.
+
+### 12.7 Aceptación
+
+1. Desde claude.ai web, móvil y una sesión en la nube, las nueve herramientas responden; lo creado o
+   añadido aparece en Hebra.
+2. Las notas privadas no llegan por ninguna herramienta.
+3. `grep` de las notas-cebo en `docker logs` y en el log de Caddy da 0.
+4. `/mcp` sin token responde 401 y `oauth-revoke-all` corta el acceso.
+5. La suite stdio sigue en verde.
+
+### 12.8 Lotes
+
+| Lote | Qué | Criterio de cierre | Depende de |
+|---|---|---|---|
+| **C1** Secretos en fichero | `FileSecretStore` y selección explícita en `serve`, `pair` y `unpair`. | Tests: 0600/0700, escritura atómica, `unpair` lo deja vacío, valor corrupto = ausente, en modo fichero no se carga `@napi-rs/keyring`. | — |
+| **C2** `serve-http` | Streamable HTTP sin estado: `POST /mcp`, límite de cuerpo, `allowedHosts`, `/healthz`; no arranca sin auth. | Las 9 herramientas por el cliente HTTP del SDK; cebos fuera de stderr; dos `append` concurrentes correctos; suite stdio en verde. | — |
+| **C3** OAuth de un dueño | §12.2. | Sin token 401 con `resource_metadata`; secreto, callback o verifier erróneos rechazados; código reusado rechazado; replay de refresh revoca la familia; token revocado 401; flujo completo con el cliente del SDK. | C2 |
+| **C4** Despliegue | Dockerfile, compose, Caddy, runbook y registro DNS. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
+| **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 y DNS |
+| **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
+
+C1 y C2 van en paralelo.
