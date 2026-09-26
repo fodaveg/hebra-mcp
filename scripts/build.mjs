@@ -6,29 +6,17 @@
  * `src/hebra.ts` con una ruta relativa, y el esquema llega como constante TS
  * (`schema-sql.ts`): el cargador de `?raw` de Vite ya no hace falta y se quitó.
  *
- * El alias `$lib` (convención de SvelteKit) → `vendor/hebra/src/lib` SIGUE haciendo
- * falta para lo que `node.ts` no exporta y hebra-mcp usa: tipos de `types.ts`,
- * `folder-tree`, `canonicalTag` (`notes/tags`), `search-snippet`, `blob-store` y
- * `schema-sql`. Se quitará cuando `node.ts` los exporte (petición a Hebra, informe de
- * L6b).
+ * El alias `$lib` (convención de SvelteKit) → `vendor/hebra/src/lib` ya no hace falta
+ * (D5, `199c3d1d`): lo último que lo usaba fuera de producción era el dispatcher propio
+ * de los casos compartidos, y `node-testing.ts` ya exporta el arnés corrido
+ * (`ALL_LIBRARY_CASES`/`runLibraryCase`, `test/library-cases.node.test.ts`). El plugin
+ * de resolución se quitó con él.
  */
 import { build } from 'esbuild';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const vendorLib = join(root, 'vendor', 'hebra', 'src', 'lib');
-
-/** @type {import('esbuild').Plugin} */
-const hebraVendorPlugin = {
-  name: 'hebra-mcp-vendor',
-  setup(api) {
-    api.onResolve({ filter: /^\$lib\// }, (args) => {
-      const rest = args.path.slice('$lib/'.length);
-      return { path: join(vendorLib, rest.endsWith('.ts') ? rest : `${rest}.ts`) };
-    });
-  }
-};
 
 const shared = {
   bundle: true,
@@ -38,10 +26,8 @@ const shared = {
   packages: 'external',
   // Sin esto, esbuild sube directorios desde cada fichero buscando un tsconfig.json y
   // se para en el de `vendor/hebra` (que extiende `./.svelte-kit/tsconfig.json`, un
-  // fichero que solo genera `svelte-kit sync` y que aquí no existe). El de hebra-mcp
-  // no necesita nada de eso: la resolución de `$lib` la hace el plugin.
+  // fichero que solo genera `svelte-kit sync` y que aquí no existe).
   tsconfig: join(root, 'tsconfig.json'),
-  plugins: [hebraVendorPlugin],
   logLevel: 'info'
 };
 

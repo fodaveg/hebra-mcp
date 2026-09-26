@@ -15,11 +15,7 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "noEmit": true,
-    "baseUrl": ".",
-    "paths": {
-      "$lib/*": ["vendor/hebra/src/lib/*"]
-    }
+    "noEmit": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs"]
 }
