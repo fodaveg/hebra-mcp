@@ -390,8 +390,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   (patrón de lumbre-mcp `deploy/compose.yml`). Imagen `node:24-alpine` fijada por digest y sin root.
 - `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
   `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
-- Subdominio propio `hebra-mcp.lumbre.pro`, porque la metadata OAuth va en la raíz del host. El 26 sep no
-  resolvía y `lumbre.pro` no tiene comodín: hay que crear el registro A.
+- Host propio `mcp.hebra.pro` (elegido por David el 26 sep 2026), porque la metadata OAuth va en la raíz
+  del host. Ya resuelve a `135.181.157.147`, el servidor de Lumbre; falta el sitio en Caddy.
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
 - Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
   se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
@@ -424,8 +424,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C1** Secretos en fichero | `FileSecretStore` y selección explícita en `serve`, `pair` y `unpair`. | Tests: 0600/0700, escritura atómica, `unpair` lo deja vacío, valor corrupto = ausente, en modo fichero no se carga `@napi-rs/keyring`. | — |
 | **C2** `serve-http` | Streamable HTTP sin estado: `POST /mcp`, límite de cuerpo, `allowedHosts`, `/healthz`; no arranca sin auth. | Las 9 herramientas por el cliente HTTP del SDK; cebos fuera de stderr; dos `append` concurrentes correctos; suite stdio en verde. | — |
 | **C3** OAuth de un dueño | §12.2. | Sin token 401 con `resource_metadata`; secreto, callback o verifier erróneos rechazados; código reusado rechazado; replay de refresh revoca la familia; token revocado 401; flujo completo con el cliente del SDK. | C2 |
-| **C4** Despliegue | Dockerfile, compose, Caddy, runbook y registro DNS. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
-| **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 y DNS |
+| **C4** Despliegue | Dockerfile, compose, Caddy y runbook para `mcp.hebra.pro`. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
+| **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
 
 C1 y C2 van en paralelo.
