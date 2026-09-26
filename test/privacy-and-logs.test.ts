@@ -1,8 +1,9 @@
 /**
  * Filtro de privados y logs, de punta a punta por el protocolo MCP (`InMemoryTransport`
  * del SDK, sin spawnear un proceso: eso lo cubre `test/e2e/stdio-server.test.ts`).
- * Recorre las SIETE herramientas con argumentos que casarían el cebo (SPEC.md §10 L1,
- * §6.3, §6.4): ni el resultado ni stderr pueden traerlo.
+ * Recorre las NUEVE herramientas (las 7 de lectura de L1 y las 2 de escritura de L3b)
+ * con argumentos que casarían el cebo (SPEC.md §10 L1, §6.3, §6.4): ni el resultado ni
+ * stderr pueden traerlo.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -21,7 +22,9 @@ const TOOL_NAMES = [
   'hebra_list_tags',
   'hebra_list_folders',
   'hebra_links',
-  'hebra_status'
+  'hebra_status',
+  'hebra_create_note',
+  'hebra_append_to_note'
 ] as const;
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
@@ -40,7 +43,7 @@ function textOf(result: CallToolResult): string {
     .join('\n');
 }
 
-describe('filtro de privados y logs, por las 7 herramientas', () => {
+describe('filtro de privados y logs, por las 9 herramientas', () => {
   let test: TestContext | undefined;
   let client: Client | undefined;
   let server: McpServer | undefined;
@@ -74,7 +77,14 @@ describe('filtro de privados y logs, por las 7 herramientas', () => {
       { name: 'hebra_list_tags', arguments: {} },
       { name: 'hebra_list_folders', arguments: {} },
       { name: 'hebra_links', arguments: { id: test.library.publicNoteId } },
-      { name: 'hebra_status', arguments: {} }
+      { name: 'hebra_status', arguments: {} },
+      // Las dos de escritura (L3b): el cebo va en `body`/`text`, que nunca se hace eco
+      // en la salida (`{id, title, folderPath}` / `{id, outcome, copyId?}`) ni en el log.
+      { name: 'hebra_create_note', arguments: { body: `# Nota nueva\n${BAIT_FOLDER}\n${BAIT_TAG}\n` } },
+      {
+        name: 'hebra_append_to_note',
+        arguments: { id: test.library.publicNoteId, text: `${BAIT_FOLDER} ${BAIT_TAG}` }
+      }
     ];
 
     const texts: string[] = [];
@@ -144,7 +154,11 @@ describe('privacy_config_unresolved (carpeta configurada que no existe)', () => 
             ? { id: 'lo-que-sea' }
             : name === 'hebra_links'
               ? { id: 'lo-que-sea' }
-              : {};
+              : name === 'hebra_create_note'
+                ? { body: '# lo que sea' }
+                : name === 'hebra_append_to_note'
+                  ? { id: 'lo-que-sea', text: 'lo que sea' }
+                  : {};
       const result = (await client.callTool({ name, arguments: arguments_ })) as CallToolResult;
       expect(result.isError).toBe(true);
       expect(JSON.parse(textOf(result))).toEqual({ error: 'privacy_config_unresolved' });

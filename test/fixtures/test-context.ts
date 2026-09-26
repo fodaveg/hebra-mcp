@@ -11,14 +11,21 @@
  * necesita `registerTools`, que reconstruye el filtro EN CADA llamada
  * (`src/server/context.ts`): úsalo cuando el test cambie el almacén entre llamadas
  * (sync, escrituras) y quiera comprobar que la herramienta ve el cambio sin reiniciar.
+ *
+ * `write` (L3b) va DIRECTO sin sync: un `NoteWriter` sobre el mismo `port`, con
+ * `onConflictCopy` sin efecto y `requestRound` resuelta ya, como corresponde a una
+ * instancia sin emparejar (L2) o a un test que no necesita el motor de sync real (para
+ * eso, `test/sync/devices.ts` y `test/write-tools-sync.test.ts`).
  */
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store';
+import { NoteWriter } from '../../src/store/writes';
 import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import type { ServerContext, ToolContext } from '../../src/server/context';
+import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
 import { buildTestLibrary, type TestLibrary } from './test-library';
 
 const DEFAULT_PRIVACY_CONFIG: PrivacyConfig = {
@@ -31,7 +38,19 @@ export interface TestContext {
   serverContext: ServerContext;
   library: TestLibrary;
   dataDir: string;
+  sqlitePath: string;
   close(): Promise<void>;
+}
+
+/** `WriteContext` sin sync, sobre `port`: sin ronda que pedir. */
+function testWriteContext(port: NodeLibraryPort): WriteContext {
+  const writer = new NoteWriter(port);
+  return buildWriteContext({
+    createNote: (input) => writer.createNote(input),
+    appendToNote: (input) => writer.appendToNote(input),
+    onConflictCopy: () => () => {},
+    requestRound: () => Promise.resolve(null)
+  });
 }
 
 export async function buildTestContext(
@@ -44,17 +63,36 @@ export async function buildTestContext(
   const port: NodeLibraryPort = await openNodeLibraryPort({ sqlitePath, dataDir });
   const status = new UnlinkedStatusSource();
   const privacy = await PrivacyFilter.build(port, privacyConfig);
+  const write = testWriteContext(port);
 
   return {
-    ctx: { port, privacy, status },
-    serverContext: { port, privacyConfig, status },
+    ctx: { port, privacy, status, write },
+    serverContext: { port, privacyConfig, status, write },
     library,
     dataDir,
+    sqlitePath,
     async close() {
       port.close();
       await rm(dataDir, { recursive: true, force: true });
     }
   };
+}
+
+/**
+ * Un `WriteContext` de OTRA instancia sobre el MISMO fichero, en solo lectura (SPEC.md
+ * §8): toda escritura por él rechaza con `busy_other_instance`, igual que un segundo
+ * proceso de hebra-mcp que no tiene el bloqueo. Para los tests de `busy_other_instance`
+ * de `hebra_create_note`/`hebra_append_to_note`.
+ */
+export async function openBusyWriteContext(
+  test: Pick<TestContext, 'sqlitePath' | 'dataDir'>
+): Promise<{ write: WriteContext; close(): void }> {
+  const reader = await openNodeLibraryPort({
+    sqlitePath: test.sqlitePath,
+    dataDir: test.dataDir,
+    mode: 'readOnly'
+  });
+  return { write: testWriteContext(reader), close: () => reader.close() };
 }
 
 /** Config con una carpeta privada que NO existe: para `privacy_config_unresolved`. */

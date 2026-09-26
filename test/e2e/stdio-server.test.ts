@@ -56,6 +56,8 @@ describe('hebra-mcp serve (proceso real, protocolo MCP por stdio)', () => {
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual(
       [
+        'hebra_append_to_note',
+        'hebra_create_note',
         'hebra_links',
         'hebra_list_folders',
         'hebra_list_notes',

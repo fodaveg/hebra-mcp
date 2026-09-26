@@ -23,6 +23,7 @@ import { loadPrivacyConfig, resolveDataDir } from '../privacy';
 import { LibraryInstanceStatusSource } from '../status/status-source';
 import { buildMcpServer } from './build-server';
 import type { ServerContext } from './context';
+import { buildWriteContext } from './write-context';
 
 async function serve(): Promise<void> {
   const dataDir = resolveDataDir();
@@ -34,10 +35,20 @@ async function serve(): Promise<void> {
   // CADA llamada, con el almacén tal como esté en ese momento (§1 del hallazgo del
   // coordinador, 26 sep 2026: un filtro construido una vez al arrancar se queda
   // obsoleto en cuanto el sync mueve una nota a una carpeta privada, o al revés).
+  // `write` (L3b): sin emparejar (L2) `instance.syncRunner` es `null`, así que
+  // `requestRound` resuelve ya (no hay ronda que pedir) y las escrituras siguen
+  // funcionando sobre la SQLite local, vacía o no.
+  const write = buildWriteContext({
+    createNote: (input) => instance.createNote(input),
+    appendToNote: (input) => instance.appendToNote(input),
+    onConflictCopy: (listener) => instance.onConflictCopy(listener),
+    requestRound: () => instance.syncRunner?.requestRound() ?? Promise.resolve(null)
+  });
   const ctx: ServerContext = {
     port: instance.port,
     privacyConfig,
-    status: new LibraryInstanceStatusSource(instance)
+    status: new LibraryInstanceStatusSource(instance),
+    write
   };
 
   const server: McpServer = buildMcpServer(ctx, pkg.version);

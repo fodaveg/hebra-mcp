@@ -9,7 +9,8 @@ export type ToolErrorCode =
   | 'not_found'
   | 'ambiguous_title'
   | 'privacy_config_unresolved'
-  | 'invalid_input';
+  | 'invalid_input'
+  | 'busy_other_instance';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

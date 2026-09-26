@@ -4,18 +4,24 @@
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
- * `hebra_create_note` y `hebra_append_to_note` NO se registran aquí (van en L3b).
+ * `hebra_create_note` y `hebra_append_to_note` (L3b) se registran con el mismo `runTool`:
+ * pasan igual por `privacy_config_unresolved` primero y por el log cerrado de cada
+ * llamada.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { resolveToolContext, type ServerContext, type ToolContext } from './context';
 import { ToolError, toErrorResult, toOkResult } from './errors';
 import {
+  appendToNoteInputShape,
+  createNoteInputShape,
   linksInputShape,
   listNotesInputShape,
   readNoteInputShape,
   searchInputShape
 } from './schemas';
+import { runAppendToNote } from './tools/append-to-note';
+import { runCreateNote } from './tools/create-note';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
@@ -134,5 +140,28 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       description: 'Estado del vínculo con Hebra y del sync. Sin contenido de notas.'
     },
     async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx))
+  );
+
+  server.registerTool(
+    'hebra_create_note',
+    {
+      title: 'Crear una nota',
+      description:
+        'Crea una nota nueva en la biblioteca de Hebra (el primer H1 del cuerpo es el título), en una carpeta existente o en la raíz.',
+      inputSchema: createNoteInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_create_note', (toolCtx) => runCreateNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_append_to_note',
+    {
+      title: 'Añadir texto a una nota',
+      description:
+        'Añade texto al final de una nota existente. Una edición concurrente produce una copia de conflicto visible, sin perder texto.',
+      inputSchema: appendToNoteInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_append_to_note', (toolCtx) => runAppendToNote(toolCtx, input))
   );
 }

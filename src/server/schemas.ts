@@ -28,3 +28,16 @@ export const readNoteInputShape = {
 export const linksInputShape = {
   id: z.string()
 };
+
+/** Sin `.max()` a propósito (SPEC.md §5, L3b): el límite de `body` lo aplica
+ *  `create-note.ts` con `invalid_input`, sin eco de la entrada. */
+export const createNoteInputShape = {
+  body: z.string(),
+  folder: z.string().optional()
+};
+
+/** Sin `.max()`: el límite de `text` lo aplica `append-to-note.ts`. */
+export const appendToNoteInputShape = {
+  id: z.string(),
+  text: z.string()
+};
