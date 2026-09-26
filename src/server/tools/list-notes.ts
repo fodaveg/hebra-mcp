@@ -10,7 +10,7 @@
 import { canonicalTag } from '$lib/notes/tags';
 import { encodeCursor } from '$lib/library/sqlite-engine';
 import type { NotesScope } from '$lib/library/types';
-import type { ServerContext } from '../context';
+import type { ToolContext } from '../context';
 
 export interface ListedNote {
   id: string;
@@ -26,7 +26,7 @@ const DEFAULT_LIMIT = 50;
 const PAGE_SIZE = 100;
 
 export async function runListNotes(
-  ctx: ServerContext,
+  ctx: ToolContext,
   input: { folder?: string; tag?: string; cursor?: string; limit?: number }
 ): Promise<{ notes: ListedNote[]; nextCursor: string | null }> {
   const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), 100);

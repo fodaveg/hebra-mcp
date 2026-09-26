@@ -1,32 +1,40 @@
 /**
- * Extrae los `ref` en bruto (lo que va entre `[[`/`![[` y `]]`, sin alias) de un cuerpo,
- * para `hebra_links` §outgoing. El almacén guarda los enlaces YA analizados en la tabla
- * `links` (derivados al escribir), pero `HebraLibraryPort` no expone un método «enlaces
- * salientes de esta nota en bruto»: `resolveLink(ref)` necesita el `ref` ya extraído, no
- * lo da. Componer esto releyendo el cuerpo es lo único posible sin tocar `src/store`
- * (ver el informe de cierre de L1).
+ * Enlaces salientes de un cuerpo, para `hebra_links` §outgoing (SPEC.md §5). Antes esto
+ * era un regex propio sobre el texto en bruto: no excluía vallas de código, así que un
+ * `[[…]]` literal dentro de un bloque de código se trataba como un enlace, a diferencia
+ * de Hebra (hallazgo del coordinador, 26 sep 2026).
  *
- * Aproximación deliberada, más simple que el escáner real de Hebra
- * (`notes/markdown.ts`, vía CodeMirror): NO excluye bloques de código ni código en
- * línea, así que un `[[…]]` literal dentro de una valla de código se trataría aquí
- * como un enlace. `deriveNote` sí lo haría bien, pero solo se puede importar sin que
- * CodeMirror entre en el bundle de producción (comentario de cabecera de
- * `store/node-port.ts`); si un lote futuro ya necesita `deriveNote` en el bundle
- * (L3, para las escrituras), esto puede sustituirse por sus derivados.
+ * Ahora usa `deriveNote(body).links` (`$lib/library/derive`, reexportado por
+ * `src/store/index.ts`): el MISMO analizador que usa Hebra para derivar (vía
+ * `notes/markdown.ts`/CodeMirror, que SÍ excluye código), así que un enlace dentro de
+ * una valla de código no cuenta aquí tampoco. Ya no arrastra CodeMirror al bundle por
+ * primera vez: `src/store/writes.ts` (L3, `hebra_create_note`/`hebra_append_to_note`)
+ * ya lo necesita y ya está en `dist/` (comentario de cabecera de `store/node-port.ts`).
+ *
+ * `DerivedLink` da el destino YA ANALIZADO (`targetKind`/`target`/`targetPath`), no el
+ * texto tal cual se escribió entre `[[` y `]]`: `refOf` lo reconstruye a la MISMA forma
+ * que `parseLinkRef` (`$lib/library/derive`) sabe volver a analizar, para que
+ * `HebraLibraryPort.resolveLink(ref)` (que solo acepta esa forma) lo resuelva. Un
+ * enlace con alias (`[[Título|Alias]]`) pierde el alias en el `ref`: SPEC.md §5 ya lo
+ * pide así («sin alias»).
  */
-const LINK_PATTERN = /!?\[\[([^[\]\n]+)\]\]/gu;
+import type { DerivedLink } from '$lib/library/types';
+import { deriveNote } from '../../store';
 
-/** Refs únicos, en el orden en que aparecen, ya sin el alias (`|texto`). */
-export function scanOutgoingRefs(body: string): string[] {
-  const seen = new Set<string>();
-  const refs: string[] = [];
-  for (const match of body.matchAll(LINK_PATTERN)) {
-    const raw = match[1]!;
-    const pipe = raw.indexOf('|');
-    const ref = (pipe >= 0 ? raw.slice(0, pipe) : raw).trim();
-    if (!ref || seen.has(ref)) continue;
-    seen.add(ref);
-    refs.push(ref);
+function refOf(link: DerivedLink): string {
+  switch (link.targetKind) {
+    case 'id':
+      return `id:${link.target}`;
+    case 'blob':
+      return `sha256:${link.target}`;
+    case 'title':
+    case 'file':
+      return link.targetPath ? `${link.targetPath}/${link.target}` : link.target;
   }
-  return refs;
+}
+
+/** Refs únicos, en el orden en que los derivó `deriveNote` (ya sin duplicados: ver su
+ *  `seenLinks`). */
+export function scanOutgoingRefs(body: string): string[] {
+  return deriveNote(body).links.map(refOf);
 }

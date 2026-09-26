@@ -8,7 +8,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
-import type { ServerContext } from './context';
+import { resolveToolContext, type ServerContext, type ToolContext } from './context';
 import { ToolError, toErrorResult, toOkResult } from './errors';
 import {
   linksInputShape,
@@ -40,17 +40,25 @@ function countOf(result: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * Reconstruye el `ToolContext` (filtro de privados incluido) DEL ALMACÉN, en esta
+ * llamada: nunca el de una llamada anterior. Es lo que evita la fuga de §1 (una nota
+ * que el sync movió a una carpeta privada, o le añadió una etiqueta privada, mientras
+ * el proceso vive) y el fallo simétrico (una nota nueva del sync, invisible hasta
+ * reiniciar).
+ */
 async function runTool(
   ctx: ServerContext,
   name: string,
-  run: () => Promise<unknown>
+  run: (toolCtx: ToolContext) => Promise<unknown>
 ): Promise<ReturnType<typeof toOkResult>> {
-  if (ctx.privacy.unresolved) {
+  const toolCtx = await resolveToolContext(ctx);
+  if (toolCtx.privacy.unresolved) {
     logToolError(name, 'privacy_config_unresolved');
     return toErrorResult(new ToolError('privacy_config_unresolved'));
   }
   try {
-    const result = await run();
+    const result = await run(toolCtx);
     logToolOk(name, countOf(result));
     return toOkResult(result);
   } catch (error) {
@@ -68,7 +76,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta.',
       inputSchema: searchInputShape
     },
-    async (input) => runTool(ctx, 'hebra_search', () => runSearch(ctx, input))
+    async (input) => runTool(ctx, 'hebra_search', (toolCtx) => runSearch(toolCtx, input))
   );
 
   server.registerTool(
@@ -78,7 +86,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, más recientes primero.',
       inputSchema: listNotesInputShape
     },
-    async (input) => runTool(ctx, 'hebra_list_notes', () => runListNotes(ctx, input))
+    async (input) => runTool(ctx, 'hebra_list_notes', (toolCtx) => runListNotes(toolCtx, input))
   );
 
   server.registerTool(
@@ -88,7 +96,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       description: 'Lee una nota completa por id o por título exacto.',
       inputSchema: readNoteInputShape
     },
-    async (input) => runTool(ctx, 'hebra_read_note', () => runReadNote(ctx, input))
+    async (input) => runTool(ctx, 'hebra_read_note', (toolCtx) => runReadNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -97,7 +105,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       title: 'Listar etiquetas',
       description: 'Lista las etiquetas de la biblioteca (anidadas como a/b) con su recuento de notas.'
     },
-    async () => runTool(ctx, 'hebra_list_tags', () => runListTags(ctx))
+    async () => runTool(ctx, 'hebra_list_tags', (toolCtx) => runListTags(toolCtx))
   );
 
   server.registerTool(
@@ -106,7 +114,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       title: 'Listar carpetas',
       description: 'Lista las carpetas de la biblioteca con su recuento de notas.'
     },
-    async () => runTool(ctx, 'hebra_list_folders', () => runListFolders(ctx))
+    async () => runTool(ctx, 'hebra_list_folders', (toolCtx) => runListFolders(toolCtx))
   );
 
   server.registerTool(
@@ -116,7 +124,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       description: 'Enlaces salientes y entrantes (backlinks) de una nota, por id.',
       inputSchema: linksInputShape
     },
-    async (input) => runTool(ctx, 'hebra_links', () => runLinks(ctx, input))
+    async (input) => runTool(ctx, 'hebra_links', (toolCtx) => runLinks(toolCtx, input))
   );
 
   server.registerTool(
@@ -125,6 +133,6 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       title: 'Estado del vínculo',
       description: 'Estado del vínculo con Hebra y del sync. Sin contenido de notas.'
     },
-    async () => runTool(ctx, 'hebra_status', () => runStatus(ctx))
+    async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx))
   );
 }

@@ -19,7 +19,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import pkg from '../../package.json';
 import { LibraryInstance } from '../sync/library-instance';
-import { loadPrivacyConfig, resolveDataDir, PrivacyFilter } from '../privacy';
+import { loadPrivacyConfig, resolveDataDir } from '../privacy';
 import { LibraryInstanceStatusSource } from '../status/status-source';
 import { buildMcpServer } from './build-server';
 import type { ServerContext } from './context';
@@ -30,10 +30,13 @@ async function serve(): Promise<void> {
     LibraryInstance.open({ dataDir, deviceLabel: 'hebra-mcp' }),
     loadPrivacyConfig(dataDir)
   ]);
-  const privacy = await PrivacyFilter.build(instance.port, privacyConfig);
+  // `privacyConfig` sin resolver a `PrivacyFilter` aquí: `register-tools.ts` lo hace en
+  // CADA llamada, con el almacén tal como esté en ese momento (§1 del hallazgo del
+  // coordinador, 26 sep 2026: un filtro construido una vez al arrancar se queda
+  // obsoleto en cuanto el sync mueve una nota a una carpeta privada, o al revés).
   const ctx: ServerContext = {
     port: instance.port,
-    privacy,
+    privacyConfig,
     status: new LibraryInstanceStatusSource(instance)
   };
 

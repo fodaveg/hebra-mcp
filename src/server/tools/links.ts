@@ -4,7 +4,7 @@
  * inexistente responde `not_found`.
  */
 import { ToolError } from '../errors';
-import type { ServerContext } from '../context';
+import type { ToolContext } from '../context';
 import { scanOutgoingRefs } from './link-scan';
 
 export interface OutgoingLink {
@@ -21,7 +21,7 @@ export interface BacklinkNote {
 const BACKLINKS_PAGE_SIZE = 100;
 
 export async function runLinks(
-  ctx: ServerContext,
+  ctx: ToolContext,
   input: { id: string }
 ): Promise<{ outgoing: OutgoingLink[]; backlinks: BacklinkNote[] }> {
   const meta = ctx.privacy.visibleMeta(input.id);

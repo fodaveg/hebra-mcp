@@ -23,6 +23,16 @@ import type {
   TitleCandidates
 } from '$lib/library/types';
 
+/** Una fila de `notesVisibilityIndex()`: lo mínimo para decidir si una nota está
+ *  oculta (carpeta EFECTIVA y etiquetas canónicas, con sus ancestros) y para enseñar su
+ *  ruta y sus etiquetas. Tipo nuestro, no de Hebra: nada de esto sale ya montado de
+ *  `HebraLibraryPort`. */
+export interface NoteVisibilityEntry {
+  id: string;
+  folderId: string;
+  tags: string[];
+}
+
 export interface HebraLibraryPort {
   libraryOpen(): Promise<LibraryOpenInfo>;
   noteCreate(folderId?: string | null): Promise<NoteRow>;
@@ -41,6 +51,13 @@ export interface HebraLibraryPort {
     filters?: SearchFilters | null
   ): Promise<SearchPage>;
   notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates>;
+  /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
+   *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
+   *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota
+   *  (O(notas) + O(etiquetas) consultas); esto es UNA sola consulta SQL, pensada para
+   *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
+   *  mientras el proceso vive). */
+  notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

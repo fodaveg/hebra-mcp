@@ -30,14 +30,15 @@ describe('hebra_list_folders', () => {
     test = await buildTestContext();
     const { folders } = await runListFolders(test.ctx);
     const root = folders.find((f) => f.path === '')!;
-    // La raíz tiene: linkingNote y (antes de contar la oculta por etiqueta) esa nota
-    // NO debe sumar al recuento visible.
+    // La raíz tiene: linkingNote y codeFenceNote, visibles, y (antes de contar la
+    // oculta por etiqueta) esa nota NO debe sumar al recuento visible.
     const port = test.ctx.port;
     const hiddenByTag = await port.noteRead(test.library.privateTagNoteId);
     expect(hiddenByTag).not.toBeNull();
     expect(root.count).toBeGreaterThan(0);
     // El recuento visible de la raíz nunca puede superar las notas de raíz VISIBLES
-    // conocidas por el test (linkingNote); si la oculta contara, sería 1 de más.
-    expect(root.count).toBe(1);
+    // conocidas por el test (linkingNote, codeFenceNote); si la oculta contara, sería
+    // una de más.
+    expect(root.count).toBe(2);
   });
 });

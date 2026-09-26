@@ -54,4 +54,14 @@ describe('hebra_links', () => {
     test = await buildTestContext();
     await expect(runLinks(test.ctx, { id: 'no-existe' })).rejects.toBeInstanceOf(ToolError);
   });
+
+  it('un [[…]] dentro de una valla de código no cuenta como enlace', async () => {
+    test = await buildTestContext();
+    const { outgoing } = await runLinks(test.ctx, { id: test.library.codeFenceNoteId });
+    expect(outgoing).toHaveLength(1);
+    expect(outgoing[0]!.ref.toLowerCase()).toBe(test.library.publicNoteTitle.toLowerCase());
+    expect(outgoing[0]!.resolvedId).toBe(test.library.publicNoteId);
+    // El de dentro de la valla ("Nota pública 2 de Lumbre") NUNCA aparece.
+    expect(outgoing.some((link) => link.ref.toLowerCase().includes('pública 2'))).toBe(false);
+  });
 });

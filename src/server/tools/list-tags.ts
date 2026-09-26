@@ -4,14 +4,14 @@
  * biblioteca): una etiqueta privada, o que solo tienen notas ocultas por carpeta o por
  * otra etiqueta, sale con recuento 0 y se omite.
  */
-import type { ServerContext } from '../context';
+import type { ToolContext } from '../context';
 
 export interface TagCount {
   tag: string;
   count: number;
 }
 
-export async function runListTags(ctx: ServerContext): Promise<{ tags: TagCount[] }> {
+export async function runListTags(ctx: ToolContext): Promise<{ tags: TagCount[] }> {
   const { tags } = await ctx.port.tagsList();
   const visibleCounts = new Map<string, number>();
   for (const { tags: noteTags } of ctx.privacy.visibleNotes().values()) {

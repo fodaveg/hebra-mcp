@@ -50,7 +50,7 @@ import { FsBlobStore } from './blob-store-fs';
 import { busyOtherInstance } from './errors';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
-import type { HebraLibraryPort } from './types';
+import type { HebraLibraryPort, NoteVisibilityEntry } from './types';
 import type { NoteWriteStore, NoteWriteTarget } from './writes';
 
 export interface OpenNodeLibraryOptions {
@@ -162,6 +162,39 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
     return this.read(() => this.engine.notesByTitlePrefix(canonicalTitle(prefix), limit));
+  }
+
+  /**
+   * Carpeta efectiva y etiquetas de cada nota viva, en UNA consulta (§ comentario de
+   * `./types.ts`). Carpeta efectiva: la propia `folder_id` si esa carpeta existe y no
+   * es lápida, si no la raíz (`root`) — misma regla que `rowToNote`/`notesPageQuery` de
+   * `sqlite-engine.ts`, aquí en SQL para no leer nota a nota. Etiquetas: `GROUP_CONCAT`
+   * con `\n` como separador (una etiqueta canónica nunca lleva salto de línea) en vez de
+   * una subconsulta por nota; `GROUP_CONCAT` de cero filas es `NULL`, de ahí el `?? ''`.
+   * SQL propio de hebra-mcp sobre las tablas de `schema.sql` (`notes`, `folders`,
+   * `note_tags`), no un método de Hebra: pasa por `this.db` (el mismo `DatabaseSync` del
+   * adaptador, `./sqlite-conn-node.ts`) y por la cola serie como cualquier otra lectura.
+   */
+  async notesVisibilityIndex(): Promise<NoteVisibilityEntry[]> {
+    return this.read(() => {
+      const rows = this.db
+        .prepare(
+          `SELECT n.id AS id,
+                  CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
+                  GROUP_CONCAT(t.tag, char(10)) AS tags
+           FROM notes n
+           LEFT JOIN folders f ON f.id = n.folder_id
+           LEFT JOIN note_tags t ON t.note_id = n.id
+           WHERE n.deleted = 0 AND n.trashed_at IS NULL
+           GROUP BY n.id`
+        )
+        .all() as Array<{ id: string; folder_id: string; tags: string | null }>;
+      return rows.map((row) => ({
+        id: row.id,
+        folderId: row.folder_id,
+        tags: row.tags ? row.tags.split('\n') : []
+      }));
+    });
   }
 
   /**

@@ -62,7 +62,7 @@ describe('filtro de privados y logs, por las 7 herramientas', () => {
 
   it('ninguna herramienta, con argumentos que casarían el cebo, lo devuelve ni lo loguea', async () => {
     test = await buildTestContext();
-    ({ client, server } = await connectedClient(test.ctx));
+    ({ client, server } = await connectedClient(test.serverContext));
 
     const calls: Array<{ name: string; arguments?: Record<string, unknown> }> = [
       { name: 'hebra_search', arguments: { query: BAIT_FOLDER } },
@@ -97,7 +97,7 @@ describe('filtro de privados y logs, por las 7 herramientas', () => {
 
   it('un log de cada llamada es un JSON con tool/ok, sin más campos de contenido', async () => {
     test = await buildTestContext();
-    ({ client, server } = await connectedClient(test.ctx));
+    ({ client, server } = await connectedClient(test.serverContext));
     await client.callTool({ name: 'hebra_list_tags', arguments: {} });
     const lines = (stderrSpy!.mock.calls as unknown as [string][])
       .map(([line]) => line.trim())
@@ -134,7 +134,7 @@ describe('privacy_config_unresolved (carpeta configurada que no existe)', () => 
   it('toda herramienta responde el mismo código cerrado', async () => {
     test = await buildTestContext(UNRESOLVED_PRIVACY_CONFIG);
     expect(test.ctx.privacy.unresolved).toBe(true);
-    ({ client, server } = await connectedClient(test.ctx));
+    ({ client, server } = await connectedClient(test.serverContext));
 
     for (const name of TOOL_NAMES) {
       const arguments_ =

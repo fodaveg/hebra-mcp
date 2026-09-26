@@ -41,6 +41,10 @@ export interface TestLibrary {
   duplicateNoteBId: string;
   /** Copia de conflicto de `publicNoteId` (`noteSave` forzado a `redirected`). */
   conflictCopyId: string;
+  /** Un enlace real y un `[[…]]` literal DENTRO de una valla de código: el segundo no
+   *  cuenta como enlace (SPEC.md §5, `hebra_links`; hallazgo del coordinador, 26 sep
+   *  2026, sobre `deriveNote` vs. un regex propio). */
+  codeFenceNoteId: string;
 }
 
 async function createNote(
@@ -105,6 +109,13 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
   const trashedNote = await createNote(engine, null, '# Nota en la papelera\nEsto nunca debe salir.\n');
   await engine.noteTrash(trashedNote.id);
 
+  const codeFenceNote = await createNote(
+    engine,
+    null,
+    `# Nota con código\nEnlaza de verdad a [[${publicNoteTitle}]].\n\n` +
+      '```\n[[Nota pública 2 de Lumbre]] (esto es código, no un enlace)\n```\n'
+  );
+
   const duplicateTitle = 'Título Repetido';
   const duplicateA = await createNote(engine, proyectos.id, `# ${duplicateTitle}\nCandidata A.\n`);
   const duplicateB = await createNote(engine, lumbre.id, `# ${duplicateTitle}\nCandidata B.\n`);
@@ -144,6 +155,7 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     duplicateTitle,
     duplicateNoteAId: duplicateA.id,
     duplicateNoteBId: duplicateB.id,
-    conflictCopyId: conflictResult.redirectedTo
+    conflictCopyId: conflictResult.redirectedTo,
+    codeFenceNoteId: codeFenceNote.id
   };
 }

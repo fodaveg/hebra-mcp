@@ -6,7 +6,7 @@
  * resultados visibles o agotar el almacén (SPEC.md §6.3).
  */
 import { canonicalTag } from '$lib/notes/tags';
-import type { ServerContext } from '../context';
+import type { ToolContext } from '../context';
 
 export interface SearchResult {
   id: string;
@@ -21,7 +21,7 @@ const DEFAULT_LIMIT = 20;
 const PAGE_SIZE = 50;
 
 export async function runSearch(
-  ctx: ServerContext,
+  ctx: ToolContext,
   input: { query: string; limit?: number; folder?: string; tag?: string }
 ): Promise<{ results: SearchResult[] }> {
   const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), 50);

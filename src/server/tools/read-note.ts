@@ -7,7 +7,7 @@
  */
 import { canonicalTitle } from '$lib/library/derive';
 import { ToolError } from '../errors';
-import type { ServerContext } from '../context';
+import type { ToolContext } from '../context';
 
 export interface ReadNoteOutput {
   id: string;
@@ -23,7 +23,7 @@ export interface ReadNoteOutput {
 
 const TITLE_CANDIDATES_LIMIT = 50;
 
-async function resolveIdByTitle(ctx: ServerContext, title: string): Promise<string> {
+async function resolveIdByTitle(ctx: ToolContext, title: string): Promise<string> {
   const target = canonicalTitle(title);
   const { items } = await ctx.port.notesByTitlePrefix(title, TITLE_CANDIDATES_LIMIT);
   const candidates = items.filter(
@@ -42,7 +42,7 @@ async function resolveIdByTitle(ctx: ServerContext, title: string): Promise<stri
 }
 
 export async function runReadNote(
-  ctx: ServerContext,
+  ctx: ToolContext,
   input: { id?: string; title?: string }
 ): Promise<ReadNoteOutput> {
   const hasId = input.id !== undefined;

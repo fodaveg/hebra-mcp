@@ -34,7 +34,7 @@ import type {
 import { WriterLock, type WriterLockOptions } from '../lock/writer-lock';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
-import type { HebraLibraryPort } from '../store/types';
+import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
 import {
   NoteWriter,
   type AppendToNoteInput,
@@ -279,6 +279,7 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     ): Promise<SearchPage> => current().search(q, cursor, limit, filters),
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
+    notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     close: (): void => current().close()
   };
 }

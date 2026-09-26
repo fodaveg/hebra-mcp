@@ -1,8 +1,16 @@
 /**
- * `ServerContext` de prueba sobre la biblioteca de `test-library.ts`: abre el mismo
- * fichero SQLite con `openNodeLibraryPort` (la vía normal de producción, `src/store`,
- * sin tocarlo) y construye el filtro de privados con `Diario` (carpeta) y `secreto`
- * (etiqueta) como privados.
+ * `ToolContext`/`ServerContext` de prueba sobre la biblioteca de `test-library.ts`:
+ * abre el mismo fichero SQLite con `openNodeLibraryPort` (la vía normal de producción,
+ * `src/store`, sin tocarlo) y arma el filtro de privados con `Diario` (carpeta) y
+ * `secreto` (etiqueta) como privados.
+ *
+ * `ctx` (`ToolContext`, `privacy` YA construida) es lo que usan los tests de cada
+ * herramienta por separado (`test/tools/*.test.ts`): no cambia el almacén a mitad de
+ * prueba, así que una `privacy` fija ahí es correcta y más simple. `serverContext`
+ * (`ServerContext`, con `privacyConfig` en vez de `privacy` ya resuelta) es lo que
+ * necesita `registerTools`, que reconstruye el filtro EN CADA llamada
+ * (`src/server/context.ts`): úsalo cuando el test cambie el almacén entre llamadas
+ * (sync, escrituras) y quiera comprobar que la herramienta ve el cambio sin reiniciar.
  */
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,7 +18,7 @@ import { join } from 'node:path';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store';
 import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
-import type { ServerContext } from '../../src/server/context';
+import type { ServerContext, ToolContext } from '../../src/server/context';
 import { buildTestLibrary, type TestLibrary } from './test-library';
 
 const DEFAULT_PRIVACY_CONFIG: PrivacyConfig = {
@@ -19,7 +27,8 @@ const DEFAULT_PRIVACY_CONFIG: PrivacyConfig = {
 };
 
 export interface TestContext {
-  ctx: ServerContext;
+  ctx: ToolContext;
+  serverContext: ServerContext;
   library: TestLibrary;
   dataDir: string;
   close(): Promise<void>;
@@ -33,11 +42,12 @@ export async function buildTestContext(
   const library = await buildTestLibrary(sqlitePath);
 
   const port: NodeLibraryPort = await openNodeLibraryPort({ sqlitePath, dataDir });
+  const status = new UnlinkedStatusSource();
   const privacy = await PrivacyFilter.build(port, privacyConfig);
-  const ctx: ServerContext = { port, privacy, status: new UnlinkedStatusSource() };
 
   return {
-    ctx,
+    ctx: { port, privacy, status },
+    serverContext: { port, privacyConfig, status },
     library,
     dataDir,
     async close() {

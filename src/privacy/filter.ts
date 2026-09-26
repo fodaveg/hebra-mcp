@@ -3,6 +3,17 @@
  * herramientas antes de devolver nada. Cerrado ante la duda: si una carpeta configurada
  * no existe hoy, `unresolved` queda `true` y el servidor responde `privacy_config_unresolved`
  * a toda herramienta (R5).
+ *
+ * `PrivacyFilter.build` es una instantánea del almacén EN ESE MOMENTO: NUNCA se guarda
+ * entre llamadas de herramienta (`src/server/context.ts`, `resolveToolContext`,
+ * reconstruye una por llamada). El sync cambia el almacén mientras el proceso vive
+ * (`SyncRunner`, `src/sync/`): una instancia cacheada al arrancar se queda obsoleta y
+ * puede enseñar, o esconder, una nota que ya no es así (hallazgo del coordinador, 26
+ * sep 2026; reproducido en `test/privacy-live-refresh.test.ts`). Dos consultas del
+ * almacén (`foldersList()` + `notesVisibilityIndex()`, ambas de una sola vuelta SQL)
+ * lo hacen barato de sobra para pagarlo en cada llamada: medido en
+ * `test/store/notes-visibility-index.node.test.ts` (milisegundos de un dígito con
+ * 5 000 notas).
  */
 import { ROOT_FOLDER_ID } from '$lib/library/folder-tree';
 import type { HebraLibraryPort } from '../store/types';
