@@ -2,8 +2,8 @@
  * `hebra_status` (SPEC.md §5). `StatusSource` es la interfaz inyectable que separa el
  * servidor MCP de quién sabe el estado: `UnlinkedStatusSource` (sin nada que abrir, o
  * tests) y `LibraryInstanceStatusSource` (sobre `LibraryInstance` de L3a: escritor
- * único, `pendingUpload`, `errorsByCode` reales). Ninguna de las dos sabe de
- * emparejado todavía (`linked` es L2): siempre `false` hasta que exista.
+ * único, `pendingUpload`, `errorsByCode` reales). `linked` lo decide `serve` (L2): `true`
+ * solo si arrancó con los secretos de emparejado del llavero.
  */
 export interface HebraStatus {
   linked: boolean;
@@ -34,8 +34,8 @@ export class UnlinkedStatusSource implements StatusSource {
   }
 }
 
-/** Lo que ya sabe una `LibraryInstance` de L3a (escritor único, §8): sin `linked`
- *  todavía (L2), que aquí siempre es `false`. */
+/** Lo que ya sabe una `LibraryInstance` de L3a (escritor único, §8). `linked` no es suyo:
+ *  lo sabe quien la abrió, según haya secretos de emparejado en el llavero (L2). */
 export interface InstanceStatusLike {
   status(): Promise<{
     lastSyncAt: string | null;
@@ -48,10 +48,14 @@ export interface InstanceStatusLike {
 }
 
 export class LibraryInstanceStatusSource implements StatusSource {
-  constructor(private readonly instance: InstanceStatusLike) {}
+  /** `linked`: `serve` arrancó con los secretos de `pair` y el sync configurado (L2). */
+  constructor(
+    private readonly instance: InstanceStatusLike,
+    private readonly linked = false
+  ) {}
 
   async getStatus(): Promise<HebraStatus> {
     const status = await this.instance.status();
-    return { linked: false, ...status };
+    return { linked: this.linked, ...status };
   }
 }

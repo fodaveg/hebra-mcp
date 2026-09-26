@@ -57,6 +57,10 @@ const DOM_EXEMPT_PACKAGES = ['@codemirror/*', '@lezer/*', 'zod', 'zod/*'];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */
 const FORBIDDEN_EXTERNALS = ['@tauri-apps/*', '$app/*', 'svelte', 'svelte/*', '@sveltejs/*'];
+/** Externos en el reempaquetado porque son módulos NATIVOS (`.node`), que esbuild no
+ *  sabe cargar: `@napi-rs/keyring` (llavero del SO, L2) y su binario por plataforma. No
+ *  llevan JS de navegador que mirar: el cargador de `index.js` solo elige el `.node`. */
+const NATIVE_EXTERNALS = ['@napi-rs/keyring', '@napi-rs/keyring-*'];
 const DOM_GLOBALS = [
   'window',
   'document',
@@ -130,7 +134,7 @@ for (const file of files) {
       write: false,
       metafile: true,
       logLevel: 'silent',
-      external: [...DOM_EXEMPT_PACKAGES, ...FORBIDDEN_EXTERNALS],
+      external: [...DOM_EXEMPT_PACKAGES, ...FORBIDDEN_EXTERNALS, ...NATIVE_EXTERNALS],
       define
     });
   } catch (error) {

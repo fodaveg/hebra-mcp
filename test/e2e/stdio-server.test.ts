@@ -46,7 +46,13 @@ describe('hebra-mcp serve (proceso real, protocolo MCP por stdio)', () => {
     transport = new StdioClientTransport({
       command: 'node',
       args: [cliPath, 'serve'],
-      env: { ...process.env, HEBRA_MCP_DATA_DIR: dataDir } as Record<string, string>,
+      // Servicio del llavero propio y vacío: `serve` lee el llavero al arrancar (L2), y
+      // este test no puede leer nunca los secretos reales de David.
+      env: {
+        ...process.env,
+        HEBRA_MCP_DATA_DIR: dataDir,
+        HEBRA_MCP_KEYRING_SERVICE: `hebra-mcp-e2e-${process.pid}-${Date.now()}`
+      } as Record<string, string>,
       stderr: 'ignore'
     });
     client = new Client({ name: 'hebra-mcp-e2e', version: '0.0.0' });

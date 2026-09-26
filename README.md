@@ -17,6 +17,22 @@ del propio motor de Hebra.
 - Acceso SSH al repo privado `git@github.com:fodaveg/hebra.git` (submódulo de
   `vendor/hebra`): sin él, `git submodule update` falla.
 
+## Emparejar (L2)
+
+```sh
+hebra-mcp pair [--lumbre https://app.lumbre.pro] [--label "Claude (hebra-mcp)"]
+claude mcp add hebra -- hebra-mcp serve
+hebra-mcp unpair   # borra los secretos del llavero y el directorio de datos
+```
+
+`pair` abre Lumbre en el navegador (o imprime la URL), recibe el código en un listener
+de `127.0.0.1` y pide acceso a la biblioteca: se aprueba en Hebra > Ajustes >
+Sincronización. Antes de guardar nada enseña en la terminal hasta tres títulos para que
+confirmes que es tu biblioteca. Los secretos van al llavero del sistema (servicio
+`hebra-mcp`, `@napi-rs/keyring`), nunca a ficheros, variables de entorno ni argumentos.
+Con una identidad ya guardada (tras revocar la conexión en Lumbre), `pair` solo renueva
+la credencial. Contrato completo: `SPEC.md` §7.
+
 ## Clonar
 
 ```sh

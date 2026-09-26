@@ -1,13 +1,13 @@
 /**
- * Punto de entrada del binario `hebra-mcp` (SPEC.md §7.5, §10 L1). Único subcomando de
- * L1: `serve`, que arranca el servidor MCP por stdio. Stdout es EXCLUSIVO del protocolo
- * MCP (§6.4): cualquier aviso va a stderr.
+ * Punto de entrada del binario `hebra-mcp` (SPEC.md §7, §10 L1-L2). Subcomandos:
  *
- * Sin emparejado (L2) todavía no hay biblioteca real ni `sync` que configurar:
- * `LibraryInstance.open` sin `sync` abre (o crea, vacía) la SQLite del directorio de
- * datos con el escritor único de todos modos (SPEC.md §8: dos sesiones de Claude Code
- * ya son dos procesos, aunque ninguna esté emparejada). Con la biblioteca vacía, las
- * herramientas responden vacías y `hebra_status` dice `linked: false`, que es justo L1.
+ * - `serve`: el servidor MCP por stdio (`./serve.ts`). Stdout es EXCLUSIVO del protocolo
+ *   MCP (§6.4): cualquier aviso va a stderr. Con los secretos de `pair` en el llavero,
+ *   sincroniza; sin ellos, sirve la SQLite local sin sync (`linked: false`).
+ * - `pair [--lumbre <origen>] [--label <etiqueta>]`: emparejado interactivo
+ *   (`../pair/pair.ts`). Aquí stdout es la terminal de David; stderr, solo eventos cerrados.
+ * - `unpair`: borra los secretos y el directorio de datos, tras confirmar
+ *   (`../pair/unpair.ts`).
  *
  * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
  * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
@@ -15,51 +15,52 @@
  * colgaría.
  */
 import { pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 // Solo `version`: esbuild recorta un JSON importado por nombre, y el `package.json`
 // entero metería en `dist/` los nombres de las devDependencies (entre ellas
 // `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
 import { version } from '../../package.json';
-import { LibraryInstance } from '../sync/library-instance';
-import { loadPrivacyConfig, resolveDataDir } from '../privacy';
-import { LibraryInstanceStatusSource } from '../status/status-source';
+import { logEvent } from '../log/logger';
+import { PairError } from '../pair/errors';
+import { DEFAULT_LUMBRE_ORIGIN } from '../pair/lumbre';
+import { DEFAULT_PAIR_LABEL, runPair } from '../pair/pair';
+import { openInBrowser, stdioTerminal } from '../pair/terminal';
+import { runUnpair } from '../pair/unpair';
+import { resolveDataDir } from '../privacy';
+import { openKeyringSecretStore, type SecretStore } from '../secrets';
 import { buildMcpServer } from './build-server';
-import type { ServerContext } from './context';
-import { buildWriteContext } from './write-context';
+import { openServeContext } from './serve';
+
+const USAGE = [
+  'uso:',
+  '  hebra-mcp serve',
+  `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
+  '  hebra-mcp unpair'
+].join('\n');
+
+/** El llavero, o `null` si el módulo nativo no carga en esta plataforma. */
+async function keyringOrNull(): Promise<SecretStore | null> {
+  try {
+    return await openKeyringSecretStore();
+  } catch {
+    logEvent({ event: 'secrets.keyring', result: 'unavailable' });
+    return null;
+  }
+}
 
 async function serve(): Promise<void> {
-  const dataDir = resolveDataDir();
-  const [instance, privacyConfig] = await Promise.all([
-    LibraryInstance.open({ dataDir, deviceLabel: 'hebra-mcp' }),
-    loadPrivacyConfig(dataDir)
-  ]);
-  // `privacyConfig` sin resolver a `PrivacyFilter` aquí: `register-tools.ts` lo hace en
-  // CADA llamada, con el almacén tal como esté en ese momento (§1 del hallazgo del
-  // coordinador, 26 sep 2026: un filtro construido una vez al arrancar se queda
-  // obsoleto en cuanto el sync mueve una nota a una carpeta privada, o al revés).
-  // `write` (L3b): sin emparejar (L2) `instance.syncRunner` es `null`, así que
-  // `requestRound` resuelve ya (no hay ronda que pedir) y las escrituras siguen
-  // funcionando sobre la SQLite local, vacía o no.
-  const write = buildWriteContext({
-    createNote: (input) => instance.createNote(input),
-    appendToNote: (input) => instance.appendToNote(input),
-    onConflictCopy: (listener) => instance.onConflictCopy(listener),
-    requestRound: () => instance.syncRunner?.requestRound() ?? Promise.resolve(null)
+  const { ctx, close } = await openServeContext({
+    dataDir: resolveDataDir(),
+    secrets: await keyringOrNull()
   });
-  const ctx: ServerContext = {
-    port: instance.port,
-    privacyConfig,
-    status: new LibraryInstanceStatusSource(instance),
-    write
-  };
-
   const server: McpServer = buildMcpServer(ctx, version);
   const transport = new StdioServerTransport();
 
   const shutdown = async (): Promise<void> => {
     await server.close();
-    await instance.close();
+    await close();
     process.exit(0);
   };
   process.once('SIGINT', () => void shutdown());
@@ -68,14 +69,61 @@ async function serve(): Promise<void> {
   await server.connect(transport);
 }
 
-async function main(): Promise<void> {
-  const [subcommand] = process.argv.slice(2);
-  if (subcommand !== 'serve') {
-    process.stderr.write('uso: hebra-mcp serve\n');
-    process.exit(1);
-    return;
+/** `pair` y `unpair` necesitan el llavero: sin él no hay dónde guardar ni qué borrar. */
+async function interactive(
+  run: (secrets: SecretStore, terminal: ReturnType<typeof stdioTerminal>) => Promise<void>
+): Promise<void> {
+  const secrets = await openKeyringSecretStore();
+  const terminal = stdioTerminal();
+  try {
+    await run(secrets, terminal);
+  } catch (error) {
+    if (!(error instanceof PairError)) throw error;
+    terminal.print(error.message);
+    logEvent({ event: 'pair.failed', code: error.code });
+    process.exitCode = 1;
+  } finally {
+    terminal.close();
   }
-  await serve();
+}
+
+async function main(): Promise<void> {
+  const [subcommand, ...rest] = process.argv.slice(2);
+  switch (subcommand) {
+    case 'serve':
+      await serve();
+      return;
+    case 'pair': {
+      const { values } = parseArgs({
+        args: rest,
+        options: { lumbre: { type: 'string' }, label: { type: 'string' } },
+        strict: true
+      });
+      await interactive(async (secrets, terminal) => {
+        await runPair({
+          dataDir: resolveDataDir(),
+          secrets,
+          terminal,
+          lumbreOrigin: values.lumbre,
+          label: values.label,
+          openUrl: openInBrowser
+        });
+      });
+      // El sync y los temporizadores ya se cerraron; lo que quede (keep-alive de fetch)
+      // no debe dejar la terminal colgada.
+      process.exit(process.exitCode ?? 0);
+      return;
+    }
+    case 'unpair':
+      await interactive(async (secrets, terminal) => {
+        await runUnpair({ dataDir: resolveDataDir(), secrets, terminal });
+      });
+      process.exit(process.exitCode ?? 0);
+      return;
+    default:
+      process.stderr.write(`${USAGE}\n`);
+      process.exit(1);
+  }
 }
 
 const isMainModule =
@@ -83,7 +131,14 @@ const isMainModule =
 
 if (isMainModule) {
   main().catch((error: unknown) => {
-    process.stderr.write(`${JSON.stringify({ event: 'fatal', message: String(error) })}\n`);
+    // Nombre y `code` del error, no su mensaje: desde L2 aquí pueden llegar errores de red,
+    // del llavero o de un `JSON.parse` de una respuesta de Lumbre, y el mensaje de este
+    // último cita el texto recibido (que podría llevar un token).
+    const name = error instanceof Error ? error.name : 'unknown';
+    const code = (error as { code?: unknown } | null)?.code;
+    process.stderr.write(
+      `${JSON.stringify({ event: 'fatal', error: name, ...(typeof code === 'string' ? { code } : {}) })}\n`
+    );
     process.exit(1);
   });
 }
