@@ -1,7 +1,12 @@
 import { describe, it } from 'vitest';
 import { SqliteLibraryEngine } from '../src/hebra';
 import { openNodeSqliteConn } from '../src/store/sqlite-conn-node';
-import { ALL_LIBRARY_CASES, MemoryBlobStore, runLibraryCase } from './hebra-testing';
+import {
+  ALL_LIBRARY_CASES,
+  LIBRARY_CASES_DEVICE_LABEL,
+  MemoryBlobStore,
+  runLibraryCase
+} from './hebra-testing';
 
 /**
  * Casos compartidos del almacén (`vendor/hebra/src/lib/library/cases/library-cases.json`,
@@ -16,16 +21,18 @@ import { ALL_LIBRARY_CASES, MemoryBlobStore, runLibraryCase } from './hebra-test
  * público y Hebra no, así que no se repite (solo hacia delante: sin reescribir el
  * historial). `ALL_LIBRARY_CASES` es el mismo `library-cases.json`, ya parseado.
  *
- * `deviceLabel: 'Mac'` SOLO en esta fixture, porque el caso «sync §7 nota, fila 6»
- * compara `conflictDevice` con ese literal (lo trae `library-cases.json`, igual que lo
- * abre `library-cases.test.ts` de Hebra); el runtime de hebra-mcp declara 'Claude'
- * (L5, `src/store/node-port.ts`).
+ * La fixture abre el motor con `LIBRARY_CASES_DEVICE_LABEL` de Hebra (hoy 'Mac'),
+ * porque el caso «sync §7 nota, fila 6» compara `conflictDevice` con esa etiqueta; si
+ * Hebra la cambia, llega sola. El runtime de hebra-mcp declara 'Claude' (L5,
+ * `src/store/node-port.ts`).
  */
 describe('casos compartidos del almacén (adaptador node:sqlite)', () => {
   for (const testCase of ALL_LIBRARY_CASES) {
     it(testCase.name, async () => {
       const { conn } = openNodeSqliteConn(':memory:');
-      const engine = await SqliteLibraryEngine.open(conn, 'Mac', { blobs: new MemoryBlobStore() });
+      const engine = await SqliteLibraryEngine.open(conn, LIBRARY_CASES_DEVICE_LABEL, {
+        blobs: new MemoryBlobStore()
+      });
       await runLibraryCase(engine, conn, testCase);
     });
   }
