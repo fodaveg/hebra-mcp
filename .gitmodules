@@ -1,0 +1,3 @@
+[submodule "vendor/hebra"]
+	path = vendor/hebra
+	url = git@github.com:fodaveg/hebra.git
