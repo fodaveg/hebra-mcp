@@ -63,6 +63,13 @@ export function createSyncStorePort(
     syncLeaseAcquire: (ownerId, ttlMs) =>
       writable() ? read(() => engine.syncLeaseAcquire(ownerId, ttlMs)) : Promise.resolve(false),
     blobPut: (bytes, options) => write(() => engine.blobPut(bytes, options)),
-    blobRead: (sha256) => read(() => engine.blobRead(sha256))
+    blobRead: (sha256) => read(() => engine.blobRead(sha256)),
+    // No es una de las cinco mutaciones de nota ni un `sync*`: es el `libraryReset` del
+    // `LibraryPort` de Hebra («Descargar la biblioteca del servidor», §6.6), que TS exige
+    // aquí desde `20889178`. Nadie en hebra-mcp lo llama todavía (no hay herramienta MCP
+    // ni botón de ajustes que lo dispare): existe solo para que `SyncStorePort` siga
+    // implementando el interfaz completo. D2 no lo prohíbe (`FORBIDDEN_NAME` de
+    // `test/store/surface.node.test.ts` no incluye `libraryReset`).
+    libraryReset: () => write(() => engine.libraryReset())
   };
 }

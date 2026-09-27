@@ -4,8 +4,18 @@
  * `rename`, que en el mismo sistema de ficheros es atómico en POSIX). El motor solo
  * llama a `write` cuando el hash no está ya presente (`blobPut`, `sqlite-engine.ts`), así
  * que no hace falta comprobar duplicados aquí.
+ *
+ * `clear()` («Descargar la biblioteca del servidor», `libraryReset`): el motor ya vació
+ * `blobs` en la MISMA transacción SQLite (`sqlite-engine.ts`) antes de llamar aquí, así
+ * que la atomicidad de la fila y la del fichero en disco son dos cosas distintas — un
+ * corte a mitad de este borrado nunca deja una fila de `blobs` sin bytes, como mucho
+ * bytes huérfanos que ningún `blobRead` vuelve a alcanzar. Por eso, igual que
+ * `OpfsBlobStore.clear()` de Hebra, esto es de MEJOR ESFUERZO: un error de E/S al borrar
+ * (permisos, disco ocupado por otro proceso) se traga en vez de propagarse, para que un
+ * `libraryReset` que ya comprometió la base no acabe rechazando la promesa entera y
+ * pareciendo fallido cuando la base sí quedó vacía.
  */
-import { mkdir, open, readFile, rename, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BlobBytesStore } from '../hebra';
@@ -50,5 +60,9 @@ export class FsBlobStore implements BlobBytesStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw error;
     }
+  }
+
+  async clear(): Promise<void> {
+    await rm(join(this.root, 'blobs'), { recursive: true, force: true }).catch(() => undefined);
   }
 }
