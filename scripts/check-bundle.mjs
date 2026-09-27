@@ -6,11 +6,13 @@
  * no sobre las fuentes: lo que importa es lo que de verdad queda después de que esbuild
  * siga los imports.
  *
- * L3 mete en el bundle el analizador Markdown de Hebra (`deriveNote` → `notes/markdown.ts`
- * → `@codemirror/lang-markdown`, que arrastra `@codemirror/view`), porque la paridad de
- * derivados con las apps es obligatoria (decisión del orquestador, 26 sep 2026). Ese
- * código tiene referencias REALES a `document`/`window`/`navigator`, protegidas con
- * `typeof … !== 'undefined'`. Cómo se admite sin abrir la puerta a nada más:
+ * L3 mete en el bundle el analizador Markdown de Hebra (`deriveNote` → `notes/markdown.ts`),
+ * porque la paridad de derivados con las apps es obligatoria (decisión del orquestador, 26
+ * sep 2026). Desde el submódulo en `2acb6d4b` (27 sep 2026), ese analizador parsea con
+ * `@lezer/markdown` directo (`markdown/dialect.ts` de Hebra), sin `@codemirror/lang-markdown`
+ * ni `@codemirror/view`: ninguno de los `@lezer/*` que arrastra referencia el DOM (medido con
+ * este mismo check quitándolos de `DOM_EXEMPT_PACKAGES` y viendo que sigue en verde), así que
+ * ya no necesitan quedar exentos del paso 2. Cómo se admite el resto sin abrir la puerta a nada más:
  *
  * 1. Imports prohibidos (`@tauri-apps/…`, `$app/…`, `svelte`, `@sveltejs/…`): se leen
  *    del metafile de esbuild (cada import, externo o empaquetado, con su ruta), no con
@@ -19,24 +21,22 @@
  * 2. Globales del DOM: `scripts/build.mjs` deja los paquetes de `node_modules` como
  *    externos, así que en `dist/` solo hay código de hebra-mcp y de Hebra. Aquí se
  *    reempaqueta cada fichero de `dist/` en memoria, METIENDO todos los paquetes de
- *    `node_modules` salvo `@codemirror/*` y `@lezer/*` (los únicos exentos), con un
- *    `define` que sustituye cada global (`window`, `document`, `navigator`,
- *    `indexedDB`…, también como `globalThis.x`) por un centinela. `define` de esbuild
- *    solo sustituye referencias LIBRES, no variables locales, así que una variable
- *    `document` de `notes/markdown.ts` (medido: tres apariciones de `document.` que son
- *    un parámetro, no el DOM) no da un falso positivo, y un `window.` real en cualquier
- *    otro paquete sí aparece. Un solo centinela en la salida = fallo, con el fichero de
- *    origen (el comentario `// ruta` que esbuild pone delante de cada módulo).
+ *    `node_modules` salvo los de `DOM_EXEMPT_PACKAGES` (`zod`, `debug`, `object-inspect`;
+ *    § comentarios de abajo), con un `define` que sustituye cada global (`window`,
+ *    `document`, `navigator`, `indexedDB`…, también como `globalThis.x`) por un centinela.
+ *    `define` de esbuild solo sustituye referencias LIBRES, no variables locales, así que
+ *    un `window.` o `document.` real en cualquier paquete no exento sí aparece. Un solo
+ *    centinela en la salida = fallo, con el fichero de origen (el comentario `// ruta` que
+ *    esbuild pone delante de cada módulo).
  * 3. Prueba de humo: carga `dist/*` en un proceso de Node SIN globales del DOM (se
  *    borra el `navigator` que trae Node 24 y se comprueba que `window`, `document` y
  *    `navigator` son `undefined`) y ejecuta `deriveNote` sobre un Markdown con H1,
  *    `#etiqueta/anidada` y `[[enlace]]`, comparando con la salida esperada de Hebra.
  *
- * `zod` (peer del SDK de MCP, L1) también queda exento: `zod/v4/core/util.js` tiene
+ * `zod` (peer del SDK de MCP, L1) queda exento: `zod/v4/core/util.js` tiene
  * `if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare"))`
  * (detecta el runtime de Cloudflare Workers para su mapa de errores), protegido con
- * `typeof` igual que el caso de CodeMirror de arriba — decisión del orquestador, 26 sep
- * 2026, tras medirlo con este mismo check.
+ * `typeof` — decisión del orquestador, 26 sep 2026, tras medirlo con este mismo check.
  *
  * `debug` y `object-inspect` entran con Express (C2, `serve-http`: el router OAuth del SDK
  * de MCP es de Express) y quedan exentos por la misma razón, medido con este check el 26
@@ -62,8 +62,6 @@ const FORBIDDEN_TEXT = ['@tauri-apps', '$app/'];
 const FORBIDDEN_IMPORT = /^(@tauri-apps\/|\$app\/|svelte(\/|$)|@sveltejs\/)/;
 /** Paquetes exentos del chequeo de globales del DOM (y solo estos). */
 const DOM_EXEMPT_PACKAGES = [
-  '@codemirror/*',
-  '@lezer/*',
   'zod',
   'zod/*',
   'debug',
@@ -188,14 +186,18 @@ const SAMPLE = '# Plan de viaje\n\nIdeas para #viajes/2026 y enlace a [[Otra not
 const EXPECTED = {
   title: 'Plan de viaje',
   titleNorm: 'plan de viaje',
+  titleSort: 'qlan de wiaje',
   excerpt: 'Ideas para #viajes/2026 y enlace a Otra nota.',
   tags: [
-    { tag: 'viajes', label: 'viajes' },
-    { tag: 'viajes/2026', label: 'viajes/2026' }
+    { tag: 'viajes', label: 'viajes', direct: false },
+    { tag: 'viajes/2026', label: 'viajes/2026', direct: true }
   ],
   links: [{ targetKind: 'title', target: 'otra nota', targetPath: null }],
   blobRefs: [],
-  props: []
+  props: [],
+  hasOpenTasks: false,
+  tasks: [],
+  locked: false
 };
 const smoke = `
 delete globalThis.navigator;

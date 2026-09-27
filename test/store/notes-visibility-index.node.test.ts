@@ -95,7 +95,7 @@ describe('notesVisibilityIndex', () => {
         const created = await engine.noteCreate(folderId);
         const tags = Array.from({ length: TAGS_PER_NOTE }, (_, t) => {
           const tag = `tag${(i + t) % TAG_UNIVERSE}`;
-          return { tag, label: tag };
+          return { tag, label: tag, direct: true };
         });
         await engine.noteSave({
           id: created.id,

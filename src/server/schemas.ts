@@ -15,6 +15,10 @@ export const searchInputShape = {
 
 export const listNotesInputShape = {
   folder: z.string().optional(),
+  /** Con `folder`, incluye también las notas de sus subcarpetas (carpetas reales,
+   *  decisión de David del 27 sep 2026). Ausente o `false`: solo las directas, como
+   *  siempre. Sin `folder`, no tiene efecto. */
+  subfolders: z.boolean().optional(),
   tag: z.string().optional(),
   cursor: z.string().optional(),
   limit: z.number().int().min(1).max(100).optional()

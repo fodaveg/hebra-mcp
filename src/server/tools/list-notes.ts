@@ -6,6 +6,13 @@
  * (`encodeCursor`, misma clave `favorite:updatedAt:id` que `notesPageQuery`): quien
  * llame puede seguir paginando aunque esta página haya tenido que saltar notas
  * ocultas o filtradas.
+ *
+ * `subfolders?` (carpetas reales, decisión de David del 27 sep 2026): con `folder` y
+ * `true`, el ámbito nativo pasa a `{kind: 'folder', folderId, subfolders: true}` y el
+ * almacén ya devuelve las notas de todo el subárbol EFECTIVO (`folderSubtree`, §3). El
+ * filtro de privados no cambia por esto: sigue mirando nota a nota
+ * (`ctx.privacy.visibleMeta`), así que una subcarpeta privada dentro de un ámbito
+ * público sigue sin salir. Ausente o `false`: solo las notas directas, como siempre.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import type { ToolContext } from '../context';
@@ -25,7 +32,13 @@ const PAGE_SIZE = 100;
 
 export async function runListNotes(
   ctx: ToolContext,
-  input: { folder?: string; tag?: string; cursor?: string; limit?: number }
+  input: {
+    folder?: string;
+    subfolders?: boolean;
+    tag?: string;
+    cursor?: string;
+    limit?: number;
+  }
 ): Promise<{ notes: ListedNote[]; nextCursor: string | null }> {
   const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), 100);
 
@@ -45,7 +58,9 @@ export async function runListNotes(
 
   const scope: NotesScope =
     folderId !== undefined
-      ? { kind: 'folder', folderId }
+      ? input.subfolders
+        ? { kind: 'folder', folderId, subfolders: true }
+        : { kind: 'folder', folderId }
       : tagFilter !== undefined
         ? { kind: 'tag', tag: tagFilter }
         : { kind: 'all' };

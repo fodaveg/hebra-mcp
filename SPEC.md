@@ -107,7 +107,7 @@ Reglas comunes:
 | Herramienta | Entrada | Salida |
 |---|---|---|
 | `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `folder?` (ruta), `tag?` | `results: [{id, title, folderPath, tags, snippet, updatedAt}]` |
-| `hebra_list_notes` | `folder?`, `tag?`, `cursor?`, `limit` (1-100, def. 50); orden por `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
+| `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50); orden por `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?}`. Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
 | `hebra_list_tags` | nada | `tags: [{tag, count}]` (anidadas como `a/b`) |
 | `hebra_list_folders` | nada | `folders: [{id, path, count}]` |

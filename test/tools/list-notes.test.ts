@@ -70,6 +70,41 @@ describe('hebra_list_notes', () => {
     for (const note of notes) expect(note.tags.some((tag) => tag.startsWith('proyectos'))).toBe(true);
   });
 
+  it('sin `subfolders`, la carpeta solo trae sus notas directas', async () => {
+    test = await buildTestContext();
+    const { notes } = await runListNotes(test.ctx, { folder: 'proyectos', limit: 100 });
+    expect(notes.map((note) => note.id)).toEqual([test!.library.duplicateNoteAId]);
+  });
+
+  it('con `subfolders: true`, la carpeta trae también las notas de sus subcarpetas', async () => {
+    test = await buildTestContext();
+    const { notes } = await runListNotes(test.ctx, {
+      folder: 'proyectos',
+      subfolders: true,
+      limit: 100
+    });
+    const ids = notes.map((note) => note.id);
+    expect(ids).toContain(test!.library.duplicateNoteAId);
+    expect(ids).toContain(test!.library.duplicateNoteBId);
+    expect(ids).toContain(test!.library.publicNoteId);
+    expect(ids).toContain(test!.library.publicNote2Id);
+  });
+
+  it('con `subfolders: true`, el filtro de privados sigue actuando nota a nota', async () => {
+    test = await buildTestContext();
+    // `proyectos` es pública, pero la comprobación es la misma que sin `subfolders`
+    // (`ctx.privacy.visibleMeta` por nota, no por ámbito): el cebo nunca debe salir.
+    const { notes } = await runListNotes(test.ctx, {
+      folder: 'proyectos',
+      subfolders: true,
+      limit: 100
+    });
+    for (const note of notes) {
+      expect(note.excerpt).not.toContain(BAIT_FOLDER);
+      expect(note.excerpt).not.toContain(BAIT_TAG);
+    }
+  });
+
   it('un cursor devuelto sigue paginando', async () => {
     test = await buildTestContext();
     const first = await runListNotes(test.ctx, { limit: 1 });
