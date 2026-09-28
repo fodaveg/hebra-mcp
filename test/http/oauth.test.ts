@@ -3,12 +3,17 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import type { HebraOAuthProvider } from '../../src/oauth/provider';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
-import { startTestHttpApp, type TestHttpApp } from '../fixtures/http-app';
+import { startTestHttpApp, textOf, type TestHttpApp } from '../fixtures/http-app';
 
 const SECRET = '0123456789abcdef0123456789abcdef';
 const PAIR_ID = '11111111-1111-4111-8111-111111111111';
@@ -18,6 +23,7 @@ const DEVICE = 'cd'.repeat(16);
 const OTHER_DEVICE = 'ef'.repeat(16);
 const ACCOUNT = '34'.repeat(32);
 const UPSTREAM = '56'.repeat(32);
+const CIMD_CLIENT_ID = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
 
 let context: TestContext;
 let app: TestHttpApp;
@@ -37,6 +43,9 @@ let brokerDevice: string;
 let brokerVault: string;
 let brokerPair: string;
 let clockOffset: number;
+let cimdFetch: ReturnType<typeof vi.fn>;
+let stderrSpy: ReturnType<typeof vi.spyOn>;
+const clients: Client[] = [];
 
 const response = (value: object, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
 
@@ -76,7 +85,12 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
 }
 
 beforeEach(async () => {
-  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  cimdFetch = vi.fn(async (input: string | URL) => new Response(JSON.stringify({
+    client_id: CIMD_CLIENT_ID, client_name: 'Claude', redirect_uris: [CLAUDE_CALLBACK],
+    token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'],
+    response_types: ['code']
+  }), { status: String(input) === CIMD_CLIENT_ID ? 200 : 404, headers: { 'content-type': 'application/json' } }));
   context = await buildTestContext();
   store = new MemorySecretStore();
   await writePairedSecrets(store, {
@@ -90,7 +104,7 @@ beforeEach(async () => {
   grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
   app = await startTestHttpApp(context.serverContext, async (config) => {
     const auth = await loadOAuthHttpAuth(context.dataDir, config, store,
-      { backchannelFetch: broker, now: () => Date.now() + clockOffset,
+      { backchannelFetch: broker, fetch: cimdFetch as never, now: () => Date.now() + clockOffset,
         env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
     if (!auth) throw new Error('auth absent');
     provider = auth.provider;
@@ -99,17 +113,62 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  for (const client of clients.splice(0)) await client.close();
   await app?.close(); await context?.close(); vi.restoreAllMocks();
 });
+
+/** Proveedor cliente en memoria: el SDK maneja DCR/CIMD, state, PKCE y refresh. */
+class MemoryOAuthClient implements OAuthClientProvider {
+  info: OAuthClientInformationMixed | undefined;
+  saved: OAuthTokens | undefined;
+  verifier = '';
+  authorizationUrl: URL | undefined;
+  constructor(readonly clientMetadataUrl?: string) {}
+  get redirectUrl(): string { return CLAUDE_CALLBACK; }
+  get clientMetadata(): OAuthClientMetadata {
+    return { client_name: 'Claude', redirect_uris: [CLAUDE_CALLBACK], token_endpoint_auth_method: 'none',
+      grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] };
+  }
+  state(): string { return 'estado-de-prueba'; }
+  clientInformation() { return this.info; }
+  saveClientInformation(info: OAuthClientInformationMixed): void { this.info = info; }
+  tokens() { return this.saved; }
+  saveTokens(tokens: OAuthTokens): void { this.saved = tokens; }
+  redirectToAuthorization(url: URL): void { this.authorizationUrl = url; }
+  saveCodeVerifier(verifier: string): void { this.verifier = verifier; }
+  codeVerifier(): string { return this.verifier; }
+}
+
+/** Flujo completo con el cliente SDK, hasta una herramienta MCP sobre SQLite local. */
+async function sdkFlow(auth: MemoryOAuthClient): Promise<Client> {
+  const mcpUrl = new URL(`${app.origin}/mcp`);
+  const first = new StreamableHTTPClientTransport(mcpUrl, { authProvider: auth });
+  const initial = new Client({ name: 'claude-de-prueba', version: '0.0.0' });
+  await expect(initial.connect(first)).rejects.toThrow();
+  expect(auth.authorizationUrl).toBeDefined();
+  const navigation = await fetch(auth.authorizationUrl!, { redirect: 'manual' });
+  expect(navigation.status).toBe(302);
+  expect(navigation.headers.get('location')).toBe(`https://app.lumbre.pro/integrations/hebra-mcp?request=${requestId}`);
+  approved = true;
+  const returned = await callback('approved');
+  expect(returned.status).toBe(302);
+  const code = new URL(returned.headers.get('location')!).searchParams.get('code')!;
+  await first.finishAuth(code);
+  expect(auth.saved?.access_token).toMatch(/^hmcp_at_/);
+  const client = new Client({ name: 'claude-de-prueba', version: '0.0.0' });
+  await client.connect(new StreamableHTTPClientTransport(mcpUrl, { authProvider: auth }));
+  clients.push(client);
+  return client;
+}
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
-async function authorize(challenge: string, ip?: string): Promise<Response> {
+async function authorize(challenge: string, ip?: string, oauthClientId = DCR_CLIENT_ID): Promise<Response> {
   const url = new URL(`${app.origin}/authorize`);
-  for (const [key, value] of Object.entries({ response_type: 'code', client_id: DCR_CLIENT_ID, redirect_uri: CLAUDE_CALLBACK,
+  for (const [key, value] of Object.entries({ response_type: 'code', client_id: oauthClientId, redirect_uri: CLAUDE_CALLBACK,
     code_challenge_method: 'S256', code_challenge: challenge, scope: 'hebra:mcp', resource: app.config.resourceUrl,
     state: 'estado' })) url.searchParams.set(key, value);
   return fetch(url, { redirect: 'manual', ...(ip ? { headers: { 'x-forwarded-for': ip } } : {}) });
@@ -154,6 +213,55 @@ async function issuedTokens(): Promise<{ access_token: string; refresh_token: st
 }
 
 describe('consentimiento y vínculo exacto', () => {
+  it('metadata PRM/AS conserva issuer, resource, PKCE, CIMD y DCR', async () => {
+    for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
+      expect(await (await fetch(`${app.origin}${path}`)).json()).toMatchObject({
+        resource: app.config.resourceUrl, authorization_servers: [app.origin], scopes_supported: ['hebra:mcp']
+      });
+    }
+    expect(await (await fetch(`${app.origin}/.well-known/oauth-authorization-server`)).json()).toMatchObject({
+      issuer: app.origin, authorization_endpoint: `${app.origin}/authorize`,
+      registration_endpoint: `${app.origin}/register`, code_challenge_methods_supported: ['S256'],
+      token_endpoint_auth_methods_supported: ['none'], client_id_metadata_document_supported: true
+    });
+  });
+
+  it('cliente SDK por DCR completa OAuth y accede a una herramienta', async () => {
+    const auth = new MemoryOAuthClient();
+    const client = await sdkFlow(auth);
+    expect(auth.info?.client_id).toBe(DCR_CLIENT_ID);
+    const result = await client.callTool({ name: 'hebra_status', arguments: {} }) as CallToolResult;
+    expect(JSON.parse(textOf(result))).toMatchObject({ linked: false });
+  });
+
+  it('cliente SDK por CIMD descarga documento admitido y lista herramientas', async () => {
+    const auth = new MemoryOAuthClient(CIMD_CLIENT_ID);
+    const client = await sdkFlow(auth);
+    expect(auth.info?.client_id).toBe(CIMD_CLIENT_ID);
+    expect(cimdFetch).toHaveBeenCalledWith(CIMD_CLIENT_ID, expect.objectContaining({ redirect: 'manual' }));
+    expect((await client.listTools()).tools).toHaveLength(9);
+  });
+
+  it('un cliente, callback o metadata CIMD ajenos no inicia solicitud; logs sin secretos', async () => {
+    const challenge = pkce().challenge;
+    const evil = new URL(`${app.origin}/authorize`);
+    for (const [key, value] of Object.entries({ response_type: 'code', client_id: DCR_CLIENT_ID,
+      redirect_uri: 'https://evil.example/callback', code_challenge_method: 'S256', code_challenge: challenge,
+      resource: app.config.resourceUrl })) evil.searchParams.set(key, value);
+    expect((await fetch(evil, { redirect: 'manual' })).status).toBe(400);
+    for (const candidate of ['https://evil.example/client.json', 'https://claude.ai/', 'otro-cliente']) {
+      expect((await authorize(challenge, undefined, candidate)).status).toBe(400);
+    }
+    cimdFetch.mockImplementation(async () => response({ client_id: CIMD_CLIENT_ID,
+      redirect_uris: ['https://claude.ai/otro'], token_endpoint_auth_method: 'none' }));
+    expect((await authorize(challenge, undefined, CIMD_CLIENT_ID)).status).toBe(400);
+    const auth = new MemoryOAuthClient();
+    await sdkFlow(auth);
+    const logged = (stderrSpy.mock.calls as unknown as [string][]).map(([line]) => String(line)).join('');
+    for (const secret of [SECRET, UPSTREAM, transactionId, auth.saved!.access_token, auth.saved!.refresh_token!,
+      'estado-de-prueba']) expect(logged).not.toContain(secret);
+  });
+
   it('conecta con PKCE, código de un uso y bearer guardado fuera de metadata', async () => {
     const { code, verifier } = await approvedCode();
     const first = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: CLAUDE_CALLBACK });

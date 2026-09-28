@@ -4,10 +4,9 @@
  * `serve` y, si otro proceso vivo lo tiene, no arranca (`writer_lock_held`). Nunca
  * reenvía por `writer.sock` (`openServeContext({ writerOnly: true })`).
  *
- * Orden de arranque: primero la autenticación (sin ella no se abre ni la biblioteca ni el
- * sync: `auth_not_configured`), después el contexto (llavero o almacén de secretos,
- * bloqueo, sync), y por último el listener. Si el listener falla, se cierra el contexto y
- * se suelta el bloqueo.
+ * Orden de arranque: preflight de configuración sin efectos; después el contexto
+ * adquiere el bloqueo de escritor; solo entonces se abre el OAuth mutable y el listener.
+ * Cualquier fallo posterior cierra el contexto y suelta el bloqueo.
  */
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -34,6 +33,8 @@ export interface StartServeHttpOptions
   secrets: SecretStore | null;
   config: HttpConfig;
   version: string;
+  /** Comprobación pura: nunca lee ni escribe el almacén ni llama al broker. */
+  authConfigured(): boolean;
   /** La autenticación de `/mcp`, o `null` si no está configurada (y entonces no arranca). */
   loadAuth(dataDir: string, config: HttpConfig, secrets: SecretStore | null): Promise<HttpAuth | null>;
 }
@@ -58,8 +59,7 @@ function listen(server: Server, port: number, host: string): Promise<void> {
 }
 
 export async function startServeHttp(options: StartServeHttpOptions): Promise<ServeHttpHandle> {
-  const auth = await options.loadAuth(options.dataDir, options.config, options.secrets);
-  if (!auth) {
+  if (!options.authConfigured()) {
     throw new ServeHttpError(
       'auth_not_configured',
       'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
@@ -73,9 +73,15 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     syncIntervalMs: options.syncIntervalMs,
     writerOnly: true
   });
-  const app = createHttpApp({ ctx: serve.ctx, version: options.version, config: options.config, auth });
-  const server = createServer(app);
+  let server: Server;
   try {
+    const auth = await options.loadAuth(options.dataDir, options.config, options.secrets);
+    if (!auth) throw new ServeHttpError(
+      'auth_not_configured',
+      'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
+    );
+    const app = createHttpApp({ ctx: serve.ctx, version: options.version, config: options.config, auth });
+    server = createServer(app);
     await listen(server, options.config.port, options.config.listenHost);
   } catch (error) {
     await serve.close();

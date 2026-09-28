@@ -39,6 +39,7 @@ import { HttpConfigError, readHttpConfig } from '../http/config';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../http/serve-http';
 import {
   loadOAuthHttpAuth,
+  oauthHttpAuthConfigured,
   OAuthCliError,
   runOAuthRevokeAll,
   runOAuthSetSecret
@@ -106,11 +107,13 @@ async function serveHttp(): Promise<void> {
   const dataDir = resolveDataDir();
   let handle: ServeHttpHandle;
   try {
+    const secrets = await openServeSecretStore(dataDir);
     handle = await startServeHttp({
       dataDir,
-      secrets: await openServeSecretStore(dataDir),
+      secrets,
       config: readHttpConfig(),
       version,
+      authConfigured: () => oauthHttpAuthConfigured(secrets),
       loadAuth: (authDataDir, config, secrets) => loadOAuthHttpAuth(authDataDir, config, secrets)
     });
   } catch (error) {

@@ -259,8 +259,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (!entry || entry.expiresAt <= this.now()) return fail();
     const { grant } = entry;
     const cleanup = async () => {
-      await this.grants.unstage(hash);
-      await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      try {
+        await this.backchannel.revoke(grant.accessToken);
+        await this.grants.unstage(hash);
+      } catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); }
     };
     if (entry.clientId !== client.client_id || (redirectUri !== undefined && redirectUri !== entry.redirectUri) ||
       verifier === undefined || !VERIFIER.test(verifier) || !equal(s256(verifier), entry.challenge) || !this.sameResource(resource)) {
@@ -278,7 +280,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       const { accessToken: _unused, ...metadata } = grant;
       const issued = await this.tokens.issueFamily({ clientId: entry.clientId, scope: OAUTH_SCOPE, resource: entry.resource,
         grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt }, await this.revocations.current(),
-      async (familyId, ids) => { await this.grants.set(familyId, grant.accessToken, ids); await this.grants.unstage(hash); });
+      async (familyId, ids) => { await this.grants.markPromoting(hash, familyId); await this.grants.set(familyId, grant.accessToken, ids); });
+      await this.grants.unstage(hash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
       logEvent({ event: 'oauth.token', grant: 'authorization_code', result: 'issued' });
       return this.tokensResponse(issued);
     } catch { await cleanup(); throw new ServerError('No se pudo guardar la autorización.'); }

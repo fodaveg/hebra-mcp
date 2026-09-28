@@ -394,11 +394,15 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   acepta directamente en `/mcp`, ni el token OAuth de Hebra autentica las APIs de Lumbre.
   Access/refresh de Claude quedan como hashes en `oauth-tokens.json` v2; el bearer de la
   concesión vive en el almacén de secretos existente. Los códigos pendientes y las
-  concesiones sin familia se limpian o revocan al caducar/reiniciar.
+  concesiones sin familia se limpian o revocan al caducar/reiniciar. La marca de
+  promoción se retira solo después de persistir la familia; si el proceso cae antes,
+  el siguiente arranque revoca la concesión upstream.
 - `HEBRA_MCP_BACKCHANNEL_SECRET` es exclusivo de Hebra MCP, distinto del secreto de
   Lumbre MCP. Se envía como Bearer solo por TLS; ausencia o valor inválido impide arrancar
   la autenticación. Los errores de red/introspección rechazan el acceso temporalmente sin
-  revocar por ello una familia válida. `active: false` la invalida localmente.
+  revocar por ello una familia válida. `active: false` la invalida localmente. La
+  recuperación mutable de OAuth ocurre solo después de tomar `writer.lock`, para que
+  un segundo proceso rechazado no toque concesiones del escritor.
 - `oauth-revoke-all` corta todas las familias locales mediante
   `oauth-revocations-v2.json`. El antiguo `oauth-owner.json` no es puerta de acceso.
   Familias v1 del owner secret no se cargan como v2: Claude debe reconectar. Esta

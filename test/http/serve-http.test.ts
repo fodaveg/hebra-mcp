@@ -14,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { MAX_MCP_BODY_BYTES } from '../../src/http/app';
+import { GrantSecrets } from '../../src/oauth/grants';
+import { MemorySecretStore } from '../../src/secrets';
 import { httpConfigFor } from '../../src/http/config';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../../src/http/serve-http';
 import { WriterRequiredError } from '../../src/server/serve';
@@ -237,6 +239,7 @@ describe('arranque de serve-http', () => {
         secrets: null,
         config: httpConfigFor('http://127.0.0.1', 0),
         version: '0.0.0-test',
+        authConfigured: () => false,
         loadAuth: async () => null
       })
     ).rejects.toBeInstanceOf(ServeHttpError);
@@ -251,6 +254,7 @@ describe('arranque de serve-http', () => {
       secrets: null,
       config: httpConfigFor('http://127.0.0.1', 0),
       version: '0.0.0-test',
+      authConfigured: () => true,
       loadAuth: async () => staticBearerAuth(TOKEN),
       instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
     });
@@ -270,9 +274,34 @@ describe('arranque de serve-http', () => {
         secrets: null,
         config: httpConfigFor('http://127.0.0.1', 0),
         version: '0.0.0-test',
+        authConfigured: () => true,
         loadAuth: async () => staticBearerAuth(TOKEN),
         instance: { checkIntervalMs: null, lock: { releaseOnExit: false, pid: 999_999, isAlive: () => true } }
       })
     ).rejects.toBeInstanceOf(WriterRequiredError);
+  });
+
+  it('un segundo arranque no recupera ni revoca concesiones pendientes del escritor', async () => {
+    const dataDir = tempDataDir();
+    const secrets = new MemorySecretStore();
+    const config = httpConfigFor('http://127.0.0.1', 0);
+    const first = await startServeHttp({ dataDir, secrets, config, version: '0.0.0-test',
+      authConfigured: () => true, loadAuth: async () => staticBearerAuth(TOKEN),
+      instance: { checkIntervalMs: null, lock: { releaseOnExit: false } } });
+    handles.push(first);
+    const grants = await GrantSecrets.open(secrets, []);
+    await grants.stage('aa'.repeat(32), 'bb'.repeat(32));
+    let recoveries = 0;
+    await expect(startServeHttp({ dataDir, secrets, config, version: '0.0.0-test',
+      authConfigured: () => true,
+      loadAuth: async () => {
+        recoveries += 1;
+        await GrantSecrets.recoverPending(secrets, [], grants, async () => { throw new Error('should not revoke'); });
+        return staticBearerAuth(TOKEN);
+      },
+      instance: { checkIntervalMs: null, lock: { releaseOnExit: false, pid: 999_999, isAlive: () => true } }
+    })).rejects.toBeInstanceOf(WriterRequiredError);
+    expect(recoveries).toBe(0);
+    expect(await secrets.get('hebra-mcp-oauth-pending')).toContain('bb'.repeat(32));
   });
 });

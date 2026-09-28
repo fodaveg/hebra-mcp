@@ -5,6 +5,29 @@ const KEY = 'hebra-mcp-oauth-grants';
 const PENDING_KEY = 'hebra-mcp-oauth-pending';
 const FAMILY = /^[A-Za-z0-9_-]{22}$/;
 const TOKEN = /^[0-9a-f]{64}$/;
+const CODE_HASH = /^[0-9a-f]{64}$/;
+
+interface PendingGrant { token: string; familyId?: string }
+
+function parsePending(raw: string | null): Record<string, PendingGrant> {
+  if (raw === null) return {};
+  try {
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    const result: Record<string, PendingGrant> = {};
+    for (const [codeHash, entry] of Object.entries(value)) {
+      if (!CODE_HASH.test(codeHash)) continue;
+      // Compatibilidad con marcas staged creadas antes de la promoción durable.
+      const candidate = typeof entry === 'string' ? { token: entry } : entry;
+      if (!candidate || typeof candidate !== 'object') continue;
+      const pending = candidate as Record<string, unknown>;
+      if (typeof pending.token !== 'string' || !TOKEN.test(pending.token) ||
+        (pending.familyId !== undefined && (typeof pending.familyId !== 'string' || !FAMILY.test(pending.familyId)))) continue;
+      result[codeHash] = { token: pending.token, ...(pending.familyId ? { familyId: pending.familyId } : {}) };
+    }
+    return result;
+  } catch { return {}; }
+}
 
 export class GrantSecrets {
   private readonly values = new Map<string, string>();
@@ -29,18 +52,21 @@ export class GrantSecrets {
   }
 
   /** Concesiones canjeadas cuyo código local aún no se ha presentado, recuperables tras un reinicio. */
-  static async recoverPending(store: SecretStore, revoke: (token: string) => Promise<void>): Promise<void> {
+  static async recoverPending(
+    store: SecretStore,
+    liveIds: readonly string[],
+    grants: GrantSecrets,
+    revoke: (token: string) => Promise<void>
+  ): Promise<void> {
     const raw = await store.get(PENDING_KEY);
     if (raw === null) return;
-    let entries: Record<string, string> = {};
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        entries = Object.fromEntries(Object.entries(parsed).filter(([, value]) => typeof value === 'string' && TOKEN.test(value)));
+    const entries = parsePending(raw);
+    for (const [key, entry] of Object.entries(entries)) {
+      if (entry.familyId && liveIds.includes(entry.familyId) && grants.get(entry.familyId) === entry.token) {
+        delete entries[key];
+        continue;
       }
-    } catch { /* Un formato roto se descarta sin exponerlo. */ }
-    for (const [key, token] of Object.entries(entries)) {
-      try { await revoke(token); delete entries[key]; } catch { /* Se reintentará en el siguiente arranque. */ }
+      try { await revoke(entry.token); delete entries[key]; } catch { /* Se reintentará en el siguiente arranque. */ }
     }
     await store.set(PENDING_KEY, JSON.stringify(entries));
   }
@@ -48,10 +74,21 @@ export class GrantSecrets {
   /** Guarda antes de emitir un código OAuth; al caducar o fallar se revoca upstream. */
   async stage(codeHash: string, token: string): Promise<void> {
     const run = this.queue.then(async () => {
-      const raw = await this.store.get(PENDING_KEY);
-      let entries: Record<string, string> = {};
-      try { if (raw) entries = JSON.parse(raw) as Record<string, string>; } catch { /* Cerrado al formato previo. */ }
-      entries[codeHash] = token;
+      const entries = parsePending(await this.store.get(PENDING_KEY));
+      entries[codeHash] = { token };
+      await this.store.set(PENDING_KEY, JSON.stringify(entries));
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  /** La marca se conserva hasta que `oauth-tokens.json` confirma la familia. */
+  markPromoting(codeHash: string, familyId: string): Promise<void> {
+    const run = this.queue.then(async () => {
+      const entries = parsePending(await this.store.get(PENDING_KEY));
+      const entry = entries[codeHash];
+      if (!entry || !FAMILY.test(familyId)) throw new Error('pending_grant_missing');
+      entries[codeHash] = { ...entry, familyId };
       await this.store.set(PENDING_KEY, JSON.stringify(entries));
     });
     this.queue = run.catch(() => undefined);
@@ -62,8 +99,7 @@ export class GrantSecrets {
     const run = this.queue.then(async () => {
       const raw = await this.store.get(PENDING_KEY);
       if (!raw) return;
-      let entries: Record<string, string>;
-      try { entries = JSON.parse(raw) as Record<string, string>; } catch { await this.store.delete(PENDING_KEY); return; }
+      const entries = parsePending(raw);
       delete entries[codeHash];
       await this.store.set(PENDING_KEY, JSON.stringify(entries));
     });

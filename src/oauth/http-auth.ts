@@ -52,20 +52,26 @@ export function protectedResourceMetadataUrl(config: HttpConfig): string {
   return `${config.publicOrigin}/.well-known/oauth-protected-resource/mcp`;
 }
 
+/** Validación sin E/S para no tocar concesiones antes de tomar writer.lock. */
+export function oauthHttpAuthConfigured(secrets: SecretStore | null, env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.HEBRA_MCP_BACKCHANNEL_SECRET;
+  return secrets !== null && value !== undefined && value.length >= 32 && value.length <= 512 && !/[\r\n]/.test(value);
+}
+
 export async function loadOAuthHttpAuth(
   dataDir: string,
   config: HttpConfig,
   secrets: SecretStore | null,
   options: OAuthHttpAuthOptions = {}
 ): Promise<OAuthHttpAuth | null> {
-  const rawSecret = (options.env ?? process.env).HEBRA_MCP_BACKCHANNEL_SECRET;
-  if (!secrets || !rawSecret || rawSecret.length < 32 || rawSecret.length > 512 || /[\r\n]/.test(rawSecret)) return null;
+  if (!oauthHttpAuthConfigured(secrets, options.env)) return null;
+  const rawSecret = (options.env ?? process.env).HEBRA_MCP_BACKCHANNEL_SECRET!;
   const backchannel = new LumbreBackchannel(rawSecret, config.resourceUrl, options.backchannelFetch);
   const now = options.now ?? Date.now;
   const tokens = await TokenStore.open(dataDir, now);
   const revocations = new RevocationFile(dataDir);
-  const grants = await GrantSecrets.open(secrets, tokens.familyIds());
-  await GrantSecrets.recoverPending(secrets, (token) => backchannel.revoke(token));
+  const grants = await GrantSecrets.open(secrets!, tokens.familyIds());
+  await GrantSecrets.recoverPending(secrets!, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
   logEvent({ event: 'oauth.start', families: tokens.liveFamilyCount(await revocations.current()) });
   const provider = new HebraOAuthProvider({
     issuer: config.publicOrigin,
@@ -73,7 +79,7 @@ export async function loadOAuthHttpAuth(
     revocations,
     tokens,
     grants,
-    secrets,
+    secrets: secrets!,
     backchannel,
     clients: new ClaudeClientsStore({ fetch: options.fetch, now }),
     now
