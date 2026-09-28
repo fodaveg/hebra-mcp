@@ -1,9 +1,8 @@
 /**
- * Ficheros del OAuth de un solo dueño (SPEC.md §12.2), en el directorio de datos:
+ * Ficheros del OAuth local (SPEC.md §12.2), en el directorio de datos:
  *
- * - `oauth-owner.json`: el hash del secreto del dueño y la marca de revocación
- *   (`revokedBefore`). Solo lo escriben los subcomandos `oauth-set-secret` y
- *   `oauth-revoke-all`; `serve-http` solo lo lee.
+ * - `oauth-revocations-v2.json`: marca de revocación global, escrita solo por
+ *   `oauth-revoke-all`; `serve-http` la lee. El antiguo `oauth-owner.json` se ignora.
  * - `oauth-tokens.json`: las familias de tokens (hashes, nunca los tokens). Solo lo escribe
  *   `serve-http`.
  *
@@ -18,12 +17,7 @@ import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
-export const OAUTH_OWNER_FILE = 'oauth-owner.json';
 export const OAUTH_TOKENS_FILE = 'oauth-tokens.json';
-
-export function ownerFilePath(dataDir: string): string {
-  return join(dataDir, OAUTH_OWNER_FILE);
-}
 
 export function tokensFilePath(dataDir: string): string {
   return join(dataDir, OAUTH_TOKENS_FILE);

@@ -18,8 +18,7 @@
  *    crezca. Si el registro pide un `client_secret`, se sustituye por un cliente público
  *    (RFC 7591 §3.2.1 permite al servidor reemplazar los metadatos pedidos).
  *
- * Ninguno de los dos da acceso por sí solo: el acceso lo da el secreto del dueño en la
- * página de autorización.
+ * Ninguno de los dos da acceso por sí solo: la aprobación llega del consentimiento de Lumbre.
  */
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';

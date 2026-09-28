@@ -45,8 +45,10 @@ services:
       HEBRA_MCP_SECRET_STORE: 'file'
       # `src/privacy/data-dir.ts`: el directorio de datos, con la SQLite,
       # `config.json` de privados, los secretos de fichero (C1, JSON 0600 en
-      # subdirectorio 0700) y `oauth-owner.json`/`oauth-tokens.json` (C3).
+      # subdirectorio 0700) y `oauth-revocations-v2.json`/`oauth-tokens.json`.
       HEBRA_MCP_DATA_DIR: /data
+      # Se inyecta desde el entorno privado del operador; nunca se versiona su valor.
+      HEBRA_MCP_BACKCHANNEL_SECRET: ${HEBRA_MCP_BACKCHANNEL_SECRET:?configura el secreto compartido con Lumbre}
       # `src/http/config.ts`. Por defecto `serve-http` escucha en `127.0.0.1`
       # (pensado para tests/desarrollo local): AQUÍ tiene que ser `0.0.0.0` o
       # Caddy no lo alcanzaría por la red `edge`. Repetido como `ENV` en el

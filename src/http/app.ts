@@ -19,8 +19,7 @@
  *   solo vale si la CONEXIÓN viene de loopback (healthcheck, tests), igual que en
  *   lumbre-mcp: nadie que llegue por la red `edge` puede saltarse la comprobación con un
  *   `Host: localhost`. El SDK trae `hostHeaderValidation`, pero no mira la IP del peer.
- *   `Origin: null` solo se admite en los `POST` que declare `HttpAuth.nullOriginPostPaths`
- *   (el formulario de consentimiento).
+ *   `Origin: null` se rechaza en todas las rutas OAuth actuales.
  * - Tope de cuerpo (`MAX_MCP_BODY_BYTES`) con 413, `cache-control: no-store`,
  *   `nosniff` y `no-referrer`.
  * - Logs (§6.4): `http.request` con método, una etiqueta de ruta de un conjunto CERRADO y
@@ -57,15 +56,14 @@ const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;
 
 /**
  * La autenticación de `/mcp`. `serve-http` no arranca sin una (SPEC.md §12.2). La
- * implementación de verdad es el OAuth de un solo dueño (`src/oauth/`).
+ * implementación de verdad es el OAuth con consentimiento de Lumbre (`src/oauth/`).
  */
 export interface HttpAuth {
   /** Monta en la raíz las rutas propias (metadata, `/authorize`, `/token`…). */
   install(app: Express): void;
   /** Deja pasar a `POST /mcp` solo con credencial válida; si no, 401. */
   requireAuth: RequestHandler;
-  /** Rutas donde un `POST` con `Origin: null` se admite (formularios con `no-referrer`
-   *  cuya protección CSRF no depende del `Origin`). En el resto, `null` da 403. */
+  /** Rutas especiales de Origin nulo; OAuth actual no declara ninguna. */
   nullOriginPostPaths?: readonly string[];
 }
 
@@ -85,7 +83,7 @@ const ROUTE_LABELS = new Set([
   '/token',
   '/register',
   '/revoke',
-  '/oauth/consent',
+  '/oauth/lumbre/callback',
   '/.well-known/oauth-protected-resource',
   '/.well-known/oauth-protected-resource/mcp',
   '/.well-known/oauth-authorization-server'

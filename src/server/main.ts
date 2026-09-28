@@ -11,8 +11,8 @@
  * - `serve-http`: el conector remoto de claude.ai (SPEC.md §12, `../http/`). Streamable
  *   HTTP sin estado, siempre escritor, y no arranca sin autenticación configurada.
  *   Configuración por entorno (`../http/config.ts`), nunca secretos.
- * - `oauth-set-secret` / `oauth-revoke-all`: el secreto del dueño del OAuth de
- *   `serve-http` (por stdin) y la revocación de todos sus tokens (`../oauth/cli.ts`).
+ * - `oauth-revoke-all`: revocación local de todos los tokens de `serve-http`;
+ *   `oauth-set-secret` devuelve un error de método sustituido (`../oauth/cli.ts`).
  *
  * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
  * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
@@ -40,7 +40,6 @@ import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../http/se
 import {
   loadOAuthHttpAuth,
   OAuthCliError,
-  processOAuthCliIo,
   runOAuthRevokeAll,
   runOAuthSetSecret
 } from '../oauth';
@@ -53,7 +52,6 @@ const USAGE = [
   `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
   '  hebra-mcp unpair',
   '  hebra-mcp serve-http',
-  '  hebra-mcp oauth-set-secret   (el secreto por stdin, nunca como argumento)',
   '  hebra-mcp oauth-revoke-all'
 ].join('\n');
 
@@ -113,7 +111,7 @@ async function serveHttp(): Promise<void> {
       secrets: await openServeSecretStore(dataDir),
       config: readHttpConfig(),
       version,
-      loadAuth: (authDataDir, config) => loadOAuthHttpAuth(authDataDir, config)
+      loadAuth: (authDataDir, config, secrets) => loadOAuthHttpAuth(authDataDir, config, secrets)
     });
   } catch (error) {
     if (
@@ -183,10 +181,10 @@ async function main(): Promise<void> {
       await serveHttp();
       return;
     case 'oauth-set-secret':
-      await oauthCommand((dataDir) => runOAuthSetSecret(dataDir, processOAuthCliIo()));
+      await oauthCommand(() => runOAuthSetSecret());
       return;
     case 'oauth-revoke-all':
-      await oauthCommand((dataDir) => runOAuthRevokeAll(dataDir, processOAuthCliIo()));
+      await oauthCommand((dataDir) => runOAuthRevokeAll(dataDir, { print: (line) => process.stdout.write(`${line}\n`) }));
       return;
     case 'pair': {
       const { values } = parseArgs({

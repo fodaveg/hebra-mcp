@@ -46,29 +46,28 @@ ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
 ## Conector remoto de claude.ai (`serve-http`)
 
 Para claude.ai (web, móvil y sesiones en la nube), hebra-mcp corre como servidor HTTP en
-un contenedor del servidor de Lumbre, en `https://mcp.hebra.pro` (`SPEC.md` §12). Antes
-de arrancarlo hay que fijar el secreto del dueño, que es lo que pedirá claude.ai al
-conectar:
+un contenedor del servidor de Lumbre, en `https://mcp.hebra.pro` (`SPEC.md` §12). Claude
+se conecta mediante el OAuth público de Hebra MCP; Lumbre autentica al propietario y
+muestra el consentimiento:
 
 ```sh
-hebra-mcp oauth-set-secret      # lo pide dos veces sin eco; o por tubería:
-                                # hebra-mcp oauth-set-secret < fichero-con-el-secreto
-hebra-mcp serve-http            # no arranca sin el secreto
-hebra-mcp oauth-revoke-all      # revoca todos los tokens (claude.ai tendrá que volver a autorizarse)
+hebra-mcp serve-http            # requiere configuración de backchannel
+hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
 ```
 
-- El secreto va siempre por stdin, nunca como argumento ni variable de entorno. Mínimo
-  32 caracteres y 10 distintos: genéralo con el gestor de contraseñas. Solo se guarda su hash (scrypt)
-  en `oauth-owner.json` del directorio de datos (0600). Fijar uno nuevo revoca los
-  tokens anteriores.
-- En el contenedor, los tres van por `docker compose exec`, nunca por `run` (§12.5).
+- `HEBRA_MCP_BACKCHANNEL_SECRET` (32–512 caracteres) es exclusivo de Hebra MCP y se
+  provisiona en ambos servidores sin versionar su valor. El servidor necesita su
+  dispositivo ya emparejado; el login de Lumbre no entrega la clave de biblioteca.
+- En el contenedor, `oauth-revoke-all` actúa sobre el volumen compartido sin abrir la
+  biblioteca; el emparejado y los comandos que sí la abren conservan el bloqueo de escritor.
 - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`
   (`127.0.0.1`; en el contenedor, `0.0.0.0`), `HEBRA_MCP_PUBLIC_URL`
   (`https://mcp.hebra.pro`) y, para los secretos del dispositivo,
   `HEBRA_MCP_SECRET_STORE=file`.
-- En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. La página de
-  autorización pide el secreto; con él, claude.ai recibe un access token de 1 h y un
-  refresh rotatorio (la autorización dura 30 días).
+- En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. El navegador
+  pasa por el login y consentimiento de Lumbre; Claude recibe un access token de 1 h y un
+  refresh rotatorio (la autorización dura hasta 30 días). La gestión de concesiones está
+  en `/integrations/hebra-mcp` de Lumbre.
 - `serve-http` siempre es el escritor único: si otro proceso tiene `writer.lock`, no
   arranca.
 

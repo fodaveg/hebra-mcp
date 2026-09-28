@@ -33,7 +33,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D4 | **Cuándo** (revisada el 26 sep 2026): **BEAR-22 queda cerrada** por decisión de David (la biblioteca actual es de prueba y la va a reimportar desde Obsidian). Se hacen **todos los lotes ya**, en orden L0 → L1 → L2 (en cuanto Lumbre despliegue L2a) → L3 → L4. Objetivo: que David use Hebra en serio con el MCP cuanto antes. | La versión anterior esperaba a BEAR-22 para todo lo que cambiara el sync o el vínculo en Hebra. |
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
 | D6 | **Conector remoto** (26 sep 2026): hebra-mcp tiene que funcionar como conector remoto de claude.ai (web, móvil, sesiones en la nube), y **corre en el servidor de Lumbre**, en un contenedor aparte. stdio sigue funcionando en local. Diseño en §12. | Revoca el descarte de D1: ese servidor guarda las claves de la biblioteca y puede leer las notas (quien tenga root en él). Descartados: una máquina de casa (Fedora o Mac) publicada con Tailscale Funnel, que mantenía el cifrado de punta a punta pero solo funcionaba con esa máquina encendida. |
-| D7 | **Autenticación del conector remoto** (26 sep 2026): servidor OAuth propio de un solo dueño dentro de hebra-mcp; claude.ai pide un secreto largo que David guarda en su gestor de contraseñas. | Descartado: el login de Lumbre, que exigía cambios en Lumbre, adaptar el servidor OAuth de lumbre-mcp y hacía de la cuenta de Lumbre la llave de la biblioteca. |
+| D7 | **Autenticación del conector remoto** (revisada el 28 sep 2026): conservar el OAuth público de Hebra MCP y usar login y consentimiento de Lumbre para aprobar la biblioteca ya emparejada. | Sustituye la decisión del 26 sep de usar un secreto del dueño. El login no entrega la clave de biblioteca ni reasocia otra biblioteca. |
 
 ## 4. Arquitectura
 
@@ -331,7 +331,7 @@ Lumbre.
 | **L4** Puesta en marcha con la biblioteca real | Emparejado real, configuración de privados de David, `claude mcp add`, QA de David. | 🟡 tras L2 y L3 | Los 7 puntos de §2 comprobados por David en su biblioteca. |
 | **L5** Plataforma propia del dispositivo (opcional) | `agent` en el relé, en Ajustes y en `conflictDevice` para que Hebra diga «Claude». La implementó la sesión de Hebra (`035db7e6`) y el relé, la de Lumbre; hebra-mcp cambió la plataforma que declara (`LINK_PLATFORM` y `deviceLabel`). | ✅ cerrado el 26 sep 2026 | Hebra la muestra; P3 cerrada. `LINK_PLATFORM = 'agent'`, `deviceLabel = 'Claude'` en `serve`/`pair`/`node-port.ts`, con los 68 casos compartidos, `tsc` y `npm test` en verde. |
 | **L6** Punto de entrada estable de Hebra (P1) | Hebra exporta `node.ts` o una subruta de `exports` con motor, almacén, transporte, vínculo y derivados; esquema sin `?raw`. La implementa la sesión de Hebra; hebra-mcp cambia su empaquetado para usarlo. | 🔴 sesión de Hebra, en curso desde el 26 sep 2026 | hebra-mcp compila sin alias `$lib` ni plugin de `?raw`, y los casos compartidos siguen en verde. |
-| **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | ✅ C1-C5 desplegados en `mcp.hebra.pro` el 26 sep 2026 · 🟡 C6 (QA de David) | §12.7. |
+| **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | C1-C5 con el método anterior se desplegaron el 26 sep 2026. La sustitución por login Lumbre es candidato local; despliegue coordinado y C6 siguen pendientes. | §12.7. |
 | **Después de v1** | Servir adjuntos, más escrituras. | Fuera de v1 | Nueva decisión de David. |
 
 ## 11. Pendiente
@@ -372,54 +372,44 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
     SDK es de Express. `check:bundle` exime `debug` y `object-inspect`, cuyas referencias al DOM no se
     ejecutan en Node.
 
-### 12.2 Autenticación (D7)
+### 12.2 Autenticación (D7, revisada el 28 sep 2026)
 
-- Router OAuth del SDK de MCP (1.30.1: handlers `authorize`, `token`, `register`, `revoke` y
-  `bearerAuth`), con un solo dueño.
-- Solo admite el callback `https://claude.ai/api/mcp/auth_callback` y PKCE S256.
-- La página de autorización pide el secreto del dueño, de alta entropía; el servidor guarda su hash.
-- Tokens opacos guardados como hash: access de 1 h y refresh rotatorio de 30 días (valores de lumbre-mcp
-  `oauth.ts:25-26`). Reusar un refresh revoca su familia.
-- `oauth-revoke-all` revoca todos los tokens. `serve-http` no arranca sin configuración de auth.
-- Por medir: si claude.ai acepta el registro dinámico del SDK (lumbre-mcp usa CIMD).
-- Implementado en C3 (`src/oauth/`):
-  - **Registro del cliente: los dos mecanismos**. CIMD es el medido: lumbre-mcp está en producción con
-    claude.ai anunciando `client_id_metadata_document_supported` y sin `registration_endpoint`
-    (`oauth.ts:808-822`). El SDK 1.30.1 no trae CIMD en el servidor; se implementa en el almacén de
-    clientes: `client_id` HTTPS de `claude.ai`, documento sin redirecciones, 5 s, 64 KiB, que tiene que
-    registrar el callback; caché de 5 min. DCR (`/register` del SDK) queda como alternativa: todo
-    registro válido recibe el mismo `client_id` público fijo, sin secreto y sin estado que crezca.
-    Ninguno da acceso por sí solo: lo da el secreto. Sigue sin medir cuál elige claude.ai con este
-    servidor, que anuncia los dos (C6).
-  - La metadata AS es propia y no la del SDK: anuncia CIMD, `iss` en la respuesta, solo clientes
-    `none` y un `issuer` sin barra final, como lumbre-mcp. PRM en `/.well-known/oauth-protected-resource`
-    y en `…/mcp`, con `resource` = `<origen>/mcp` y scope `hebra:mcp`. El 401 de `/mcp` lleva
-    `resource_metadata` en `WWW-Authenticate` (`requireBearerAuth` del SDK; el token solo por cabecera).
-  - Página de autorización sin recursos externos ni JavaScript, CSP cerrada, `frame-ancestors 'none'`,
-    y el aviso «Continúa solo si acabas de pulsar Conectar en claude.ai. Si alguien te ha enviado este
-    enlace, ciérralo.». `POST /oauth/consent` con el secreto, que admite `Origin: null` (la página fija
-    `no-referrer`; el CSRF lo cubre el `request` opaco de 256 bits). Ninguna otra ruta lo admite.
-  - Intentos (tras la auditoría de seguridad de C3): 5 por solicitud y 5 por IP en 15 min, reservados
-    antes del primer `await` (con envíos concurrentes no se evalúan más) y scrypt de uno en uno. Lo que
-    se rechaza sin evaluar responde igual con secreto bueno o malo. Sin bloqueo global: a partir de 50
-    fallos en la ventana solo se registra `oauth.consent.global_threshold`, porque un bloqueo global
-    dejaría a cualquiera impedir que David reconecte. Como mucho 4 solicitudes pendientes por IP: una IP
-    solo desaloja las suyas.
-  - Hash del secreto con scrypt de `node:crypto` (N=2^15, r=8, p=1): argon2 solo es experimental en
-    Node 24 y lo demás exige un módulo nativo nuevo. Mínimo 32 caracteres y 10 distintos. `oauth-set-secret` lo lee por
-    stdin (sin eco en terminal) y revoca todos los tokens anteriores.
-  - Códigos de un solo uso, 60 s, en memoria como hash. El código se consume antes de validar cliente,
-    `redirect_uri`, PKCE y `resource` (`skipLocalPkceValidation`: el SDK validaría PKCE sin consumirlo).
-  - La familia de refresh dura 30 días desde la autorización (vigencia absoluta, como lumbre-mcp). El
-    refresh lleva el id de su familia: presentar uno que no es el vigente revoca la familia entera,
-    salvo el recién rotado en los 30 s siguientes (dos refresh simultáneos), que da `invalid_grant`
-    sin revocar.
-  - Ficheros en el directorio de datos, 0600 y escritura atómica (con `fsync` del fichero y del
-    directorio tras el `rename`): `oauth-owner.json` (hash y
-    `revokedBefore`, solo lo escriben `oauth-set-secret` y `oauth-revoke-all`) y `oauth-tokens.json`
-    (hashes de tokens, solo lo escribe `serve-http`). Un escritor por fichero evita un bloqueo entre
-    procesos. `serve-http` relee `oauth-owner.json` cuando cambia, así que `oauth-revoke-all` corta al
-    momento aunque el servidor siga en marcha.
+- Hebra MCP conserva el OAuth público del SDK: issuer `https://mcp.hebra.pro`, recurso
+  `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR, callback de Claude, PKCE S256,
+  state, códigos de un uso, access de una hora y refresh rotatorio con familia de 30 días
+  absolutos. Un refresh reutilizado fuera de la ventana de gracia revoca su familia.
+- `/authorize` reserva una solicitud y pide consentimiento a Lumbre mediante el backchannel
+  `/api/integrations/hebra-mcp/requests`. Lumbre usa su login y su sesión web para mostrar
+  cliente, biblioteca y alcance. La respuesta aprobada vuelve a
+  `/oauth/lumbre/callback`; Hebra canjea la transacción autenticada y solo entonces emite
+  su código OAuth. El callback público por sí solo no concede acceso; un `denied` falsificado
+  no consume la solicitud pendiente.
+- La solicitud y la concesión incluyen `pairedCredentialId`, `syncVaultId` y el
+  `opaqueDeviceId` real del dispositivo Blob V2. Lumbre comprueba propietario, bóveda
+  activa y la fila exacta `hebraBlobDevices` no revocada, vinculada a esa credencial.
+  Hebra compara los tres campos con su emparejado actual al canjear, acceder y refrescar,
+  y consulta introspección en Lumbre en cada uso. Revocar solo esa fila Blob V2 corta los
+  access/refresh posteriores aunque sobreviva la credencial de emparejado.
+- Lumbre devuelve un `accountId` opaco, nunca `users.id`. La concesión upstream no se
+  acepta directamente en `/mcp`, ni el token OAuth de Hebra autentica las APIs de Lumbre.
+  Access/refresh de Claude quedan como hashes en `oauth-tokens.json` v2; el bearer de la
+  concesión vive en el almacén de secretos existente. Los códigos pendientes y las
+  concesiones sin familia se limpian o revocan al caducar/reiniciar.
+- `HEBRA_MCP_BACKCHANNEL_SECRET` es exclusivo de Hebra MCP, distinto del secreto de
+  Lumbre MCP. Se envía como Bearer solo por TLS; ausencia o valor inválido impide arrancar
+  la autenticación. Los errores de red/introspección rechazan el acceso temporalmente sin
+  revocar por ello una familia válida. `active: false` la invalida localmente.
+- `oauth-revoke-all` corta todas las familias locales mediante
+  `oauth-revocations-v2.json`. El antiguo `oauth-owner.json` no es puerta de acceso.
+  Familias v1 del owner secret no se cargan como v2: Claude debe reconectar. Esta
+  transición conserva el emparejado, la clave, la SQLite y las notas. El comando antiguo
+  `oauth-set-secret` devuelve un error claro.
+- El formato v2 y la revocación local son independientes de la revocación visible en la
+  página de Lumbre. Revocar una familia por OAuth corta primero su acceso local y luego
+  pide la revocación upstream. Revocar la concesión en Lumbre deja la introspección
+  inactiva y cierra la familia en el siguiente acceso; no borra notas ni el dispositivo.
+- Los tests sintéticos comprueban el contrato local. Falta acreditar en producción el
+  recorrido real Claude → login Lumbre → consentimiento → lectura → revocación → rechazo.
 
 ### 12.3 Secretos
 
@@ -486,7 +476,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 |---|---|---|---|
 | **C1** Secretos en fichero | `FileSecretStore` y selección explícita en `serve`, `pair` y `unpair`. | Tests: 0600/0700, escritura atómica, `unpair` lo deja vacío, valor corrupto = ausente, en modo fichero no se carga `@napi-rs/keyring`. | — |
 | **C2** `serve-http` | Streamable HTTP sin estado: `POST /mcp`, límite de cuerpo, `allowedHosts`, `/healthz`; no arranca sin auth. | Las 9 herramientas por el cliente HTTP del SDK; cebos fuera de stderr; dos `append` concurrentes correctos; suite stdio en verde. | — |
-| **C3** OAuth de un dueño | §12.2. | Sin token 401 con `resource_metadata`; secreto, callback o verifier erróneos rechazados; código reusado rechazado; replay de refresh revoca la familia; token revocado 401; flujo completo con el cliente del SDK. | C2 |
+| **C3** OAuth y consentimiento Lumbre | §12.2. | Sin token 401 con `resource_metadata`; vínculo exacto de dispositivo/bóveda, callback y PKCE, código de un uso, refresh/revocación y reconexión tras formato v1. El recorrido real con Claude queda en C6. | C2 y broker Lumbre |
 | **C4** Despliegue | Dockerfile, compose, Caddy y runbook para `mcp.hebra.pro`. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
 | **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |

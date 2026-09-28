@@ -1,7 +1,7 @@
 /**
- * El OAuth de un solo dueño montado sobre la app de `serve-http` (`HttpAuth`,
- * `src/http/app.ts`). `null` si no hay secreto del dueño: entonces `serve-http` no
- * arranca (SPEC.md §12.2).
+ * OAuth de Hebra con consentimiento Lumbre montado sobre `serve-http`.
+ * `null` si falta la credencial de backchannel o el almacén de secretos:
+ * entonces `serve-http` no arranca (SPEC.md §12.2).
  *
  * Rutas, todas en la raíz del host (la metadata OAuth tiene que ir ahí):
  * - `/.well-known/oauth-protected-resource` y `/.well-known/oauth-protected-resource/mcp`
@@ -13,20 +13,24 @@
  *   `URL.href`, con barra). Se monta ANTES del router del SDK, que también las sirve.
  * - `/authorize`, `/token`, `/register`, `/revoke`: el router del SDK (`mcpAuthRouter`)
  *   con el proveedor de `./provider.ts`, con sus limitadores por IP.
- * - `POST /oauth/consent`: el formulario de la página de autorización.
+ * - `GET /oauth/lumbre/callback`: recibe la vuelta del consentimiento y
+ *   confirma la aprobación por backchannel antes de emitir código.
  *
  * `requireAuth` es `requireBearerAuth` del SDK: solo la cabecera `Authorization` (nunca un
  * token en la URL), scope `hebra:mcp`, y el 401 con `WWW-Authenticate` que incluye
  * `resource_metadata`.
  */
-import express, { type Express, type Request, type Response } from 'express';
-import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
+import { type Express, type NextFunction, type Request, type Response } from 'express';
+import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { HttpAuth } from '../http/app';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
+import type { SecretStore } from '../secrets';
+import { BackchannelError, LumbreBackchannel } from './backchannel';
 import { ClaudeClientsStore } from './clients';
-import { OwnerFile, type OwnerRecord } from './owner';
+import { GrantSecrets } from './grants';
+import { RevocationFile } from './owner';
 import { HebraOAuthProvider, OAUTH_SCOPE } from './provider';
 import { TokenStore } from './token-store';
 
@@ -35,8 +39,9 @@ export interface OAuthHttpAuthOptions {
   fetch?: (input: string | URL, init?: RequestInit) => Promise<globalThis.Response>;
   /** Tests: reloj de tokens y códigos. */
   now?: () => number;
-  /** Tests: la verificación del secreto (por defecto, scrypt). */
-  verifySecret?: (record: OwnerRecord, candidate: string) => Promise<boolean>;
+  /** Tests: broker HTTPS simulado, sin exponer el secreto. */
+  backchannelFetch?: (input: string | URL, init?: RequestInit) => Promise<globalThis.Response>;
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface OAuthHttpAuth extends HttpAuth {
@@ -50,22 +55,28 @@ export function protectedResourceMetadataUrl(config: HttpConfig): string {
 export async function loadOAuthHttpAuth(
   dataDir: string,
   config: HttpConfig,
+  secrets: SecretStore | null,
   options: OAuthHttpAuthOptions = {}
 ): Promise<OAuthHttpAuth | null> {
-  const owner = new OwnerFile(dataDir);
-  const record = await owner.current();
-  if (!record) return null;
+  const rawSecret = (options.env ?? process.env).HEBRA_MCP_BACKCHANNEL_SECRET;
+  if (!secrets || !rawSecret || rawSecret.length < 32 || rawSecret.length > 512 || /[\r\n]/.test(rawSecret)) return null;
+  const backchannel = new LumbreBackchannel(rawSecret, config.resourceUrl, options.backchannelFetch);
   const now = options.now ?? Date.now;
   const tokens = await TokenStore.open(dataDir, now);
-  logEvent({ event: 'oauth.start', families: tokens.liveFamilyCount(record.revokedBefore) });
+  const revocations = new RevocationFile(dataDir);
+  const grants = await GrantSecrets.open(secrets, tokens.familyIds());
+  await GrantSecrets.recoverPending(secrets, (token) => backchannel.revoke(token));
+  logEvent({ event: 'oauth.start', families: tokens.liveFamilyCount(await revocations.current()) });
   const provider = new HebraOAuthProvider({
     issuer: config.publicOrigin,
     resource: config.resourceUrl,
-    owner,
+    revocations,
     tokens,
+    grants,
+    secrets,
+    backchannel,
     clients: new ClaudeClientsStore({ fetch: options.fetch, now }),
-    now,
-    verifySecret: options.verifySecret
+    now
   });
 
   const protectedResource = {
@@ -99,24 +110,16 @@ export async function loadOAuthHttpAuth(
 
   return {
     provider,
-    // Hallazgo B2: la página fija `no-referrer`, y con eso un navegador (Firefox) puede
-    // enviar el formulario con `Origin: null`. El CSRF ahí lo cubre el `request` opaco de
-    // 256 bits de la solicitud pendiente, no el `Origin`.
-    nullOriginPostPaths: ['/oauth/consent'],
     install(app: Express) {
       app.get('/.well-known/oauth-protected-resource', sendMetadata(protectedResource));
       app.get('/.well-known/oauth-protected-resource/mcp', sendMetadata(protectedResource));
       app.get('/.well-known/oauth-authorization-server', sendMetadata(authorizationServer));
-      app.post(
-        '/oauth/consent',
-        express.urlencoded({ extended: false, limit: '8kb' }),
-        (req: Request, res: Response) => {
-          void provider.handleConsent(req, res).catch(() => {
-            logEvent({ event: 'oauth.consent', result: 'error' });
-            if (!res.headersSent) res.status(500).type('text/plain').send('Error interno.');
-          });
-        }
-      );
+      app.get('/oauth/lumbre/callback', (req: Request, res: Response) => {
+        void provider.handleLumbreCallback(req, res).catch(() => {
+          logEvent({ event: 'oauth.consent', result: 'error' });
+          if (!res.headersSent) res.status(503).json({ error: 'temporarily_unavailable' });
+        });
+      });
       app.use(
         mcpAuthRouter({
           provider,
@@ -128,10 +131,33 @@ export async function loadOAuthHttpAuth(
         })
       );
     },
-    requireAuth: requireBearerAuth({
-      verifier: provider,
-      requiredScopes: [OAUTH_SCOPE],
-      resourceMetadataUrl: protectedResourceMetadataUrl(config)
-    })
+    // El middleware del SDK traduce una caída temporal del verificador a 500 o
+    // invalid_token. Aquí preservamos su challenge para tokens inválidos y 503
+    // recuperable para introspección indisponible, sin provocar un nuevo login.
+    requireAuth(req: Request, res: Response, next: NextFunction) {
+      const raw = req.headers.authorization;
+      const token = raw?.startsWith('Bearer ') ? raw.slice(7) : null;
+      if (!token || token.includes(' ')) {
+        res.setHeader('WWW-Authenticate', `Bearer error="invalid_token", scope="${OAUTH_SCOPE}", resource_metadata="${protectedResourceMetadataUrl(config)}"`);
+        res.status(401).json({ error: 'invalid_token' }); return;
+      }
+      void provider.verifyAccessToken(token).then((auth) => {
+        if (!auth.scopes.includes(OAUTH_SCOPE) || auth.expiresAt === undefined || auth.expiresAt < Date.now() / 1000) {
+          res.setHeader('WWW-Authenticate', `Bearer error="invalid_token", scope="${OAUTH_SCOPE}", resource_metadata="${protectedResourceMetadataUrl(config)}"`);
+          res.status(401).json({ error: 'invalid_token' }); return;
+        }
+        Object.assign(req, { auth });
+        next();
+      }).catch((error: unknown) => {
+        if (error instanceof BackchannelError) {
+          res.status(503).json({ error: 'temporarily_unavailable' }); return;
+        }
+        if (error instanceof InvalidTokenError) {
+          res.setHeader('WWW-Authenticate', `Bearer error="invalid_token", scope="${OAUTH_SCOPE}", resource_metadata="${protectedResourceMetadataUrl(config)}"`);
+          res.status(401).json({ error: 'invalid_token' }); return;
+        }
+        res.status(503).json({ error: 'temporarily_unavailable' });
+      });
+    }
   };
 }

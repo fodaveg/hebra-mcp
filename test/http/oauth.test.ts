@@ -1,524 +1,351 @@
-/**
- * OAuth de un solo dueño de `serve-http` (SPEC.md §12.2, lote C3), por HTTP real contra
- * la app en un puerto efímero:
- *
- * - Positivo: el flujo completo autorización → token → herramienta con el cliente del
- *   SDK (`StreamableHTTPClientTransport` con `authProvider`), por DCR y por CIMD.
- * - Negativos: sin token 401 con `resource_metadata`; token en la URL; secreto,
- *   `redirect_uri`, `client_id` o `code_verifier` erróneos; código reutilizado; refresh
- *   reutilizado (revoca la familia); `/revoke`; `oauth-revoke-all`; límite de intentos.
- * - Almacenamiento: solo hashes, 0600, y los tokens sobreviven a un reinicio.
- * - Logs: ni secreto, ni códigos, ni tokens en stderr.
- */
+/** Consentimiento Lumbre sobre el OAuth público real, con broker cerrado simulado. */
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import type {
-  OAuthClientInformationMixed,
-  OAuthClientMetadata,
-  OAuthTokens
-} from '@modelcontextprotocol/sdk/shared/auth.js';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import {
-  CLAUDE_CALLBACK,
-  DCR_CLIENT_ID,
-  loadOAuthHttpAuth,
-  OAUTH_OWNER_FILE,
-  OAUTH_TOKENS_FILE,
-  OAuthCliError,
-  readOwnerRecord,
-  runOAuthRevokeAll,
-  runOAuthSetSecret,
-  setOwnerSecret
-} from '../../src/oauth';
+import { encodeRecoveryCode } from '../../src/hebra';
+import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
+import type { HebraOAuthProvider } from '../../src/oauth/provider';
+import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
-import { startTestHttpApp, textOf, type TestHttpApp } from '../fixtures/http-app';
+import { startTestHttpApp, type TestHttpApp } from '../fixtures/http-app';
 
-const SECRET = 'secreto-del-dueño-de-prueba-0123456789-abcdef';
-const CIMD_CLIENT_ID = 'https://claude.ai/oauth/mcp-oauth-client-metadata';
+const SECRET = '0123456789abcdef0123456789abcdef';
+const PAIR_ID = '11111111-1111-4111-8111-111111111111';
+const GRANT_ID = '22222222-2222-4222-8222-222222222222';
+const VAULT = 'ab'.repeat(16);
+const DEVICE = 'cd'.repeat(16);
+const OTHER_DEVICE = 'ef'.repeat(16);
+const ACCOUNT = '34'.repeat(32);
+const UPSTREAM = '56'.repeat(32);
 
-let stderrSpy: ReturnType<typeof vi.spyOn> | undefined;
-let test: TestContext | undefined;
-const apps: TestHttpApp[] = [];
-const clients: Client[] = [];
-let cimdFetch: ReturnType<typeof vi.fn>;
-/** Adelanto del reloj de tokens y códigos (la ventana de gracia del refresh). */
-let clockOffset = 0;
+let context: TestContext;
+let app: TestHttpApp;
+let provider: HebraOAuthProvider;
+let store: MemorySecretStore;
+let requestId: string;
+let transactionId: string;
+let clientId: string;
+let resource: string;
+let approved: boolean;
+let deviceActive: boolean;
+let available: boolean;
+let requestCount: number;
+let exchangeCount: number;
+let grantExpiresAt: string;
+let brokerDevice: string;
+let brokerVault: string;
+let brokerPair: string;
+let clockOffset: number;
 
-function stderrText(): string {
-  return (stderrSpy!.mock.calls as unknown as [string][]).map(([line]) => String(line)).join('');
+const response = (value: object, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+
+/** Verifica que el cliente envía exclusivamente el backchannel autorizado. */
+async function broker(input: string | URL, init?: RequestInit): Promise<Response> {
+  expect(String(input).startsWith('https://app.lumbre.pro/api/integrations/hebra-mcp/')).toBe(true);
+  expect(init?.headers).toMatchObject({ authorization: `Bearer ${SECRET}` });
+  expect(init?.redirect).toBe('manual');
+  if (!available) throw new Error('offline');
+  const body = JSON.parse(String(init?.body)) as Record<string, string>;
+  const path = new URL(String(input)).pathname.split('/').at(-1);
+  if (path === 'requests') {
+    requestCount += 1;
+    expect(body.opaqueDeviceId).toBe(DEVICE);
+    expect(body.pairedCredentialId).toBe(PAIR_ID);
+    expect(body.syncVaultId).toBe(VAULT);
+    requestId = crypto.randomUUID();
+    transactionId = body.transactionId!;
+    clientId = body.clientId!;
+    resource = body.resource!;
+    return response({ requestId, authorizationUrl: `https://app.lumbre.pro/integrations/hebra-mcp?request=${requestId}`,
+      expiresAt: new Date(Date.now() + 600_000).toISOString() });
+  }
+  if (path === 'exchange') {
+    exchangeCount += 1;
+    if (!approved || !deviceActive || body.requestId !== requestId || body.transactionId !== transactionId) return response({ error: 'invalid_grant' }, 400);
+    return response({ credentialId: GRANT_ID, accessToken: UPSTREAM, tokenType: 'Bearer', clientId, resource, scope: 'hebra:mcp',
+      accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
+  }
+  if (path === 'introspect') {
+    if (!deviceActive || body.accessToken !== UPSTREAM) return response({ active: false });
+    return response({ active: true, credentialId: GRANT_ID, clientId, resource, scope: 'hebra:mcp', accountId: ACCOUNT,
+      pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
+  }
+  if (path === 'revoke') { approved = false; return response({ revoked: true }); }
+  throw new Error('unexpected route');
 }
 
-function cimdDocument(overrides: Record<string, unknown> = {}): Response {
-  return new Response(
-    JSON.stringify({
-      client_id: CIMD_CLIENT_ID,
-      client_name: 'Claude',
-      redirect_uris: [CLAUDE_CALLBACK],
-      token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code'],
-      ...overrides
-    }),
-    { status: 200, headers: { 'content-type': 'application/json' } }
-  );
-}
-
-beforeEach(() => {
-  stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+beforeEach(async () => {
+  vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  context = await buildTestContext();
+  store = new MemorySecretStore();
+  await writePairedSecrets(store, {
+    connection: { credentialId: PAIR_ID, readToken: 'read', writeToken: 'write', apiOrigin: 'https://app.lumbre.pro', connectedAt: new Date().toISOString() },
+    recoveryCode: await encodeRecoveryCode({ relayOrigin: 'https://app.lumbre.pro', syncVaultId: VAULT, keyEpoch: 1, vaultKey: randomBytes(32) }),
+    device: { opaqueDeviceId: DEVICE, lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }
+  });
+  approved = false; deviceActive = true; available = true; requestCount = 0; exchangeCount = 0;
   clockOffset = 0;
-  cimdFetch = vi.fn(async (input: string | URL) =>
-    String(input) === CIMD_CLIENT_ID ? cimdDocument() : new Response('no', { status: 404 })
-  );
+  brokerPair = PAIR_ID; brokerVault = VAULT; brokerDevice = DEVICE;
+  grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+  app = await startTestHttpApp(context.serverContext, async (config) => {
+    const auth = await loadOAuthHttpAuth(context.dataDir, config, store,
+      { backchannelFetch: broker, now: () => Date.now() + clockOffset,
+        env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    if (!auth) throw new Error('auth absent');
+    provider = auth.provider;
+    return auth;
+  });
 });
 
 afterEach(async () => {
-  for (const client of clients.splice(0)) await client.close();
-  for (const app of apps.splice(0)) await app.close();
-  await test?.close();
-  test = undefined;
-  stderrSpy?.mockRestore();
-  stderrSpy = undefined;
+  await app?.close(); await context?.close(); vi.restoreAllMocks();
 });
-
-async function startApp(): Promise<TestHttpApp> {
-  test ??= await buildTestContext();
-  if (!(await readOwnerRecord(test.dataDir))) await setOwnerSecret(test.dataDir, SECRET);
-  const app = await startTestHttpApp(test.serverContext, async (config) => {
-    const auth = await loadOAuthHttpAuth(test!.dataDir, config, {
-      fetch: cimdFetch as never,
-      now: () => Date.now() + clockOffset
-    });
-    if (!auth) throw new Error('sin auth');
-    return auth;
-  });
-  apps.push(app);
-  return app;
-}
 
 function pkce(): { verifier: string; challenge: string } {
   const verifier = randomBytes(32).toString('base64url');
   return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
 }
 
-async function authorizePage(
-  app: TestHttpApp,
-  params: Record<string, string>
-): Promise<globalThis.Response> {
+async function authorize(challenge: string, ip?: string): Promise<Response> {
   const url = new URL(`${app.origin}/authorize`);
-  const all: Record<string, string> = {
-    response_type: 'code',
-    client_id: DCR_CLIENT_ID,
-    redirect_uri: CLAUDE_CALLBACK,
-    code_challenge_method: 'S256',
-    state: 'estado-de-prueba',
-    scope: 'hebra:mcp',
-    resource: app.config.resourceUrl,
-    ...params
-  };
-  for (const [key, value] of Object.entries(all)) url.searchParams.set(key, value);
-  return fetch(url, { redirect: 'manual' });
+  for (const [key, value] of Object.entries({ response_type: 'code', client_id: DCR_CLIENT_ID, redirect_uri: CLAUDE_CALLBACK,
+    code_challenge_method: 'S256', code_challenge: challenge, scope: 'hebra:mcp', resource: app.config.resourceUrl,
+    state: 'estado' })) url.searchParams.set(key, value);
+  return fetch(url, { redirect: 'manual', ...(ip ? { headers: { 'x-forwarded-for': ip } } : {}) });
 }
 
-function requestIdOf(html: string): string {
-  const match = /name="request" value="([^"]+)"/.exec(html);
-  if (!match) throw new Error('la página no trae solicitud');
-  return match[1]!;
+function callback(decision: string, id = requestId): Promise<Response> {
+  return fetch(`${app.origin}/oauth/lumbre/callback?request=${id}&decision=${decision}`, { redirect: 'manual' });
 }
 
-async function consent(app: TestHttpApp, requestId: string, secret: string): Promise<globalThis.Response> {
-  return fetch(`${app.origin}/oauth/consent`, {
-    method: 'POST',
-    redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ request: requestId, secret }).toString()
-  });
+async function token(body: Record<string, string>): Promise<Response> {
+  return fetch(`${app.origin}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: DCR_CLIENT_ID, ...body }) });
 }
 
-/** Autoriza con el secreto y devuelve el código (y el verifier que lo acompaña). */
-async function obtainCode(
-  app: TestHttpApp,
-  clientId = DCR_CLIENT_ID
-): Promise<{ code: string; verifier: string }> {
+function mcpCall(accessToken: string): Promise<Response> {
+  return fetch(`${app.origin}/mcp`, { method: 'POST', headers: {
+    authorization: `Bearer ${accessToken}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
+}
+
+async function approvedCode(): Promise<{ code: string; verifier: string }> {
   const { verifier, challenge } = pkce();
-  const page = await authorizePage(app, { client_id: clientId, code_challenge: challenge });
-  expect(page.status).toBe(200);
-  const response = await consent(app, requestIdOf(await page.text()), SECRET);
-  expect(response.status).toBe(302);
-  const location = new URL(response.headers.get('location')!);
-  expect(`${location.origin}${location.pathname}`).toBe(CLAUDE_CALLBACK);
-  expect(location.searchParams.get('state')).toBe('estado-de-prueba');
-  expect(location.searchParams.get('iss')).toBe(app.origin);
-  return { code: location.searchParams.get('code')!, verifier };
+  const start = await authorize(challenge);
+  expect(start.status).toBe(302);
+  expect(start.headers.get('location')).toBe(`https://app.lumbre.pro/integrations/hebra-mcp?request=${requestId}`);
+  approved = true;
+  const end = await callback('approved');
+  expect(end.status).toBe(302);
+  const target = new URL(end.headers.get('location')!);
+  expect(`${target.origin}${target.pathname}`).toBe(CLAUDE_CALLBACK);
+  expect(target.searchParams.get('state')).toBe('estado');
+  expect(target.searchParams.get('iss')).toBe(app.origin);
+  return { code: target.searchParams.get('code')!, verifier };
 }
 
-async function tokenRequest(app: TestHttpApp, params: Record<string, string>): Promise<globalThis.Response> {
-  return fetch(`${app.origin}/token`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ client_id: DCR_CLIENT_ID, ...params }).toString()
+async function issuedTokens(): Promise<{ access_token: string; refresh_token: string }> {
+  const { code, verifier } = await approvedCode();
+  const result = await token({ grant_type: 'authorization_code', code, code_verifier: verifier,
+    redirect_uri: CLAUDE_CALLBACK, resource: app.config.resourceUrl });
+  expect(result.status).toBe(200);
+  return await result.json() as { access_token: string; refresh_token: string };
+}
+
+describe('consentimiento y vínculo exacto', () => {
+  it('conecta con PKCE, código de un uso y bearer guardado fuera de metadata', async () => {
+    const { code, verifier } = await approvedCode();
+    const first = await token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: CLAUDE_CALLBACK });
+    expect(first.status).toBe(200);
+    expect((await token({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: CLAUDE_CALLBACK })).status).toBe(400);
+    const issued = await first.json() as { access_token: string; refresh_token: string };
+    await expect(provider.verifyAccessToken(issued.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    const metadata = await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8');
+    expect(metadata).not.toContain(UPSTREAM);
+    expect(metadata).not.toContain(issued.access_token);
+    expect(metadata).not.toContain(issued.refresh_token);
+    expect(metadata).toContain('"version":2');
   });
-}
 
-async function exchange(app: TestHttpApp, code: string, verifier: string): Promise<globalThis.Response> {
-  return tokenRequest(app, {
-    grant_type: 'authorization_code',
-    code,
-    code_verifier: verifier,
-    redirect_uri: CLAUDE_CALLBACK,
-    resource: app.config.resourceUrl
+  it('denied falsificado, callback manipulado y transacción equivocada no conceden acceso', async () => {
+    const { verifier, challenge } = pkce();
+    await authorize(challenge);
+    expect((await callback('denied')).status).toBe(400);
+    expect((await callback('approved', crypto.randomUUID())).status).toBe(400);
+    expect((await fetch(`${app.origin}/oauth/lumbre/callback?request=${requestId}&decision=approved&extra=1`)).status).toBe(400);
+    approved = true;
+    transactionId = 'otro';
+    expect((await callback('approved')).status).toBe(400);
+    expect(exchangeCount).toBe(1);
+    expect((await token({ grant_type: 'authorization_code', code: 'wrong', code_verifier: verifier })).status).toBe(400);
   });
-}
 
-async function obtainTokens(app: TestHttpApp): Promise<OAuthTokens> {
-  const { code, verifier } = await obtainCode(app);
-  const response = await exchange(app, code, verifier);
-  expect(response.status).toBe(200);
-  return (await response.json()) as OAuthTokens;
-}
-
-/** `initialize` por `POST /mcp` con el bearer: el estado HTTP dice si pasó la auth. */
-async function mcpStatus(app: TestHttpApp, accessToken: string | null, path = '/mcp'): Promise<globalThis.Response> {
-  return fetch(`${app.origin}${path}`, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      accept: 'application/json, text/event-stream',
-      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
-    },
-    body: JSON.stringify({
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'initialize',
-      params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 't', version: '0' } }
-    })
+  it('revocar solo el dispositivo Blob V2 corta access y refresh aunque la credencial siga', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    deviceActive = false;
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    const refresh = await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token });
+    expect(refresh.status).toBe(400);
   });
-}
 
-/** `OAuthClientProvider` en memoria, como el de claude.ai: el callback de claude.ai y
- *  la URL de autorización capturada en vez de abrir un navegador. */
-class MemoryOAuthClient implements OAuthClientProvider {
-  info: OAuthClientInformationMixed | undefined;
-  saved: OAuthTokens | undefined;
-  verifier = '';
-  authorizationUrl: URL | undefined;
+  it('otro dispositivo activo o emparejado sustituido no hereda la familia', async () => {
+    const issued = await issuedTokens();
+    await store.set('device-identity', JSON.stringify({ opaqueDeviceId: OTHER_DEVICE,
+      lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }));
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+  });
 
-  constructor(readonly clientMetadataUrl?: string) {}
-
-  get redirectUrl(): string {
-    return CLAUDE_CALLBACK;
-  }
-
-  get clientMetadata(): OAuthClientMetadata {
-    return {
-      client_name: 'Claude',
-      redirect_uris: [CLAUDE_CALLBACK],
-      token_endpoint_auth_method: 'none',
-      grant_types: ['authorization_code', 'refresh_token'],
-      response_types: ['code']
-    };
-  }
-
-  state(): string {
-    return 'estado-de-prueba';
-  }
-
-  clientInformation() {
-    return this.info;
-  }
-
-  saveClientInformation(info: OAuthClientInformationMixed): void {
-    this.info = info;
-  }
-
-  tokens() {
-    return this.saved;
-  }
-
-  saveTokens(tokens: OAuthTokens): void {
-    this.saved = tokens;
-  }
-
-  redirectToAuthorization(url: URL): void {
-    this.authorizationUrl = url;
-  }
-
-  saveCodeVerifier(verifier: string): void {
-    this.verifier = verifier;
-  }
-
-  codeVerifier(): string {
-    return this.verifier;
-  }
-}
-
-/** El flujo entero con el cliente del SDK; devuelve un cliente MCP ya autorizado. */
-async function sdkFlow(app: TestHttpApp, provider: MemoryOAuthClient): Promise<Client> {
-  const mcpUrl = new URL(`${app.origin}/mcp`);
-  const first = new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider });
-  const unauthorized = new Client({ name: 'claude-de-prueba', version: '0.0.0' });
-  await expect(unauthorized.connect(first)).rejects.toThrow();
-  expect(provider.authorizationUrl).toBeDefined();
-
-  const page = await fetch(provider.authorizationUrl!, { redirect: 'manual' });
-  expect(page.status).toBe(200);
-  expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
-  const approved = await consent(app, requestIdOf(await page.text()), SECRET);
-  expect(approved.status).toBe(302);
-  const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
-  await first.finishAuth(code);
-  expect(provider.saved?.access_token).toMatch(/^hmcp_at_/);
-
-  const client = new Client({ name: 'claude-de-prueba', version: '0.0.0' });
-  await client.connect(new StreamableHTTPClientTransport(mcpUrl, { authProvider: provider }));
-  clients.push(client);
-  return client;
-}
-
-describe('metadata', () => {
-  it('PRM en la raíz y en /mcp, AS con CIMD y registro, issuer sin barra final', async () => {
-    const app = await startApp();
-    for (const path of ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp']) {
-      const prm = (await (await fetch(`${app.origin}${path}`)).json()) as Record<string, unknown>;
-      expect(prm).toMatchObject({
-        resource: `${app.origin}/mcp`,
-        authorization_servers: [app.origin],
-        scopes_supported: ['hebra:mcp']
-      });
+  it('un canje con biblioteca, credencial o dispositivo diferente no emite código', async () => {
+    for (const change of [
+      () => { brokerDevice = OTHER_DEVICE; },
+      () => { brokerVault = OTHER_DEVICE; },
+      () => { brokerPair = '44444444-4444-4444-8444-444444444444'; }
+    ]) {
+      await authorize(pkce().challenge);
+      approved = true;
+      change();
+      expect((await callback('approved')).status).toBe(400);
+      brokerDevice = DEVICE; brokerVault = VAULT; brokerPair = PAIR_ID;
     }
-    const as = (await (await fetch(`${app.origin}/.well-known/oauth-authorization-server`)).json()) as Record<
-      string,
-      unknown
-    >;
-    expect(as).toMatchObject({
-      issuer: app.origin,
-      authorization_endpoint: `${app.origin}/authorize`,
-      token_endpoint: `${app.origin}/token`,
-      registration_endpoint: `${app.origin}/register`,
-      code_challenge_methods_supported: ['S256'],
-      token_endpoint_auth_methods_supported: ['none'],
-      client_id_metadata_document_supported: true
-    });
-  });
-});
-
-describe('flujo completo con el cliente del SDK', () => {
-  it('por registro dinámico: autorización → token → herramienta', async () => {
-    const app = await startApp();
-    const provider = new MemoryOAuthClient();
-    const client = await sdkFlow(app, provider);
-    expect(provider.info?.client_id).toBe(DCR_CLIENT_ID);
-    const result = (await client.callTool({ name: 'hebra_status', arguments: {} })) as CallToolResult;
-    expect(JSON.parse(textOf(result))).toMatchObject({ linked: false });
   });
 
-  it('por CIMD (lo que usa claude.ai con lumbre-mcp): el documento se descarga de claude.ai', async () => {
-    const app = await startApp();
-    const provider = new MemoryOAuthClient(CIMD_CLIENT_ID);
-    const client = await sdkFlow(app, provider);
-    expect(provider.info?.client_id).toBe(CIMD_CLIENT_ID);
-    expect(cimdFetch).toHaveBeenCalledWith(CIMD_CLIENT_ID, expect.objectContaining({ redirect: 'manual' }));
-    const { tools } = await client.listTools();
-    expect(tools).toHaveLength(9);
+  it('revocación entre solicitud y canje no emite código', async () => {
+    await authorize(pkce().challenge);
+    approved = true;
+    deviceActive = false;
+    expect((await callback('approved')).status).toBe(400);
   });
 
-  it('ningún secreto, código ni token llega a stderr', async () => {
-    const app = await startApp();
-    const provider = new MemoryOAuthClient();
-    await sdkFlow(app, provider);
-    const logged = stderrText();
-    expect(logged).not.toContain(SECRET);
-    expect(logged).not.toContain(provider.saved!.access_token);
-    expect(logged).not.toContain(provider.saved!.refresh_token!);
-    expect(logged).not.toContain('estado-de-prueba');
-  });
-});
-
-describe('negativos', () => {
-  it('sin token: 401 con resource_metadata; el token en la URL no vale', async () => {
-    const app = await startApp();
-    const response = await mcpStatus(app, null);
-    expect(response.status).toBe(401);
-    expect(response.headers.get('www-authenticate')).toContain(
-      `resource_metadata="${app.origin}/.well-known/oauth-protected-resource/mcp"`
-    );
-    const tokens = await obtainTokens(app);
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(200);
-    expect((await mcpStatus(app, null, `/mcp?access_token=${tokens.access_token}`)).status).toBe(401);
-    expect((await mcpStatus(app, 'hmcp_at_inventado')).status).toBe(401);
-  });
-
-  it('secreto erróneo: 401 sin código; a los 5 fallos la solicitud deja de valer', async () => {
-    const app = await startApp();
-    const { challenge } = pkce();
-    const requestId = requestIdOf(await (await authorizePage(app, { code_challenge: challenge })).text());
-    const wrong = await consent(app, requestId, `${SECRET}x`);
-    expect(wrong.status).toBe(401);
-    expect(wrong.headers.get('location')).toBeNull();
-    // Todavía vale con el secreto bueno.
-    expect((await consent(app, requestId, SECRET)).status).toBe(302);
-
-    // Otra app sobre el mismo directorio: su propio contador de fallos por IP.
-    const fresh = await startApp();
-    const again = requestIdOf(await (await authorizePage(fresh, { code_challenge: challenge })).text());
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      expect((await consent(fresh, again, 'no-es-el-secreto')).status).toBe(401);
-    }
-    // El quinto fallo agota la IP: 429, y ya ni el secreto bueno pasa.
-    expect((await consent(fresh, again, 'no-es-el-secreto')).status).toBe(429);
-    expect((await consent(fresh, again, SECRET)).status).toBe(429);
-  });
-
-  it('redirect_uri o client_id ajenos: rechazados sin redirigir', async () => {
-    const app = await startApp();
-    const { challenge } = pkce();
-    const evilRedirect = await authorizePage(app, {
-      code_challenge: challenge,
-      redirect_uri: 'https://evil.example/callback'
-    });
-    expect(evilRedirect.status).toBe(400);
-    expect(evilRedirect.headers.get('location')).toBeNull();
-
-    const register = await fetch(`${app.origin}/register`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ redirect_uris: ['https://evil.example/callback'], token_endpoint_auth_method: 'none' })
-    });
-    expect(register.status).toBe(400);
-
-    for (const clientId of ['https://evil.example/client.json', 'https://claude.ai/', 'otro-cliente']) {
-      const response = await authorizePage(app, { code_challenge: challenge, client_id: clientId });
-      expect(response.status).toBe(400);
-    }
-    // Un documento CIMD de claude.ai que no registra el callback tampoco vale.
-    cimdFetch.mockImplementation(async () => cimdDocument({ redirect_uris: ['https://claude.ai/otro'] }));
-    expect((await authorizePage(app, { code_challenge: challenge, client_id: CIMD_CLIENT_ID })).status).toBe(400);
-  });
-
-  it('code_verifier erróneo: invalid_grant, y el código queda quemado', async () => {
-    const app = await startApp();
-    const { code, verifier } = await obtainCode(app);
-    const wrong = await exchange(app, code, pkce().verifier);
+  it('PKCE erróneo consume código y revoca la concesión upstream', async () => {
+    const { code } = await approvedCode();
+    const wrong = await token({ grant_type: 'authorization_code', code,
+      code_verifier: randomBytes(32).toString('base64url'), redirect_uri: CLAUDE_CALLBACK });
     expect(wrong.status).toBe(400);
-    expect(((await wrong.json()) as { error: string }).error).toBe('invalid_grant');
-    expect((await exchange(app, code, verifier)).status).toBe(400);
+    expect(approved).toBe(false);
+    expect((await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8').catch(() => ''))).not.toContain(UPSTREAM);
   });
 
-  it('código reutilizado: el segundo canje falla', async () => {
-    const app = await startApp();
-    const { code, verifier } = await obtainCode(app);
-    expect((await exchange(app, code, verifier)).status).toBe(200);
-    const reused = await exchange(app, code, verifier);
-    expect(reused.status).toBe(400);
-    expect(((await reused.json()) as { error: string }).error).toBe('invalid_grant');
+  it('refresh rotatorio, replay y revoke local cortan la familia', async () => {
+    const issued = await issuedTokens();
+    const refreshed = await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token });
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json() as { access_token: string; refresh_token: string };
+    expect(next.refresh_token).not.toBe(issued.refresh_token);
+    await provider.revokeToken({ client_id: DCR_CLIENT_ID } as never, { token: next.access_token } as never);
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect(approved).toBe(false);
   });
 
-  it('refresh reutilizado: revoca la familia entera', async () => {
-    const app = await startApp();
-    const first = await obtainTokens(app);
-    const rotated = await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: first.refresh_token! });
-    expect(rotated.status).toBe(200);
-    const second = (await rotated.json()) as OAuthTokens;
-    expect(second.refresh_token).not.toBe(first.refresh_token);
-    expect((await mcpStatus(app, second.access_token)).status).toBe(200);
-
-    // Pasada la ventana de gracia de 30 s (dentro, ver test/http/oauth-audit.test.ts).
-    clockOffset += 31_000;
-    const replay = await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: first.refresh_token! });
-    expect(replay.status).toBe(400);
-    // La familia cayó entera: ni el refresh vigente ni sus access valen ya.
-    expect((await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: second.refresh_token! })).status).toBe(
-      400
-    );
-    expect((await mcpStatus(app, second.access_token)).status).toBe(401);
-    expect((await mcpStatus(app, first.access_token)).status).toBe(401);
+  it('reinicio conserva familia v2 válida e ignora un fichero v1 antiguo', async () => {
+    const issued = await issuedTokens();
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    await expect(reopened!.provider.verifyAccessToken(issued.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    await writeFile(join(context.dataDir, OAUTH_TOKENS_FILE), JSON.stringify({ version: 1, families: [] }));
+    const legacy = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    await expect(legacy!.provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect(await store.get('recovery-code')).toMatch(/^hebra-recovery-v2:/);
   });
 
-  it('token revocado por /revoke: 401', async () => {
-    const app = await startApp();
-    const tokens = await obtainTokens(app);
-    const revoked = await fetch(`${app.origin}/revoke`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ client_id: DCR_CLIENT_ID, token: tokens.access_token }).toString()
-    });
-    expect(revoked.status).toBe(200);
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(401);
+  it('reiniciar con un código aún no canjeado revoca su concesión pendiente', async () => {
+    await approvedCode();
+    expect(approved).toBe(true);
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    expect(reopened).not.toBeNull();
+    expect(approved).toBe(false);
+    expect(await store.get('hebra-mcp-oauth-pending')).toBe('{}');
   });
 
-  it('oauth-revoke-all corta al momento, con el servidor en marcha', async () => {
-    const app = await startApp();
-    const tokens = await obtainTokens(app);
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(200);
-    const printed: string[] = [];
-    await runOAuthRevokeAll(test!.dataDir, { print: (line) => printed.push(line) }, Date.now() + 1);
-    expect(printed).toHaveLength(1);
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(401);
-    expect((await tokenRequest(app, { grant_type: 'refresh_token', refresh_token: tokens.refresh_token! })).status).toBe(
-      400
-    );
-    // Una autorización nueva vuelve a funcionar.
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect((await mcpStatus(app, (await obtainTokens(app)).access_token)).status).toBe(200);
+  it('fallo de persistencia no entrega tokens y revoca la concesión canjeada', async () => {
+    const { code, verifier } = await approvedCode();
+    const set = store.set.bind(store);
+    vi.spyOn(store, 'set').mockImplementation((key, value) =>
+      key === 'hebra-mcp-oauth-grants' ? Promise.reject(new Error('disk full')) : set(key, value));
+    const result = await token({ grant_type: 'authorization_code', code, code_verifier: verifier,
+      redirect_uri: CLAUDE_CALLBACK });
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(approved).toBe(false);
+    expect((await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8').catch(() => ''))).not.toContain(GRANT_ID);
   });
-});
 
-describe('almacenamiento', () => {
-  it('solo hashes en disco, 0600, y los tokens sobreviven a un reinicio', async () => {
-    const app = await startApp();
-    const tokens = await obtainTokens(app);
-    const tokensFile = join(test!.dataDir, OAUTH_TOKENS_FILE);
-    const ownerFile = join(test!.dataDir, OAUTH_OWNER_FILE);
-    for (const file of [tokensFile, ownerFile]) {
-      expect(statSync(file).mode & 0o777).toBe(0o600);
-      const text = readFileSync(file, 'utf8');
-      expect(text).not.toContain(tokens.access_token);
-      expect(text).not.toContain(tokens.refresh_token!);
-      expect(text).not.toContain(SECRET);
-    }
-    await app.close();
-    apps.splice(apps.indexOf(app), 1);
-    const restarted = await startApp();
-    expect((await mcpStatus(restarted, tokens.access_token)).status).toBe(200);
+  it('fallo temporal de introspección rechaza acceso sin revocar la familia', async () => {
+    const issued = await issuedTokens();
+    available = false;
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    const outage = await mcpCall(issued.access_token);
+    expect(outage.status).toBe(503);
+    expect(await outage.json()).toEqual({ error: 'temporarily_unavailable' });
+    expect(outage.headers.get('www-authenticate')).toBeNull();
+    available = true;
+    await expect(provider.verifyAccessToken(issued.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
   });
-});
 
-describe('oauth-set-secret', () => {
-  function io(answers: string[], interactive = true) {
-    const printed: string[] = [];
-    return {
-      printed,
-      io: {
-        interactive,
-        readSecret: async () => answers.shift() ?? '',
-        print: (line: string) => printed.push(line)
-      }
-    };
-  }
+  it('dos refresh simultáneos conservan la familia; un replay pasado el margen la corta', async () => {
+    const issued = await issuedTokens();
+    const [a, b] = await Promise.all([
+      token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token }),
+      token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 400]);
+    const winner = await (a.status === 200 ? a : b).json() as { access_token: string };
+    await expect(provider.verifyAccessToken(winner.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    clockOffset = 31_000;
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+    await expect(provider.verifyAccessToken(winner.access_token)).rejects.toThrow();
+  });
 
-  it('rechaza un secreto corto o que no coincide, y fijar uno nuevo revoca los tokens', async () => {
-    const app = await startApp();
-    const tokens = await obtainTokens(app);
-    await expect(runOAuthSetSecret(test!.dataDir, io(['corto', 'corto']).io)).rejects.toBeInstanceOf(OAuthCliError);
-    await expect(runOAuthSetSecret(test!.dataDir, io([SECRET, `${SECRET}x`]).io)).rejects.toMatchObject({
-      code: 'owner_secret_mismatch'
-    });
-    // Nada cambió: el token sigue valiendo.
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(200);
+  it('una IP no desplaza las solicitudes de otra y Origin:null ya no es excepción', async () => {
+    for (let index = 0; index < 4; index += 1) expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(302);
+    expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(429);
+    expect((await authorize(pkce().challenge, '10.0.0.2')).status).toBe(302);
+    expect(requestCount).toBe(5);
+    const oldForm = await fetch(`${app.origin}/oauth/consent`, { method: 'POST', headers: { origin: 'null' } });
+    expect(oldForm.status).toBe(403);
+    expect((await fetch(`${app.origin}/oauth/lumbre/callback?request=${requestId}&decision=approved`,
+      { headers: { origin: 'null' } })).status).toBe(403);
+  });
 
-    const next = `${SECRET}-nuevo`;
-    const ok = io([next], false);
-    await runOAuthSetSecret(test!.dataDir, ok.io, Date.now() + 1);
-    expect(ok.printed.join('\n')).not.toContain(next);
-    expect((await mcpStatus(app, tokens.access_token)).status).toBe(401);
-    // El viejo ya no autoriza; el nuevo sí.
-    const { challenge } = pkce();
-    const requestId = requestIdOf(await (await authorizePage(app, { code_challenge: challenge })).text());
-    expect((await consent(app, requestId, SECRET)).status).toBe(401);
-    expect((await consent(app, requestId, next)).status).toBe(302);
+  it('revocación global y reinicio rechazan familias anteriores; el emparejado se conserva', async () => {
+    const issued = await issuedTokens();
+    await revokeAllTokens(context.dataDir, Date.now() + 1);
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect(await store.get('recovery-code')).toMatch(/^hebra-recovery-v2:/);
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    await expect(reopened!.provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+  });
+
+  it('revocar globalmente entre solicitud, código y canje no fabrica una familia nueva', async () => {
+    await authorize(pkce().challenge);
+    await revokeAllTokens(context.dataDir, Date.now() + 1);
+    approved = true;
+    expect((await callback('approved')).status).toBe(400);
+    expect(exchangeCount).toBe(0);
+
+    const { code, verifier } = await approvedCode();
+    await revokeAllTokens(context.dataDir, Date.now() + 2);
+    expect((await token({ grant_type: 'authorization_code', code, code_verifier: verifier,
+      redirect_uri: CLAUDE_CALLBACK })).status).toBe(400);
+    expect((await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8').catch(() => ''))).not.toContain(GRANT_ID);
+  });
+
+  it('fallo de configuración no permite arrancar el OAuth', async () => {
+    expect(await loadOAuthHttpAuth(context.dataDir, app.config, store, { env: {} })).toBeNull();
+    expect(await loadOAuthHttpAuth(context.dataDir, app.config, null,
+      { env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } })).toBeNull();
+  });
+
+  it('un bearer upstream o de otra integración no abre /mcp', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(UPSTREAM)).status).toBe(401);
+    expect((await mcpCall('lmcp_at_' + randomBytes(32).toString('base64url'))).status).toBe(401);
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
   });
 });

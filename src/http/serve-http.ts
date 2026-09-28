@@ -35,7 +35,7 @@ export interface StartServeHttpOptions
   config: HttpConfig;
   version: string;
   /** La autenticación de `/mcp`, o `null` si no está configurada (y entonces no arranca). */
-  loadAuth(dataDir: string, config: HttpConfig): Promise<HttpAuth | null>;
+  loadAuth(dataDir: string, config: HttpConfig, secrets: SecretStore | null): Promise<HttpAuth | null>;
 }
 
 export interface ServeHttpHandle {
@@ -58,11 +58,11 @@ function listen(server: Server, port: number, host: string): Promise<void> {
 }
 
 export async function startServeHttp(options: StartServeHttpOptions): Promise<ServeHttpHandle> {
-  const auth = await options.loadAuth(options.dataDir, options.config);
+  const auth = await options.loadAuth(options.dataDir, options.config, options.secrets);
   if (!auth) {
     throw new ServeHttpError(
       'auth_not_configured',
-      'serve-http no arranca sin el secreto del dueño: fíjalo con `hebra-mcp oauth-set-secret`.'
+      'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
     );
   }
   const serve = await openServeContext({

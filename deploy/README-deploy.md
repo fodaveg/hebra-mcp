@@ -1,12 +1,9 @@
 # Deploy del transporte HTTP remoto (`mcp.hebra.pro`, SPEC.md §12, lote C4)
 
-C1 (secretos en fichero), C2 (`serve-http`) y C3 (OAuth de un dueño) ya están
-integrados en esta rama (`c2-c3-serve-http-oauth`, rebasada bajo `c4-deploy`).
-Los nombres de variables y subcomandos de abajo están confirmados contra el
-código, no contra la SPEC a secas. Aun así, **este runbook sigue sin
-ejecutarse contra el servidor real**: lo que se ha probado es un build y un
-arranque LOCALES (ver "Verificación local hecha para este lote" al final);
-desplegar en el VPS de verdad es el paso siguiente, fuera de este lote.
+C1 (secretos en fichero) y C2 (`serve-http`) conservan su transporte. El OAuth público
+C3 cambia la aprobación al login y consentimiento de Lumbre (SPEC.md §12.2).
+Este cambio es un candidato local: el broker, el secreto compartido, el despliegue
+coordinado y la QA real requieren su propia evidencia antes de declararlo servido.
 
 ## Variables y subcomandos (confirmados)
 
@@ -16,11 +13,12 @@ desplegar en el VPS de verdad es el paso siguiente, fuera de este lote.
 | Nombre | Qué es | Por defecto | Fuente |
 |---|---|---|---|
 | `serve-http` | Subcomando que arranca el transporte HTTP | — | `src/server/main.ts` |
-| `oauth-set-secret` | Subcomando que fija el secreto del dueño **por stdin** (dos veces sin eco en TTY; una lectura completa por tubería) y revoca los tokens anteriores | — | `src/oauth/cli.ts` |
+| `oauth-set-secret` | Comando retirado: falla con mensaje de método sustituido | — | `src/oauth/cli.ts` |
 | `oauth-revoke-all` | Subcomando que revoca todos los tokens vigentes | — | `src/oauth/cli.ts` |
 | `/healthz` | Ruta de liveness, sin autenticación, responde **204 sin cuerpo** | — | `src/http/app.ts` |
 | `/mcp` | Ruta del transporte Streamable HTTP (`POST`; `GET`/`DELETE` dan 405) | — | `src/http/app.ts` |
-| `HEBRA_MCP_DATA_DIR` | Directorio de datos: SQLite, `config.json` de privados, secretos de fichero (C1) y `oauth-owner.json`/`oauth-tokens.json` (C3) | ninguno (obligatorio en el contenedor) | `src/privacy/data-dir.ts` |
+| `HEBRA_MCP_DATA_DIR` | Directorio de datos: SQLite, privados, secretos, `oauth-revocations-v2.json` y `oauth-tokens.json` | ninguno (obligatorio en el contenedor) | `src/privacy/data-dir.ts` |
+| `HEBRA_MCP_BACKCHANNEL_SECRET` | Bearer exclusivo de Hebra MCP, compartido con el broker Lumbre; 32–512 caracteres, sin CR/LF | ninguno (obligatorio) | `src/oauth/http-auth.ts` |
 | `HEBRA_MCP_SECRET_STORE` | Modo del almacén de secretos: `keychain` o `file`, selección EXPLÍCITA, nunca fallback | `keychain` (aquí se fija `file`) | `src/secrets/store-mode.ts` |
 | `HEBRA_MCP_HTTP_LISTEN` | Interfaz de escucha | `127.0.0.1` (aquí se fija `0.0.0.0`, o Caddy no llegaría por la red `edge`) | `src/http/config.ts` |
 | `HEBRA_MCP_HTTP_PORT` | Puerto de escucha | `8787` | `src/http/config.ts` |
@@ -145,94 +143,38 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
      docker compose -f deploy/compose.yml up -d --build"
    ```
 
-   **En el PRIMER despliegue, esto deja el contenedor en bucle de
-   reinicio.** `serve-http` no arranca sin el secreto del dueño configurado
-   (`ServeHttpError('auth_not_configured')`, `src/http/serve-http.ts`), así
-   que sale con 1 nada más arrancar y `restart: unless-stopped` lo reinicia
-   sin parar — sano no se pone hasta fijar el secreto (paso siguiente).
+   Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en el entorno
+   privado con el mismo valor que el broker Lumbre. `compose.yml` exige su presencia;
+   el valor no se copia al repositorio. El dispositivo remoto ya debe estar emparejado
+   mediante el procedimiento C5. Si falta configuración, `serve-http` sale cerrado.
 
-5. Fijar el secreto del dueño (ver "Configurar el secreto del dueño" abajo);
-   **es obligatorio en el primer despliegue**, no un paso posterior opcional.
-
-6. Comprobar salud (ver "Verificar la aceptación de C4" más abajo) antes de
+5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.
 
 **No hay `git pull` en el servidor**, por el submódulo privado (ver arriba). Si
 algún día se decide clonar el árbol público sin `vendor/hebra` y compilar en el
 propio VPS, este paso cambiaría; hoy no es el caso.
 
-## Configurar el secreto del dueño
+## Configurar el broker y revocar acceso
 
-El flujo OAuth de un solo dueño (C3, SPEC.md §12.2) necesita el secreto del
-dueño ya fijado ANTES de que `serve-http` acepte el primer `/authorize` — y,
-desde este lote, ANTES de que arranque siquiera (ver el bucle de reinicio del
-paso 4 de arriba). Se fija **por stdin**, nunca como argumento de proceso
-(aparecería en `ps` de cualquiera con acceso al host) ni como variable de
-entorno en `compose.yml` (quedaría en texto plano en un fichero versionable y
-en `docker inspect`):
+Provisionar el mismo `HEBRA_MCP_BACKCHANNEL_SECRET` exclusivo en Lumbre y en el
+entorno privado desde el que se ejecuta `docker compose`; 32–512 caracteres,
+sin saltos de línea. Se transmite solo por TLS en `Authorization: Bearer`.
+`LUMBRE_MCP_BACKCHANNEL_SECRET` es otra credencial y no sirve aquí. No registrar
+el valor en este runbook, en Compose ni en los logs. El proceso debe conservar
+su emparejado existente: el login no sustituye la clave de biblioteca.
 
-```bash
-ssh -t "$HEBRA_MCP_HOST" \
-  "cd $HEBRA_MCP_DEST && docker compose run --rm --no-deps mcp \
-    node dist/cli.mjs oauth-set-secret"
-# … lo pide dos veces sin eco (con `-t` se propaga un TTY real hasta el
-# contenedor); si se prefiere sin TTY (script, CI), se puede canalizar por
-# tubería y entonces NO repite la pregunta:
-#   printf '%s' "$SECRETO" | ssh "$HEBRA_MCP_HOST" \
-#     "cd $HEBRA_MCP_DEST && docker compose run --rm --no-deps -T mcp \
-#       node dist/cli.mjs oauth-set-secret"
-```
-
-**Por qué `compose run` y no `compose exec` (y por qué esto NO contradice la
-regla general de "nunca `run`"):** en el primer despliegue no hay ningún
-contenedor en estado `running` de forma estable al que hacer `exec` — está en
-bucle de reinicio precisamente por falta de este secreto. `docker compose run
---rm --no-deps` crea un contenedor de usar-y-tirar sobre el MISMO volumen
-`hebra-mcp_data`, sin depender de que el servicio principal esté arriba.
-
-Esto sería peligroso si `oauth-set-secret` abriera la biblioteca o el bloqueo
-de escritor (la regla general de SPEC.md §12.5 — "los comandos de
-mantenimiento van por `compose exec`, nunca por `run`" — existe justo porque
-`writer-lock.ts` identifica al escritor por PID, y dentro de un contenedor el
-PID se reutiliza desde 1: un segundo contenedor escritor tomaría el bloqueo
-del primero por huérfano). **Verificado leyendo el código** (`src/oauth/cli.ts`,
-`src/oauth/owner.ts`, `src/server/main.ts`): `oauth-set-secret` y
-`oauth-revoke-all` NUNCA llaman a `openServeContext` ni a nada de
-`src/server/serve.ts` — `oauthCommand()` en `main.ts` solo les pasa
-`resolveDataDir()`, y las dos funciones (`setOwnerSecret`,
-`revokeAllTokens`) solo leen y escriben `oauth-owner.json` con
-`writeJsonAtomic` (`src/oauth/files.ts`). No tocan la SQLite, no tocan
-`writer.lock`, no sincronizan. Por eso el `run --rm --no-deps` de estos DOS
-subcomandos concretos es seguro incluso con `serve-http` ya corriendo al lado
-sobre el mismo volumen: `serve-http` solo LEE ese fichero (`OwnerFile.current()`,
-un `stat` + relectura si cambió) y recoge el cambio sin reiniciar.
-
-**La regla general sigue en pie para todo lo demás**: `serve`, `pair`,
-`unpair` y cualquier subcomando futuro que abra la biblioteca siguen
-prohibidos por `run` mientras `serve-http` (o cualquier otro proceso escritor)
-esté vivo sobre el mismo volumen. Si algún día se añade un tercer subcomando
-de mantenimiento, hay que repetir esta misma comprobación de código antes de
-asumir que también es seguro por `run`.
-
-## Revocar acceso
-
-Mismo motivo que arriba (`oauth-revoke-all` tampoco toca la biblioteca ni el
-bloqueo de escritor, solo `oauth-owner.json`): por `run --rm --no-deps`, tanto
-si `serve-http` está sano como si está en bucle de reinicio.
+Al revocar todas las familias locales, ejecutar sobre el volumen activo:
 
 ```bash
-ssh "$HEBRA_MCP_HOST" \
-  "cd $HEBRA_MCP_DEST && docker compose run --rm --no-deps -T mcp \
-    node dist/cli.mjs oauth-revoke-all"
+ssh "$HEBRA_MCP_HOST"   "cd $HEBRA_MCP_DEST && docker compose -f deploy/compose.yml exec -T mcp     node dist/cli.mjs oauth-revoke-all"
 ```
 
-Revoca todos los tokens emitidos (access y refresh); claude.ai tendría que
-volver a pasar por `/authorize` y el secreto del dueño. El corte inmediato y
-sin depender de que el proceso reaccione es parar el contenedor:
-
-```bash
-ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && docker compose stop mcp"
-```
+Esto mueve `oauth-revocations-v2.json` y corta los access/refresh locales.
+La revocación de concesiones concretas se gestiona en
+`https://app.lumbre.pro/integrations/hebra-mcp`; un `active: false` corta su
+familia local en el siguiente acceso. Revocar el emparejado o el dispositivo
+Blob V2 también impide abrir notas cacheadas. No borra claves ni SQLite.
 
 ## Emparejado remoto (C5, SPEC.md §12.4)
 
@@ -402,111 +344,11 @@ Pendiente, fuera del alcance de C4: decidir si se quiere un backup cifrado
 propio (mismo patrón `age` que los otros dos scripts) para `hebra-mcp_data`, o
 si se acepta el mismo riesgo que ya se acepta hoy para `lumbre-mcp_state`.
 
-## Verificación local hecha para este lote (26 sep 2026)
+## Evidencia histórica y verificación actual
 
-Todo esto es LOCAL (Mac, Docker Desktop), sin tocar el servidor. Comandos y
-salida literal:
-
-```
-$ npm run build && npm run check:bundle
-[...]
-check:bundle: 4 fichero(s) de dist/ sin imports de Tauri/$app/svelte, sin globales del DOM [...]
-
-$ npm run typecheck
-> tsc --noEmit
-(sin salida = sin errores)
-
-$ docker build -f deploy/Dockerfile -t hebra-mcp-test:local .
-[...] DONE (build correcto)
-
-$ docker build -f deploy/Dockerfile --check .
-Check complete, no warnings found.
-
-$ docker compose -f deploy/compose.yml config
-(sin errores; YAML resuelto correctamente)
-```
-
-Arranque sin secreto del dueño (volumen recién creado, `chown 1000:1000`
-previo):
-
-```
-$ docker run -d --name hebra-mcp-test [envs de HEBRA_MCP_*, sin oauth-set-secret previo] hebra-mcp-test:local
-$ docker logs hebra-mcp-test
-{"event":"serve_http.failed","code":"auth_not_configured"}
-serve-http no arranca sin el secreto del dueño: fíjalo con `hebra-mcp oauth-set-secret`.
-$ docker inspect --format '{{.State.Status}} exitcode={{.State.ExitCode}}' hebra-mcp-test
-exited exitcode=1
-```
-
-Mensaje claro, código de salida 1, tal como documenta `serveHttpFailureMessage`
-en `src/server/main.ts`. Con `restart: unless-stopped` (lo que trae
-`compose.yml`) esto sería el bucle de reinicio descrito arriba.
-
-Fijar el secreto por `run` (contenedor de usar-y-tirar, sin que el principal
-esté arriba) y reiniciar:
-
-```
-$ printf '%s' "prueba-secreta-de-treintaidos-caracteres-o-mas-1234567890" | \
-    docker run --rm -i [mismos envs] hebra-mcp-test:local node dist/cli.mjs oauth-set-secret
-Secreto guardado (solo su hash). Todos los tokens anteriores quedan revocados.
-
-$ docker run -d --name hebra-mcp-test [mismos envs, mismo volumen] hebra-mcp-test:local
-$ docker logs hebra-mcp-test
-{"event":"oauth.start","families":0}
-{"event":"serve.start","linked":false}
-{"event":"writer.socket","result":"listening"}
-{"event":"serve_http.listening","port":8787}
-$ docker inspect --format '{{.State.Status}}' hebra-mcp-test
-running
-```
-
-`serve-http` arrancó **sin biblioteca emparejada** (`linked: false`): no exige
-emparejado para arrancar, solo el secreto del dueño (respuesta a la duda que
-dejó abierta el encargo).
-
-Comprobaciones HTTP contra el contenedor local (puerto publicado SOLO para
-esta prueba; en producción no se publica ninguno):
-
-```
-$ curl -si http://127.0.0.1:18787/healthz
-HTTP/1.1 204 No Content
-(sin cuerpo)
-
-$ curl -si -X POST http://127.0.0.1:18787/mcp -H 'Content-Type: application/json' \
-    -H 'Accept: application/json, text/event-stream' \
-    -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
-HTTP/1.1 401 Unauthorized
-WWW-Authenticate: Bearer error="invalid_token", error_description="Missing Authorization header", scope="hebra:mcp", resource_metadata="http://127.0.0.1:18787/.well-known/oauth-protected-resource/mcp"
-{"error":"invalid_token","error_description":"Missing Authorization header"}
-
-$ curl -si http://127.0.0.1:18787/.well-known/oauth-protected-resource
-HTTP/1.1 200 OK
-{"resource":"http://127.0.0.1:18787/mcp","authorization_servers":["http://127.0.0.1:18787"], [...]}
-
-$ curl -si http://127.0.0.1:18787/.well-known/oauth-authorization-server
-HTTP/1.1 200 OK
-{"issuer":"http://127.0.0.1:18787","authorization_endpoint":"http://127.0.0.1:18787/authorize", [...]}
-```
-
-`oauth-revoke-all` por `run` con el contenedor principal SANO al lado, sobre el
-mismo volumen (confirma en la práctica lo que dice el código: no hay conflicto
-de bloqueo):
-
-```
-$ docker run --rm [mismos envs] hebra-mcp-test:local node dist/cli.mjs oauth-revoke-all
-Todos los tokens quedan revocados. Claude tendrá que volver a autorizarse con el secreto.
-$ docker inspect --format '{{.State.Status}}' hebra-mcp-test
-running
-```
-
-Limpieza tras la prueba: `docker rm -f hebra-mcp-test`, `docker rmi
-hebra-mcp-test:local`, `docker volume rm hebra-mcp-test-data`. No queda nada
-de esto en el Mac.
-
-**Lo que esta verificación NO cubre** (fuera de alcance de una prueba local):
-el flujo OAuth completo con el cliente real del SDK contra `mcp.hebra.pro` de
-verdad, el emparejado remoto (C5), el fragmento de Caddy contra el borde real
-(el `trusted_proxies`/CDN de la sección de arriba sigue pendiente de
-reverificar), y el comportamiento bajo `read_only`/`cap_drop: [ALL]` con la
-biblioteca REAL de Hebra sincronizando (aquí solo hubo una SQLite local vacía,
-sin sync).
+Las pruebas locales de Docker del 26 sep 2026 acreditaron el método antiguo
+de secreto del dueño; sus salidas están en el historial de Git y no acreditan
+este cambio de login. Para el candidato actual, ejecutar `npm run check`,
+`docker compose -f deploy/compose.yml config` con la variable privada definida
+y el recorrido real de SPEC.md §12.7. Registrar por separado build, despliegue,
+servicio servido y QA con Claude. Ninguno se infiere de un checkout local.

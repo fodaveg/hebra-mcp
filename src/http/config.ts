@@ -1,8 +1,7 @@
 /**
  * Configuración de `hebra-mcp serve-http` (SPEC.md §12.1), leída del entorno. Nada de
- * esto es secreto: puerto, interfaz de escucha y URL pública. El secreto del dueño
- * (§12.2) nunca pasa por el entorno ni por argumentos: vive, como hash, en el directorio
- * de datos (`hebra-mcp oauth-set-secret`).
+ * esto es secreto: puerto, interfaz de escucha y URL pública. La credencial de
+ * backchannel (§12.2) se configura aparte mediante HEBRA_MCP_BACKCHANNEL_SECRET.
  *
  * - `HEBRA_MCP_HTTP_PORT`: puerto de escucha (por defecto 8787).
  * - `HEBRA_MCP_HTTP_LISTEN`: interfaz de escucha (por defecto `127.0.0.1`; en el

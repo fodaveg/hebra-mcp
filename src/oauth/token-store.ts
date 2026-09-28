@@ -1,5 +1,5 @@
 /**
- * Tokens del OAuth de un solo dueño (SPEC.md §12.2): opacos, aleatorios y guardados solo
+ * Tokens del OAuth con consentimiento Lumbre (SPEC.md §12.2): opacos, aleatorios y guardados solo
  * como SHA-256. Valores de lumbre-mcp (`oauth.ts:25-26`): access de 1 h y familia de
  * refresh de 30 días desde la autorización (vigencia absoluta: pasado ese plazo hay que
  * volver a meter el secreto).
@@ -14,7 +14,7 @@
  *   una lista de refresh usados. Excepción: el refresh recién rotado, presentado en los
  *   30 s siguientes a la rotación (dos refresh simultáneos), da `invalid_grant` sin
  *   revocar nada.
- * - Revocación global: una familia creada hasta `revokedBefore` del dueño
+ * - Revocación global: una familia creada hasta `revokedBefore` local
  *   (`./owner.ts`) está muerta, aunque siga en el fichero.
  * - Persistencia: `oauth-tokens.json` (0600, escritura atómica), que solo escribe este
  *   proceso. Las mutaciones van en cola y se persisten ANTES de devolver el token nuevo:
@@ -24,6 +24,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logEvent } from '../log/logger';
 import { readJsonOrNull, tokensFilePath, writeJsonAtomic } from './files';
+import type { ActiveGrant } from './backchannel';
 
 export const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
 export const REFRESH_FAMILY_TTL_MS = 30 * 24 * 60 * 60_000;
@@ -56,10 +57,11 @@ interface Family {
   previousRefreshHash?: string;
   rotatedAt?: number;
   access: AccessEntry[];
+  grant: ActiveGrant;
 }
 
 interface TokensFile {
-  version: 1;
+  version: 2;
   families: Family[];
 }
 
@@ -77,6 +79,8 @@ export interface VerifiedAccess {
   resource: string;
   /** Segundos desde epoch. */
   expiresAt: number;
+  familyId: string;
+  grant: ActiveGrant;
 }
 
 export type RefreshOutcome =
@@ -107,6 +111,9 @@ function isFamily(value: unknown): value is Family {
     typeof family.refreshHash === 'string' &&
     (family.previousRefreshHash === undefined || typeof family.previousRefreshHash === 'string') &&
     (family.rotatedAt === undefined || typeof family.rotatedAt === 'number') &&
+    typeof family.grant === 'object' && family.grant !== null &&
+    typeof (family.grant as ActiveGrant).credentialId === 'string' &&
+    typeof (family.grant as ActiveGrant).opaqueDeviceId === 'string' &&
     Array.isArray(family.access) &&
     family.access.every(
       (entry: unknown) =>
@@ -132,7 +139,7 @@ export class TokenStore {
     try {
       const value = (await readJsonOrNull(tokensFilePath(dataDir))) as Partial<TokensFile> | null;
       if (value !== null) {
-        if (value.version === 1 && Array.isArray(value.families) && value.families.every(isFamily)) {
+        if (value.version === 2 && Array.isArray(value.families) && value.families.every(isFamily)) {
           families = value.families;
         } else {
           logEvent({ event: 'oauth.tokens', result: 'invalid' });
@@ -150,19 +157,25 @@ export class TokenStore {
     return this.families.filter((family) => this.alive(family, revokedBefore, now)).length;
   }
 
+  /** Identificadores de familias persistidas para limpiar bearers huérfanos al reiniciar. */
+  familyIds(): string[] { return this.families.map((family) => family.id); }
+
   private alive(family: Family, revokedBefore: number, now: number): boolean {
     return family.createdAt > revokedBefore && family.expiresAt > now;
   }
 
   /** Serializa una mutación y la persiste antes de resolver. */
-  private mutate<T>(operation: () => T): Promise<T> {
+  private mutate<T>(operation: () => T | Promise<T>): Promise<T> {
     const run = this.queue.then(async () => {
-      const result = operation();
-      await writeJsonAtomic(this.dataDir, tokensFilePath(this.dataDir), {
-        version: 1,
-        families: this.families
-      } satisfies TokensFile);
-      return result;
+      const before = structuredClone(this.families);
+      try {
+        const result = await operation();
+        await writeJsonAtomic(this.dataDir, tokensFilePath(this.dataDir), {
+          version: 2,
+          families: this.families
+        } satisfies TokensFile);
+        return result;
+      } catch (error) { this.families = before; throw error; }
     });
     this.queue = run.catch(() => undefined);
     return run;
@@ -199,27 +212,33 @@ export class TokenStore {
 
   /** Una familia nueva tras una autorización aprobada. */
   issueFamily(
-    input: { clientId: string; scope: string; resource: string },
-    revokedBefore: number
+    input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number },
+    revokedBefore: number,
+    storeBearer: (familyId: string, liveIds: readonly string[]) => Promise<void>
   ): Promise<IssuedTokens> {
-    return this.mutate(() => {
+    return this.mutate(async () => {
       const now = this.now();
       this.prune(revokedBefore, now);
+      if (input.authorizedAt <= revokedBefore) throw new Error('authorization_revoked');
+      if (this.families.length >= MAX_FAMILIES) throw new Error('too_many_families');
       const family: Family = {
         id: randomBytes(16).toString('base64url'),
         clientId: input.clientId,
         scope: input.scope,
         resource: input.resource,
-        // Estrictamente después de la revocación vigente, aunque el reloj diga lo mismo.
-        createdAt: Math.max(now, revokedBefore + 1),
-        expiresAt: now + REFRESH_FAMILY_TTL_MS,
+        // La marca es la aprobación, no el canje: una revocación concurrente
+        // nunca convierte un código antiguo en una familia nueva.
+        createdAt: input.authorizedAt,
+        expiresAt: Math.min(input.authorizedAt + REFRESH_FAMILY_TTL_MS, Date.parse(input.grant.expiresAt)),
         refreshHash: '',
-        access: []
+        access: [],
+        grant: input.grant
       };
+      if (family.expiresAt <= now) throw new Error('grant_expired');
       const accessToken = this.newAccess(family, now);
       const refreshToken = this.newRefresh(family);
       this.families.push(family);
-      while (this.families.length > MAX_FAMILIES) this.families.shift();
+      await storeBearer(family.id, this.familyIds());
       return this.issued(family, accessToken, refreshToken);
     });
   }
@@ -274,7 +293,9 @@ export class TokenStore {
             clientId: family.clientId,
             scope: family.scope,
             resource: family.resource,
-            expiresAt: Math.floor(entry.expiresAt / 1000)
+            expiresAt: Math.floor(entry.expiresAt / 1000),
+            familyId: family.id,
+            grant: family.grant
           };
         }
       }
@@ -282,8 +303,23 @@ export class TokenStore {
     return null;
   }
 
+  /** Vínculo de la familia del refresh vigente, sin revelar el bearer upstream. */
+  lookupRefresh(token: string, clientId: string, revokedBefore: number): { familyId: string; grant: ActiveGrant } | null {
+    const match = REFRESH_PATTERN.exec(token);
+    const family = match ? this.families.find((candidate) => candidate.id === match[1]) : undefined;
+    if (!family || family.clientId !== clientId || !this.alive(family, revokedBefore, this.now()) ||
+      !sameHash(sha256(token), family.refreshHash)) return null;
+    return { familyId: family.id, grant: family.grant };
+  }
+
+  /** Corta una familia cuando Lumbre confirma revocación. */
+  dropFamily(id: string): Promise<void> {
+    return this.mutate(() => { this.families = this.families.filter((family) => family.id !== id); });
+  }
+
   /**
-   * RFC 7009: un access revoca solo ese access; un refresh vigente, su familia entera.
+   * RFC 7009: revocar cualquier token vigente corta la autorización completa y su
+   * concesión upstream; una familia nunca queda parcialmente abierta en Lumbre.
    * Un token desconocido, de otro cliente o ya revocado no hace nada.
    */
   revoke(token: string, clientId: string): Promise<'access' | 'family' | 'none'> {
@@ -301,8 +337,8 @@ export class TokenStore {
         if (family.clientId !== clientId) continue;
         const index = family.access.findIndex((entry) => sameHash(hash, entry.hash));
         if (index >= 0) {
-          family.access.splice(index, 1);
-          return 'access';
+          this.families = this.families.filter((candidate) => candidate !== family);
+          return 'family';
         }
       }
       return 'none';
