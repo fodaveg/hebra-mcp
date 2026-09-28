@@ -309,6 +309,11 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 4. **Guardado**: los secretos van al llavero (§6.1). Después, `libraryConnect` y la primera descarga
    completa.
 5. **Registro en Claude**: `claude mcp add hebra -- hebra-mcp serve`.
+6. **Sin terminal interactiva** (p. ej. lanzado con el prefijo `!` de Claude Code): `pair`
+   comprueba `stdin` ANTES de cualquier llamada a Lumbre y falla con `no_tty` sin abrir el
+   navegador ni crear nada. Si la confirmación del paso 3 falla por otra causa (la entrada
+   se cierra a mitad, EOF) DESPUÉS de haber creado la conexión, el error (`confirm_failed`)
+   avisa de que quedó una conexión huérfana en Lumbre y cómo revocarla.
 
 ## 8. Ejecución y concurrencia
 

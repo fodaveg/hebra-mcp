@@ -36,9 +36,10 @@ interface ScriptedTerminal {
   lines: string[];
   print(line: string): void;
   confirm(question: string): Promise<boolean>;
+  isTTY(): boolean;
 }
 
-function scriptedTerminal(answers: boolean[]): ScriptedTerminal {
+function scriptedTerminal(answers: boolean[], options?: { tty?: boolean }): ScriptedTerminal {
   const lines: string[] = [];
   return {
     lines,
@@ -46,7 +47,23 @@ function scriptedTerminal(answers: boolean[]): ScriptedTerminal {
     confirm: async (question) => {
       lines.push(question);
       return answers.shift() ?? false;
-    }
+    },
+    isTTY: () => options?.tty ?? true
+  };
+}
+
+/** Confirma rechazando siempre, como una entrada que se cierra (EOF) a mitad de la
+ *  pregunta: no es un «no» de David, es que `rl.question` nunca llega a responder. */
+function eofTerminal(): ScriptedTerminal {
+  const lines: string[] = [];
+  return {
+    lines,
+    print: (line) => void lines.push(line),
+    confirm: async (question) => {
+      lines.push(question);
+      throw new Error('readline was closed');
+    },
+    isTTY: () => true
   };
 }
 
@@ -306,5 +323,29 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     expect(statuses).toEqual([400]);
     expect(result.mode).toBe('linked');
     expect(fake.exchanges).toHaveLength(1);
+  });
+
+  it('sin terminal interactiva: falla con no_tty antes de llamar a Lumbre', async () => {
+    const secrets = new MemorySecretStore();
+    const failure = await runPair(pairOptions(secrets, scriptedTerminal([true], { tty: false }))).catch(
+      (error: unknown) => error
+    );
+    expect((failure as PairError).code).toBe('no_tty');
+    expect(fake.requested).toEqual([]);
+    expect(fake.exchanges).toHaveLength(0);
+    expect(secrets.size).toBe(0);
+  });
+
+  it('la confirmación se corta por EOF: confirm_failed, no unknown, y avisa de la conexión huérfana', async () => {
+    const secrets = new MemorySecretStore();
+    const approval = approveWhenAsked(approver, fake, recoveryCode);
+    const failure = await runPair(pairOptions(secrets, eofTerminal())).catch((error: unknown) => error);
+    await approval;
+    expect((failure as PairError).code).toBe('confirm_failed');
+    expect((failure as PairError).message).toContain('conexión');
+    // La conexión de Lumbre (paso 1) sí se creó; la solicitud de vínculo se canceló.
+    expect(fake.exchanges).toHaveLength(1);
+    expect(fake.deviceLinks.rows().map((row) => row.state)).toEqual(['cancelled']);
+    expect(secrets.size).toBe(0);
   });
 });

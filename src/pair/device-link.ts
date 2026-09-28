@@ -79,6 +79,12 @@ function printPreview(terminal: PairTerminal, preview: GrantedAccessPreview): vo
   terminal.print('Hebra ha dado acceso. Comprueba que es TU biblioteca antes de vincular:');
   const titles = preview.titles.map((title) => displayDeviceLabel(title) ?? 'Sin título');
   for (const title of titles) terminal.print(`  · ${title}`);
+  if (titles.length === 0) {
+    terminal.print(
+      `  No se encontró ninguna nota entre los registros leídos (${preview.recordsRead}): ` +
+        'compara la fecha de creación de la biblioteca antes de confirmar.'
+    );
+  }
   const records = preview.more ? `más de ${preview.recordsRead}` : String(preview.recordsRead);
   terminal.print(
     `  (biblioteca creada el ${preview.vaultCreatedAt}; ${records} registros leídos; ` +
@@ -143,7 +149,17 @@ export async function requestLibraryAccess(options: RequestAccessOptions): Promi
       });
       options.onStep?.('link.verify', 'ok');
       printPreview(terminal, preview);
-      const mine = await terminal.confirm('¿Son tus notas? Escribe «si» para vincular');
+      // `confirm` puede fallar por algo que no es un «no» (stdin se cierra a mitad,
+      // EOF): eso no es un fallo del vínculo, así que no se clasifica como `link_failed`
+      // vía `deviceLinkResultOf` (saldría `unknown`), sino con su propio código.
+      let mine: boolean;
+      try {
+        mine = await terminal.confirm('¿Son tus notas? Escribe «si» para vincular');
+      } catch {
+        options.onStep?.('link.confirm', 'confirm_failed');
+        await cancelQuietly(requester);
+        throw new PairError('confirm_failed');
+      }
       if (!mine) {
         options.onStep?.('link.confirm', 'not_confirmed');
         await cancelQuietly(requester);

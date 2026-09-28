@@ -16,6 +16,9 @@ export interface PairTerminal {
   print(line: string): void;
   /** `true` solo con un «si» explícito (o «sí», «s», «yes», «y»). */
   confirm(question: string): Promise<boolean>;
+  /** `false` sin una terminal interactiva de verdad (pipe, `/dev/null`, prefijo `!` de
+   *  Claude Code): sin ella, `confirm` no puede recibir un «si» de David. */
+  isTTY(): boolean;
 }
 
 const YES = new Set(['si', 'sí', 's', 'yes', 'y']);
@@ -33,6 +36,9 @@ export function stdioTerminal(): PairTerminal & { close(): void } {
     },
     async confirm(question) {
       return isYes(await rl.question(`${question}: `));
+    },
+    isTTY() {
+      return process.stdin.isTTY === true;
     },
     close() {
       rl.close();

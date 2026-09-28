@@ -25,7 +25,8 @@ function scriptedTerminal(): { terminal: PairTerminal; lines: string[] } {
     lines,
     terminal: {
       print: (line) => void lines.push(line),
-      confirm: async () => true
+      confirm: async () => true,
+      isTTY: () => true
     }
   };
 }
@@ -99,5 +100,51 @@ describe('requestLibraryAccess: plataforma agent contra MemoryDeviceLinkRelay', 
 
     expect(access.recoveryCode).toBe(recoveryCode);
     expect(lines).toContain(`  «${label}» · Claude`);
+    expect(lines.some((line) => line.includes('No se encontró ninguna nota'))).toBe(false);
+  });
+
+  it('vista previa sin notas: avisa de que compares la fecha de creación', async () => {
+    // `fake.relay` (`InMemoryLibraryRelay`) es UN solo almacén que ignora el `syncVaultId`
+    // que se le pasa (ver `getChanges` de Hebra): una bóveda «vacía» sobre el `fake`
+    // compartido leería la nota que ya posteó `beforeEach`. Un relé propio, sin
+    // `appCreate`, es la única forma de que la verificación lea 0 registros de verdad.
+    const empty = await FakeLumbre.start();
+    try {
+      empty.addLibraryVault('otra', IDENTITY.syncVaultId);
+      // Un registro que abre con la clave pero no es una nota (una carpeta): `opened`
+      // sube y la verificación no lanza `vault_empty`, pero `notes`/`titles` sigue vacío.
+      const app = await appDevice(empty.relay);
+      await app.port.folderCreate(null, 'Carpeta');
+      expect((await app.sync.runRound()).result).toBe('ok');
+      const emptyApprover = empty.addLinkedApprover('otra', IDENTITY.syncVaultId, 'cred-mac-empty');
+      const emptyRequester = empty.addLinkedApprover('otra', IDENTITY.syncVaultId, 'cred-mcp-empty');
+      const emptyRecoveryCode = await encodeRecoveryCode({
+        relayOrigin: LUMBRE,
+        syncVaultId: IDENTITY.syncVaultId,
+        keyEpoch: 1,
+        vaultKey: VAULT_KEY
+      });
+      const { terminal, lines } = scriptedTerminal();
+
+      const granted = (async () => {
+        const transport = new HttpDeviceLinkTransport({ get: async () => emptyApprover }, empty.fetcher);
+        const request = await firstPendingRequest(transport);
+        await grantDeviceLink(transport, request, emptyRecoveryCode);
+      })();
+      const access = await requestLibraryAccess({
+        connection: emptyRequester,
+        label: sanitizeDeviceLabel('', LINK_PLATFORM),
+        fetcher: empty.fetcher,
+        terminal,
+        pollMs: 5,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5)))
+      });
+      await granted;
+
+      expect(access.recoveryCode).toBe(emptyRecoveryCode);
+      expect(lines.some((line) => line.includes('No se encontró ninguna nota'))).toBe(true);
+    } finally {
+      await empty.close();
+    }
   });
 });

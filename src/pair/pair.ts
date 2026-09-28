@@ -129,6 +129,13 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
   const step = (name: string, result: string): void =>
     log({ event: 'pair.step', step: name, result });
   const { terminal, secrets } = options;
+  // Antes de CUALQUIER llamada a Lumbre (abrir el navegador incluido): sin terminal
+  // interactiva, la confirmación del paso 2 (§7.3) no puede llegar nunca, y sin ella no
+  // hay forma de dejar una conexión huérfana en Lumbre.
+  if (!terminal.isTTY()) {
+    step('terminal.tty', 'no_tty');
+    throw new PairError('no_tty');
+  }
   const fetcher: Fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
   const lumbreOrigin = normalizeLumbreOrigin(options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN);
   const label = sanitizeDeviceLabel(options.label ?? DEFAULT_PAIR_LABEL, LINK_PLATFORM);
