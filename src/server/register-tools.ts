@@ -115,7 +115,8 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     'hebra_read_note',
     {
       title: 'Leer una nota',
-      description: 'Lee una nota completa por id o por título exacto.',
+      description:
+        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla.',
       inputSchema: readNoteInputShape
     },
     async (input) => runTool(ctx, 'hebra_read_note', (toolCtx) => runReadNote(toolCtx, input))

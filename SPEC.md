@@ -6,13 +6,14 @@ Hechos de Hebra medidos en `~/code/hebra` en `cf883cb9` (26 sep 2026), solo lect
 ## 1. Objetivo
 
 Dar a Claude (Claude Code y Claude Desktop) acceso a la biblioteca de notas de Hebra mediante un
-servidor MCP que **lee** la biblioteca y **crea** contenido sin riesgo de perder texto.
+servidor MCP que **lee** la biblioteca y **crea, edita y organiza** contenido sin riesgo de perder
+texto (D2, ampliada el 28 sep 2026).
 
 ## 2. Aceptación de v1
 
 1. David vincula `hebra-mcp` a su biblioteca desde el flujo de aprobación de Hebra
    (Ajustes > Sincronización) y el proceso descarga la biblioteca completa.
-2. Desde Claude Code, las ocho herramientas de §5 responden con el esquema de §5.
+2. Desde Claude Code, las dieciséis herramientas de §5 responden con el esquema de §5.
 3. Una nota creada o ampliada desde Claude aparece en Hebra (Mac e iPhone) tras un ciclo de sync.
 4. Si Claude añade texto a una nota que David está editando a la vez, aparece una copia de
    conflicto visible en Hebra y ningún texto se pierde.
@@ -39,7 +40,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 8 herramientas + filtro de privados
+                                        ├─ servidor MCP: 16 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -170,8 +171,8 @@ Detalle de las escrituras (D2):
   lleva la configuración de privados de quien la pide (también la del lector por `writer.sock`, que
   la exige) y el escritor la aplica dentro del turno en que escribe y sobre el resultado: origen
   visible, destino visible, cuerpo resultante sin etiquetas privadas ni descendientes. Lo que no,
-  `not_found`, igual que una nota o carpeta inexistente. Esto sustituye la última frase de §6.3
-  «Escrituras»: una nota con etiqueta privada ya no se crea ni se amplía (antes, `hidden: true`).
+  `not_found`, igual que una nota o carpeta inexistente (§6.3 «Escrituras»): una nota con etiqueta
+  privada ya no se crea ni se amplía (antes, `hidden: true`).
   Límite conocido: crear o renombrar una carpeta con el nombre de una hermana privada responde
   `folder_name_taken` (lo decide el motor): revela que existe una hermana con ese nombre, nunca su
   contenido.
@@ -240,8 +241,12 @@ El dispositivo acumula tres secretos:
     etiquetas privadas o solo presentes en notas ocultas tampoco.
   - `outgoing` de `hebra_links`: un enlace a una nota oculta sale como `ref` sin resolver.
   - `backlinks`: omiten las notas ocultas.
-- **Escrituras**: no pueden apuntar a una carpeta privada ni a una nota oculta; responden
-  `not_found`. Una nota creada con una etiqueta privada queda oculta desde ese momento.
+- **Escrituras** (crear, añadir, editar y organizar): no pueden apuntar a una carpeta privada ni a
+  una nota oculta, ni dejar una nota en una carpeta privada o con una etiqueta privada (o
+  descendiente), ni cambiar qué carpetas son privadas; responden `not_found` sin escribir, igual que
+  un destino inexistente (decisión 4 de David, 28 sep 2026). Se comprueba en la herramienta y otra
+  vez en el escritor, dentro del turno en que escribe, con la configuración de quien pide (§5,
+  «Detalle de las escrituras»). Una nota con etiqueta privada ya no se crea ni se amplía.
 - **Cerrado ante la duda**: si una carpeta de `privateFolders` no existe (renombrada o borrada), el
   servidor responde a toda herramienta con `privacy_config_unresolved` hasta que se corrija la
   configuración. No se sirve nada con un filtro que no se puede aplicar.
@@ -258,8 +263,11 @@ El dispositivo acumula tres secretos:
 ### 6.5 Contenido de notas como entrada a la IA
 
 El texto de una nota puede contener instrucciones dirigidas al modelo. El daño posible está acotado
-por D2: sin borrar, mover ni reescribir, lo peor que puede hacer una instrucción inyectada es crear
-notas o añadir texto, siempre visible y revertible en Hebra.
+por D2 (ampliada el 28 sep 2026): sin borrar, purgar ni vaciar la papelera, y sin poder llevar nada a
+una carpeta o etiqueta privada, lo peor que puede hacer una instrucción inyectada es crear notas,
+añadir texto, sustituir fragmentos de una nota visible, o mover, archivar y marcar notas y carpetas
+visibles. Todo queda visible en Hebra y es revertible allí (las «Versiones anteriores» de Hebra
+guardan el cuerpo previo a una edición); una edición concurrente produce una copia de conflicto.
 
 ## 7. Emparejado (primera vez)
 
@@ -320,21 +328,29 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     forma atómica el socket de un escritor muerto, y al cerrar no se lleva el de un escritor nuevo
     (libuv borra la ruta del `bind` sin mirar de quién es; `writer.sock` solo lo borra quien lo
     creó, comprobado por inodo).
-  - Protocolo: JSON por líneas con `id` de petición. `createNote {body, folderId}`,
-    `appendToNote {id, text}` (responde `{outcome, copyId?}` con la ronda de sync ya esperada en el
-    escritor, igual que `hebra_append_to_note`) y `status` (el estado de sync del escritor). Errores
-    con código cerrado, nunca con el mensaje. Una línea de más de `MAX_MESSAGE_BYTES` (el cuerpo
-    máximo de §5 con el peor escape JSON, más 64 KiB) se rechaza sin leerla entera. El escritor
-    vuelve a comprobar los límites de §5.
-  - Un lector reenvía `hebra_create_note` y `hebra_append_to_note` al escritor. El filtro de
-    privados y los límites se aplican en la herramienta del lector, **antes** de reenviar y con su
-    configuración: el escritor no la conoce ni la supone igual.
+  - Protocolo: JSON por líneas con `id` de petición. `createNote {body, folderId, privacy}`,
+    `appendToNote {id, text, privacy}` (responde `{outcome, copyId?}` con la ronda de sync ya
+    esperada en el escritor, igual que `hebra_append_to_note`), `editNote {id, edits,
+    expectedRevision, operationId, privacy}` y `organize {action, …, privacy}` (responden el
+    resultado completo de `hebra_edit_note` y de la organización, con la ronda ya esperada y
+    `sync`), y `status` (el estado de sync del escritor). `privacy` es la configuración de
+    privados del lector y es obligatoria en las cuatro escrituras: sin ella, `invalid_request`.
+    Errores con código cerrado, nunca con el mensaje; los rechazos de una sustitución llevan su
+    índice (`edit`). Una línea de más de `MAX_MESSAGE_BYTES` (el cuerpo máximo de §5 con el peor
+    escape JSON, más 64 KiB; las sustituciones de `editNote` suman como mucho lo mismo) se rechaza
+    sin leerla entera. El escritor vuelve a comprobar los límites de §5.
+  - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note` y las seis de
+    organización al escritor. El filtro de privados y los límites se aplican en la herramienta del
+    lector, **antes** de reenviar y con su configuración, y el escritor vuelve a aplicar esa misma
+    configuración (la recibe en `privacy`) dentro del turno en que escribe: no la conoce ni la
+    supone igual.
   - Si no hay socket, nadie escucha o no responde a tiempo, el lector intenta tomar el bloqueo en ese
     momento. Si lo consigue, pasa a escritor (SQLite en lectura-escritura, sync y socket) y escribe
     él; si no, `busy_other_instance`.
   - Si la conexión se corta **después** de enviar la petición y sin respuesta, el escritor pudo
     ejecutarla antes de morir: el lector no la repite (duplicaría el texto). Intenta el relevo para
-    la siguiente y responde `busy_other_instance`.
+    la siguiente y responde `busy_other_instance`. Una edición se puede reintentar con el mismo
+    `operationId` sin duplicar (§5).
   - `hebra_status` de un lector devuelve el estado de sync del escritor, pedido por el socket, con
     `writer: "other_instance"`. Si el escritor no responde, intenta el relevo y da el estado local.
   - Logs: `write.forward` (lector) y `writer.socket.request` (escritor) con operación, resultado y
@@ -521,8 +537,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.7 Aceptación
 
-1. Desde claude.ai web, móvil y una sesión en la nube, las nueve herramientas responden; lo creado o
-   añadido aparece en Hebra.
+1. Desde claude.ai web, móvil y una sesión en la nube, las dieciséis herramientas de §5 responden;
+   lo creado, añadido, editado u organizado aparece en Hebra.
 2. Las notas privadas no llegan por ninguna herramienta.
 3. `grep` de las notas-cebo en `docker logs` y en el log de Caddy da 0.
 4. `/mcp` sin token responde 401 y `oauth-revoke-all` corta el acceso.

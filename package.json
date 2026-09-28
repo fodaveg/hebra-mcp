@@ -1,7 +1,7 @@
 {
   "name": "hebra-mcp",
   "version": "0.1.0",
-  "description": "Servidor MCP que lee y crea notas en la biblioteca de Hebra, sobre node:sqlite.",
+  "description": "Servidor MCP que lee, crea, edita y organiza notas en la biblioteca de Hebra, sobre node:sqlite.",
   "type": "module",
   "engines": {
     "node": ">=24 <25"
