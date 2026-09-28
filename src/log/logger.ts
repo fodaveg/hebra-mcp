@@ -10,7 +10,16 @@ export type ToolErrorCode =
   | 'ambiguous_title'
   | 'privacy_config_unresolved'
   | 'invalid_input'
-  | 'busy_other_instance';
+  | 'busy_other_instance'
+  // Edición y organización (D2 ampliada, 28 sep 2026; `src/store/errors.ts`).
+  | 'revision_conflict'
+  | 'no_match'
+  | 'ambiguous_match'
+  | 'overlapping_edits'
+  | 'note_locked'
+  | 'operation_id_reused'
+  | 'folder_name_taken'
+  | 'folder_cycle';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

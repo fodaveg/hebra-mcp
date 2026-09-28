@@ -54,6 +54,8 @@ import {
   type AppendToNoteResult,
   type CreateNoteInput,
   type CreateNoteResult,
+  type EditNoteInput,
+  type EditNoteSaved,
   type NoteWriteStore,
   type NoteWriteTarget
 } from '../store/writes';
@@ -277,6 +279,14 @@ export class LibraryInstance implements NoteWriteTarget {
 
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult> {
     return this.writer.appendToNote(input);
+  }
+
+  editNote(input: EditNoteInput): Promise<EditNoteSaved> {
+    return this.writer.editNote(input);
+  }
+
+  recordEditConflict(operationId: string, id: string, copyId: string): Promise<void> {
+    return this.writer.recordEditConflict(operationId, id, copyId);
   }
 
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y

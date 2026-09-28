@@ -14,6 +14,7 @@ import type { HebraOAuthProvider } from '../../src/oauth/provider';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { startTestHttpApp, textOf, type TestHttpApp } from '../fixtures/http-app';
+import { TOOL_NAMES } from '../fixtures/tool-names';
 
 const SECRET = '0123456789abcdef0123456789abcdef';
 const PAIR_ID = '11111111-1111-4111-8111-111111111111';
@@ -239,7 +240,7 @@ describe('consentimiento y vínculo exacto', () => {
     const client = await sdkFlow(auth);
     expect(auth.info?.client_id).toBe(CIMD_CLIENT_ID);
     expect(cimdFetch).toHaveBeenCalledWith(CIMD_CLIENT_ID, expect.objectContaining({ redirect: 'manual' }));
-    expect((await client.listTools()).tools).toHaveLength(9);
+    expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length);
   });
 
   it('un cliente, callback o metadata CIMD ajenos no inicia solicitud; logs sin secretos', async () => {

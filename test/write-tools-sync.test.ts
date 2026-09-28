@@ -48,6 +48,10 @@ function ctxFor(mcp: McpDevice): ServerContext {
   const write = buildWriteContext({
     createNote: (input) => mcp.writer.createNote(input),
     appendToNote: (input) => mcp.writer.appendToNote(input),
+    editNote: (input) => mcp.writer.editNote(input),
+    recordEditConflict: (operationId, id, copyId) =>
+      mcp.writer.recordEditConflict(operationId, id, copyId),
+    noteRead: (id) => mcp.port.noteRead(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     requestRound: () => mcp.runner.requestRound()
   });
@@ -168,6 +172,83 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
       const joined = family.map((note) => note.body).join('\n---\n');
       expect(joined).toContain('EDICIÓN DEL MAC');
       expect(joined).toContain('AÑADIDO POR CLAUDE');
+    }
+  });
+
+  it('hebra_edit_note: leer → editar → la edición cruza al otro dispositivo, con sync uploaded', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+
+    const id = await appCreate(app, '# Compartida\n\nuno dos tres');
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const read = JSON.parse(
+      textOf((await client.callTool({ name: 'hebra_read_note', arguments: { id } })) as CallToolResult)
+    ) as { revision: string };
+    const result = (await client.callTool({
+      name: 'hebra_edit_note',
+      arguments: {
+        id,
+        edits: [{ find: 'dos', replace: 'DOS' }],
+        expectedRevision: read.revision,
+        operationId: 'op-sync-1'
+      }
+    })) as CallToolResult;
+    expect(JSON.parse(textOf(result))).toMatchObject({ id, outcome: 'saved', sync: 'uploaded' });
+
+    await app.sync.runRound();
+    expect((await app.port.noteRead(id))?.body).toBe('# Compartida\n\nuno DOS tres');
+  });
+
+  it('hebra_edit_note con edición a la vez en otro dispositivo: conflict_copy con copyId, sin reintento', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+
+    const id = await appCreate(app, '# Compartida\n\ntexto base');
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const read = JSON.parse(
+      textOf((await client.callTool({ name: 'hebra_read_note', arguments: { id } })) as CallToolResult)
+    ) as { revision: string };
+
+    // El Mac edita y sincroniza; Claude edita sobre su copia local, aún vieja.
+    await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
+    await app.sync.runRound();
+
+    const args = {
+      id,
+      edits: [{ find: 'texto base', replace: 'TEXTO DE CLAUDE' }],
+      expectedRevision: read.revision,
+      operationId: 'op-sync-conflicto'
+    };
+    const parsed = JSON.parse(
+      textOf((await client.callTool({ name: 'hebra_edit_note', arguments: args })) as CallToolResult)
+    ) as { outcome: string; copyId?: string; revision?: string };
+    expect(parsed.outcome).toBe('conflict_copy');
+    expect(typeof parsed.copyId).toBe('string');
+    expect(parsed.revision).toBeUndefined();
+
+    // Reintentar con el mismo operationId devuelve la misma copia, sin escribir otra vez.
+    const again = JSON.parse(
+      textOf((await client.callTool({ name: 'hebra_edit_note', arguments: args })) as CallToolResult)
+    ) as { outcome: string; copyId?: string; replayed?: boolean };
+    expect(again).toMatchObject({ outcome: 'conflict_copy', copyId: parsed.copyId, replayed: true });
+
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+    await app.sync.runRound();
+    for (const bodies of [await allBodies(mcp.port), await allBodies(app.port)]) {
+      const family = bodies.filter((note) => note.id === id || note.conflictOf === id);
+      expect(family.filter((note) => note.conflictOf === id)).toHaveLength(1);
+      const joined = family.map((note) => note.body).join('\n---\n');
+      expect(joined).toContain('EDICIÓN DEL MAC');
+      expect(joined).toContain('TEXTO DE CLAUDE');
     }
   });
 });

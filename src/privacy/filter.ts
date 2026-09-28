@@ -15,11 +15,14 @@
  * `test/store/notes-visibility-index.node.test.ts` (milisegundos de un dígito con
  * 5 000 notas).
  */
-import { ROOT_FOLDER_ID } from '../hebra';
-import type { HebraLibraryPort } from '../store/types';
+import { ROOT_FOLDER_ID, type FoldersList } from '../hebra';
+import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
 import type { PrivacyConfig } from './config';
 import { FolderIndex } from './folder-index';
 import { LibraryIndex } from './library-index';
+
+/** Lo que el filtro lee del almacén: carpetas y carpeta/etiquetas de cada nota viva. */
+export type PrivacySource = Pick<HebraLibraryPort, 'foldersList' | 'notesVisibilityIndex'>;
 
 export class PrivacyFilter {
   readonly unresolved: boolean;
@@ -46,12 +49,33 @@ export class PrivacyFilter {
     this.hiddenFolderIds = hidden;
   }
 
-  static async build(port: HebraLibraryPort, config: PrivacyConfig): Promise<PrivacyFilter> {
+  static async build(port: PrivacySource, config: PrivacyConfig): Promise<PrivacyFilter> {
     const [folders, library] = await Promise.all([
       FolderIndex.build(port),
       LibraryIndex.build(port)
     ]);
     return new PrivacyFilter(folders, library, config);
+  }
+
+  /**
+   * Sobre datos ya leídos, sin `await`: lo usa el escritor DENTRO del turno de la cola
+   * en el que escribe (`src/store/writes.ts`), con el motor leído directamente, para que
+   * ni el sync ni otra escritura cambien lo que es privado entre la comprobación y la
+   * escritura (D2 ampliada, E).
+   */
+  static fromSnapshot(
+    folders: FoldersList,
+    notes: readonly NoteVisibilityEntry[],
+    config: PrivacyConfig
+  ): PrivacyFilter {
+    return new PrivacyFilter(FolderIndex.fromList(folders), LibraryIndex.fromRows(notes), config);
+  }
+
+  /** ¿Alguna de estas etiquetas canónicas (con sus ancestros, como las da `deriveNote`)
+   *  es privada? Para rechazar una escritura que dejaría la nota oculta (decisión 4). */
+  hidesAnyTag(tags: Iterable<string>): boolean {
+    for (const tag of tags) if (this.privateTags.has(tag)) return true;
+    return false;
   }
 
   /** `true` si la nota no debe salir por NINGUNA herramienta: en una carpeta privada (o

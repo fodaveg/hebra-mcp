@@ -4,9 +4,9 @@
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
- * `hebra_create_note` y `hebra_append_to_note` (L3b) se registran con el mismo `runTool`:
- * pasan igual por `privacy_config_unresolved` primero y por el log cerrado de cada
- * llamada.
+ * `hebra_create_note` y `hebra_append_to_note` (L3b), y `hebra_edit_note` (D2 ampliada,
+ * 28 sep 2026), se registran con el mismo `runTool`: pasan igual por
+ * `privacy_config_unresolved` primero y por el log cerrado de cada llamada.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -15,6 +15,7 @@ import { ToolError, toErrorResult, toOkResult } from './errors';
 import {
   appendToNoteInputShape,
   createNoteInputShape,
+  editNoteInputShape,
   linksInputShape,
   listNotesInputShape,
   readNoteInputShape,
@@ -22,6 +23,7 @@ import {
 } from './schemas';
 import { runAppendToNote } from './tools/append-to-note';
 import { runCreateNote } from './tools/create-note';
+import { runEditNote } from './tools/edit-note';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
@@ -163,5 +165,16 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     },
     async (input) =>
       runTool(ctx, 'hebra_append_to_note', (toolCtx) => runAppendToNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_edit_note',
+    {
+      title: 'Editar una nota',
+      description:
+        'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Reintentar con el mismo operationId no repite la edición.',
+      inputSchema: editNoteInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_edit_note', (toolCtx) => runEditNote(toolCtx, input))
   );
 }

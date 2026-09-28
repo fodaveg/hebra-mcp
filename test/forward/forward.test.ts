@@ -41,6 +41,7 @@ import { localWriteContext } from '../../src/server/serve';
 import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
 import { isBusyOtherInstance } from '../../src/store/errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
+import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import {
   IDENTITY,
@@ -226,12 +227,78 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect((await writer.port.noteRead(hidden.id))?.body).not.toContain('no llega');
     expect(stderrText()).not.toContain('"event":"write.forward"');
   });
+
+  it('hebra_edit_note desde un lector: la edita el escritor, con su ronda y su estado de sync', async () => {
+    const { writer, client } = await pair();
+    const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres' });
+    const read = await call(client, 'hebra_read_note', { id: created.id });
+    const args = {
+      id: created.id,
+      edits: [{ find: 'dos', replace: BAIT_TEXT }],
+      expectedRevision: read.value.revision,
+      operationId: 'op-fwd-1'
+    };
+    const result = await call(client, 'hebra_edit_note', args);
+    expect(result.isError).toBe(false);
+    expect(result.value).toMatchObject({ id: created.id, outcome: 'saved', sync: 'uploaded' });
+    expect((await writer.port.noteRead(created.id))?.body).toBe(`# Reenviada\n\nuno ${BAIT_TEXT} tres`);
+
+    // El mismo operationId por el socket: no repite.
+    const again = await call(client, 'hebra_edit_note', args);
+    expect(again.value).toMatchObject({ outcome: 'saved', replayed: true });
+
+    // Un rechazo con índice cruza el socket con su índice, sin el texto.
+    const reread = await call(client, 'hebra_read_note', { id: created.id });
+    const missing = await call(client, 'hebra_edit_note', {
+      ...args,
+      edits: [
+        { find: 'uno', replace: '1' },
+        { find: 'no está', replace: 'x' }
+      ],
+      expectedRevision: reread.value.revision,
+      operationId: 'op-fwd-2'
+    });
+    expect(missing).toEqual({ isError: true, value: { error: 'no_match', edit: 1 } });
+
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).toContain('"event":"write.forward","op":"editNote","outcome":"forwarded"');
+  });
+
+  it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
+    const { writer, reader } = await pair();
+    const created = await writer.createNote({ body: '# Visible\n\ntexto' });
+    const ctx: ServerContext = {
+      port: reader.port,
+      privacyConfig: { privateFolders: [], privateTags: ['privado'] },
+      status: new RoutedStatusSource(reader, true),
+      write: buildRoutedWriteContext(reader, localWriteContext(reader))
+    };
+    const client = await connect(ctx);
+    const read = await call(client, 'hebra_read_note', { id: created.id });
+    // Etiquetar hacia privado por edición del Markdown: como un destino inexistente.
+    const result = await call(client, 'hebra_edit_note', {
+      id: created.id,
+      edits: [{ find: 'texto', replace: 'texto #privado' }],
+      expectedRevision: read.value.revision,
+      operationId: 'op-fwd-privado'
+    });
+    expect(result).toEqual({ isError: true, value: { error: 'not_found' } });
+    expect((await writer.port.noteRead(created.id))?.body).toBe('# Visible\n\ntexto');
+    // La rechazó el ESCRITOR (el lector no mira el cuerpo resultante): hubo reenvío.
+    expect(stderrText()).toContain('"event":"write.forward","op":"editNote","outcome":"remote_error"');
+  });
 });
 
 describe('protocolo de writer.sock', () => {
   const handlers: WriterSocketHandlers = {
     createNote: async (input) => ({ id: 'n1', title: 't', folderId: input.folderId ?? 'root' }),
     appendToNote: async (input) => ({ id: input.id, outcome: 'saved' }),
+    editNote: async (input) => ({
+      id: input.id,
+      outcome: 'saved',
+      revision: 'r1.x',
+      sync: 'not_linked'
+    }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -316,6 +383,50 @@ describe('protocolo de writer.sock', () => {
     });
   });
 
+  it('editNote: el escritor exige la privacidad del lector y revalida los límites', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const valid = {
+      id: 'n1',
+      edits: [{ find: 'a', replace: 'b' }],
+      expectedRevision: 'r1.x',
+      operationId: 'op',
+      privacy: { privateFolders: [['diario']], privateTags: ['secreto'] }
+    };
+    expect(await requestWriter(path, 'editNote', valid, 2_000)).toMatchObject({ outcome: 'saved' });
+    for (const params of [
+      { ...valid, privacy: null },
+      { ...valid, privacy: { privateFolders: ['diario'], privateTags: [] } },
+      { ...valid, edits: [] },
+      { ...valid, edits: [{ find: '', replace: 'x' }] },
+      { ...valid, edits: [{ find: 'a', replace: 'x'.repeat(EDITS_TOTAL_MAX_LENGTH) }] },
+      { ...valid, operationId: '' }
+    ]) {
+      await expect(requestWriter(path, 'editNote', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
+  });
+
+  it('el límite por defecto admite las sustituciones máximas de editNote en el peor escape JSON', () => {
+    const worst = JSON.stringify({
+      id: 1,
+      op: 'editNote',
+      params: {
+        id: 'x'.repeat(200),
+        edits: Array.from({ length: 50 }, () => ({
+          find: '\u0001'.repeat(EDITS_TOTAL_MAX_LENGTH / 100),
+          replace: '\u0001'.repeat(EDITS_TOTAL_MAX_LENGTH / 100)
+        })),
+        expectedRevision: 'r'.repeat(1_024),
+        operationId: 'o'.repeat(200),
+        privacy: { privateFolders: [['diario']], privateTags: ['secreto'] }
+      }
+    });
+    expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
+  });
+
   it('al cerrar no borra un writer.sock que ya es de otro escritor', async () => {
     const dataDir = tempDataDir();
     const old = await listen(dataDir);
@@ -381,6 +492,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         return { id: 'local', title: 'local', folderId: 'root' };
       },
       appendToNote: async (input) => ({ id: input.id, outcome: 'saved' as const }),
+      editNote: async (input) => ({ id: input.id, outcome: 'saved' as const, revision: 'r1.x' }),
+      recordEditConflict: async () => undefined,
+      noteRead: async () => null,
       onConflictCopy: () => () => undefined,
       requestRound: async () => null
     });
@@ -452,6 +566,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('fallo con texto que no debe viajar');
         },
         appendToNote: async () => {
+          throw new Error('x');
+        },
+        editNote: async () => {
           throw new Error('x');
         },
         status: async () => {

@@ -4,8 +4,12 @@
  * `notesByTitlePrefix`, así que se filtra por `canonicalTitle`) entre las notas
  * VISIBLES. Una nota en la papelera, oculta por privacidad, o simplemente inexistente,
  * responde igual: `not_found` (SPEC.md §6.3: «igual que una inexistente»).
+ *
+ * `revision` (D2 ampliada, 28 sep 2026): la versión leída, opaca, que `hebra_edit_note`
+ * pide como `expectedRevision`.
  */
 import { canonicalTitle } from '../../hebra';
+import { encodeRevision } from '../../store/revision';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 
@@ -19,6 +23,8 @@ export interface ReadNoteOutput {
   updatedAt: string;
   isConflictCopy: boolean;
   conflictOf?: string;
+  /** Opaca: la versión leída, para `expectedRevision` de `hebra_edit_note`. */
+  revision: string;
 }
 
 const TITLE_CANDIDATES_LIMIT = 50;
@@ -54,6 +60,7 @@ export async function runReadNote(
   if (!meta) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
+  const { libraryId } = await ctx.port.libraryOpen();
 
   const output: ReadNoteOutput = {
     id: note.id,
@@ -63,7 +70,15 @@ export async function runReadNote(
     tags: meta.tags,
     createdAt: new Date(note.createdAt).toISOString(),
     updatedAt: new Date(note.updatedAt).toISOString(),
-    isConflictCopy: note.conflictOf !== null
+    isConflictCopy: note.conflictOf !== null,
+    // De la fila que se acaba de leer, la misma cuyo `body` sale arriba: es la base que
+    // `hebra_edit_note` exigirá (`src/store/revision.ts`).
+    revision: encodeRevision({
+      libraryId,
+      noteId: note.id,
+      localSeq: note.localSeq,
+      bodySha256: note.bodySha256
+    })
   };
   if (note.conflictOf !== null) output.conflictOf = note.conflictOf;
   return output;

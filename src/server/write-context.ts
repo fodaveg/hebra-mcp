@@ -1,34 +1,82 @@
 /**
  * `WriteContext` (SPEC.md §5, L3b): lo que las herramientas de escritura
- * (`hebra_create_note`, `hebra_append_to_note`) necesitan de la instancia, sin acoplar
- * `src/server` al tipo concreto `LibraryInstance` (`src/sync/library-instance.ts`) —
- * mismo patrón estructural que `InstanceStatusLike` de `src/status/status-source.ts`.
+ * (`hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note`) necesitan de la
+ * instancia, sin acoplar `src/server` al tipo concreto `LibraryInstance`
+ * (`src/sync/library-instance.ts`) — mismo patrón estructural que `InstanceStatusLike` de
+ * `src/status/status-source.ts`.
  *
- * `requestRound` de `WriteContextSources` SIEMPRE está presente: en producción es
- * `instance.syncRunner?.requestRound() ?? Promise.resolve(null)` (sin emparejar, L2,
- * no hay ronda que pedir); en tests sin motor de sync, una función que resuelve ya.
- * Así `buildWriteContext` no necesita saber si hay sync o no.
+ * `requestRound` de `WriteContextSources` SIEMPRE está presente: en producción pide la
+ * ronda al `SyncRunner` de la instancia (`localWriteContext` de `./serve.ts`), y sin
+ * emparejar (L2) resuelve `null`; en tests sin motor de sync, una función que resuelve
+ * ya. Así `buildWriteContext` no necesita saber si hay sync o no: lo deduce de lo que
+ * resuelve la ronda (`RoundWait`).
  */
+import type { NoteRow } from '../hebra';
 import type {
   AppendToNoteInput,
   AppendToNoteResult,
   CreateNoteInput,
-  CreateNoteResult
+  CreateNoteResult,
+  EditNoteInput,
+  EditNoteSaved
 } from '../store/writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
+  /** El guardado local de una edición (`NoteWriter.editNote`), sin esperar ronda. */
+  editNote(input: EditNoteInput): Promise<EditNoteSaved>;
+  /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda. */
+  recordEditConflict(operationId: string, id: string, copyId: string): Promise<void>;
+  /** Para saber si lo escrito ya subió (`dirty`). */
+  noteRead(id: string): Promise<NoteRow | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
-  /** Pide una ronda de sync (SPEC.md §8: «una ronda justo después de cada escritura»).
-   *  Sin sync configurado, resuelta ya: no hay nada que pedir. */
+  /**
+   * Pide una ronda de sync (SPEC.md §8: «una ronda justo después de cada escritura») y
+   * resuelve con su resultado: un objeto con `result` (código cerrado del motor,
+   * `SyncRoundResult` de Hebra) o `null` si no hay sync configurado.
+   */
   requestRound(): Promise<unknown>;
 }
+
+/** Cómo terminó la espera de la ronda de después de escribir. */
+export type RoundWait =
+  | { kind: 'done'; result: string }
+  | { kind: 'timeout' }
+  | { kind: 'no_sync' };
+
+/**
+ * Estado de sync de lo recién escrito (D2 ampliada, 28 sep 2026), para que el agente
+ * distinga «guardado y subido» de «guardado, falta subir» y de «la ronda falló»:
+ * - `uploaded`: la ronda terminó bien y la nota ya no está sucia.
+ * - `pending`: guardado en local; la ronda no terminó a tiempo, o terminó y la nota sigue
+ *   sucia (otra escritura entre medias, un registro con error). La ronda periódica lo
+ *   subirá.
+ * - `error`: la ronda terminó con un código distinto de `ok` (`syncError`: `offline`,
+ *   `http_5xx`, `revoked`…). Lo guardado sigue en local y se reintenta en la siguiente.
+ * - `not_linked`: esta instancia no está emparejada; lo guardado no sube hasta `pair`.
+ */
+export type SyncState = 'uploaded' | 'pending' | 'error' | 'not_linked';
+
+export interface SyncFields {
+  sync: SyncState;
+  syncError?: string;
+}
+
+/** Lo que devuelve `hebra_edit_note`: el guardado y su estado de sync. */
+export type EditNoteOutcome = EditNoteSaved & SyncFields;
 
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
+  /**
+   * Edición completa: guarda, espera la ronda como mucho `AWAIT_ROUND_TIMEOUT_MS` y
+   * devuelve el estado de sync. Si la ronda produce una copia de conflicto PARA ESTA nota,
+   * `conflict_copy` con su id (sin reintento automático). En un lector, todo esto ocurre
+   * en el escritor (`./forward.ts`).
+   */
+  editNote(input: EditNoteInput): Promise<EditNoteOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -36,10 +84,10 @@ export interface WriteContext {
    * deshacen una escritura que ya está confirmada en disco, la ronda periódica la
    * subirá más tarde.
    */
-  awaitRound(timeoutMs: number): Promise<void>;
+  awaitRound(timeoutMs: number): Promise<RoundWait>;
 }
 
-/** Cuánto espera `hebra_append_to_note` a la ronda de después de guardar (SPEC.md §5). */
+/** Cuánto espera una escritura a la ronda de después de guardar (SPEC.md §5). */
 export const AWAIT_ROUND_TIMEOUT_MS = 10_000;
 
 /**
@@ -78,24 +126,89 @@ export async function appendAndAwaitRound(
   }
 }
 
-export function buildWriteContext(sources: WriteContextSources): WriteContext {
+/** `RoundWait` de lo que resolvió `requestRound`: un resultado del motor, o nada. */
+function roundWaitOf(value: unknown): RoundWait {
+  const result = (value as { result?: unknown } | null | undefined)?.result;
+  return typeof result === 'string' ? { kind: 'done', result } : { kind: 'no_sync' };
+}
+
+/** `SyncFields` de la espera y de si la fila escrita sigue sucia (`null`: no se sabe). */
+export function syncFieldsOf(wait: RoundWait, dirty: boolean | null): SyncFields {
+  switch (wait.kind) {
+    case 'no_sync':
+      return { sync: 'not_linked' };
+    case 'timeout':
+      return { sync: 'pending' };
+    case 'done':
+      if (wait.result !== 'ok') return { sync: 'error', syncError: wait.result };
+      return { sync: dirty === false ? 'uploaded' : 'pending' };
+  }
+}
+
+export interface WriteContextOptions {
+  /** Tests: espera más corta a la ronda. */
+  roundTimeoutMs?: number;
+}
+
+export function buildWriteContext(
+  sources: WriteContextSources,
+  options: WriteContextOptions = {}
+): WriteContext {
+  const roundTimeoutMs = options.roundTimeoutMs ?? AWAIT_ROUND_TIMEOUT_MS;
+
+  function awaitRound(timeoutMs: number): Promise<RoundWait> {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const timeout = new Promise<RoundWait>((resolve) => {
+      timer = setTimeout(() => resolve({ kind: 'timeout' }), timeoutMs);
+      timer.unref?.();
+    });
+    const round = sources.requestRound().then(roundWaitOf, (): RoundWait => ({
+      kind: 'done',
+      result: 'unknown'
+    }));
+    return Promise.race([round, timeout]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  async function dirtyOf(id: string): Promise<boolean | null> {
+    try {
+      const row = await sources.noteRead(id);
+      return row ? row.dirty : null;
+    } catch {
+      return null;
+    }
+  }
+
   return {
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
     onConflictCopy: (listener) => sources.onConflictCopy(listener),
-    awaitRound(timeoutMs: number): Promise<void> {
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const timeout = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs);
-        timer.unref?.();
+    awaitRound,
+    async editNote(input: EditNoteInput): Promise<EditNoteOutcome> {
+      let raceCopyId: string | undefined;
+      const unsubscribe = sources.onConflictCopy((copy) => {
+        if (copy.recordId === input.id && raceCopyId === undefined) raceCopyId = copy.copyId;
       });
-      const round = sources.requestRound().then(
-        () => undefined,
-        () => undefined
-      );
-      return Promise.race([round, timeout]).finally(() => {
-        if (timer) clearTimeout(timer);
-      });
+      try {
+        const saved = await sources.editNote(input);
+        const wait = await awaitRound(roundTimeoutMs);
+        let result: EditNoteSaved = saved;
+        if (saved.outcome === 'saved' && raceCopyId !== undefined) {
+          // Otro dispositivo editó la misma nota: el motor dejó el texto de la edición en
+          // una copia visible. Sin reintento automático; queda anotado para un reintento
+          // con el mismo `operationId`.
+          result = { id: saved.id, outcome: 'conflict_copy', copyId: raceCopyId };
+          if (saved.replayed) result.replayed = true;
+          await sources
+            .recordEditConflict(input.operationId, input.id, raceCopyId)
+            .catch(() => undefined);
+        }
+        const target = result.outcome === 'conflict_copy' ? result.copyId : result.id;
+        return { ...result, ...syncFieldsOf(wait, await dirtyOf(target)) };
+      } finally {
+        unsubscribe();
+      }
     }
   };
 }

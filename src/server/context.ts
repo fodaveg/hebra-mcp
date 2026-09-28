@@ -28,10 +28,15 @@ export interface ServerContext {
  *  privados recién calculado del almacén (§6.3), la fuente de estado (§5,
  *  `hebra_status`) y, si aplica, el `WriteContext` (L3b). `register-tools.ts` construye
  *  uno por llamada con `resolveToolContext`; ninguna herramienta guarda esto entre
- *  llamadas. */
+ *  llamadas.
+ *
+ *  `privacyConfig` (la configuración, no el filtro) viaja con las escrituras de la
+ *  edición y la organización: el escritor la vuelve a aplicar DENTRO del turno en que
+ *  escribe (D2 ampliada), también cuando se la reenvía un lector. */
 export interface ToolContext {
   port: HebraLibraryPort;
   privacy: PrivacyFilter;
+  privacyConfig: PrivacyConfig;
   status: StatusSource;
   write?: WriteContext;
 }
@@ -41,5 +46,11 @@ export interface ToolContext {
  *  llamada de herramienta en vez de cachearlo. */
 export async function resolveToolContext(ctx: ServerContext): Promise<ToolContext> {
   const privacy = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  return { port: ctx.port, privacy, status: ctx.status, write: ctx.write };
+  return {
+    port: ctx.port,
+    privacy,
+    privacyConfig: ctx.privacyConfig,
+    status: ctx.status,
+    write: ctx.write
+  };
 }

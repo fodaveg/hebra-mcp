@@ -13,7 +13,7 @@
  * Solo cubre notas VIVAS (ni papelera ni lápida): `notesVisibilityIndex()` ya las
  * excluye en SQL (SPEC.md §5: «las notas en la papelera nunca se devuelven»).
  */
-import type { HebraLibraryPort } from '../store/types';
+import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
 
 export interface NoteIndexEntry {
   folderId: string;
@@ -30,8 +30,12 @@ export class LibraryIndex {
     this.notes = notes;
   }
 
-  static async build(port: HebraLibraryPort): Promise<LibraryIndex> {
-    const rows = await port.notesVisibilityIndex();
+  static async build(port: Pick<HebraLibraryPort, 'notesVisibilityIndex'>): Promise<LibraryIndex> {
+    return LibraryIndex.fromRows(await port.notesVisibilityIndex());
+  }
+
+  /** Sobre filas ya leídas (el filtro de DENTRO de un turno de escritura). */
+  static fromRows(rows: readonly NoteVisibilityEntry[]): LibraryIndex {
     const notes = new Map<string, NoteIndexEntry>();
     for (const row of rows) notes.set(row.id, { folderId: row.folderId, tags: new Set(row.tags) });
     return new LibraryIndex(notes);

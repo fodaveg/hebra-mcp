@@ -42,12 +42,16 @@ export interface TestContext {
   close(): Promise<void>;
 }
 
-/** `WriteContext` sin sync, sobre `port`: sin ronda que pedir. */
+/** `WriteContext` sin sync, sobre `port`: sin ronda que pedir (`sync: "not_linked"`). */
 function testWriteContext(port: NodeLibraryPort): WriteContext {
   const writer = new NoteWriter(port);
   return buildWriteContext({
     createNote: (input) => writer.createNote(input),
     appendToNote: (input) => writer.appendToNote(input),
+    editNote: (input) => writer.editNote(input),
+    recordEditConflict: (operationId, id, copyId) =>
+      writer.recordEditConflict(operationId, id, copyId),
+    noteRead: (id) => port.noteRead(id),
     onConflictCopy: () => () => {},
     requestRound: () => Promise.resolve(null)
   });
@@ -66,7 +70,7 @@ export async function buildTestContext(
   const write = testWriteContext(port);
 
   return {
-    ctx: { port, privacy, status, write },
+    ctx: { port, privacy, privacyConfig, status, write },
     serverContext: { port, privacyConfig, status, write },
     library,
     dataDir,

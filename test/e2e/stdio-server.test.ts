@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { TOOL_NAMES } from '../fixtures/tool-names';
 
 const root = fileURLToPath(new URL('../..', import.meta.url));
 const cliPath = join(root, 'dist', 'cli.mjs');
@@ -60,19 +61,7 @@ describe('hebra-mcp serve (proceso real, protocolo MCP por stdio)', () => {
 
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name).sort();
-    expect(names).toEqual(
-      [
-        'hebra_append_to_note',
-        'hebra_create_note',
-        'hebra_links',
-        'hebra_list_folders',
-        'hebra_list_notes',
-        'hebra_list_tags',
-        'hebra_read_note',
-        'hebra_search',
-        'hebra_status'
-      ].sort()
-    );
+    expect(names).toEqual(TOOL_NAMES);
 
     const result = await client.callTool({ name: 'hebra_status', arguments: {} });
     const text = (result.content as Array<{ type: string; text?: string }>).find(

@@ -5,9 +5,12 @@
  *
  * Lado del lector, `buildRoutedWriteContext`: un `WriteContext` que
  * - en el escritor, escribe en local, como siempre;
- * - en un lector, reenvía `createNote` y `appendToNote` al escritor. `appendToNote` vuelve
- *   ya con la ronda esperada allí (`appendAndAwaitRound`), así que `awaitRound` y
- *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner);
+ * - en un lector, reenvía `createNote`, `appendToNote` y `editNote` al escritor.
+ *   `appendToNote` y `editNote` vuelven ya con la ronda esperada allí
+ *   (`appendAndAwaitRound`, `WriteContext.editNote`), así que `awaitRound` y
+ *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
+ *   `editNote` lleva además la configuración de privados de ESTE lector, que el escritor
+ *   aplica dentro del turno en que escribe;
  * - si el escritor no responde porque no hay socket, nadie escucha o no contesta a
  *   tiempo, intenta tomar el bloqueo EN ESE MOMENTO (`checkWriter`). Si lo consigue,
  *   escribe en local como nuevo escritor; si no, `busy_other_instance`, como antes;
@@ -43,16 +46,25 @@ import type {
   AppendToNoteInput,
   AppendToNoteResult,
   CreateNoteInput,
-  CreateNoteResult
+  CreateNoteResult,
+  EditNoteInput
 } from '../store/writes';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
-import { AWAIT_ROUND_TIMEOUT_MS, appendAndAwaitRound, type WriteContext } from './write-context';
+import {
+  AWAIT_ROUND_TIMEOUT_MS,
+  appendAndAwaitRound,
+  type EditNoteOutcome,
+  type SyncFields,
+  type SyncState,
+  type WriteContext
+} from './write-context';
 
 /** Tiempos de espera del reenvío. `appendToNote` incluye los 10 s de la ronda del
  *  escritor (`AWAIT_ROUND_TIMEOUT_MS`) y un margen para la escritura. */
 export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   createNote: 15_000,
   appendToNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  editNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   status: 5_000
 };
 
@@ -70,7 +82,31 @@ export interface ForwardOptions {
   timeoutMs?: Partial<Record<WriterSocketOp, number>>;
 }
 
-type WriteOp = Extract<WriterSocketOp, 'createNote' | 'appendToNote'>;
+type WriteOp = Exclude<WriterSocketOp, 'status'>;
+
+const SYNC_STATES: ReadonlySet<string> = new Set<SyncState>([
+  'uploaded',
+  'pending',
+  'error',
+  'not_linked'
+]);
+
+/** Valida el `EditNoteOutcome` que devuelve el escritor (no se fía de su forma). */
+function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
+  if (!isRecord(value) || typeof value.sync !== 'string' || !SYNC_STATES.has(value.sync)) {
+    throw new Error('writer_protocol');
+  }
+  const sync: SyncFields = { sync: value.sync as SyncState };
+  if (typeof value.syncError === 'string') sync.syncError = value.syncError;
+  const replayed = value.replayed === true ? { replayed: true as const } : {};
+  if (value.outcome === 'saved' && typeof value.revision === 'string') {
+    return { id, outcome: 'saved', revision: value.revision, ...replayed, ...sync };
+  }
+  if (value.outcome === 'conflict_copy' && typeof value.copyId === 'string') {
+    return { id, outcome: 'conflict_copy', copyId: value.copyId, ...replayed, ...sync };
+  }
+  throw new Error('writer_protocol');
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -176,6 +212,22 @@ export function buildRoutedWriteContext(
         (value) => asAppendResult(value, input.id),
         () => local.appendToNote(input)
       ),
+    // La edición entera (guardado, ronda y estado de sync) ocurre en el escritor. Si la
+    // conexión se corta tras enviarla, no se repite (igual que las demás): el agente
+    // puede reintentar con el mismo `operationId` sin duplicar nada.
+    editNote: (input: EditNoteInput) =>
+      routed(
+        'editNote',
+        {
+          id: input.id,
+          edits: input.edits,
+          expectedRevision: input.expectedRevision,
+          operationId: input.operationId,
+          privacy: input.privacy ?? null
+        },
+        (value) => asEditOutcome(value, input.id),
+        () => local.editNote(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -189,6 +241,7 @@ export function writerSocketHandlers(
   return {
     createNote: (input) => local.createNote(input),
     appendToNote: (input) => appendAndAwaitRound(local, input),
+    editNote: (input) => local.editNote(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;

@@ -23,6 +23,7 @@ import { APPEND_SEPARATOR } from '../../src/store/writes';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { BAIT_FOLDER, BAIT_TAG } from '../fixtures/test-library';
 import { baitCalls } from '../fixtures/bait-calls';
+import { TOOL_NAMES } from '../fixtures/tool-names';
 import {
   connectHttpClient,
   startTestHttpApp,
@@ -32,18 +33,6 @@ import {
 } from '../fixtures/http-app';
 
 const TOKEN = 'token-de-prueba-c2';
-
-const TOOL_NAMES = [
-  'hebra_append_to_note',
-  'hebra_create_note',
-  'hebra_links',
-  'hebra_list_folders',
-  'hebra_list_notes',
-  'hebra_list_tags',
-  'hebra_read_note',
-  'hebra_search',
-  'hebra_status'
-];
 
 let stderrSpy: ReturnType<typeof vi.spyOn> | undefined;
 let test: TestContext | undefined;
@@ -80,8 +69,8 @@ async function startWithTestLibrary(): Promise<{ test: TestContext; app: TestHtt
   return { test, app, client };
 }
 
-describe('las nueve herramientas por el cliente HTTP del SDK', () => {
-  it('tools/list trae las nueve y ninguna devuelve ni loguea el cebo', async () => {
+describe('todas las herramientas por el cliente HTTP del SDK', () => {
+  it('tools/list trae todas y ninguna devuelve ni loguea el cebo', async () => {
     const { test, client } = await startWithTestLibrary();
     const { tools } = await client.listTools();
     expect(tools.map((tool) => tool.name).sort()).toEqual(TOOL_NAMES);
@@ -95,8 +84,8 @@ describe('las nueve herramientas por el cliente HTTP del SDK', () => {
       expect(result.content.length).toBeGreaterThan(0);
       texts.push(textOf(result));
     }
-    // Las nueve respondieron algo (sin error de transporte), y ninguna con el cebo.
-    expect(new Set(calls.map((call) => call.name)).size).toBe(9);
+    // Todas respondieron algo (sin error de transporte), y ninguna con el cebo.
+    expect([...new Set(calls.map((call) => call.name))].sort()).toEqual(TOOL_NAMES);
     const output = texts.join('\n');
     expect(output).not.toContain(BAIT_FOLDER);
     expect(output).not.toContain(BAIT_TAG);

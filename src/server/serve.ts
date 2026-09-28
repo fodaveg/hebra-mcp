@@ -65,13 +65,29 @@ export interface ServeContext {
   close(): Promise<void>;
 }
 
-/** Las escrituras sobre esta instancia, sin reenvío: las del escritor. */
+/**
+ * Las escrituras sobre esta instancia, sin reenvío: las del escritor.
+ *
+ * `requestRound`: sin runner (sin emparejar), `null` (`not_linked`). Con runner, su
+ * resultado; si el runner no hizo ronda (revocado o parado), un código en su lugar, para
+ * que la herramienta diga `error` y no `not_linked`.
+ */
 export function localWriteContext(instance: LibraryInstance): WriteContext {
   return buildWriteContext({
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
+    editNote: (input) => instance.editNote(input),
+    recordEditConflict: (operationId, id, copyId) =>
+      instance.recordEditConflict(operationId, id, copyId),
+    noteRead: (id) => instance.port.noteRead(id),
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
-    requestRound: () => instance.syncRunner?.requestRound() ?? Promise.resolve(null)
+    requestRound: () => {
+      const runner = instance.syncRunner;
+      if (!runner) return Promise.resolve(null);
+      return runner
+        .requestRound()
+        .then((round) => round ?? { result: runner.revoked ? 'revoked' : 'unknown' });
+    }
   });
 }
 

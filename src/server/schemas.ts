@@ -45,3 +45,19 @@ export const appendToNoteInputShape = {
   id: z.string(),
   text: z.string()
 };
+
+/** Sin `.min()`/`.max()`: número de sustituciones, tamaños y `operationId` los aplica
+ *  `edit-note.ts` con `invalid_input`, sin eco de la entrada. */
+export const editNoteInputShape = {
+  id: z.string(),
+  edits: z.array(
+    z.object({
+      find: z.string().describe('Texto EXACTO del cuerpo leído; tiene que aparecer una sola vez.'),
+      replace: z.string()
+    })
+  ),
+  expectedRevision: z.string().describe('La `revision` que devolvió hebra_read_note.'),
+  operationId: z
+    .string()
+    .describe('Id único de esta edición (un UUID). Reintentar con el mismo no la repite.')
+};

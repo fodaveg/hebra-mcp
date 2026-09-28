@@ -14,8 +14,13 @@
  * - `appendToNote` `{id, text}` → `{id, outcome, copyId?}`, ya con la ronda de sync
  *   esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
  * - `status` `{}` → el estado de sync del escritor, sin `writer` ni `linked`.
- * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error}` con un código cerrado
- * (`WriterSocketErrorCode`). Nunca viaja el mensaje de una excepción.
+ * - `editNote` `{id, edits, expectedRevision, operationId, privacy}` → el resultado
+ *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
+ *   escritor. `privacy` es la configuración de privados del LECTOR, que el escritor
+ *   aplica dentro del turno de la escritura (D2 ampliada, 28 sep 2026).
+ * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
+ * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
+ * Nunca viaja el mensaje de una excepción.
  *
  * Seguridad:
  * - El directorio de datos ya es 0700; el socket queda además en 0600 (umask acotado a
@@ -40,14 +45,27 @@ import { createConnection, createServer, type Server, type Socket } from 'node:n
 import { dirname, join } from 'node:path';
 import { LibraryError } from '../hebra';
 import { logEvent } from '../log/logger';
-import { busyOtherInstance, isBusyOtherInstance } from '../store/errors';
+import type { PrivacyConfig } from '../privacy/config';
+import type { EditNoteOutcome } from '../server/write-context';
+import { editsWithinLimits, type TextEdit } from '../store/edits';
+import {
+  busyOtherInstance,
+  isBusyOtherInstance,
+  isWriteRejectionCode,
+  StoreError,
+  WRITE_REJECTION_CODES,
+  type WriteRejectionCode
+} from '../store/errors';
+import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
+import { REVISION_MAX_LENGTH } from '../store/revision';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
   type AppendToNoteInput,
   type AppendToNoteResult,
   type CreateNoteInput,
-  type CreateNoteResult
+  type CreateNoteResult,
+  type EditNoteInput
 } from '../store/writes';
 
 export const WRITER_SOCKET_FILE = 'writer.sock';
@@ -56,7 +74,9 @@ export const WRITER_SOCKET_FILE = 'writer.sock';
  * Tamaño máximo de una línea del protocolo, en bytes. `JSON.stringify` escapa un
  * carácter de control como `\uXXXX` (6 bytes por unidad UTF-16), que es el peor caso
  * (un carácter no ASCII ocupa como mucho 3 bytes de UTF-8 por unidad). El margen cubre
- * el sobre (`id`, `op`, `folderId`…).
+ * el sobre (`id`, `op`, `folderId`…) y, en las operaciones que la llevan, la
+ * configuración de privados del lector. Las sustituciones de `editNote` suman como mucho
+ * lo mismo que el cuerpo de `createNote` (`EDITS_TOTAL_MAX_LENGTH`).
  */
 export const MAX_MESSAGE_BYTES = CREATE_BODY_MAX_LENGTH * 6 + 64 * 1024;
 
@@ -66,16 +86,26 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
 
-export type WriterSocketOp = 'createNote' | 'appendToNote' | 'status';
+export type WriterSocketOp = 'createNote' | 'appendToNote' | 'editNote' | 'status';
 
-/** Códigos de error del protocolo: cerrados, sin texto libre. */
+const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
+  'createNote',
+  'appendToNote',
+  'editNote',
+  'status'
+]);
+
+/** Códigos de error del protocolo: cerrados, sin texto libre. Los de
+ *  `WriteRejectionCode` son los rechazos de la edición y la organización
+ *  (`src/store/errors.ts`), que viajan tal cual. */
 export type WriterSocketErrorCode =
   | 'busy_other_instance'
   | 'note_not_found'
   | 'folder_not_found'
   | 'invalid_request'
   | 'message_too_large'
-  | 'internal';
+  | 'internal'
+  | WriteRejectionCode;
 
 const REMOTE_LIBRARY_CODES = new Set(['note_not_found', 'folder_not_found']);
 
@@ -93,6 +123,8 @@ export interface WriterSocketHandlers {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   /** Escribe y espera la ronda de sync (con su copia de conflicto, si la hubo). */
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
+  /** Edita, espera la ronda y devuelve el estado de sync (`hebra_edit_note`). */
+  editNote(input: EditNoteInput): Promise<EditNoteOutcome>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -104,7 +136,7 @@ interface RequestEnvelope {
 
 type ResponseEnvelope =
   | { id: number | string | null; ok: true; result: unknown }
-  | { id: number | string | null; ok: false; error: WriterSocketErrorCode };
+  | { id: number | string | null; ok: false; error: WriterSocketErrorCode; edit?: number };
 
 class InvalidRequest extends Error {
   constructor() {
@@ -126,9 +158,9 @@ function parseEnvelope(line: string): RequestEnvelope {
   if (!isPlainObject(value)) throw new InvalidRequest();
   const { id, op, params } = value;
   if (typeof id !== 'number' && typeof id !== 'string') throw new InvalidRequest();
-  if (op !== 'createNote' && op !== 'appendToNote' && op !== 'status') throw new InvalidRequest();
+  if (typeof op !== 'string' || !OPS.has(op)) throw new InvalidRequest();
   if (params !== undefined && !isPlainObject(params)) throw new InvalidRequest();
-  return { id, op, params: params ?? {} };
+  return { id, op: op as WriterSocketOp, params: params ?? {} };
 }
 
 function isId(value: unknown): value is string {
@@ -150,14 +182,60 @@ function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
   return { id, text };
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string');
+}
+
+/** La configuración de privados del lector: obligatoria en las operaciones que la llevan
+ *  (sin ella el escritor no sabría qué ocultar, y no supone la suya). */
+function privacyOf(value: unknown): PrivacyConfig {
+  if (!isPlainObject(value)) throw new InvalidRequest();
+  const { privateFolders, privateTags } = value;
+  if (!Array.isArray(privateFolders) || !privateFolders.every(isStringArray)) {
+    throw new InvalidRequest();
+  }
+  if (!isStringArray(privateTags)) throw new InvalidRequest();
+  return { privateFolders, privateTags };
+}
+
+function editInputOf(params: Record<string, unknown>): EditNoteInput {
+  const { id, edits, expectedRevision, operationId, privacy } = params;
+  if (!isId(id)) throw new InvalidRequest();
+  if (
+    typeof operationId !== 'string' ||
+    operationId.length === 0 ||
+    operationId.length > OPERATION_ID_MAX_LENGTH
+  ) {
+    throw new InvalidRequest();
+  }
+  if (typeof expectedRevision !== 'string' || expectedRevision.length > REVISION_MAX_LENGTH) {
+    throw new InvalidRequest();
+  }
+  if (!Array.isArray(edits)) throw new InvalidRequest();
+  const parsed: TextEdit[] = edits.map((edit: unknown) => {
+    if (!isPlainObject(edit) || typeof edit.find !== 'string' || typeof edit.replace !== 'string') {
+      throw new InvalidRequest();
+    }
+    return { find: edit.find, replace: edit.replace };
+  });
+  if (!editsWithinLimits(parsed)) throw new InvalidRequest();
+  return { id, edits: parsed, expectedRevision, operationId, privacy: privacyOf(privacy) };
+}
+
 /** Código cerrado de un fallo del escritor; nunca el mensaje. */
 function errorCodeOf(error: unknown): WriterSocketErrorCode {
   if (error instanceof InvalidRequest) return 'invalid_request';
   if (isBusyOtherInstance(error)) return 'busy_other_instance';
+  if (error instanceof StoreError && isWriteRejectionCode(error.code)) return error.code;
   if (error instanceof LibraryError && REMOTE_LIBRARY_CODES.has(error.code)) {
     return error.code as WriterSocketErrorCode;
   }
   return 'internal';
+}
+
+/** Índice de la sustitución que falló, si el rechazo lo trae. */
+function editIndexOf(error: unknown): number | undefined {
+  return error instanceof StoreError ? error.editIndex : undefined;
 }
 
 function errnoOf(error: unknown): string {
@@ -318,6 +396,9 @@ export class WriterSocketServer {
         case 'appendToNote':
           result = await handlers.appendToNote(appendInputOf(envelope.params));
           break;
+        case 'editNote':
+          result = await handlers.editNote(editInputOf(envelope.params));
+          break;
         case 'status':
           result = await handlers.status();
           break;
@@ -326,7 +407,11 @@ export class WriterSocketServer {
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'ok' });
     } catch (error) {
       const code = errorCodeOf(error);
-      response = { id: envelope.id, ok: false, error: code };
+      const edit = editIndexOf(error);
+      response =
+        edit === undefined
+          ? { id: envelope.id, ok: false, error: code }
+          : { id: envelope.id, ok: false, error: code, edit };
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'error', code });
     }
     if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(response)}\n`);
@@ -389,9 +474,10 @@ export class WriterRemoteError extends Error {
 
 /** Traduce el código remoto al mismo error que habría lanzado una escritura local, para
  *  que `mapWriteError` (`src/server/tools/write-errors.ts`) no distinga el camino. */
-function remoteError(code: WriterSocketErrorCode): Error {
+function remoteError(code: WriterSocketErrorCode, edit?: number): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
+  if (isWriteRejectionCode(code)) return new StoreError(code, edit);
   return new WriterRemoteError(code);
 }
 
@@ -401,7 +487,8 @@ const KNOWN_ERROR_CODES = new Set<WriterSocketErrorCode>([
   'folder_not_found',
   'invalid_request',
   'message_too_large',
-  'internal'
+  'internal',
+  ...WRITE_REJECTION_CODES
 ]);
 
 let nextRequestId = 1;
@@ -475,7 +562,11 @@ export function requestWriter(
         return;
       }
       const code = response.error as WriterSocketErrorCode;
-      finish({ error: remoteError(KNOWN_ERROR_CODES.has(code) ? code : 'internal') });
+      const edit =
+        typeof response.edit === 'number' && Number.isSafeInteger(response.edit) && response.edit >= 0
+          ? response.edit
+          : undefined;
+      finish({ error: remoteError(KNOWN_ERROR_CODES.has(code) ? code : 'internal', edit) });
     });
   });
 }

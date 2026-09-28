@@ -10,7 +10,8 @@ import {
   folderPathSegments,
   folderSubtree,
   ROOT_FOLDER_ID,
-  type EffectiveParent
+  type EffectiveParent,
+  type FoldersList
 } from '../hebra';
 import type { HebraLibraryPort } from '../store/types';
 
@@ -22,9 +23,15 @@ export class FolderIndex {
 
   private constructor() {}
 
-  static async build(port: HebraLibraryPort): Promise<FolderIndex> {
+  static async build(port: Pick<HebraLibraryPort, 'foldersList'>): Promise<FolderIndex> {
+    return FolderIndex.fromList(await port.foldersList());
+  }
+
+  /** Sobre una lista ya leída: la usa el filtro que se construye DENTRO de un turno de
+   *  escritura (`src/store/writes.ts`), y la simulación de un cambio de carpetas antes de
+   *  hacerlo (`../privacy/filter.ts`, `withFolders`). */
+  static fromList({ folders }: FoldersList): FolderIndex {
     const index = new FolderIndex();
-    const { folders } = await port.foldersList();
     for (const folder of folders) {
       index.parents.set(folder.id, { parentId: folder.parentId, state: folder.parentState });
       index.names.set(folder.id, folder.name);

@@ -49,6 +49,7 @@ import {
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import { FsBlobStore } from './blob-store-fs';
 import { busyOtherInstance } from './errors';
+import { ensureOperationsTable, sqliteOperationStore } from './operations';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type { HebraLibraryPort, NoteVisibilityEntry } from './types';
@@ -98,6 +99,9 @@ export async function openNodeLibraryPort(
   if (options.sqlitePath !== ':memory:' && mode === 'readWrite') {
     await secureSqliteFileModes(options.sqlitePath);
   }
+  // Registro de idempotencia de `hebra_edit_note` (`./operations.ts`): tabla propia de
+  // hebra-mcp; solo la crea (y la escribe) el escritor.
+  if (mode === 'readWrite') ensureOperationsTable(db);
   return new NodeLibraryPort(engine, db, mode);
 }
 
@@ -216,38 +220,47 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * adaptador, `./sqlite-conn-node.ts`) y por la cola serie como cualquier otra lectura.
    */
   async notesVisibilityIndex(): Promise<NoteVisibilityEntry[]> {
-    return this.read(() => {
-      const rows = this.db
-        .prepare(
-          `SELECT n.id AS id,
-                  CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
-                  GROUP_CONCAT(t.tag, char(10)) AS tags
-           FROM notes n
-           LEFT JOIN folders f ON f.id = n.folder_id
-           LEFT JOIN note_tags t ON t.note_id = n.id
-           WHERE n.deleted = 0 AND n.trashed_at IS NULL
-           GROUP BY n.id`
-        )
-        .all() as Array<{ id: string; folder_id: string; tags: string | null }>;
-      return rows.map((row) => ({
-        id: row.id,
-        folderId: row.folder_id,
-        tags: row.tags ? row.tags.split('\n') : []
-      }));
-    });
+    return this.read(() => this.visibilityRows());
+  }
+
+  /** La consulta de `notesVisibilityIndex`, sin cola: también la usa `writeExclusive`
+   *  dentro de su turno. */
+  private visibilityRows(): NoteVisibilityEntry[] {
+    const rows = this.db
+      .prepare(
+        `SELECT n.id AS id,
+                CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
+                GROUP_CONCAT(t.tag, char(10)) AS tags
+         FROM notes n
+         LEFT JOIN folders f ON f.id = n.folder_id
+         LEFT JOIN note_tags t ON t.note_id = n.id
+         WHERE n.deleted = 0 AND n.trashed_at IS NULL
+         GROUP BY n.id`
+      )
+      .all() as Array<{ id: string; folder_id: string; tags: string | null }>;
+    return rows.map((row) => ({
+      id: row.id,
+      folderId: row.folder_id,
+      tags: row.tags ? row.tags.split('\n') : []
+    }));
   }
 
   /**
-   * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) a las tres
-   * operaciones de nota del motor. Solo para `./writes.ts`: dentro de `operation` no se
-   * puede llamar a ningún otro método de este puerto (esperaría detrás de sí mismo).
+   * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
+   * las operaciones de nota, lo que lee el filtro de privados y el registro de
+   * idempotencia. Solo para `./writes.ts`: dentro de `operation` no se puede llamar a
+   * ningún otro método de este puerto (esperaría detrás de sí mismo).
    */
   writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T> {
     return this.write(() =>
       operation({
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
-        noteSave: (input) => this.engine.noteSave(input)
+        noteSave: (input) => this.engine.noteSave(input),
+        libraryId: () => this.engine.libraryOpen().libraryId,
+        foldersList: () => this.engine.foldersList(),
+        notesVisibilityIndex: () => this.visibilityRows(),
+        operations: sqliteOperationStore(this.db)
       })
     );
   }

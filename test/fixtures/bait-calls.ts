@@ -1,6 +1,6 @@
 /**
- * Las llamadas del test de notas-cebo (SPEC.md §6.3, §6.4): las nueve herramientas con
- * argumentos que casarían el cebo. Las comparten el test por `InMemoryTransport`
+ * Las llamadas del test de notas-cebo (SPEC.md §6.3, §6.4): todas las herramientas
+ * (`./tool-names.ts`) con argumentos que casarían el cebo. Las comparten el test por `InMemoryTransport`
  * (`test/privacy-and-logs.test.ts`) y el de Streamable HTTP (`test/http/serve-http.test.ts`),
  * para que el cebo se pruebe igual por los dos transportes.
  */
@@ -29,6 +29,27 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     {
       name: 'hebra_append_to_note',
       arguments: { id: library.publicNoteId, text: `${BAIT_FOLDER} ${BAIT_TAG}` }
+    },
+    // Edición (D2 ampliada): el cebo en `find` de una nota oculta (`not_found`) y en
+    // `replace` de una pública con una revisión que no vale (`invalid_input`). Ninguna
+    // salida ni ningún log hace eco de `find`/`replace`.
+    {
+      name: 'hebra_edit_note',
+      arguments: {
+        id: library.privateFolderNoteId,
+        edits: [{ find: BAIT_FOLDER, replace: 'x' }],
+        expectedRevision: 'r1.x',
+        operationId: 'bait-1'
+      }
+    },
+    {
+      name: 'hebra_edit_note',
+      arguments: {
+        id: library.publicNoteId,
+        edits: [{ find: 'Enlaza', replace: `${BAIT_FOLDER} ${BAIT_TAG}` }],
+        expectedRevision: 'r1.x',
+        operationId: 'bait-2'
+      }
     }
   ];
 }
