@@ -28,7 +28,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | # | Decisión | Motivo / descartes |
 |---|---|---|
 | D1 | **Dispositivo propio**: proceso Node que se vincula a la biblioteca como un dispositivo más por el flujo de aprobación, con su propia SQLite y el MISMO motor de sync de Hebra. Transporte MCP: **stdio** primero; conector remoto más adelante (D6). | El sync va cifrado de punta a punta: el relé de `app.lumbre.pro` no puede leer notas. Descartados: leer la SQLite del contenedor del Mac y un MCP en el servidor de Lumbre (este último, revocado por D6). |
-| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Nunca** reescribe, mueve, etiqueta ni borra. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra). |
+| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Ampliada el 28 sep 2026** («me parecen ok tus decisiones del mcp. adelante con ellas»): 1) el MCP puede modificar notas existentes; 2) por **sustituciones puntuales** `{find, replace}` sobre la revisión leída, nunca reescribiendo el cuerpo entero (renombrar = editar el H1); 3) primer lote = edición + organización (mover nota, favorita, archivar/desarchivar, crear/renombrar/mover carpeta); papelera, versiones y adjuntos van en otro lote, y **nunca** purga nada irreversible; 4) nunca mueve una nota a una carpeta privada ni le pone una etiqueta privada, por ninguna vía: se rechaza sin escribir y con el mismo error que un destino inexistente. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra) y ya permitía editar (`noteSave` con `expectedLocalSeq`/`baseBodySha256`). |
 | D3 | **Ve toda la biblioteca salvo** carpetas o etiquetas marcadas como privadas en la configuración del MCP. El filtro vive en el MCP y se aplica antes de devolver nada a la IA. | |
 | D4 | **Cuándo** (revisada el 26 sep 2026): **BEAR-22 queda cerrada** por decisión de David (la biblioteca actual es de prueba y la va a reimportar desde Obsidian). Se hacen **todos los lotes ya**, en orden L0 → L1 → L2 (en cuanto Lumbre despliegue L2a) → L3 → L4. Objetivo: que David use Hebra en serio con el MCP cuanto antes. | La versión anterior esperaba a BEAR-22 para todo lo que cambiara el sync o el vínculo en Hebra. |
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
@@ -108,12 +108,19 @@ Reglas comunes:
 |---|---|---|
 | `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `folder?` (ruta), `tag?` | `results: [{id, title, folderPath, tags, snippet, updatedAt}]` |
 | `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50); orden por `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
-| `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?}`. Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
+| `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
 | `hebra_list_tags` | nada | `tags: [{tag, count}]` (anidadas como `a/b`) |
 | `hebra_list_folders` | nada | `folders: [{id, path, count}]` |
 | `hebra_links` | `id` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}]}` |
 | `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | `{id, outcome: "saved" \| "conflict_copy", copyId?}` |
+| `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; `find` no vacío; `find` + `replace` de todas ≤ 100 000 caracteres), `expectedRevision`, `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", revision?, copyId?, replayed?, sync, syncError?}`. Errores: `revision_conflict`, `no_match` / `ambiguous_match` / `overlapping_edits` (con `edit`: índice), `note_locked`, `operation_id_reused`, `not_found`. |
+| `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
+| `hebra_set_favorite` | `id`, `favorite` | igual que `hebra_move_note` |
+| `hebra_set_archived` | `id`, `archived` | igual que `hebra_move_note` |
+| `hebra_create_folder` | `name` (≤ 255, sin `/`), `parentId?` (def. `"root"`) | `{id, path, sync, syncError?}`. Nombre repetido entre hermanas: `folder_name_taken`. |
+| `hebra_rename_folder` | `id`, `name` | igual que `hebra_create_folder` |
+| `hebra_move_folder` | `id`, `parentId` | igual que `hebra_create_folder`. Dentro de sí misma o de una descendiente: `folder_cycle`. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked}`. Sin contenido de notas. |
 
 Detalle de las escrituras (D2):
@@ -129,8 +136,53 @@ Detalle de las escrituras (D2):
   Si el almacén responde `redirected`, o la ronda produce `sync.conflict_copy` para esa nota, la
   salida es `conflict_copy` con el id de la copia. En Hebra no existe una operación de «añadir al
   final»: se construye así y nunca toca otro campo.
-- No se exponen `noteMove`, `noteTrash`, `notePurge`, `folder*`, `file*` ni ninguna otra mutación de
-  `LibraryStorePort`: el servidor ni siquiera las importa en su capa de herramientas.
+- `hebra_edit_note` (D2 ampliada, 28 sep 2026):
+  - **Revisión**: `r1.` + base64url de `[library_id, id, local_seq, body_sha256]` de la fila leída.
+    `updatedAt` no vale (mover o archivar no lo cambia). La edición se certifica contra la base que
+    trae el agente, no contra la nota actual: el SHA-256 del cuerpo de la revisión tiene que ser el
+    de ahora (si no, `revision_conflict` sin escribir) y `noteSave` recibe `expectedLocalSeq` y
+    `baseBodySha256` de la revisión. Una revisión de otra nota o ilegible: `invalid_input`.
+  - **Sustituciones**: cada `find` se busca en el cuerpo leído (no en el resultado de las
+    anteriores) y tiene que aparecer exactamente una vez, contando solapes consigo mismo. Dos no
+    pueden tocar el mismo tramo. Cualquier fallo rechaza todas, sin escribir.
+  - Todo en un turno de la cola del almacén, por el escritor único (un lector la reenvía por
+    `writer.sock`, op `editNote`): idempotencia, filtro de privados, nota bloqueada (`note_locked`),
+    revisión, sustituciones, resultado sin etiqueta privada, guardado. Derivados completos de
+    `deriveNote`.
+  - **Idempotencia**: tabla propia `hebra_mcp_operations` en `library.sqlite` (no viaja por sync ni
+    la toca `libraryReset`), en dos fases (`started` con el SHA-256 del cuerpo resultante → `noteSave`
+    → `done` con el resultado). El mismo `operationId` con la misma petición devuelve lo mismo con
+    `replayed: true`; con otra, `operation_id_reused`. Si el proceso muere entre guardar y cerrar el
+    registro, el SHA-256 dice que se guardó y no se repite; si murió antes, se guarda. **Límites**:
+    caduca a las 24 h (después, el reintento choca con su revisión, nunca duplica); cada directorio
+    de datos tiene el suyo (el Mac y el conector remoto no comparten registro ni revisiones); `unpair`
+    lo borra con el resto.
+- **Organización** (`hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`,
+  `hebra_create_folder`, `hebra_rename_folder`, `hebra_move_folder`): por id, sobre `noteMove`,
+  `noteSetFavorite`, `noteArchive`/`noteUnarchive`, `folderCreate`, `folderRename` y `folderMove` del
+  motor (los reexporta `node.ts` de Hebra). Un turno de la cola, por el escritor único (op
+  `organize`). Favorita y archivar son idempotentes; crear carpeta no, pero un reintento choca con
+  `folder_name_taken` y nunca duplica. Una nota bloqueada se puede organizar (nada de esto toca su
+  cuerpo). Renombrar o mover una carpeta no puede cambiar qué es privado: se simula el árbol
+  resultante y, si ocultaría otras carpetas o dejaría sin resolver una ruta de `privateFolders` (una
+  privada dentro), `not_found` sin escribir.
+- **Privacidad de las escrituras** (decisión 4): toda escritura (crear, añadir, editar, organizar)
+  lleva la configuración de privados de quien la pide (también la del lector por `writer.sock`, que
+  la exige) y el escritor la aplica dentro del turno en que escribe y sobre el resultado: origen
+  visible, destino visible, cuerpo resultante sin etiquetas privadas ni descendientes. Lo que no,
+  `not_found`, igual que una nota o carpeta inexistente. Esto sustituye la última frase de §6.3
+  «Escrituras»: una nota con etiqueta privada ya no se crea ni se amplía (antes, `hidden: true`).
+  Límite conocido: crear o renombrar una carpeta con el nombre de una hermana privada responde
+  `folder_name_taken` (lo decide el motor): revela que existe una hermana con ese nombre, nunca su
+  contenido.
+- **Estado de sync** (edición y organización): se espera la ronda como mucho 10 s y `sync` dice
+  `uploaded` (ronda `ok` y fila ya limpia), `pending` (guardado; sin ronda a tiempo o aún sucio),
+  `error` (ronda con otro código: `syncError`, p. ej. `offline`, `revoked`) o `not_linked` (sin
+  emparejar). Una copia de conflicto de la ronda para esa nota da `conflict_copy` con `copyId`, sin
+  reintento automático.
+- No se exponen `noteTrash`, `noteRestore`, `notePurge`, `folderTrash`, `file*`, `trashEmpty`,
+  versiones ni `tagRename`: el servidor ni siquiera las importa en su capa de herramientas
+  (`test/store/surface.node.test.ts`).
 - Los nombres exactos de los métodos del almacén para búsqueda, etiquetas y enlaces se fijan en L0
   leyendo `sqlite-engine.ts` y `graph-store.ts` en el SHA fijado.
 

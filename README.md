@@ -1,6 +1,7 @@
 # hebra-mcp
 
-Servidor MCP que da a Claude acceso de lectura (y, en un lote posterior, de creación) a
+Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, editar por
+sustituciones puntuales y organizar notas y carpetas; nunca borrar, `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
