@@ -172,7 +172,9 @@ su emparejado existente: el login no sustituye la clave de biblioteca.
 Al revocar todas las familias locales, ejecutar sobre el volumen activo:
 
 ```bash
-ssh "$HEBRA_MCP_HOST"   "cd $HEBRA_MCP_DEST && docker compose -f deploy/compose.yml exec -T mcp     node dist/cli.mjs oauth-revoke-all"
+ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+  docker compose --env-file deploy/.env -f deploy/compose.yml exec -T mcp \
+  node dist/cli.mjs oauth-revoke-all"
 ```
 
 Esto mueve `oauth-revocations-v2.json` y corta los access/refresh locales.
@@ -216,7 +218,8 @@ directamente**. El procedimiento es en el Mac:
    el directorio temporal del Mac**:
 
    ```bash
-   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && docker compose restart mcp"
+   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+     docker compose --env-file deploy/.env -f deploy/compose.yml restart mcp"
    rm -rf /tmp/hebra-mcp-pair-remoto
    ```
 
@@ -317,7 +320,8 @@ sesión en la nube (§12.7, C6).
 - **Retirar** (por ejemplo, para desmontar el conector remoto por completo):
 
   ```bash
-  ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && docker compose down"
+  ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+    docker compose --env-file deploy/.env -f deploy/compose.yml down"
   # el volumen NO se borra con `down` a secas; borrarlo es indistinguible de
   # perder los secretos del emparejado remoto y todos los grants OAuth:
   # docker volume rm hebra-mcp_data   # solo si se quiere borrar TODO el estado
@@ -354,7 +358,7 @@ si se acepta el mismo riesgo que ya se acepta hoy para `lumbre-mcp_state`.
 
 Las pruebas locales de Docker del 26 sep 2026 acreditaron el método antiguo
 de secreto del dueño; sus salidas están en el historial de Git y no acreditan
-este cambio de login. Para el candidato actual, ejecutar `npm run check`,
-`docker compose -f deploy/compose.yml config` con la variable privada definida
+este cambio de login. Para otra publicación, ejecutar `npm run check`,
+`docker compose --env-file deploy/.env -f deploy/compose.yml config --quiet`
 y el recorrido real de SPEC.md §12.7. Registrar por separado build, despliegue,
 servicio servido y QA con Claude. Ninguno se infiere de un checkout local.

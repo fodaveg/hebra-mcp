@@ -448,7 +448,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
   `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
 - Host propio `mcp.hebra.pro` (elegido por David el 26 sep 2026), porque la metadata OAuth va en la raíz
-  del host. El sitio Caddy está desplegado desde el 28 sep 2026.
+  del host. El sitio Caddy se comprobó operativo el 28 sep 2026.
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
 - Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
   se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
