@@ -2,8 +2,9 @@
 
 C1 (secretos en fichero) y C2 (`serve-http`) conservan su transporte. El OAuth público
 C3 cambia la aprobación al login y consentimiento de Lumbre (SPEC.md §12.2).
-Este cambio es un candidato local: el broker, el secreto compartido, el despliegue
-coordinado y la QA real requieren su propia evidencia antes de declararlo servido.
+El cambio se desplegó el 28 sep 2026 con Hebra MCP `e36e72a` y broker Lumbre
+`dfdc34f`. El inicio OAuth público DCR + PKCE llega al consentimiento de Lumbre;
+la reconexión y QA de Claude por David siguen pendientes. Ver [RELEASE-2026-09-28.md](RELEASE-2026-09-28.md).
 
 ## Variables y subcomandos (confirmados)
 
@@ -113,7 +114,7 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    `vendor/hebra`, nunca `node_modules/`:
 
    ```bash
-   rsync -az --delete \
+   rsync -az --delete --exclude=.env \
      dist deploy package.json package-lock.json \
      "$HEBRA_MCP_HOST:$HEBRA_MCP_DEST/"
    ```
@@ -123,8 +124,10 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    lo encuentra (visto al preparar el primer despliegue, 26 sep 2026).
 
    El `--delete` es intencional: si un despliegue anterior dejó un fichero de
-   `dist/` que ya no existe, no debe seguir sirviéndose. No aplicar `--delete`
-   sobre nada que no sea el árbol que gestiona este `rsync`.
+   `dist/` que ya no existe, no debe seguir sirviéndose. `--exclude=.env`
+   protege `deploy/.env`, provisionado solo en el servidor, tanto de la copia
+   como de la eliminación. No aplicar `--delete` sobre nada que no sea el
+   árbol que gestiona este `rsync`.
 
 3. Preparar el volumen la PRIMERA vez (el contenedor corre con `USER node`,
    uid/gid 1000; sin este paso, el arranque falla al intentar escribir la
@@ -140,13 +143,15 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 
    ```bash
    ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
-     docker compose -f deploy/compose.yml up -d --build"
+     docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build"
    ```
 
-   Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en el entorno
-   privado con el mismo valor que el broker Lumbre. `compose.yml` exige su presencia;
-   el valor no se copia al repositorio. El dispositivo remoto ya debe estar emparejado
-   mediante el procedimiento C5. Si falta configuración, `serve-http` sale cerrado.
+   Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en
+   `deploy/.env` privado con el mismo valor que el broker Lumbre. También se
+   puede ejecutar desde `deploy/` con `--env-file .env`. `compose.yml` exige
+   su presencia; el valor no se copia al repositorio. El dispositivo remoto ya
+   debe estar emparejado mediante el procedimiento C5. Si falta configuración,
+   `serve-http` sale cerrado.
 
 5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.
@@ -268,9 +273,10 @@ Un `log { output discard }` puesto solo en el fragmento del sitio SOLO tapa
 es `http.log.error.mcp_hebra`, y el `include` que lo atrapa no se admite dentro
 del bloque `log` de un sitio, solo en el global. Ver la nota "PENDIENTE DE
 MEDIR" dentro de `mcp-hebra-pro.caddy`: esto no se ha comprobado todavía contra
-el servidor real (no hay nada desplegado aún), y hay que repetir la prueba que
-`lumbre-mcp` documenta (parar el contenedor, pedir una URL con datos falsos,
-`grep` el log del borde) en cuanto haya un contenedor `hebra-mcp` corriendo.
+el servidor real; el despliegue del 28 sep 2026 no incluyó esa prueba. Queda
+repetir, en una ventana de diagnóstico autorizada, la prueba que `lumbre-mcp`
+documenta (parar el contenedor, pedir una URL con datos falsos y revisar el log
+del borde).
 
 ## Verificar la aceptación de C4
 

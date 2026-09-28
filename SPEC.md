@@ -331,7 +331,7 @@ Lumbre.
 | **L4** Puesta en marcha con la biblioteca real | Emparejado real, configuración de privados de David, `claude mcp add`, QA de David. | 🟡 tras L2 y L3 | Los 7 puntos de §2 comprobados por David en su biblioteca. |
 | **L5** Plataforma propia del dispositivo (opcional) | `agent` en el relé, en Ajustes y en `conflictDevice` para que Hebra diga «Claude». La implementó la sesión de Hebra (`035db7e6`) y el relé, la de Lumbre; hebra-mcp cambió la plataforma que declara (`LINK_PLATFORM` y `deviceLabel`). | ✅ cerrado el 26 sep 2026 | Hebra la muestra; P3 cerrada. `LINK_PLATFORM = 'agent'`, `deviceLabel = 'Claude'` en `serve`/`pair`/`node-port.ts`, con los 68 casos compartidos, `tsc` y `npm test` en verde. |
 | **L6** Punto de entrada estable de Hebra (P1) | Hebra exporta `node.ts` o una subruta de `exports` con motor, almacén, transporte, vínculo y derivados; esquema sin `?raw`. La implementa la sesión de Hebra; hebra-mcp cambia su empaquetado para usarlo. | 🔴 sesión de Hebra, en curso desde el 26 sep 2026 | hebra-mcp compila sin alias `$lib` ni plugin de `?raw`, y los casos compartidos siguen en verde. |
-| **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | C1-C5 con el método anterior se desplegaron el 26 sep 2026. La sustitución por login Lumbre es candidato local; despliegue coordinado y C6 siguen pendientes. | §12.7. |
+| **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | C1-C5 con login Lumbre se desplegaron el 28 sep 2026 (Hebra MCP `e36e72a`, broker Lumbre `dfdc34f`); el inicio OAuth público DCR + PKCE llegó al consentimiento. C6 sigue pendiente de QA de David desde Claude. | §12.7. |
 | **Después de v1** | Servir adjuntos, más escrituras. | Fuera de v1 | Nueva decisión de David. |
 
 ## 11. Pendiente
@@ -448,18 +448,20 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
   `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
 - Host propio `mcp.hebra.pro` (elegido por David el 26 sep 2026), porque la metadata OAuth va en la raíz
-  del host. Ya resuelve a `135.181.157.147`, el servidor de Lumbre; falta el sitio en Caddy.
+  del host. El sitio Caddy está desplegado desde el 28 sep 2026.
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
 - Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
   se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
 - `config.json` de privados vive en el volumen y se lee al arrancar: editarlo exige reiniciar.
 
-### 12.6 Qué protección se pierde
+### 12.6 Límites de protección
 
 - Quien tenga root en el servidor, o escape de otro contenedor de ese host, lee y escribe toda la
   biblioteca, incluidas las notas privadas. El filtro de §6.3 solo actúa sobre la salida.
-- Revocar en Lumbre corta el sync pero **no** el acceso de claude.ai a la copia del servidor. El corte
-  real es `oauth-revoke-all` o parar el contenedor.
+- Revocar en Lumbre la concesión Hebra MCP, su biblioteca o el dispositivo Blob V2 exacto
+  invalida el acceso OAuth de Claude mediante introspección. Retirar la credencial de
+  emparejado también invalida la concesión y corta el sync; `oauth-revoke-all` corta
+  todas las familias locales.
 - Sin rotación de clave (§6.2), retirar el dispositivo no invalida la clave que ya tuvo.
 - Se mantienen: sobres del relé cifrados, la app Lumbre sin la clave (volumen y entorno aparte), D2, el
   filtro y los logs cerrados.
