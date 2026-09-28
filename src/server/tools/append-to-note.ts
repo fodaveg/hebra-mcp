@@ -10,12 +10,13 @@
  * En una instancia lectora, `ctx.write` reenvía la escritura al escritor único
  * (`../forward.ts`), que hace allí la escritura y la espera de la ronda: el filtro de
  * privados y el límite de tamaño de aquí se aplican ANTES, con la configuración de
- * privados de ESTA instancia.
+ * privados de ESTA instancia, y el escritor vuelve a aplicar esa configuración dentro del
+ * turno en que escribe.
  *
- * `hidden: true` sobre el CUERPO RESULTANTE (el de la nota final: la copia si hubo
- * conflicto, la original si no), igual criterio que `create-note.ts`.
+ * Decisión 4 de David (28 sep 2026): un texto que dejaría la nota con una etiqueta
+ * privada se rechaza sin escribir, con `not_found`. Antes se escribía y la salida decía
+ * `hidden: true`. Una nota bloqueada responde `note_locked`.
  */
-import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH } from '../../store/writes';
 import { ToolError } from '../errors';
@@ -27,7 +28,6 @@ export interface AppendToNoteOutput {
   id: string;
   outcome: 'saved' | 'conflict_copy';
   copyId?: string;
-  hidden?: true;
 }
 
 export async function runAppendToNote(
@@ -42,23 +42,20 @@ export async function runAppendToNote(
 
   let result;
   try {
-    result = await appendAndAwaitRound(ctx.write, { id: input.id, text: input.text });
+    result = await appendAndAwaitRound(ctx.write, {
+      id: input.id,
+      text: input.text,
+      privacy: ctx.privacyConfig
+    });
   } catch (error) {
     throw mapWriteError(error);
   }
 
   const { outcome } = result;
   const copyId = result.outcome === 'conflict_copy' ? result.copyId : undefined;
-  const finalId = copyId ?? input.id;
-
-  const note = await ctx.port.noteRead(finalId);
-  const hidden = note
-    ? deriveNote(note.body).tags.some(({ tag }) => ctx.privacy.isTagHidden(tag))
-    : false;
-  logEvent({ event: 'note.append', id: input.id, outcome, hidden });
+  logEvent({ event: 'note.append', id: input.id, outcome });
 
   const output: AppendToNoteOutput = { id: input.id, outcome };
   if (copyId !== undefined) output.copyId = copyId;
-  if (hidden) output.hidden = true;
   return output;
 }

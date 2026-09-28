@@ -54,6 +54,8 @@ import {
 } from '../sync/devices';
 
 const BAIT_TEXT = 'CEBO-TEXTO-conflicto-3b8e';
+/** Configuración de privados vacía, para las peticiones crudas al socket. */
+const OPEN = { privateFolders: [], privateTags: [] };
 
 const dirs: string[] = [];
 const children: ChildProcess[] = [];
@@ -380,7 +382,9 @@ describe('protocolo de writer.sock', () => {
     await listen(dataDir);
     expect(statSync(path).isSocket()).toBe(true);
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(await requestWriter(path, 'createNote', { body: '# x', folderId: null }, 2_000)).toEqual({
+    expect(
+      await requestWriter(path, 'createNote', { body: '# x', folderId: null, privacy: OPEN }, 2_000)
+    ).toEqual({
       id: 'n1',
       title: 't',
       folderId: 'root'
@@ -416,7 +420,17 @@ describe('protocolo de writer.sock', () => {
       requestWriter(path, 'createNote', { body: 'x'.repeat(CREATE_BODY_MAX_LENGTH + 1) }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
     await expect(
-      requestWriter(path, 'appendToNote', { id: 'n1', text: 'x'.repeat(20_001) }, 2_000)
+      requestWriter(path, 'appendToNote', { id: 'n1', text: 'x'.repeat(20_001), privacy: OPEN }, 2_000)
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+    // Sin la privacidad del lector, ninguna escritura: el escritor no supone la suya.
+    await expect(
+      requestWriter(path, 'createNote', { body: '# x', folderId: null }, 2_000)
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(
+      requestWriter(path, 'appendToNote', { id: 'n1', text: 'x' }, 2_000)
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+    await expect(
+      requestWriter(path, 'organize', { action: 'setFavorite', id: 'n1', favorite: true }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
     expect(JSON.parse(await raw(path, 'no es json\n'))).toEqual({
       id: null,
@@ -626,7 +640,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     servers.push(server);
     const instance = fakeInstance(path, 'this');
     const write = buildRoutedWriteContext(instance, localSpy());
-    const error = await write.createNote({ body: '# x' }).catch((caught: unknown) => caught);
+    const error = await write
+      .createNote({ body: '# x', privacy: OPEN })
+      .catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(WriterRemoteError);
     expect((error as WriterRemoteError).code).toBe('internal');
     expect(instance.checkWriter).not.toHaveBeenCalled();

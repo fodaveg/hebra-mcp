@@ -9,15 +9,16 @@
  * le reenvían ahí las escrituras (`src/server/forward.ts`).
  *
  * Protocolo: JSON por líneas (`\n`), una petición y una respuesta por línea, emparejadas
- * por `id` de petición. Cada petición lleva `op` y `params`:
- * - `createNote` `{body, folderId}` → `{id, title, folderId}`.
- * - `appendToNote` `{id, text}` → `{id, outcome, copyId?}`, ya con la ronda de sync
- *   esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
+ * por `id` de petición. Cada petición lleva `op` y `params`. Todas las escrituras llevan
+ * `privacy`, la configuración de privados del LECTOR, que el escritor aplica dentro del
+ * turno de la escritura (D2 ampliada, 28 sep 2026); sin ella, `invalid_request`:
+ * - `createNote` `{body, folderId, privacy}` → `{id, title, folderId}`.
+ * - `appendToNote` `{id, text, privacy}` → `{id, outcome, copyId?}`, ya con la ronda de
+ *   sync esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
  * - `status` `{}` → el estado de sync del escritor, sin `writer` ni `linked`.
  * - `editNote` `{id, edits, expectedRevision, operationId, privacy}` → el resultado
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
- *   escritor. `privacy` es la configuración de privados del LECTOR, que el escritor
- *   aplica dentro del turno de la escritura (D2 ampliada, 28 sep 2026).
+ *   escritor.
  * - `organize` `{action, …, privacy}` → `OrganizeOutcome` (mover nota, favorita,
  *   archivar, crear/renombrar/mover carpeta), igual: ronda esperada y privacidad del
  *   lector.
@@ -179,7 +180,7 @@ function createInputOf(params: Record<string, unknown>): CreateNoteInput {
   const { body, folderId } = params;
   if (typeof body !== 'string' || body.length > CREATE_BODY_MAX_LENGTH) throw new InvalidRequest();
   if (folderId !== null && folderId !== undefined && !isId(folderId)) throw new InvalidRequest();
-  return { body, folderId: folderId ?? null };
+  return { body, folderId: folderId ?? null, privacy: privacyOf(params.privacy) };
 }
 
 function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
@@ -187,7 +188,7 @@ function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
   if (!isId(id) || typeof text !== 'string' || text.length > APPEND_TEXT_MAX_LENGTH) {
     throw new InvalidRequest();
   }
-  return { id, text };
+  return { id, text, privacy: privacyOf(params.privacy) };
 }
 
 function isStringArray(value: unknown): value is string[] {

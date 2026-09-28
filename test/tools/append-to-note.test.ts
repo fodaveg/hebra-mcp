@@ -1,4 +1,6 @@
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
+import { resolveToolContext } from '../../src/server/context';
 import { buildTestContext, openBusyWriteContext, type TestContext } from '../fixtures/test-context';
 import { runAppendToNote } from '../../src/server/tools/append-to-note';
 import { APPEND_SEPARATOR } from '../../src/store/writes';
@@ -60,23 +62,49 @@ describe('hebra_append_to_note', () => {
     ).rejects.toMatchObject({ code: 'not_found' });
   });
 
-  it('etiqueta privada en el texto añadido: hidden true', async () => {
+  it('etiqueta privada en el texto añadido: not_found, sin escribir (decisión 4)', async () => {
     test = await buildTestContext();
-    const result = await runAppendToNote(test.ctx, {
-      id: test.library.publicNote2Id,
-      text: '#secreto\ncontenido oculto'
-    });
-    expect(result.outcome).toBe('saved');
-    expect(result.hidden).toBe(true);
+    const before = await test.ctx.port.noteRead(test.library.publicNote2Id);
+    for (const tag of ['#secreto', '#secreto/hija']) {
+      await expect(
+        runAppendToNote(test.ctx, { id: test.library.publicNote2Id, text: `${tag}\ncontenido oculto` })
+      ).rejects.toMatchObject({ code: 'not_found' });
+    }
+    expect((await test.ctx.port.noteRead(test.library.publicNote2Id))?.body).toBe(before?.body);
   });
 
-  it('sin etiqueta privada: hidden ausente', async () => {
+  it('el escritor lo comprueba dentro de la escritura, sin pasar por la herramienta', async () => {
+    test = await buildTestContext();
+    const privacy = test.serverContext.privacyConfig;
+    await expect(
+      test.ctx.write!.appendToNote({ id: test.library.privateTagNoteId, text: 'x', privacy })
+    ).rejects.toMatchObject({ code: 'not_found' });
+    await expect(
+      test.ctx.write!.appendToNote({ id: test.library.privateFolderNoteId, text: 'x', privacy })
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('nota bloqueada: note_locked, sin escribir', async () => {
+    test = await buildTestContext();
+    const created = await test.ctx.port.noteCreate(null);
+    const locked = 'hebra-locked:v1:no-es-un-envoltorio-valido';
+    const db = new DatabaseSync(test.sqlitePath);
+    db.prepare('UPDATE notes SET body = ? WHERE id = ?').run(locked, created.id);
+    db.close();
+    const ctx = await resolveToolContext(test.serverContext);
+    await expect(runAppendToNote(ctx, { id: created.id, text: 'x' })).rejects.toMatchObject({
+      code: 'note_locked'
+    });
+    expect((await test.ctx.port.noteRead(created.id))?.body).toBe(locked);
+  });
+
+  it('sin etiqueta privada: la salida es solo {id, outcome}', async () => {
     test = await buildTestContext();
     const result = await runAppendToNote(test.ctx, {
       id: test.library.publicNote2Id,
       text: 'texto normal'
     });
-    expect(result.hidden).toBeUndefined();
+    expect(result).toEqual({ id: test.library.publicNote2Id, outcome: 'saved' });
   });
 
   it('otra instancia tiene el bloqueo: busy_other_instance', async () => {

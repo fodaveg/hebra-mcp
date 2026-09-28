@@ -71,6 +71,9 @@ export interface CreateNoteInput {
   body: string;
   /** Carpeta existente; `null`/ausente = la raíz. */
   folderId?: string | null;
+  /** Igual que `EditNoteInput.privacy`: la configuración de quien pide, aplicada dentro
+   *  del turno de la escritura. */
+  privacy?: PrivacyConfig;
 }
 
 export interface CreateNoteResult {
@@ -82,6 +85,8 @@ export interface CreateNoteResult {
 export interface AppendToNoteInput {
   id: string;
   text: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy?: PrivacyConfig;
 }
 
 export type AppendToNoteResult =
@@ -270,9 +275,24 @@ export class NoteWriter {
     }
   }
 
+  /**
+   * Crea una nota. Dentro del turno, con la configuración de privados de quien pide: la
+   * carpeta tiene que existir y ser visible, y el cuerpo no puede llevar una etiqueta
+   * privada (decisión 4 de David, 28 sep 2026: el MCP no le pone una etiqueta privada a
+   * ninguna nota). Si no, `not_found` sin crear nada.
+   */
   async createNote(input: CreateNoteInput): Promise<CreateNoteResult> {
     const result = await this.target.writeExclusive(async (store) => {
-      const note = await store.noteCreate(input.folderId ?? null);
+      const filter = privacyInTurn(store, input.privacy);
+      const folderId = input.folderId ?? ROOT_FOLDER_ID;
+      if (!filter.folderExists(folderId) || filter.isFolderHidden(folderId)) {
+        throw writeRejected('not_found');
+      }
+      const derived = deriveNote(input.body);
+      if (filter.hidesAnyTag((derived.tags ?? []).map(({ tag }) => tag))) {
+        throw writeRejected('not_found');
+      }
+      const note = await store.noteCreate(folderId);
       const saved = await store.noteSave(saveInputFor(note, input.body));
       // Recién creada, nadie más la conoce: `redirected` aquí sería un fallo del motor,
       // no un conflicto. Se devuelve igual el id donde quedó el texto.
@@ -287,15 +307,23 @@ export class NoteWriter {
   /**
    * Añade `text` al final de la nota `id`. `note_not_found` (`LibraryError` de Hebra) si
    * no existe o está en la papelera: las herramientas nunca devuelven notas de la
-   * papelera (SPEC.md §5), así que tampoco se escribe en ellas.
+   * papelera (SPEC.md §5), así que tampoco se escribe en ellas. Dentro del turno, con la
+   * configuración de privados de quien pide: una nota oculta, o un texto que la dejaría
+   * con una etiqueta privada (decisión 4), es `not_found` sin escribir; una nota
+   * bloqueada, `note_locked`.
    */
   async appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult> {
     const result = await this.target.writeExclusive(async (store) => {
+      const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null) throw new LibraryError('note_not_found');
-      const saved = await store.noteSave(
-        saveInputFor(note, `${note.body}${APPEND_SEPARATOR}${input.text}`)
-      );
+      if (filter.isHiddenNote(note.id)) throw writeRejected('not_found');
+      if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
+      const saveInput = saveInputFor(note, `${note.body}${APPEND_SEPARATOR}${input.text}`);
+      if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
+        throw writeRejected('not_found');
+      }
+      const saved = await store.noteSave(saveInput);
       return saved.outcome === 'saved'
         ? ({ id: input.id, outcome: 'saved' } as const)
         : ({ id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo } as const);

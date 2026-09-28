@@ -15,7 +15,7 @@ describe('hebra_create_note', () => {
     const result = await runCreateNote(test.ctx, { body });
     expect(result.title).toBe('Nota nueva');
     expect(result.folderPath).toBe('');
-    expect(result.hidden).toBeUndefined();
+    expect(Object.keys(result).sort()).toEqual(['folderPath', 'id', 'title']);
     expect(typeof result.id).toBe('string');
 
     const note = await test.ctx.port.noteRead(result.id);
@@ -54,16 +54,28 @@ describe('hebra_create_note', () => {
     });
   });
 
-  it('etiqueta privada en el cuerpo: hidden true', async () => {
+  it('etiqueta privada (o descendiente) en el cuerpo: not_found, sin crear nada (decisión 4)', async () => {
     test = await buildTestContext();
-    const result = await runCreateNote(test.ctx, { body: '# Nota secreta\n#secreto\nContenido.\n' });
-    expect(result.hidden).toBe(true);
+    const before = (await test.ctx.port.notesPage(null, 200, { kind: 'all' })).items.length;
+    for (const tag of ['#secreto', '#secreto/hija']) {
+      await expect(
+        runCreateNote(test.ctx, { body: `# Nota secreta\n${tag}\nContenido.\n` })
+      ).rejects.toMatchObject({ code: 'not_found' });
+    }
+    const after = (await test.ctx.port.notesPage(null, 200, { kind: 'all' })).items.length;
+    expect(after).toBe(before);
   });
 
-  it('sin etiqueta privada: hidden ausente (nunca false explícito)', async () => {
+  it('el escritor lo comprueba dentro de la escritura, sin pasar por la herramienta', async () => {
     test = await buildTestContext();
-    const result = await runCreateNote(test.ctx, { body: '# Nota pública\nContenido.\n' });
-    expect(result.hidden).toBeUndefined();
+    const privacy = test.serverContext.privacyConfig;
+    const diario = test.ctx.privacy.folderIdForPath('diario');
+    await expect(
+      test.ctx.write!.createNote({ body: '# En Diario', folderId: diario, privacy })
+    ).rejects.toMatchObject({ code: 'not_found' });
+    await expect(
+      test.ctx.write!.createNote({ body: '# Etiquetada\n#secreto', privacy })
+    ).rejects.toMatchObject({ code: 'not_found' });
   });
 
   it('otra instancia tiene el bloqueo: busy_other_instance', async () => {

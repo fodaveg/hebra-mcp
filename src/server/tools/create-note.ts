@@ -7,14 +7,15 @@
  *
  * En una instancia lectora, `ctx.write` reenvía la creación al escritor único
  * (`../forward.ts`): el límite y la carpeta privada se comprueban aquí ANTES, con la
- * configuración de privados de ESTA instancia.
+ * configuración de privados de ESTA instancia, y el escritor lo vuelve a comprobar con
+ * esa misma configuración dentro del turno en que escribe.
  *
- * `hidden: true` en la salida si alguna etiqueta de `deriveNote(body).tags` es privada
- * (§6.3, «una nota creada con una etiqueta privada queda oculta desde ese momento»): NO
- * revela la CONFIGURACIÓN de privados (qué carpeta o etiqueta está oculta) a quien no la
- * conoce ya, porque quien escribió el cuerpo ya conoce sus propias etiquetas.
+ * Decisión 4 de David (28 sep 2026): el MCP no le pone una etiqueta privada a ninguna
+ * nota. Un cuerpo con una etiqueta privada (o descendiente) se rechaza sin crear nada,
+ * con `not_found`, como una carpeta privada o inexistente. Antes de esa decisión la nota
+ * se creaba y la salida decía `hidden: true`.
  */
-import { deriveNote, ROOT_FOLDER_ID } from '../../hebra';
+import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
@@ -25,7 +26,6 @@ export interface CreateNoteOutput {
   id: string;
   title: string;
   folderPath: string;
-  hidden?: true;
 }
 
 export async function runCreateNote(
@@ -41,19 +41,20 @@ export async function runCreateNote(
 
   let result;
   try {
-    result = await ctx.write.createNote({ body: input.body, folderId });
+    result = await ctx.write.createNote({
+      body: input.body,
+      folderId,
+      privacy: ctx.privacyConfig
+    });
   } catch (error) {
     throw mapWriteError(error);
   }
 
-  const hidden = deriveNote(input.body).tags.some(({ tag }) => ctx.privacy.isTagHidden(tag));
-  logEvent({ event: 'note.create', id: result.id, hidden });
+  logEvent({ event: 'note.create', id: result.id });
 
-  const output: CreateNoteOutput = {
+  return {
     id: result.id,
     title: result.title,
     folderPath: ctx.privacy.folderPath(result.folderId)
   };
-  if (hidden) output.hidden = true;
-  return output;
 }

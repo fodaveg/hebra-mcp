@@ -9,8 +9,8 @@
  *   escritor. Las tres últimas vuelven ya con la ronda esperada allí
  *   (`appendAndAwaitRound`, `WriteContext.editNote`/`organize`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
- *   `editNote` y `organize` llevan además la configuración de privados de ESTE lector,
- *   que el escritor aplica dentro del turno en que escribe;
+ *   Todas llevan además la configuración de privados de ESTE lector, que el escritor
+ *   aplica dentro del turno en que escribe;
  * - si el escritor no responde porque no hay socket, nadie escucha o no contesta a
  *   tiempo, intenta tomar el bloqueo EN ESE MOMENTO (`checkWriter`). Si lo consigue,
  *   escribe en local como nuevo escritor; si no, `busy_other_instance`, como antes;
@@ -20,7 +20,8 @@
  *
  * El filtro de privados y los límites de tamaño NO están aquí: los aplica la herramienta
  * que recibe la llamada, antes de llegar a `ctx.write`, con la configuración de privados
- * de ESTA instancia. El escritor no la conoce ni la supone igual.
+ * de ESTA instancia. El escritor no la conoce ni la supone igual: la recibe con cada
+ * escritura y la vuelve a aplicar dentro del turno en que escribe.
  *
  * Lado del escritor, `writerSocketHandlers`: lo que hace con cada petición, sobre su
  * `WriteContext` local.
@@ -233,14 +234,14 @@ export function buildRoutedWriteContext(
     createNote: (input: CreateNoteInput) =>
       routed(
         'createNote',
-        { body: input.body, folderId: input.folderId ?? null },
+        { body: input.body, folderId: input.folderId ?? null, privacy: input.privacy ?? null },
         asCreateResult,
         () => local.createNote(input)
       ),
     appendToNote: (input: AppendToNoteInput) =>
       routed(
         'appendToNote',
-        { id: input.id, text: input.text },
+        { id: input.id, text: input.text, privacy: input.privacy ?? null },
         (value) => asAppendResult(value, input.id),
         () => local.appendToNote(input)
       ),

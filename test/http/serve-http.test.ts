@@ -20,6 +20,7 @@ import { httpConfigFor } from '../../src/http/config';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../../src/http/serve-http';
 import { WriterRequiredError } from '../../src/server/serve';
 import { APPEND_SEPARATOR } from '../../src/store/writes';
+import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { BAIT_FOLDER, BAIT_TAG } from '../fixtures/test-library';
 import { baitCalls } from '../fixtures/bait-calls';
@@ -121,6 +122,43 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
       `${APPEND_SEPARATOR}Primero.${APPEND_SEPARATOR}Segundo.`,
       `${APPEND_SEPARATOR}Segundo.${APPEND_SEPARATOR}Primero.`
     ]).toContain(tail);
+  });
+
+  it('hebra_edit_note por HTTP: el mismo contrato y los mismos límites que por stdio', async () => {
+    const { test, client } = await startWithTestLibrary();
+    const id = test.library.publicNote2Id;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
+      return { isError: result.isError === true, value: JSON.parse(textOf(result)) as Record<string, unknown> };
+    };
+    const read = await call('hebra_read_note', { id });
+    const edited = await call('hebra_edit_note', {
+      id,
+      edits: [{ find: 'Texto normal', replace: 'Texto por HTTP' }],
+      expectedRevision: read.value.revision,
+      operationId: 'op-http-1'
+    });
+    expect(edited.value).toMatchObject({ id, outcome: 'saved', sync: 'not_linked' });
+    const reread = await call('hebra_read_note', { id });
+    expect(reread.value.body).toContain('Texto por HTTP');
+
+    // El tope de las sustituciones (100 000 caracteres) en el peor escape JSON cabe en el
+    // cuerpo HTTP: llega a la herramienta (aquí, `no_match`), no es un 413.
+    const worst = '\u0001'.repeat(EDITS_TOTAL_MAX_LENGTH / 2);
+    const atLimit = await call('hebra_edit_note', {
+      id,
+      edits: [{ find: worst, replace: worst }],
+      expectedRevision: reread.value.revision,
+      operationId: 'op-http-2'
+    });
+    expect(atLimit).toEqual({ isError: true, value: { error: 'no_match', edit: 0 } });
+    const overLimit = await call('hebra_edit_note', {
+      id,
+      edits: [{ find: worst, replace: `${worst}x` }],
+      expectedRevision: reread.value.revision,
+      operationId: 'op-http-3'
+    });
+    expect(overLimit).toEqual({ isError: true, value: { error: 'invalid_input' } });
   });
 });
 
