@@ -1,3 +1,4 @@
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTestContext, openBusyWriteContext, type TestContext } from '../fixtures/test-context';
 import { runCreateNote } from '../../src/server/tools/create-note';
@@ -64,6 +65,23 @@ describe('hebra_create_note', () => {
     }
     const after = (await test.ctx.port.notesPage(null, 200, { kind: 'all' })).items.length;
     expect(after).toBe(before);
+  });
+
+  it('cuerpo que empieza por la marca de bloqueo: invalid_input y ninguna fila nueva', async () => {
+    test = await buildTestContext();
+    const count = (): number => {
+      const db = new DatabaseSync(test!.sqlitePath, { readOnly: true });
+      try {
+        return Number((db.prepare('SELECT COUNT(*) AS n FROM notes').get() as { n: number }).n);
+      } finally {
+        db.close();
+      }
+    };
+    const before = count();
+    for (const body of ['hebra-locked:x', 'hebra-locked:v1:{"title":"x"}\nbasura']) {
+      await expect(runCreateNote(test.ctx, { body })).rejects.toMatchObject({ code: 'invalid_input' });
+    }
+    expect(count()).toBe(before);
   });
 
   it('el escritor lo comprueba dentro de la escritura, sin pasar por la herramienta', async () => {

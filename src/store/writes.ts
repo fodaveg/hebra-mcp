@@ -283,6 +283,11 @@ export class NoteWriter {
    */
   async createNote(input: CreateNoteInput): Promise<CreateNoteResult> {
     const result = await this.target.writeExclusive(async (store) => {
+      // Antes de `noteCreate`, que confirma su propia transacción: si `noteSave` fallara
+      // después (`invalid_locked_body`), quedaría una nota vacía huérfana; y con una
+      // cabecera v1 válida, una nota «bloqueada» con lo que el agente escribió. El MCP
+      // nunca crea notas bloqueadas.
+      if (input.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
       const filter = privacyInTurn(store, input.privacy);
       const folderId = input.folderId ?? ROOT_FOLDER_ID;
       if (!filter.folderExists(folderId) || filter.isFolderHidden(folderId)) {
