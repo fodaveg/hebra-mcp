@@ -223,6 +223,16 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => this.visibilityRows());
   }
 
+  /** `folders.dirty` de una carpeta (SQL propio sobre `schema.sql`, como el de arriba). */
+  async folderDirty(id: string): Promise<boolean | null> {
+    return this.read(() => {
+      const row = this.db.prepare('SELECT dirty FROM folders WHERE id = ?').get(id) as
+        | { dirty: number }
+        | undefined;
+      return row ? Number(row.dirty) === 1 : null;
+    });
+  }
+
   /** La consulta de `notesVisibilityIndex`, sin cola: también la usa `writeExclusive`
    *  dentro de su turno. */
   private visibilityRows(): NoteVisibilityEntry[] {
@@ -257,6 +267,13 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
+        noteMove: (id, folderId) => this.engine.noteMove(id, folderId),
+        noteSetFavorite: (id, favorite) => this.engine.noteSetFavorite(id, favorite),
+        noteArchive: (id) => this.engine.noteArchive(id),
+        noteUnarchive: (id) => this.engine.noteUnarchive(id),
+        folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
+        folderRename: (id, name) => this.engine.folderRename(id, name),
+        folderMove: (id, parentId) => this.engine.folderMove(id, parentId),
         libraryId: () => this.engine.libraryOpen().libraryId,
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => this.visibilityRows(),

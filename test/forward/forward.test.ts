@@ -264,6 +264,47 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"editNote","outcome":"forwarded"');
   });
 
+  it('organización desde un lector: la hace el escritor, con la privacidad del lector', async () => {
+    const { writer, reader } = await pair();
+    const created = await writer.createNote({ body: '# Organizada\n\ntexto' });
+    const privada = await writer.organize({ action: 'createFolder', parentId: 'root', name: 'Privada' });
+    const ctx: ServerContext = {
+      port: reader.port,
+      privacyConfig: { privateFolders: [['privada']], privateTags: [] },
+      status: new RoutedStatusSource(reader, true),
+      write: buildRoutedWriteContext(reader, localWriteContext(reader))
+    };
+    const client = await connect(ctx);
+
+    const folder = await call(client, 'hebra_create_folder', { name: 'Pública' });
+    expect(folder.value).toMatchObject({ path: 'pública', sync: 'uploaded' });
+    const moved = await call(client, 'hebra_move_note', {
+      id: created.id,
+      folderId: folder.value.id as string
+    });
+    expect(moved.value).toMatchObject({ folderPath: 'pública', sync: 'uploaded' });
+    expect((await writer.port.noteRead(created.id))?.folderId).toBe(folder.value.id);
+
+    // Hacia la carpeta privada del LECTOR: la herramienta la rechaza antes de reenviar…
+    expect(await call(client, 'hebra_move_note', { id: created.id, folderId: privada.id })).toEqual({
+      isError: true,
+      value: { error: 'not_found' }
+    });
+    // …y si la petición llega al escritor por el socket, él la rechaza con la misma
+    // configuración, dentro del turno en que escribiría.
+    const direct = await buildRoutedWriteContext(reader, localWriteContext(reader))
+      .organize({
+        action: 'moveNote',
+        id: created.id,
+        folderId: privada.id,
+        privacy: ctx.privacyConfig
+      })
+      .catch((error: unknown) => error);
+    expect(direct).toMatchObject({ code: 'not_found' });
+    expect((await writer.port.noteRead(created.id))?.folderId).toBe(folder.value.id);
+    expect(stderrText()).toContain('"event":"write.forward","op":"organize","outcome":"forwarded"');
+  });
+
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Visible\n\ntexto' });
@@ -299,6 +340,7 @@ describe('protocolo de writer.sock', () => {
       revision: 'r1.x',
       sync: 'not_linked'
     }),
+    organize: async () => ({ kind: 'folder', id: 'f1', sync: 'not_linked' }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -494,7 +536,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
       appendToNote: async (input) => ({ id: input.id, outcome: 'saved' as const }),
       editNote: async (input) => ({ id: input.id, outcome: 'saved' as const, revision: 'r1.x' }),
       recordEditConflict: async () => undefined,
+      organize: async () => ({ kind: 'folder' as const, id: 'local' }),
       noteRead: async () => null,
+      folderDirty: async () => null,
       onConflictCopy: () => () => undefined,
       requestRound: async () => null
     });
@@ -569,6 +613,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('x');
         },
         editNote: async () => {
+          throw new Error('x');
+        },
+        organize: async () => {
           throw new Error('x');
         },
         status: async () => {

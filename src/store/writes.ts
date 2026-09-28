@@ -23,6 +23,7 @@ import { createHash } from 'node:crypto';
 import {
   deriveNote,
   LibraryError,
+  ROOT_FOLDER_ID,
   type FoldersList,
   type NoteRow,
   type NoteSaveInput,
@@ -41,6 +42,15 @@ export interface NoteWriteStore {
   noteCreate(folderId?: string | null): Promise<NoteRow>;
   noteRead(id: string): Promise<NoteRow | null>;
   noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
+  /** Organización (D2 ampliada): los métodos del mismo nombre de `SqliteLibraryEngine`.
+   *  De las carpetas solo hace falta el id (`FolderRow` no lo exporta `node.ts`). */
+  noteMove(id: string, folderId: string): Promise<NoteRow>;
+  noteSetFavorite(id: string, favorite: boolean): Promise<NoteRow>;
+  noteArchive(id: string): Promise<NoteRow>;
+  noteUnarchive(id: string): Promise<NoteRow>;
+  folderCreate(parentId: string | null, name: string): Promise<{ id: string }>;
+  folderRename(id: string, name: string): Promise<{ id: string }>;
+  folderMove(id: string, parentId: string | null): Promise<{ id: string }>;
   /** `meta.library_id` del almacén (para la revisión). */
   libraryId(): string;
   /** Lo que lee el filtro de privados, en este mismo turno. */
@@ -112,6 +122,64 @@ export interface EditNoteInput {
 export type EditNoteSaved =
   | { id: string; outcome: 'saved'; revision: string; replayed?: true }
   | { id: string; outcome: 'conflict_copy'; copyId: string; replayed?: true };
+
+/**
+ * Organización (D2 ampliada, 28 sep 2026): mover una nota, favorita, archivar y
+ * desarchivar, y crear, renombrar y mover carpetas. Todo por id; la raíz es
+ * `ROOT_FOLDER_ID` (`"root"`, la que lista `hebra_list_folders` con ruta vacía). Sin
+ * papelera, versiones ni adjuntos (otro lote) y sin nada irreversible.
+ */
+export type OrganizeAction =
+  | { action: 'moveNote'; id: string; folderId: string }
+  | { action: 'setFavorite'; id: string; favorite: boolean }
+  | { action: 'setArchived'; id: string; archived: boolean }
+  | { action: 'createFolder'; parentId: string; name: string }
+  | { action: 'renameFolder'; id: string; name: string }
+  | { action: 'moveFolder'; id: string; parentId: string };
+
+export type OrganizeActionName = OrganizeAction['action'];
+
+/** Igual que `EditNoteInput.privacy`: la configuración de quien pide. */
+export type OrganizeInput = OrganizeAction & { privacy?: PrivacyConfig };
+
+/** Lo que queda tras organizar: la nota (carpeta efectiva, favorita, archivada) o la
+ *  carpeta. La ruta para enseñar la calcula la herramienta con SU filtro. */
+export type OrganizeSaved =
+  | { kind: 'note'; id: string; folderId: string; favorite: boolean; archived: boolean }
+  | { kind: 'folder'; id: string };
+
+/** Nombre de carpeta: el motor exige no vacío y sin `/` (`validName`); esto acota el
+ *  tamaño (lo comprueban la herramienta y el socket). */
+export const FOLDER_NAME_MAX_LENGTH = 255;
+
+/** Los errores del motor de Hebra que la organización puede dar, a su código cerrado. */
+function organizeRejection(error: unknown): unknown {
+  if (!(error instanceof LibraryError)) return error;
+  switch (error.code) {
+    case 'note_not_found':
+    case 'folder_not_found':
+      return writeRejected('not_found');
+    case 'folder_name_taken':
+      return writeRejected('folder_name_taken');
+    case 'folder_cycle':
+      return writeRejected('folder_cycle');
+    case 'invalid_name':
+    case 'root_folder_immutable':
+      return writeRejected('invalid_input');
+    default:
+      return error;
+  }
+}
+
+function noteSaved(row: NoteRow): OrganizeSaved {
+  return {
+    kind: 'note',
+    id: row.id,
+    folderId: row.effectiveFolderId,
+    favorite: row.favorite,
+    archived: row.archivedAt !== null
+  };
+}
 
 const OPEN_PRIVACY: PrivacyConfig = { privateFolders: [], privateTags: [] };
 
@@ -325,6 +393,107 @@ export class NoteWriter {
       return { result: outcome, wrote: true };
     });
     if (wrote) this.written();
+    return result;
+  }
+
+  /**
+   * Organización (D2 ampliada, 28 sep 2026), en UN turno de la cola del almacén, con el
+   * filtro de privados de quien pide construido sobre el almacén de ESTE turno:
+   * - La nota o carpeta de origen tiene que ser visible: oculta, en la papelera o
+   *   inexistente es `not_found`, las tres igual.
+   * - El destino (carpeta a la que se mueve una nota, padre de una carpeta nueva o
+   *   movida) también: una carpeta privada responde `not_found`, igual que una que no
+   *   existe (decisión 4 de David: sin revelar que el destino es privado).
+   * - Renombrar o mover una carpeta visible no puede cambiar QUÉ es privado: se simula
+   *   el árbol resultante y, si oculta otras carpetas o una ruta de `privateFolders` deja
+   *   de existir (había una carpeta privada dentro), `not_found` sin escribir.
+   * - Un ciclo (mover una carpeta dentro de sí misma o de una descendiente) es
+   *   `folder_cycle`; un nombre ya usado por una hermana, `folder_name_taken`; un nombre
+   *   vacío o con `/`, o tocar la raíz, `invalid_input`. Las tres reglas son del motor.
+   * Favorita y archivar son idempotentes (fijan un estado). Crear una carpeta no: un
+   * reintento choca con `folder_name_taken`, nunca duplica.
+   * Una nota bloqueada se puede organizar: nada de esto toca su cuerpo.
+   */
+  async organize(input: OrganizeInput): Promise<OrganizeSaved> {
+    const result = await this.target.writeExclusive(async (store) => {
+      const folders = store.foldersList();
+      const notes = store.notesVisibilityIndex();
+      const config = input.privacy ?? OPEN_PRIVACY;
+      const filter = PrivacyFilter.fromSnapshot(folders, notes, config);
+      if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
+
+      const requireVisibleFolder = (id: string): void => {
+        if (!filter.folderExists(id) || filter.isFolderHidden(id)) throw writeRejected('not_found');
+      };
+      const requireVisibleNote = async (id: string): Promise<void> => {
+        const row = await store.noteRead(id);
+        if (!row || row.trashedAt !== null || filter.isHiddenNote(id)) {
+          throw writeRejected('not_found');
+        }
+      };
+      /** Mismo filtro sobre el árbol de carpetas tras el cambio: si no oculta lo mismo,
+       *  la operación cambiaría qué es privado. */
+      const requireSamePrivacyAfter = (
+        change: (entry: FoldersList['folders'][number]) => FoldersList['folders'][number]
+      ): void => {
+        const simulated: FoldersList = {
+          folders: folders.folders.map((entry) => (entry.id === targetId ? change(entry) : entry))
+        };
+        const after = PrivacyFilter.fromSnapshot(simulated, notes, config);
+        if (!after.hidesSameFoldersAs(filter)) throw writeRejected('not_found');
+      };
+      const targetId = 'id' in input ? input.id : '';
+
+      try {
+        switch (input.action) {
+          case 'moveNote':
+            await requireVisibleNote(input.id);
+            requireVisibleFolder(input.folderId);
+            return noteSaved(await store.noteMove(input.id, input.folderId));
+          case 'setFavorite':
+            await requireVisibleNote(input.id);
+            return noteSaved(await store.noteSetFavorite(input.id, input.favorite));
+          case 'setArchived':
+            await requireVisibleNote(input.id);
+            return noteSaved(
+              input.archived ? await store.noteArchive(input.id) : await store.noteUnarchive(input.id)
+            );
+          case 'createFolder': {
+            requireVisibleFolder(input.parentId);
+            const created = await store.folderCreate(input.parentId, input.name);
+            return { kind: 'folder' as const, id: created.id };
+          }
+          case 'renameFolder': {
+            if (input.id === ROOT_FOLDER_ID) throw writeRejected('invalid_input');
+            requireVisibleFolder(input.id);
+            requireSamePrivacyAfter((entry) => ({ ...entry, name: input.name.trim() }));
+            const renamed = await store.folderRename(input.id, input.name);
+            return { kind: 'folder' as const, id: renamed.id };
+          }
+          case 'moveFolder': {
+            if (input.id === ROOT_FOLDER_ID) throw writeRejected('invalid_input');
+            requireVisibleFolder(input.id);
+            requireVisibleFolder(input.parentId);
+            // Antes de simular: el árbol simulado con un ciclo no tendría ruta.
+            const parents = new Map(folders.folders.map((entry) => [entry.id, entry.parentId]));
+            for (let cursor: string | null = input.parentId; cursor !== null; ) {
+              if (cursor === input.id) throw writeRejected('folder_cycle');
+              cursor = parents.get(cursor) ?? null;
+            }
+            requireSamePrivacyAfter((entry) => ({
+              ...entry,
+              parentId: input.parentId,
+              parentState: 'ok'
+            }));
+            const moved = await store.folderMove(input.id, input.parentId);
+            return { kind: 'folder' as const, id: moved.id };
+          }
+        }
+      } catch (error) {
+        throw organizeRejection(error);
+      }
+    });
+    this.written();
     return result;
   }
 

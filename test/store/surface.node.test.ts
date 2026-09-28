@@ -7,19 +7,22 @@ import { openNodeLibraryPort } from '../../src/store/node-port';
 import { LibraryInstance } from '../../src/sync/library-instance';
 
 /**
- * D2 (SPEC.md §3, §5): «No se exponen `noteMove`, `noteTrash`, `notePurge`, `folder*`,
- * `file*` ni ninguna otra mutación de `LibraryStorePort`: el servidor ni siquiera las
- * importa». Tres comprobaciones sobre lo que el servidor puede alcanzar de `src/store`,
- * `src/sync`, `src/lock` y `src/ipc`:
+ * D2 (SPEC.md §3, §5), ampliada el 28 sep 2026: el MCP edita notas y las organiza
+ * (`noteMove`, favorita, archivar, `folderCreate`/`folderRename`/`folderMove`), pero
+ * papelera, purga, versiones, adjuntos y renombrar etiquetas siguen fuera (otro lote, y
+ * sin nada irreversible). Tres comprobaciones sobre lo que el servidor puede alcanzar de
+ * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
  * 2. Ningún objeto que esos módulos entregan (el puerto, su vista de sync, la instancia y
  *    su `port`) TIENE un método así.
- * 3. Ninguna fuente LLAMA a uno (`.noteMove(`…) ni importa los módulos de Hebra que los
+ * 3. Ninguna fuente LLAMA a uno (`.noteTrash(`…) ni importa los módulos de Hebra que los
  *    implementan (`local-port`, `web-port`, `native-port`, `tag-rename`, `tags-reindex`).
  */
 
-const FORBIDDEN_NAME = /^(noteMove|noteTrash|notePurge|folder[A-Z]\w*|file[A-Z]\w*|tagRename)$/;
-const FORBIDDEN_CALL = /\.\s*(noteMove|noteTrash|notePurge|folder[A-Z]\w*|file[A-Z]\w*|tagRename)\s*\(/;
+const FORBIDDEN =
+  'noteTrash|noteRestore|notePurge|noteClearConflict|noteVersion\\w*|folderTrash|file[A-Z]\\w*|trashEmpty|tagRename';
+const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
+const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
 const FORBIDDEN_IMPORT =
   /from\s+['"]\$lib\/library\/(local-port|web-port|native-port|tag-rename|tags-reindex)['"]/;
 

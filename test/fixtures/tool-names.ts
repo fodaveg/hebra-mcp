@@ -7,13 +7,19 @@
  */
 export const TOOL_NAMES: readonly string[] = [
   'hebra_append_to_note',
+  'hebra_create_folder',
   'hebra_create_note',
   'hebra_edit_note',
   'hebra_links',
   'hebra_list_folders',
   'hebra_list_notes',
   'hebra_list_tags',
+  'hebra_move_folder',
+  'hebra_move_note',
   'hebra_read_note',
+  'hebra_rename_folder',
   'hebra_search',
+  'hebra_set_archived',
+  'hebra_set_favorite',
   'hebra_status'
 ].sort();

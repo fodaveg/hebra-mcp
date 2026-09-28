@@ -4,9 +4,9 @@
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
- * `hebra_create_note` y `hebra_append_to_note` (L3b), y `hebra_edit_note` (D2 ampliada,
- * 28 sep 2026), se registran con el mismo `runTool`: pasan igual por
- * `privacy_config_unresolved` primero y por el log cerrado de cada llamada.
+ * `hebra_create_note` y `hebra_append_to_note` (L3b), y `hebra_edit_note` y las seis de
+ * organización (D2 ampliada, 28 sep 2026), se registran con el mismo `runTool`: pasan
+ * igual por `privacy_config_unresolved` primero y por el log cerrado de cada llamada.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -14,16 +14,30 @@ import { resolveToolContext, type ServerContext, type ToolContext } from './cont
 import { ToolError, toErrorResult, toOkResult } from './errors';
 import {
   appendToNoteInputShape,
+  createFolderInputShape,
   createNoteInputShape,
   editNoteInputShape,
   linksInputShape,
   listNotesInputShape,
+  moveFolderInputShape,
+  moveNoteInputShape,
   readNoteInputShape,
-  searchInputShape
+  renameFolderInputShape,
+  searchInputShape,
+  setArchivedInputShape,
+  setFavoriteInputShape
 } from './schemas';
 import { runAppendToNote } from './tools/append-to-note';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
+import {
+  runCreateFolder,
+  runMoveFolder,
+  runMoveNote,
+  runRenameFolder,
+  runSetArchived,
+  runSetFavorite
+} from './tools/organize';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
@@ -176,5 +190,69 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
       inputSchema: editNoteInputShape
     },
     async (input) => runTool(ctx, 'hebra_edit_note', (toolCtx) => runEditNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_move_note',
+    {
+      title: 'Mover una nota',
+      description: 'Mueve una nota a otra carpeta, por ids ("root" es la raíz).',
+      inputSchema: moveNoteInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_move_note', (toolCtx) => runMoveNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_set_favorite',
+    {
+      title: 'Marcar como favorita',
+      description: 'Marca (true) o desmarca (false) una nota como favorita.',
+      inputSchema: setFavoriteInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_set_favorite', (toolCtx) => runSetFavorite(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_set_archived',
+    {
+      title: 'Archivar una nota',
+      description: 'Archiva (true) o desarchiva (false) una nota. No la borra ni la manda a la papelera.',
+      inputSchema: setArchivedInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_set_archived', (toolCtx) => runSetArchived(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_create_folder',
+    {
+      title: 'Crear una carpeta',
+      description: 'Crea una carpeta dentro de parentId (por defecto, la raíz). El nombre no puede repetir el de una hermana.',
+      inputSchema: createFolderInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_create_folder', (toolCtx) => runCreateFolder(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_rename_folder',
+    {
+      title: 'Renombrar una carpeta',
+      description: 'Renombra una carpeta por id. El nombre no puede repetir el de una hermana ni llevar "/".',
+      inputSchema: renameFolderInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_rename_folder', (toolCtx) => runRenameFolder(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_move_folder',
+    {
+      title: 'Mover una carpeta',
+      description: 'Mueve una carpeta dentro de otra, por ids ("root" es la raíz). Nunca dentro de sí misma ni de una descendiente.',
+      inputSchema: moveFolderInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_move_folder', (toolCtx) => runMoveFolder(toolCtx, input))
   );
 }

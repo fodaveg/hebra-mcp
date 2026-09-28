@@ -5,12 +5,12 @@
  *
  * Lado del lector, `buildRoutedWriteContext`: un `WriteContext` que
  * - en el escritor, escribe en local, como siempre;
- * - en un lector, reenvía `createNote`, `appendToNote` y `editNote` al escritor.
- *   `appendToNote` y `editNote` vuelven ya con la ronda esperada allí
- *   (`appendAndAwaitRound`, `WriteContext.editNote`), así que `awaitRound` y
+ * - en un lector, reenvía `createNote`, `appendToNote`, `editNote` y `organize` al
+ *   escritor. Las tres últimas vuelven ya con la ronda esperada allí
+ *   (`appendAndAwaitRound`, `WriteContext.editNote`/`organize`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
- *   `editNote` lleva además la configuración de privados de ESTE lector, que el escritor
- *   aplica dentro del turno en que escribe;
+ *   `editNote` y `organize` llevan además la configuración de privados de ESTE lector,
+ *   que el escritor aplica dentro del turno en que escribe;
  * - si el escritor no responde porque no hay socket, nadie escucha o no contesta a
  *   tiempo, intenta tomar el bloqueo EN ESE MOMENTO (`checkWriter`). Si lo consigue,
  *   escribe en local como nuevo escritor; si no, `busy_other_instance`, como antes;
@@ -47,13 +47,15 @@ import type {
   AppendToNoteResult,
   CreateNoteInput,
   CreateNoteResult,
-  EditNoteInput
+  EditNoteInput,
+  OrganizeInput
 } from '../store/writes';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
   AWAIT_ROUND_TIMEOUT_MS,
   appendAndAwaitRound,
   type EditNoteOutcome,
+  type OrganizeOutcome,
   type SyncFields,
   type SyncState,
   type WriteContext
@@ -65,6 +67,7 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   createNote: 15_000,
   appendToNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   editNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  organize: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   status: 5_000
 };
 
@@ -91,13 +94,42 @@ const SYNC_STATES: ReadonlySet<string> = new Set<SyncState>([
   'not_linked'
 ]);
 
-/** Valida el `EditNoteOutcome` que devuelve el escritor (no se fía de su forma). */
-function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
-  if (!isRecord(value) || typeof value.sync !== 'string' || !SYNC_STATES.has(value.sync)) {
+function syncFieldsFrom(value: Record<string, unknown>): SyncFields {
+  if (typeof value.sync !== 'string' || !SYNC_STATES.has(value.sync)) {
     throw new Error('writer_protocol');
   }
   const sync: SyncFields = { sync: value.sync as SyncState };
   if (typeof value.syncError === 'string') sync.syncError = value.syncError;
+  return sync;
+}
+
+/** Valida el `OrganizeOutcome` que devuelve el escritor. */
+function asOrganizeOutcome(value: unknown): OrganizeOutcome {
+  if (!isRecord(value) || typeof value.id !== 'string') throw new Error('writer_protocol');
+  const sync = syncFieldsFrom(value);
+  if (value.kind === 'folder') return { kind: 'folder', id: value.id, ...sync };
+  if (
+    value.kind === 'note' &&
+    typeof value.folderId === 'string' &&
+    typeof value.favorite === 'boolean' &&
+    typeof value.archived === 'boolean'
+  ) {
+    return {
+      kind: 'note',
+      id: value.id,
+      folderId: value.folderId,
+      favorite: value.favorite,
+      archived: value.archived,
+      ...sync
+    };
+  }
+  throw new Error('writer_protocol');
+}
+
+/** Valida el `EditNoteOutcome` que devuelve el escritor (no se fía de su forma). */
+function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
+  if (!isRecord(value)) throw new Error('writer_protocol');
+  const sync = syncFieldsFrom(value);
   const replayed = value.replayed === true ? { replayed: true as const } : {};
   if (value.outcome === 'saved' && typeof value.revision === 'string') {
     return { id, outcome: 'saved', revision: value.revision, ...replayed, ...sync };
@@ -228,6 +260,13 @@ export function buildRoutedWriteContext(
         (value) => asEditOutcome(value, input.id),
         () => local.editNote(input)
       ),
+    organize: (input: OrganizeInput) =>
+      routed(
+        'organize',
+        { ...input, privacy: input.privacy ?? null },
+        asOrganizeOutcome,
+        () => local.organize(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -242,6 +281,7 @@ export function writerSocketHandlers(
     createNote: (input) => local.createNote(input),
     appendToNote: (input) => appendAndAwaitRound(local, input),
     editNote: (input) => local.editNote(input),
+    organize: (input) => local.organize(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;

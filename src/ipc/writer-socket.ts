@@ -18,6 +18,9 @@
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
  *   escritor. `privacy` es la configuración de privados del LECTOR, que el escritor
  *   aplica dentro del turno de la escritura (D2 ampliada, 28 sep 2026).
+ * - `organize` `{action, …, privacy}` → `OrganizeOutcome` (mover nota, favorita,
+ *   archivar, crear/renombrar/mover carpeta), igual: ronda esperada y privacidad del
+ *   lector.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -46,7 +49,7 @@ import { dirname, join } from 'node:path';
 import { LibraryError } from '../hebra';
 import { logEvent } from '../log/logger';
 import type { PrivacyConfig } from '../privacy/config';
-import type { EditNoteOutcome } from '../server/write-context';
+import type { EditNoteOutcome, OrganizeOutcome } from '../server/write-context';
 import { editsWithinLimits, type TextEdit } from '../store/edits';
 import {
   busyOtherInstance,
@@ -65,7 +68,9 @@ import {
   type AppendToNoteResult,
   type CreateNoteInput,
   type CreateNoteResult,
-  type EditNoteInput
+  type EditNoteInput,
+  FOLDER_NAME_MAX_LENGTH,
+  type OrganizeInput
 } from '../store/writes';
 
 export const WRITER_SOCKET_FILE = 'writer.sock';
@@ -86,12 +91,13 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
 
-export type WriterSocketOp = 'createNote' | 'appendToNote' | 'editNote' | 'status';
+export type WriterSocketOp = 'createNote' | 'appendToNote' | 'editNote' | 'organize' | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'createNote',
   'appendToNote',
   'editNote',
+  'organize',
   'status'
 ]);
 
@@ -125,6 +131,8 @@ export interface WriterSocketHandlers {
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
   /** Edita, espera la ronda y devuelve el estado de sync (`hebra_edit_note`). */
   editNote(input: EditNoteInput): Promise<EditNoteOutcome>;
+  /** Organiza, espera la ronda y devuelve el estado de sync. */
+  organize(input: OrganizeInput): Promise<OrganizeOutcome>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -220,6 +228,37 @@ function editInputOf(params: Record<string, unknown>): EditNoteInput {
   });
   if (!editsWithinLimits(parsed)) throw new InvalidRequest();
   return { id, edits: parsed, expectedRevision, operationId, privacy: privacyOf(privacy) };
+}
+
+function isFolderName(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= FOLDER_NAME_MAX_LENGTH;
+}
+
+function organizeInputOf(params: Record<string, unknown>): OrganizeInput {
+  const privacy = privacyOf(params.privacy);
+  const { id } = params;
+  switch (params.action) {
+    case 'moveNote':
+      if (!isId(id) || !isId(params.folderId)) throw new InvalidRequest();
+      return { action: 'moveNote', id, folderId: params.folderId, privacy };
+    case 'setFavorite':
+      if (!isId(id) || typeof params.favorite !== 'boolean') throw new InvalidRequest();
+      return { action: 'setFavorite', id, favorite: params.favorite, privacy };
+    case 'setArchived':
+      if (!isId(id) || typeof params.archived !== 'boolean') throw new InvalidRequest();
+      return { action: 'setArchived', id, archived: params.archived, privacy };
+    case 'createFolder':
+      if (!isId(params.parentId) || !isFolderName(params.name)) throw new InvalidRequest();
+      return { action: 'createFolder', parentId: params.parentId, name: params.name, privacy };
+    case 'renameFolder':
+      if (!isId(id) || !isFolderName(params.name)) throw new InvalidRequest();
+      return { action: 'renameFolder', id, name: params.name, privacy };
+    case 'moveFolder':
+      if (!isId(id) || !isId(params.parentId)) throw new InvalidRequest();
+      return { action: 'moveFolder', id, parentId: params.parentId, privacy };
+    default:
+      throw new InvalidRequest();
+  }
 }
 
 /** Código cerrado de un fallo del escritor; nunca el mensaje. */
@@ -398,6 +437,9 @@ export class WriterSocketServer {
           break;
         case 'editNote':
           result = await handlers.editNote(editInputOf(envelope.params));
+          break;
+        case 'organize':
+          result = await handlers.organize(organizeInputOf(envelope.params));
           break;
         case 'status':
           result = await handlers.status();

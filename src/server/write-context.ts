@@ -18,7 +18,9 @@ import type {
   CreateNoteInput,
   CreateNoteResult,
   EditNoteInput,
-  EditNoteSaved
+  EditNoteSaved,
+  OrganizeInput,
+  OrganizeSaved
 } from '../store/writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
@@ -29,8 +31,11 @@ export interface WriteContextSources {
   editNote(input: EditNoteInput): Promise<EditNoteSaved>;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda. */
   recordEditConflict(operationId: string, id: string, copyId: string): Promise<void>;
+  /** La organización local (`NoteWriter.organize`), sin esperar ronda. */
+  organize(input: OrganizeInput): Promise<OrganizeSaved>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
+  folderDirty(id: string): Promise<boolean | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda de sync (SPEC.md §8: «una ronda justo después de cada escritura») y
@@ -67,6 +72,9 @@ export interface SyncFields {
 /** Lo que devuelve `hebra_edit_note`: el guardado y su estado de sync. */
 export type EditNoteOutcome = EditNoteSaved & SyncFields;
 
+/** Lo que devuelven las herramientas de organización antes de poner rutas. */
+export type OrganizeOutcome = OrganizeSaved & SyncFields;
+
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
@@ -77,6 +85,9 @@ export interface WriteContext {
    * en el escritor (`./forward.ts`).
    */
   editNote(input: EditNoteInput): Promise<EditNoteOutcome>;
+  /** Organización completa: escribe, espera la ronda y devuelve el estado de sync. En un
+   *  lector, todo ocurre en el escritor (`./forward.ts`). */
+  organize(input: OrganizeInput): Promise<OrganizeOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -209,6 +220,15 @@ export function buildWriteContext(
       } finally {
         unsubscribe();
       }
+    },
+    async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
+      const saved = await sources.organize(input);
+      const wait = await awaitRound(roundTimeoutMs);
+      const dirty =
+        saved.kind === 'note'
+          ? await dirtyOf(saved.id)
+          : await sources.folderDirty(saved.id).catch(() => null);
+      return { ...saved, ...syncFieldsOf(wait, dirty) };
     }
   };
 }

@@ -56,6 +56,8 @@ import {
   type CreateNoteResult,
   type EditNoteInput,
   type EditNoteSaved,
+  type OrganizeInput,
+  type OrganizeSaved,
   type NoteWriteStore,
   type NoteWriteTarget
 } from '../store/writes';
@@ -289,6 +291,10 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.writer.recordEditConflict(operationId, id, copyId);
   }
 
+  organize(input: OrganizeInput): Promise<OrganizeSaved> {
+    return this.writer.organize(input);
+  }
+
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y
    *  `errorsByCode` se leen igual de la base; las rondas son del otro proceso. */
   async status(): Promise<InstanceStatus> {
@@ -346,6 +352,7 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
+    folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     close: (): void => current().close()
   };
 }

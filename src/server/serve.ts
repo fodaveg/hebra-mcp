@@ -79,7 +79,9 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     editNote: (input) => instance.editNote(input),
     recordEditConflict: (operationId, id, copyId) =>
       instance.recordEditConflict(operationId, id, copyId),
+    organize: (input) => instance.organize(input),
     noteRead: (id) => instance.port.noteRead(id),
+    folderDirty: (id) => instance.port.folderDirty(id),
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
     requestRound: () => {
       const runner = instance.syncRunner;

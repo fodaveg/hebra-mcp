@@ -1,12 +1,11 @@
 /**
- * Puerto propio de hebra-mcp sobre el almacén de Hebra: solo lo que D2 permite en v1
- * (leer, buscar, crear una nota y añadir texto al final; `noteSave` cubre las dos
- * escrituras porque `hebra_append_to_note` construye `body + "\n\n" + text` en la capa
- * de herramientas y llama a lo mismo que crear, SPEC.md §5). A propósito NO es
- * `LibraryStorePort` (`library/types` de Hebra): ese interfaz obliga a implementar
- * `tagRename`/`tagsReindex`/`noteMove`/`noteTrash`/`folder*`/`file*`, que v1 nunca
- * expone (SPEC.md §5: «el servidor ni siquiera las importa»). Cualquier método de aquí
- * es uno que SÍ hace falta detrás de una herramienta MCP futura (L1/L3).
+ * Puerto propio de hebra-mcp sobre el almacén de Hebra: las lecturas de las herramientas
+ * y las dos mutaciones de nota más sencillas (`noteCreate`/`noteSave`). La edición y la
+ * organización (D2 ampliada, 28 sep 2026) NO están aquí: van por un turno exclusivo de la
+ * cola (`writeExclusive`, `./writes.ts`), con el filtro de privados dentro del turno. A
+ * propósito NO es `LibraryStorePort` (`library/types` de Hebra): ese interfaz obliga a
+ * implementar `tagRename`/`noteTrash`/`notePurge`/`file*`, que hebra-mcp nunca expone
+ * (`test/store/surface.node.test.ts`).
  */
 import type {
   FoldersList,
@@ -58,6 +57,9 @@ export interface HebraLibraryPort {
    *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
    *  mientras el proceso vive). */
   notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
+  /** ¿La carpeta tiene cambios sin subir? `null` si no existe. Para el estado de sync
+   *  que devuelven las herramientas de organización (D2 ampliada). */
+  folderDirty(id: string): Promise<boolean | null>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

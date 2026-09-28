@@ -51,7 +51,9 @@ function ctxFor(mcp: McpDevice): ServerContext {
     editNote: (input) => mcp.writer.editNote(input),
     recordEditConflict: (operationId, id, copyId) =>
       mcp.writer.recordEditConflict(operationId, id, copyId),
+    organize: (input) => mcp.writer.organize(input),
     noteRead: (id) => mcp.port.noteRead(id),
+    folderDirty: (id) => mcp.port.folderDirty(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     requestRound: () => mcp.runner.requestRound()
   });
@@ -201,6 +203,40 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
 
     await app.sync.runRound();
     expect((await app.port.noteRead(id))?.body).toBe('# Compartida\n\nuno DOS tres');
+  });
+
+  it('organización: carpeta nueva y nota movida y archivada cruzan al otro dispositivo', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+
+    const id = await appCreate(app, '# Para mover\n\ntexto');
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const call = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(textOf((await client!.callTool({ name, arguments: args })) as CallToolResult)) as Record<
+        string,
+        unknown
+      >;
+    const folder = await call('hebra_create_folder', { name: 'Desde Claude' });
+    expect(folder).toMatchObject({ path: 'desde claude', sync: 'uploaded' });
+    expect(await call('hebra_move_note', { id, folderId: folder.id })).toMatchObject({
+      folderPath: 'desde claude',
+      sync: 'uploaded'
+    });
+    expect(await call('hebra_set_archived', { id, archived: true })).toMatchObject({
+      archived: true,
+      sync: 'uploaded'
+    });
+
+    await app.sync.runRound();
+    const seen = await app.port.noteRead(id);
+    expect(seen?.folderId).toBe(folder.id);
+    expect(seen?.archivedAt).not.toBeNull();
+    const folders = await app.port.foldersList();
+    expect(folders.folders.find((entry) => entry.id === folder.id)?.name).toBe('Desde Claude');
   });
 
   it('hebra_edit_note con edición a la vez en otro dispositivo: conflict_copy con copyId, sin reintento', async () => {
