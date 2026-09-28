@@ -71,19 +71,19 @@ export const CREATE_BODY_MAX_LENGTH = 100_000;
 /** Límite del texto de `hebra_append_to_note` (SPEC.md §5), igual que el de arriba. */
 export const APPEND_TEXT_MAX_LENGTH = 20_000;
 
-/** `NoteSaveInput` completo para `body`: derivados de Hebra y la base leída. */
+/**
+ * `NoteSaveInput` completo para `body`: TODOS los derivados de `deriveNote` y la base
+ * leída. Se pasan todos, no una lista a mano: el almacén de Hebra reemplaza cada conjunto
+ * derivado en cada guardado (`replaceNoteTasks` borra e inserta `tasks ?? []`), así que
+ * uno que falte aquí vacía su índice (bug medido el 28 sep 2026 con `tasks`,
+ * `hasOpenTasks` y `titleSort`; `test/store/writes-derived.node.test.ts`). `locked` viaja
+ * también, aunque `noteSave` lo recalcula del cuerpo y no se fía de él.
+ */
 export function saveInputFor(note: NoteRow, body: string): NoteSaveInput {
-  const derived = deriveNote(body);
   return {
+    ...deriveNote(body),
     id: note.id,
     body,
-    title: derived.title,
-    titleNorm: derived.titleNorm,
-    excerpt: derived.excerpt,
-    tags: derived.tags,
-    links: derived.links,
-    blobRefs: derived.blobRefs,
-    props: derived.props,
     expectedLocalSeq: note.localSeq,
     baseBodySha256: note.bodySha256
   };
