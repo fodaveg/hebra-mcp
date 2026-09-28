@@ -304,7 +304,10 @@ Comando `hebra-mcp pair`, interactivo en terminal:
    David debe ver en Hebra.
 3. **Aprobación**: David aprueba en Hebra > Ajustes > Sincronización. El proceso sondea cada 2 s
    (`DEVICE_LINK_POLL_MS`), desenvuelve el código de recuperación y ejecuta `verifyGrantedAccess`:
-   lee hasta 4 páginas y muestra títulos descifrados para que David confirme que es su biblioteca.
+   comprueba el acceso con hasta 4 páginas de 200 registros y sigue buscando hasta 3 títulos de nota
+   (`VERIFY_TITLE_SEARCH_MAX_RECORDS`, 5000 registros; la subida inicial manda las carpetas
+   primero), y los muestra descifrados para que David confirme que es su biblioteca. Sin ningún
+   título, avisa de que compare la fecha de creación.
    Es el único momento en que se imprimen títulos, y es en su terminal, no en logs.
 4. **Guardado**: los secretos van al llavero (§6.1). Después, `libraryConnect` y la primera descarga
    completa.
