@@ -7,10 +7,13 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Este es el estado del **lote L0** (esqueleto y almacén en Node): todavía no hay
-servidor MCP ni emparejado con Hebra; solo el almacén (SQLite sobre `node:sqlite`) y un
-puerto de lectura/escritura sobre él, verificados con los casos de prueba compartidos
-del propio motor de Hebra.
+Estado a 28 de septiembre de 2026: el servidor MCP tiene 13 herramientas (lectura,
+creación, edición por sustituciones y organización de notas; detalle en `SPEC.md` §5),
+emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
+por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
+`https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
+su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12); papelera, versiones y
+adjuntos quedan para otro lote.
 
 ## Requisitos
 
@@ -122,4 +125,4 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
   de hebra-mcp sobre el motor (`HebraLibraryPort`): deliberadamente más estrecho que el
   `LibraryStorePort` completo de Hebra, ver el comentario de cabecera de `node-port.ts`.
 - `scripts/build.mjs`, `scripts/check-bundle.mjs`, `scripts/check-no-hebra-code.mjs` —
-  build y los dos checks de cierre de L0.
+  build y los dos checks que corre `npm run check` junto con `typecheck` y `test`.
