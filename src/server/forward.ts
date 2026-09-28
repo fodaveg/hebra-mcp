@@ -108,15 +108,12 @@ function syncFieldsFrom(value: Record<string, unknown>): SyncFields {
 function asOrganizeOutcome(value: unknown): OrganizeOutcome {
   if (!isRecord(value) || typeof value.id !== 'string') throw new Error('writer_protocol');
   const sync = syncFieldsFrom(value);
-  if (value.kind === 'folder') return { kind: 'folder', id: value.id, ...sync };
   if (
-    value.kind === 'note' &&
     typeof value.folderId === 'string' &&
     typeof value.favorite === 'boolean' &&
     typeof value.archived === 'boolean'
   ) {
     return {
-      kind: 'note',
       id: value.id,
       folderId: value.folderId,
       favorite: value.favorite,

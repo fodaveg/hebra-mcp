@@ -1,24 +1,24 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
+import { REMOVED_FOLDER_TOOLS, TOOL_NAMES } from '../fixtures/tool-names';
 import { resolveToolContext, type ToolContext } from '../../src/server/context';
 import { ToolError } from '../../src/server/errors';
-import {
-  runCreateFolder,
-  runMoveFolder,
-  runMoveNote,
-  runRenameFolder,
-  runSetArchived,
-  runSetFavorite
-} from '../../src/server/tools/organize';
+import { registerTools } from '../../src/server/register-tools';
+import { runMoveNote, runSetArchived, runSetFavorite } from '../../src/server/tools/organize';
 import { runReadNote } from '../../src/server/tools/read-note';
 import { runListFolders } from '../../src/server/tools/list-folders';
 import { NoteWriter } from '../../src/store/writes';
 import type { NodeLibraryPort } from '../../src/store/node-port';
 
 /**
- * Organización por id (D2 ampliada, 28 sep 2026) sobre la biblioteca de prueba
+ * Organización de notas por id (D2 ampliada, 28 sep 2026) sobre la biblioteca de prueba
  * (`Proyectos/Lumbre` visible; `Diario` y `Diario/2026` privadas; `secreto` etiqueta
- * privada). Sin sync: `sync: "not_linked"`.
+ * privada). Sin sync: `sync: "not_linked"`. Sin herramientas de carpetas (opción A de
+ * David, 28 sep 2026).
  */
 
 describe('organización', () => {
@@ -84,9 +84,6 @@ describe('organización', () => {
     await expect(
       writer.organize({ action: 'setFavorite', id: test.library.privateTagNoteId, favorite: true, privacy })
     ).rejects.toMatchObject({ code: 'not_found' });
-    await expect(
-      writer.organize({ action: 'createFolder', parentId: folderId(ctx, 'diario'), name: 'x', privacy })
-    ).rejects.toMatchObject({ code: 'not_found' });
     expect((await ctx.port.noteRead(id))?.folderId).toBe(folderId(ctx, 'proyectos/lumbre'));
   });
 
@@ -120,75 +117,42 @@ describe('organización', () => {
     expect(await runSetFavorite(await fresh(), { id, favorite: false })).toMatchObject({ favorite: false });
   });
 
-  it('crear carpeta: en la raíz o dentro de una visible; nunca en una privada; sin duplicar', async () => {
+  it('sin herramientas de carpetas: tools/list no las trae y llamarlas es una herramienta inexistente', async () => {
+    // Opción A de David (28 sep 2026): crear, renombrar y mover carpetas quedan fuera del
+    // MCP porque sus errores revelaban carpetas privadas. «Carpeta privada = inexistente»
+    // al mover una NOTA lo cubre el test de arriba («mover una nota a una carpeta
+    // privada responde igual que a una inexistente»).
     test = await buildTestContext();
-    const created = await runCreateFolder(await fresh(), { name: 'Nueva' });
-    expect(created).toMatchObject({ path: 'nueva', sync: 'not_linked' });
-    const ctx = await fresh();
-    expect(await runCreateFolder(ctx, { name: 'Hija', parentId: created.id })).toMatchObject({
-      path: 'nueva/hija'
-    });
-    await expectNotFound(runCreateFolder(ctx, { name: 'Espía', parentId: folderId(ctx, 'diario') }));
-    await expectNotFound(runCreateFolder(ctx, { name: 'Espía', parentId: 'no-existe' }));
-    // Reintentar la misma creación no duplica: choca con el nombre.
-    await expect(runCreateFolder(await fresh(), { name: 'nueva' })).rejects.toMatchObject({
-      code: 'folder_name_taken'
-    });
-    for (const name of ['', '   ', 'a/b', 'x'.repeat(256)]) {
-      await expect(runCreateFolder(await fresh(), { name })).rejects.toMatchObject({
-        code: 'invalid_input'
-      });
+    const server = new McpServer({ name: 'hebra-mcp-organize-test', version: '0.0.0' });
+    registerTools(server, test.serverContext);
+    const client = new Client({ name: 'hebra-mcp-organize-client', version: '0.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const names = (await client.listTools()).tools.map((tool) => tool.name).sort();
+      expect(names).toEqual(TOOL_NAMES);
+      for (const name of REMOVED_FOLDER_TOOLS) expect(names).not.toContain(name);
+
+      const foldersBefore = (await runListFolders(await fresh())).folders.length;
+      for (const name of REMOVED_FOLDER_TOOLS) {
+        const result = (await client.callTool({
+          name,
+          arguments: { id: 'root', name: 'Nueva', parentId: 'root' }
+        })) as CallToolResult;
+        // El error genérico del SDK (1.30.1, `McpServer`: `McpError` InvalidParams
+        // envuelto en un resultado `isError`) para una herramienta no registrada: ni una
+        // salida nuestra ni ninguno de nuestros códigos cerrados.
+        expect(result.isError).toBe(true);
+        const text = result.content
+          .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
+          .map((block) => block.text)
+          .join('\n');
+        expect(text).toContain(`Tool ${name} not found`);
+      }
+      expect((await runListFolders(await fresh())).folders).toHaveLength(foldersBefore);
+    } finally {
+      await client.close();
+      await server.close();
     }
-    const paths = (await runListFolders(await fresh())).folders.map((folder) => folder.path);
-    expect(paths.filter((path) => path === 'nueva')).toHaveLength(1);
-  });
-
-  it('renombrar carpeta visible; la privada y la raíz, no', async () => {
-    test = await buildTestContext();
-    const ctx = await fresh();
-    const lumbre = folderId(ctx, 'proyectos/lumbre');
-    expect(await runRenameFolder(ctx, { id: lumbre, name: 'Hebra' })).toMatchObject({
-      id: lumbre,
-      path: 'proyectos/hebra'
-    });
-    expect((await runReadNote(await fresh(), { id: test.library.publicNote2Id })).folderPath).toBe(
-      'proyectos/hebra'
-    );
-    await expectNotFound(runRenameFolder(await fresh(), { id: folderId(ctx, 'diario'), name: 'Otro' }));
-    await expect(runRenameFolder(await fresh(), { id: 'root', name: 'Raíz' })).rejects.toMatchObject({
-      code: 'invalid_input'
-    });
-  });
-
-  it('mover carpeta: a la raíz sí; dentro de sí misma o de una descendiente, folder_cycle; a una privada, not_found', async () => {
-    test = await buildTestContext();
-    const ctx = await fresh();
-    const proyectos = folderId(ctx, 'proyectos');
-    const lumbre = folderId(ctx, 'proyectos/lumbre');
-    for (const parentId of [proyectos, lumbre]) {
-      await expect(runMoveFolder(ctx, { id: proyectos, parentId })).rejects.toMatchObject({
-        code: 'folder_cycle'
-      });
-    }
-    await expectNotFound(runMoveFolder(ctx, { id: lumbre, parentId: folderId(ctx, 'diario') }));
-    await expectNotFound(runMoveFolder(ctx, { id: folderId(ctx, 'diario/2026'), parentId: 'root' }));
-    expect(await runMoveFolder(ctx, { id: lumbre, parentId: 'root' })).toMatchObject({
-      id: lumbre,
-      path: 'lumbre'
-    });
-  });
-
-  it('renombrar o mover una carpeta con una privada dentro no cambia qué es privado', async () => {
-    test = await buildTestContext({ privateFolders: [['proyectos', 'lumbre']], privateTags: [] });
-    const ctx = await fresh();
-    const proyectos = folderId(ctx, 'proyectos');
-    const diario = folderId(ctx, 'diario');
-    // `Proyectos` es visible, pero su hija `Lumbre` es privada: cambiarle la ruta dejaría
-    // `proyectos/lumbre` sin resolver (o expuesta).
-    await expectNotFound(runRenameFolder(ctx, { id: proyectos, name: 'Otros' }));
-    await expectNotFound(runMoveFolder(ctx, { id: proyectos, parentId: diario }));
-    const after = await fresh();
-    expect(after.privacy.unresolved).toBe(false);
-    expect(after.privacy.folderPath(proyectos)).toBe('proyectos');
   });
 });

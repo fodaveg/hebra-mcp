@@ -51,14 +51,9 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
         operationId: 'bait-2'
       }
     },
-    // Organización (D2 ampliada): sobre las notas ocultas, todas `not_found`. Crear
-    // «Diario» en la raíz choca con la carpeta privada del mismo nombre: la respuesta es
-    // un código cerrado (`folder_name_taken`), sin nombres ni contenido.
+    // Organización de notas (D2 ampliada): sobre las notas ocultas, todas `not_found`.
     { name: 'hebra_move_note', arguments: { id: library.privateFolderNoteId, folderId: 'root' } },
     { name: 'hebra_set_favorite', arguments: { id: library.privateTagNoteId, favorite: true } },
-    { name: 'hebra_set_archived', arguments: { id: library.privateFolderNoteId, archived: true } },
-    { name: 'hebra_create_folder', arguments: { name: 'Diario' } },
-    { name: 'hebra_rename_folder', arguments: { id: 'root', name: 'x' } },
-    { name: 'hebra_move_folder', arguments: { id: 'no-existe', parentId: 'root' } }
+    { name: 'hebra_set_archived', arguments: { id: library.privateFolderNoteId, archived: true } }
   ];
 }

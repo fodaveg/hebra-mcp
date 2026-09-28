@@ -53,7 +53,6 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
       writer.recordEditConflict(operationId, id, copyId),
     organize: (input) => writer.organize(input),
     noteRead: (id) => port.noteRead(id),
-    folderDirty: (id) => port.folderDirty(id),
     onConflictCopy: () => () => {},
     requestRound: () => Promise.resolve(null)
   });

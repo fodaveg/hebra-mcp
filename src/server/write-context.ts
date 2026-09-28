@@ -35,7 +35,6 @@ export interface WriteContextSources {
   organize(input: OrganizeInput): Promise<OrganizeSaved>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
-  folderDirty(id: string): Promise<boolean | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda de sync (SPEC.md §8: «una ronda justo después de cada escritura») y
@@ -224,11 +223,7 @@ export function buildWriteContext(
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
       const saved = await sources.organize(input);
       const wait = await awaitRound(roundTimeoutMs);
-      const dirty =
-        saved.kind === 'note'
-          ? await dirtyOf(saved.id)
-          : await sources.folderDirty(saved.id).catch(() => null);
-      return { ...saved, ...syncFieldsOf(wait, dirty) };
+      return { ...saved, ...syncFieldsOf(wait, await dirtyOf(saved.id)) };
     }
   };
 }

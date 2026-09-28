@@ -17,8 +17,9 @@
  * - `note_locked`: nota bloqueada (Paridad Bear L de Hebra, §17): su cuerpo no se edita.
  * - `operation_id_reused`: el mismo `operationId` con otra petición.
  * - `privacy_config_unresolved`: el filtro no se puede aplicar (SPEC.md §6.3, R5).
- * - `folder_name_taken`/`folder_cycle`: las dos reglas de carpetas del motor de Hebra.
- * - `invalid_input`: la entrada no vale (revisión ilegible, nombre vacío…).
+ * - `invalid_input`: la entrada no vale (revisión ilegible, cuerpo bloqueado…).
+ * Sin códigos de carpetas: crear, renombrar y mover carpetas no está en el MCP (opción A
+ * de David, 28 sep 2026), porque `folder_name_taken`/`folder_cycle` revelaban privadas.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -29,8 +30,6 @@ export type WriteRejectionCode =
   | 'note_locked'
   | 'operation_id_reused'
   | 'privacy_config_unresolved'
-  | 'folder_name_taken'
-  | 'folder_cycle'
   | 'invalid_input';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
@@ -42,8 +41,6 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'note_locked',
   'operation_id_reused',
   'privacy_config_unresolved',
-  'folder_name_taken',
-  'folder_cycle',
   'invalid_input'
 ]);
 

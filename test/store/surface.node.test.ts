@@ -8,9 +8,10 @@ import { LibraryInstance } from '../../src/sync/library-instance';
 
 /**
  * D2 (SPEC.md §3, §5), ampliada el 28 sep 2026: el MCP edita notas y las organiza
- * (`noteMove`, favorita, archivar, `folderCreate`/`folderRename`/`folderMove`), pero
- * papelera, purga, versiones, adjuntos y renombrar etiquetas siguen fuera (otro lote, y
- * sin nada irreversible). Tres comprobaciones sobre lo que el servidor puede alcanzar de
+ * (`noteMove`, favorita, archivar), pero papelera, purga, versiones, adjuntos, renombrar
+ * etiquetas y gestionar carpetas (`folder*`: opción A de David, 28 sep 2026, sus errores
+ * revelaban carpetas privadas) siguen fuera. Tres comprobaciones sobre lo que el servidor
+ * puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
  * 2. Ningún objeto que esos módulos entregan (el puerto, su vista de sync, la instancia y
@@ -20,7 +21,7 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  */
 
 const FORBIDDEN =
-  'noteTrash|noteRestore|notePurge|noteClearConflict|noteVersion\\w*|folderTrash|file[A-Z]\\w*|trashEmpty|tagRename';
+  'noteTrash|noteRestore|notePurge|noteClearConflict|noteVersion\\w*|folderCreate|folderRename|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|tagRename';
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
 const FORBIDDEN_IMPORT =

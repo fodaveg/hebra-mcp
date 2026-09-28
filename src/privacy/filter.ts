@@ -78,21 +78,6 @@ export class PrivacyFilter {
     return false;
   }
 
-  /**
-   * ¿Oculta este filtro exactamente las mismas carpetas que `other`, y los dos se pueden
-   * aplicar? Para la organización de carpetas (D2 ampliada): renombrar o mover una
-   * carpeta visible no puede cambiar qué es privado, ni dejar sin resolver una ruta de
-   * `privateFolders` (una carpeta privada DENTRO de la que se mueve cambiaría de ruta).
-   * Las notas no cambian de carpeta con estas operaciones, así que mismas carpetas
-   * ocultas = mismas notas ocultas.
-   */
-  hidesSameFoldersAs(other: PrivacyFilter): boolean {
-    if (this.unresolved || other.unresolved) return false;
-    if (this.hiddenFolderIds.size !== other.hiddenFolderIds.size) return false;
-    for (const id of this.hiddenFolderIds) if (!other.hiddenFolderIds.has(id)) return false;
-    return true;
-  }
-
   /** `true` si la nota no debe salir por NINGUNA herramienta: en una carpeta privada (o
    *  subcarpeta), con una etiqueta privada (o descendiente), o desconocida para el
    *  índice (cerrado ante la duda). */

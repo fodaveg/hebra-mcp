@@ -62,8 +62,9 @@ export const editNoteInputShape = {
     .describe('Id único de esta edición (un UUID). Reintentar con el mismo no la repite.')
 };
 
-/** Organización (D2 ampliada): todo por id, los de `hebra_list_notes`/`hebra_list_folders`.
- *  La raíz es la carpeta `"root"`. El tamaño de `name` lo aplica `organize.ts`. */
+/** Organización de notas (D2 ampliada): todo por id, los de `hebra_list_notes`/
+ *  `hebra_list_folders`. La raíz es la carpeta `"root"`. Sin herramientas de carpetas
+ *  (opción A de David, 28 sep 2026). */
 const FOLDER_ID_HINT = 'Id de carpeta de hebra_list_folders ("root" es la raíz).';
 
 export const moveNoteInputShape = {
@@ -79,19 +80,4 @@ export const setFavoriteInputShape = {
 export const setArchivedInputShape = {
   id: z.string(),
   archived: z.boolean()
-};
-
-export const createFolderInputShape = {
-  name: z.string(),
-  parentId: z.string().optional().describe(FOLDER_ID_HINT)
-};
-
-export const renameFolderInputShape = {
-  id: z.string(),
-  name: z.string()
-};
-
-export const moveFolderInputShape = {
-  id: z.string(),
-  parentId: z.string().describe(FOLDER_ID_HINT)
 };

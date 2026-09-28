@@ -20,8 +20,8 @@
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
  *   escritor.
  * - `organize` `{action, …, privacy}` → `OrganizeOutcome` (mover nota, favorita,
- *   archivar, crear/renombrar/mover carpeta), igual: ronda esperada y privacidad del
- *   lector.
+ *   archivar), igual: ronda esperada y privacidad del lector. Sin acciones de carpetas
+ *   (opción A de David, 28 sep 2026): una acción desconocida es `invalid_request`.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -70,7 +70,6 @@ import {
   type CreateNoteInput,
   type CreateNoteResult,
   type EditNoteInput,
-  FOLDER_NAME_MAX_LENGTH,
   type OrganizeInput
 } from '../store/writes';
 
@@ -231,10 +230,6 @@ function editInputOf(params: Record<string, unknown>): EditNoteInput {
   return { id, edits: parsed, expectedRevision, operationId, privacy: privacyOf(privacy) };
 }
 
-function isFolderName(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= FOLDER_NAME_MAX_LENGTH;
-}
-
 function organizeInputOf(params: Record<string, unknown>): OrganizeInput {
   const privacy = privacyOf(params.privacy);
   const { id } = params;
@@ -248,15 +243,6 @@ function organizeInputOf(params: Record<string, unknown>): OrganizeInput {
     case 'setArchived':
       if (!isId(id) || typeof params.archived !== 'boolean') throw new InvalidRequest();
       return { action: 'setArchived', id, archived: params.archived, privacy };
-    case 'createFolder':
-      if (!isId(params.parentId) || !isFolderName(params.name)) throw new InvalidRequest();
-      return { action: 'createFolder', parentId: params.parentId, name: params.name, privacy };
-    case 'renameFolder':
-      if (!isId(id) || !isFolderName(params.name)) throw new InvalidRequest();
-      return { action: 'renameFolder', id, name: params.name, privacy };
-    case 'moveFolder':
-      if (!isId(id) || !isId(params.parentId)) throw new InvalidRequest();
-      return { action: 'moveFolder', id, parentId: params.parentId, privacy };
     default:
       throw new InvalidRequest();
   }

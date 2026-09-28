@@ -352,7 +352,6 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
-    folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     close: (): void => current().close()
   };
 }

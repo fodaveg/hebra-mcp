@@ -267,14 +267,18 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
   });
 
   it('organización desde un lector: la hace el escritor, con la privacidad del lector', async () => {
-    const { writer, reader } = await pair();
+    const { relay, writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Organizada\n\ntexto', privacy: OPEN });
-    const privada = await writer.organize({
-      action: 'createFolder',
-      parentId: 'root',
-      name: 'Privada',
-      privacy: OPEN
-    });
+    // Las carpetas se crean en la app (el MCP no las gestiona, opción A de David) y llegan
+    // al escritor por sync; el lector las ve en la misma SQLite (WAL).
+    // La app entra primero en la biblioteca (con contenido local de antes, el motor se
+    // niega a fusionar: `library_merge_refused`) y después crea las carpetas.
+    const app = await appDevice(relay);
+    expect((await app.sync.runRound()).result).toBe('ok');
+    const privada = await app.engine.folderCreate(null, 'Privada');
+    const publica = await app.engine.folderCreate(null, 'Pública');
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await writer.syncRunner!.requestRound();
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [['privada']], privateTags: [] },
@@ -283,14 +287,9 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     };
     const client = await connect(ctx);
 
-    const folder = await call(client, 'hebra_create_folder', { name: 'Pública' });
-    expect(folder.value).toMatchObject({ path: 'pública', sync: 'uploaded' });
-    const moved = await call(client, 'hebra_move_note', {
-      id: created.id,
-      folderId: folder.value.id as string
-    });
+    const moved = await call(client, 'hebra_move_note', { id: created.id, folderId: publica.id });
     expect(moved.value).toMatchObject({ folderPath: 'pública', sync: 'uploaded' });
-    expect((await writer.port.noteRead(created.id))?.folderId).toBe(folder.value.id);
+    expect((await writer.port.noteRead(created.id))?.folderId).toBe(publica.id);
 
     // Hacia la carpeta privada del LECTOR: la herramienta la rechaza antes de reenviar…
     expect(await call(client, 'hebra_move_note', { id: created.id, folderId: privada.id })).toEqual({
@@ -308,7 +307,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
       })
       .catch((error: unknown) => error);
     expect(direct).toMatchObject({ code: 'not_found' });
-    expect((await writer.port.noteRead(created.id))?.folderId).toBe(folder.value.id);
+    expect((await writer.port.noteRead(created.id))?.folderId).toBe(publica.id);
     expect(stderrText()).toContain('"event":"write.forward","op":"organize","outcome":"forwarded"');
   });
 
@@ -347,7 +346,13 @@ describe('protocolo de writer.sock', () => {
       revision: 'r1.x',
       sync: 'not_linked'
     }),
-    organize: async () => ({ kind: 'folder', id: 'f1', sync: 'not_linked' }),
+    organize: async (input) => ({
+      id: input.id,
+      folderId: 'root',
+      favorite: false,
+      archived: false,
+      sync: 'not_linked'
+    }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -437,6 +442,17 @@ describe('protocolo de writer.sock', () => {
     await expect(
       requestWriter(path, 'organize', { action: 'setFavorite', id: 'n1', favorite: true }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
+    // Ni acciones de carpetas: fuera del MCP (opción A de David, 28 sep 2026).
+    for (const action of ['createFolder', 'renameFolder', 'moveFolder']) {
+      await expect(
+        requestWriter(
+          path,
+          'organize',
+          { action, id: 'f1', parentId: 'root', name: 'x', privacy: OPEN },
+          2_000
+        )
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
     expect(JSON.parse(await raw(path, 'no es json\n'))).toEqual({
       id: null,
       ok: false,
@@ -555,9 +571,13 @@ describe('lector: qué hace cuando el escritor no responde', () => {
       appendToNote: async (input) => ({ id: input.id, outcome: 'saved' as const }),
       editNote: async (input) => ({ id: input.id, outcome: 'saved' as const, revision: 'r1.x' }),
       recordEditConflict: async () => undefined,
-      organize: async () => ({ kind: 'folder' as const, id: 'local' }),
+      organize: async (input) => ({
+        id: input.id,
+        folderId: 'root',
+        favorite: false,
+        archived: false
+      }),
       noteRead: async () => null,
-      folderDirty: async () => null,
       onConflictCopy: () => () => undefined,
       requestRound: async () => null
     });

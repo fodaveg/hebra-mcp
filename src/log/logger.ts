@@ -17,9 +17,7 @@ export type ToolErrorCode =
   | 'ambiguous_match'
   | 'overlapping_edits'
   | 'note_locked'
-  | 'operation_id_reused'
-  | 'folder_name_taken'
-  | 'folder_cycle';
+  | 'operation_id_reused';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

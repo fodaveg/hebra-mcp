@@ -57,9 +57,6 @@ export interface HebraLibraryPort {
    *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
    *  mientras el proceso vive). */
   notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
-  /** ¿La carpeta tiene cambios sin subir? `null` si no existe. Para el estado de sync
-   *  que devuelven las herramientas de organización (D2 ampliada). */
-  folderDirty(id: string): Promise<boolean | null>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }
