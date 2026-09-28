@@ -20,6 +20,7 @@ import { encodeRevision } from '../../src/store/revision';
 import { NoteWriter, type EditNoteInput, type NoteWriteTarget } from '../../src/store/writes';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import { IDENTITY, InMemoryLibraryRelay, VAULT_KEY, appDevice } from '../sync/devices';
+import { NO_PRIVATE } from '../fixtures/no-private';
 
 const dirs: string[] = [];
 const instances: LibraryInstance[] = [];
@@ -65,8 +66,9 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
       lock
     });
     instances.push(offline);
-    const created = await offline.createNote({ body: '# Plan\n\nuno dos tres' });
+    const created = await offline.createNote({ body: '# Plan\n\nuno dos tres', privacy: NO_PRIVATE });
     const input: EditNoteInput = {
+      privacy: NO_PRIVATE,
       id: created.id,
       edits: [{ find: 'dos', replace: 'DOS' }],
       expectedRevision: await revisionOf(offline.port as NodeLibraryPort, created.id),
@@ -104,8 +106,9 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
     const sqlitePath = join(dataDir, 'library.sqlite');
     const port = await openNodeLibraryPort({ sqlitePath, dataDir });
     ports.push(port);
-    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola' });
+    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
     const input: EditNoteInput = {
+      privacy: NO_PRIVATE,
       id: created.id,
       edits: [{ find: 'hola', replace: 'hola y adiós' }],
       expectedRevision: await revisionOf(port, created.id),
@@ -138,8 +141,9 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
     const sqlitePath = join(dataDir, 'library.sqlite');
     const port = await openNodeLibraryPort({ sqlitePath, dataDir });
     ports.push(port);
-    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola' });
+    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
     const input: EditNoteInput = {
+      privacy: NO_PRIVATE,
       id: created.id,
       edits: [{ find: 'hola', replace: 'hola y adiós' }],
       expectedRevision: await revisionOf(port, created.id),
@@ -177,8 +181,9 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
     const port = await openNodeLibraryPort({ sqlitePath: join(dataDir, 'library.sqlite'), dataDir });
     ports.push(port);
     const writer = new NoteWriter(port);
-    const created = await writer.createNote({ body: '# Nota\n\nhola' });
+    const created = await writer.createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
     const input: EditNoteInput = {
+      privacy: NO_PRIVATE,
       id: created.id,
       edits: [{ find: 'hola', replace: 'hola otra vez' }],
       expectedRevision: await revisionOf(port, created.id),

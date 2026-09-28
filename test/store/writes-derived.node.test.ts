@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { deriveNote } from '../../src/hebra';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { APPEND_SEPARATOR, NoteWriter } from '../../src/store/writes';
+import { NO_PRIVATE } from '../fixtures/no-private';
 
 /**
  * Derivados completos (título, clave de orden, tareas, etiquetas, enlaces, adjuntos y
@@ -152,15 +153,15 @@ describe('derivados completos al crear y añadir (NoteWriter)', () => {
 
   it('createNote guarda todos los derivados de deriveNote', async () => {
     const { sqlitePath, writer } = await open();
-    const created = await writer.createNote({ body: FULL_BODY });
+    const created = await writer.createNote({ body: FULL_BODY, privacy: NO_PRIVATE });
     expect(storedDerived(sqlitePath, created.id)).toEqual(expectedDerived(FULL_BODY));
   });
 
   it('appendToNote conserva y recalcula todos los derivados del cuerpo final', async () => {
     const { sqlitePath, writer } = await open();
-    const created = await writer.createNote({ body: FULL_BODY });
+    const created = await writer.createNote({ body: FULL_BODY, privacy: NO_PRIVATE });
     const text = '- [ ] otra tarea #nueva';
-    await writer.appendToNote({ id: created.id, text });
+    await writer.appendToNote({ id: created.id, text, privacy: NO_PRIVATE });
     const finalBody = `${FULL_BODY}${APPEND_SEPARATOR}${text}`;
     const stored = storedDerived(sqlitePath, created.id);
     expect(stored).toEqual(expectedDerived(finalBody));

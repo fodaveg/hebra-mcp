@@ -73,7 +73,7 @@ export interface CreateNoteInput {
   folderId?: string | null;
   /** Igual que `EditNoteInput.privacy`: la configuración de quien pide, aplicada dentro
    *  del turno de la escritura. */
-  privacy?: PrivacyConfig;
+  privacy: PrivacyConfig;
 }
 
 export interface CreateNoteResult {
@@ -86,7 +86,7 @@ export interface AppendToNoteInput {
   id: string;
   text: string;
   /** Igual que `EditNoteInput.privacy`. */
-  privacy?: PrivacyConfig;
+  privacy: PrivacyConfig;
 }
 
 export type AppendToNoteResult =
@@ -115,10 +115,12 @@ export interface EditNoteInput {
   /**
    * Configuración de privados de QUIEN pide la edición: la herramienta que la recibe o,
    * por `writer.sock`, la del lector (el escritor no la conoce ni la supone igual). Se
-   * evalúa dentro del turno de la escritura. Ausente = ninguna carpeta ni etiqueta
-   * privada (llamadas internas y tests); las notas de la papelera siguen fuera igual.
+   * evalúa dentro del turno de la escritura. Obligatoria en el tipo (revisión del 28 sep
+   * 2026): sin un valor por defecto, una llamada nueva que se olvide de pasarla no compila
+   * en vez de escribir sin filtro. Quien de verdad no tenga privados pasa una
+   * configuración vacía, explícita.
    */
-  privacy?: PrivacyConfig;
+  privacy: PrivacyConfig;
 }
 
 /** Resultado del guardado LOCAL de una edición (el estado de sync lo añade quien espera
@@ -145,7 +147,7 @@ export type OrganizeAction =
 export type OrganizeActionName = OrganizeAction['action'];
 
 /** Igual que `EditNoteInput.privacy`: la configuración de quien pide. */
-export type OrganizeInput = OrganizeAction & { privacy?: PrivacyConfig };
+export type OrganizeInput = OrganizeAction & { privacy: PrivacyConfig };
 
 /** Lo que queda tras organizar: la nota (carpeta efectiva, favorita, archivada) o la
  *  carpeta. La ruta para enseñar la calcula la herramienta con SU filtro. */
@@ -186,8 +188,6 @@ function noteSaved(row: NoteRow): OrganizeSaved {
   };
 }
 
-const OPEN_PRIVACY: PrivacyConfig = { privateFolders: [], privateTags: [] };
-
 /** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de `sqlite-engine.ts`, Paridad Bear L
  *  §17). Una nota cuyo cuerpo empieza así no se edita, y una edición no puede producirlo. */
 const LOCKED_BODY_PREFIX = 'hebra-locked:';
@@ -221,12 +221,8 @@ function isEditNoteSaved(value: unknown): value is EditNoteSaved {
  * sync ni otra escritura pueden cambiarlo hasta que el turno acabe). Cerrado ante la
  * duda: una configuración que no se puede aplicar rechaza sin escribir.
  */
-function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig | undefined): PrivacyFilter {
-  const filter = PrivacyFilter.fromSnapshot(
-    store.foldersList(),
-    store.notesVisibilityIndex(),
-    config ?? OPEN_PRIVACY
-  );
+function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): PrivacyFilter {
+  const filter = PrivacyFilter.fromSnapshot(store.foldersList(), store.notesVisibilityIndex(), config);
   if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
   return filter;
 }
@@ -451,7 +447,7 @@ export class NoteWriter {
     const result = await this.target.writeExclusive(async (store) => {
       const folders = store.foldersList();
       const notes = store.notesVisibilityIndex();
-      const config = input.privacy ?? OPEN_PRIVACY;
+      const config = input.privacy;
       const filter = PrivacyFilter.fromSnapshot(folders, notes, config);
       if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
 

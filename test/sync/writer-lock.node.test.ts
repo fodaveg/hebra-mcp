@@ -15,6 +15,9 @@ import { WRITER_LOCK_FILE, WriterLock, processIsAlive } from '../../src/lock/wri
 import { StoreError } from '../../src/store/errors';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import { InMemoryLibraryRelay, IDENTITY, VAULT_KEY, appDevice } from './devices';
+import { NO_PRIVATE } from '../fixtures/no-private';
+
+const privacy = NO_PRIVATE;
 
 /**
  * Escritor único (SPEC.md §8, R4): bloqueo con PID y comprobación de vida, lectores en
@@ -198,7 +201,7 @@ describe('LibraryInstance: escritor único', () => {
     const dataDir = tempDataDir();
     const first = await open(dataDir);
     expect(first.role).toBe('this');
-    const note = await first.createNote({ body: '# Primera\n\n#compartida' });
+    const note = await first.createNote({ body: '# Primera\n\n#compartida', privacy });
 
     const child = liveProcess(); // el PID que declara la segunda instancia
     const second = await open(dataDir, { lock: { pid: child.pid! } });
@@ -207,10 +210,10 @@ describe('LibraryInstance: escritor único', () => {
     expect((await second.port.tagsList()).tags.map((tag) => tag.tag)).toEqual(['compartida']);
     expect((await second.port.search('Primera', null, 10)).items).toHaveLength(1);
 
-    await expect(second.createNote({ body: '# Segunda' })).rejects.toMatchObject({
+    await expect(second.createNote({ body: '# Segunda', privacy })).rejects.toMatchObject({
       code: 'busy_other_instance'
     });
-    await expect(second.appendToNote({ id: note.id, text: 'x' })).rejects.toBeInstanceOf(
+    await expect(second.appendToNote({ id: note.id, text: 'x', privacy })).rejects.toBeInstanceOf(
       StoreError
     );
     await expect(second.port.noteCreate(null)).rejects.toMatchObject({
@@ -219,7 +222,7 @@ describe('LibraryInstance: escritor único', () => {
     expect((await second.status()).writer).toBe('other_instance');
 
     // Lo que escribe el escritor lo ve el lector sin reabrir (WAL).
-    await first.appendToNote({ id: note.id, text: 'más' });
+    await first.appendToNote({ id: note.id, text: 'más', privacy });
     expect((await second.port.noteRead(note.id))?.body).toBe('# Primera\n\n#compartida\n\nmás');
 
     // Mientras el primero vive, la comprobación no cambia nada.
@@ -230,7 +233,7 @@ describe('LibraryInstance: escritor único', () => {
     await first.close();
     await second.checkWriter();
     expect(second.role).toBe('this');
-    const again = await second.appendToNote({ id: note.id, text: 'relevo' });
+    const again = await second.appendToNote({ id: note.id, text: 'relevo', privacy });
     expect(again.outcome).toBe('saved');
     expect((await second.port.noteRead(note.id))?.body).toContain('relevo');
   });
@@ -240,7 +243,7 @@ describe('LibraryInstance: escritor único', () => {
     // El escritor crea la base y se va sin soltar el bloqueo, que queda a nombre de un
     // proceso vivo; ese proceso muere después.
     const creator = await open(dataDir, { lock: { releaseOnExit: false } });
-    await creator.createNote({ body: '# Antes' });
+    await creator.createNote({ body: '# Antes', privacy });
     await creator.close();
     const owner = liveProcess();
     writeLock(dataDir, owner.pid!);
@@ -253,7 +256,7 @@ describe('LibraryInstance: escritor único', () => {
     await killAndWait(owner);
     await reader.checkWriter();
     expect(reader.role).toBe('this');
-    await reader.createNote({ body: '# Después' });
+    await reader.createNote({ body: '# Después', privacy });
   });
 
   it('bloqueo huérfano al arrancar: la instancia arranca como escritora', async () => {
@@ -261,7 +264,7 @@ describe('LibraryInstance: escritor único', () => {
     writeLock(dataDir, await deadPid());
     const instance = await open(dataDir);
     expect(instance.role).toBe('this');
-    expect((await instance.createNote({ body: '# Hola' })).title).toBe('Hola');
+    expect((await instance.createNote({ body: '# Hola', privacy })).title).toBe('Hola');
   });
 
   it('con sync: el escritor sincroniza tras escribir y el lector no sincroniza', async () => {
@@ -274,7 +277,7 @@ describe('LibraryInstance: escritor único', () => {
     const reader = await open(dataDir, { sync, lock: { pid: child.pid! } });
     expect(reader.syncRunner).toBeNull();
 
-    const created = await writer.createNote({ body: '# Desde Claude\n\n#mcp' });
+    const created = await writer.createNote({ body: '# Desde Claude\n\n#mcp', privacy });
     // `createNote` ya pidió una ronda (onWritten); esta se encadena detrás.
     await writer.syncRunner!.requestRound();
     const app = await appDevice(relay);

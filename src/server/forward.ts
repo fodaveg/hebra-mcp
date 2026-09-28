@@ -234,14 +234,14 @@ export function buildRoutedWriteContext(
     createNote: (input: CreateNoteInput) =>
       routed(
         'createNote',
-        { body: input.body, folderId: input.folderId ?? null, privacy: input.privacy ?? null },
+        { body: input.body, folderId: input.folderId ?? null, privacy: input.privacy },
         asCreateResult,
         () => local.createNote(input)
       ),
     appendToNote: (input: AppendToNoteInput) =>
       routed(
         'appendToNote',
-        { id: input.id, text: input.text, privacy: input.privacy ?? null },
+        { id: input.id, text: input.text, privacy: input.privacy },
         (value) => asAppendResult(value, input.id),
         () => local.appendToNote(input)
       ),
@@ -256,7 +256,7 @@ export function buildRoutedWriteContext(
           edits: input.edits,
           expectedRevision: input.expectedRevision,
           operationId: input.operationId,
-          privacy: input.privacy ?? null
+          privacy: input.privacy
         },
         (value) => asEditOutcome(value, input.id),
         () => local.editNote(input)
@@ -264,7 +264,7 @@ export function buildRoutedWriteContext(
     organize: (input: OrganizeInput) =>
       routed(
         'organize',
-        { ...input, privacy: input.privacy ?? null },
+        { ...input, privacy: input.privacy },
         asOrganizeOutcome,
         () => local.organize(input)
       ),

@@ -216,7 +216,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
 
   it('el filtro de privados del LECTOR se aplica antes de reenviar', async () => {
     const { writer, reader } = await pair();
-    const hidden = await writer.createNote({ body: '# Secreta\n\n#privado' });
+    const hidden = await writer.createNote({ body: '# Secreta\n\n#privado', privacy: OPEN });
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [], privateTags: ['privado'] },
@@ -232,7 +232,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
 
   it('hebra_edit_note desde un lector: la edita el escritor, con su ronda y su estado de sync', async () => {
     const { writer, client } = await pair();
-    const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres' });
+    const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres', privacy: OPEN });
     const read = await call(client, 'hebra_read_note', { id: created.id });
     const args = {
       id: created.id,
@@ -268,8 +268,13 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
 
   it('organización desde un lector: la hace el escritor, con la privacidad del lector', async () => {
     const { writer, reader } = await pair();
-    const created = await writer.createNote({ body: '# Organizada\n\ntexto' });
-    const privada = await writer.organize({ action: 'createFolder', parentId: 'root', name: 'Privada' });
+    const created = await writer.createNote({ body: '# Organizada\n\ntexto', privacy: OPEN });
+    const privada = await writer.organize({
+      action: 'createFolder',
+      parentId: 'root',
+      name: 'Privada',
+      privacy: OPEN
+    });
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [['privada']], privateTags: [] },
@@ -309,7 +314,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
 
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
-    const created = await writer.createNote({ body: '# Visible\n\ntexto' });
+    const created = await writer.createNote({ body: '# Visible\n\ntexto', privacy: OPEN });
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [], privateTags: ['privado'] },
@@ -571,7 +576,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     const instance = fakeInstance(path, 'other_instance');
     const local = localSpy();
     const write = buildRoutedWriteContext(instance, local, { timeoutMs: { createNote: 200 } });
-    const error = await write.createNote({ body: '# x' }).catch((caught: unknown) => caught);
+    const error = await write.createNote({ body: '# x', privacy: OPEN }).catch((caught: unknown) => caught);
     expect(isBusyOtherInstance(error)).toBe(true);
     expect(instance.checkWriter).toHaveBeenCalledOnce();
     expect(local.created).toBe(0);
@@ -587,12 +592,12 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     const instance = fakeInstance(path, 'this');
     const local = localSpy();
     const write = buildRoutedWriteContext(instance, local);
-    const error = await write.createNote({ body: '# x' }).catch((caught: unknown) => caught);
+    const error = await write.createNote({ body: '# x', privacy: OPEN }).catch((caught: unknown) => caught);
     expect(isBusyOtherInstance(error)).toBe(true);
     expect(instance.role).toBe('this');
     expect(local.created).toBe(0);
     // La siguiente ya es local.
-    expect(await write.createNote({ body: '# x' })).toMatchObject({ id: 'local' });
+    expect(await write.createNote({ body: '# x', privacy: OPEN })).toMatchObject({ id: 'local' });
     expect(local.created).toBe(1);
   });
 
@@ -601,7 +606,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     const instance = fakeInstance(join(dataDir, WRITER_SOCKET_FILE), 'this');
     const local = localSpy();
     const write = buildRoutedWriteContext(instance, local);
-    expect(await write.createNote({ body: '# x' })).toMatchObject({ id: 'local' });
+    expect(await write.createNote({ body: '# x', privacy: OPEN })).toMatchObject({ id: 'local' });
     expect(local.created).toBe(1);
     expect(stderrText()).toContain('"outcome":"takeover","reason":"no_socket"');
   });

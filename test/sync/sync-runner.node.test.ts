@@ -17,6 +17,7 @@ import {
 import { openNodeLibraryPort } from '../../src/store/node-port';
 import { NoteWriter } from '../../src/store/writes';
 import { SyncRunner } from '../../src/sync/runner';
+import { NO_PRIVATE } from '../fixtures/no-private';
 
 /**
  * L3 (SPEC.md §10): el motor de sync de Hebra sin cambios, sobre el almacén de
@@ -32,7 +33,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     const mcp = await mcpDevice(relay);
     const app = await appDevice(relay);
 
-    const created = await mcp.writer.createNote({ body: PLAN });
+    const created = await mcp.writer.createNote({ body: PLAN, privacy: NO_PRIVATE });
     expect(created.title).toBe('Plan de viaje');
     await mcp.runner.requestRound();
     await app.sync.runRound();
@@ -62,7 +63,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     const mcp = await mcpDevice(relay);
     const app = await appDevice(relay);
 
-    const plan = await mcp.writer.createNote({ body: PLAN });
+    const plan = await mcp.writer.createNote({ body: PLAN, privacy: NO_PRIVATE });
     await mcp.runner.requestRound();
     await app.sync.runRound();
     const receta = await appCreate(
@@ -98,7 +99,11 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
 
     // Edición local en la app, aún sin subir, y a la vez hebra-mcp añade al final.
     await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
-    const appended = await mcp.writer.appendToNote({ id, text: 'AÑADIDO POR CLAUDE' });
+    const appended = await mcp.writer.appendToNote({
+      id,
+      text: 'AÑADIDO POR CLAUDE',
+      privacy: NO_PRIVATE
+    });
     expect(appended).toEqual({ id, outcome: 'saved' });
     expect((await mcp.port.noteRead(id))?.body).toBe(
       '# Compartida\n\ntexto base\n\nAÑADIDO POR CLAUDE'
@@ -155,7 +160,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
 
       // Edición concurrente en los dos lados, ninguna subida todavía.
       await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
-      await writer.appendToNote({ id, text: 'AÑADIDO POR CLAUDE' });
+      await writer.appendToNote({ id, text: 'AÑADIDO POR CLAUDE', privacy: NO_PRIVATE });
 
       // La app sube PRIMERO y no choca con nada; hebra-mcp sube DESPUÉS, contra un
       // servidor que ya cambió: es hebra-mcp quien crea la copia, con SU deviceLabel.
@@ -184,7 +189,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
   it('appendToNote a una nota inexistente o en la papelera: note_not_found', async () => {
     const relay = new InMemoryLibraryRelay();
     const mcp = await mcpDevice(relay);
-    await expect(mcp.writer.appendToNote({ id: 'no-existe', text: 'x' })).rejects.toBeInstanceOf(
+    await expect(mcp.writer.appendToNote({ id: 'no-existe', text: 'x', privacy: NO_PRIVATE })).rejects.toBeInstanceOf(
       LibraryError
     );
   });
@@ -201,7 +206,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     expect(status).toMatchObject({ revoked: true, lastSyncOutcome: 'http_401' });
 
     const calls = relay.changesCalls;
-    await mcp.writer.createNote({ body: '# Después de revocar' });
+    await mcp.writer.createNote({ body: '# Después de revocar', privacy: NO_PRIVATE });
     expect(await mcp.runner.requestRound()).toBeNull();
     expect(relay.changesCalls).toBe(calls);
   });
