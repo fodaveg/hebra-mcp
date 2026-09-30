@@ -15,7 +15,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { resolveToolContext, type ServerContext, type ToolContext } from './context';
-import { ToolError, toErrorResult, toOkResult } from './errors';
+import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
   appendToNoteInputShape,
   createNoteInputShape,
@@ -52,12 +52,14 @@ import {
 import { runListTrash } from './tools/list-trash';
 import { runRestoreNote, runTrashNote } from './tools/organize';
 import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
+import { listAttachmentsInputShape, readAttachmentInputShape } from './schemas';
+import { runListAttachments, runReadAttachment } from './tools/attachments';
 
 /** Recuento de resultados a loguear (§6.4): solo un número, nunca su contenido. */
 function countOf(result: unknown): number | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const record = result as Record<string, unknown>;
-  for (const key of ['results', 'notes', 'tags', 'folders', 'versions'] as const) {
+  for (const key of ['results', 'notes', 'tags', 'folders', 'versions', 'attachments'] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
   }
@@ -89,7 +91,7 @@ async function runTool(
   try {
     const result = await run(toolCtx);
     logToolOk(name, countOf(result));
-    return toOkResult(result);
+    return result instanceof ToolContent ? result.result : toOkResult(result);
   } catch (error) {
     const toolError = error instanceof ToolError ? error : new ToolError('invalid_input');
     logToolError(name, toolError.code);
@@ -303,5 +305,29 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     },
     async (input) =>
       runTool(ctx, 'hebra_restore_version', (toolCtx) => runRestoreVersion(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_attachments',
+    {
+      title: 'Adjuntos de una nota',
+      description:
+        'Lista los adjuntos de una nota (imágenes, PDF, ficheros): attachmentId, name, mimeType y byteLength (null si no se sabe sin bajarlo). Solo lectura.',
+      inputSchema: listAttachmentsInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_list_attachments', (toolCtx) => runListAttachments(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_read_attachment',
+    {
+      title: 'Leer un adjunto',
+      description:
+        'Devuelve un adjunto de una nota: imagen como imagen, texto como texto, PDF como recurso embebido. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Solo lectura.',
+      inputSchema: readAttachmentInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_read_attachment', (toolCtx) => runReadAttachment(toolCtx, input))
   );
 }

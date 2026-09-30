@@ -17,7 +17,11 @@ export type ToolErrorCode =
   | 'ambiguous_match'
   | 'overlapping_edits'
   | 'note_locked'
-  | 'operation_id_reused';
+  | 'operation_id_reused'
+  // Adjuntos en solo lectura (30 sep 2026; `src/server/tools/attachments.ts`).
+  | 'attachment_too_large'
+  | 'attachment_type_not_allowed'
+  | 'attachment_unavailable';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

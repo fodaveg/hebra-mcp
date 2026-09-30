@@ -70,6 +70,18 @@ export interface TrashIndex {
   folders: FolderRowFact[];
 }
 
+/** Un adjunto de una nota (`note_blob_refs`, lo que Hebra escribe como
+ *  `![[sha256:H|nombre]]`), con lo que el almacén sepa de sus bytes SIN leerlos
+ *  (`blobs`): tamaño y tipo si hay fila (un recurso recibido por sync la trae aunque sus
+ *  bytes no estén; un blob bajado de Blob V2 no trae tipo), y si los bytes están aquí. */
+export interface NoteAttachmentRow {
+  sha256: string;
+  ordinal: number;
+  byteLength: number | null;
+  mime: string | null;
+  present: boolean;
+}
+
 export interface HebraLibraryPort {
   libraryOpen(): Promise<LibraryOpenInfo>;
   noteCreate(folderId?: string | null): Promise<NoteRow>;
@@ -104,6 +116,13 @@ export interface HebraLibraryPort {
   noteVersionsList(noteId: string): Promise<NoteVersionsList>;
   /** Una versión con su cuerpo, o `null` si ya no existe (caducada o purgada). */
   noteVersionRead(versionId: number): Promise<NoteVersion | null>;
+  /** Adjuntos de una nota, en el orden del cuerpo (ampliación de D2 del 30 sep 2026,
+   *  adjuntos en solo lectura). Sin filtro: lo aplica la herramienta. */
+  noteAttachments(noteId: string): Promise<NoteAttachmentRow[]>;
+  /** Bytes de un adjunto si ESTE dispositivo los tiene (`blobRead` del motor, que
+   *  verifica el SHA-256); `null` si no. Nunca los baja del relé: eso lo hace el escritor
+   *  (`NoteWriter.fetchAttachment`). Aquí no hay ninguna escritura de adjuntos. */
+  blobRead(sha256: string): Promise<Uint8Array | null>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

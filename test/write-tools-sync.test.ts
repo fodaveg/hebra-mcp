@@ -53,6 +53,7 @@ function ctxFor(mcp: McpDevice): ServerContext {
       mcp.writer.recordEditConflict(operationId, id, copyId),
     organize: (input) => mcp.writer.organize(input),
     restoreVersion: (input) => mcp.writer.restoreVersion(input),
+    fetchAttachment: (input) => mcp.writer.fetchAttachment(input, (sha) => mcp.runner.readBlob(sha)),
     noteRead: (id) => mcp.port.noteRead(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     requestRound: () => mcp.runner.requestRound()
@@ -323,6 +324,58 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
       expect(joined).toContain('EDICIÓN DEL MAC');
       expect(joined).toContain('REDACCIÓN ORIGINAL');
     }
+  });
+
+  it('adjuntos: un adjunto del Mac se baja del relé bajo demanda, y uno de más de 5 MiB se rechaza', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay, { blobs: true });
+    app = await appDevice(relay, 'Mac', { blobs: true });
+
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]);
+    const pngSha = (await app.engine.blobPut(png, { mime: 'image/png' })).sha256;
+    const big = new Uint8Array(5 * 1024 * 1024 + 1).fill(0x61);
+    const bigSha = (await app.engine.blobPut(big, { mime: 'text/plain' })).sha256;
+    const id = await appCreate(
+      app,
+      `# Con adjuntos\n\n![[sha256:${pngSha}|foto.png]]\n![[sha256:${bigSha}|grande.txt]]\n`
+    );
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await mcp.runner.requestRound();
+    // La nota llegó; los bytes siguen en el relé (Blob V2 no dice tamaño ni tipo).
+    expect(await mcp.port.blobRead(pngSha)).toBeNull();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const listed = JSON.parse(
+      textOf((await client.callTool({ name: 'hebra_list_attachments', arguments: { id } })) as CallToolResult)
+    ) as { attachments: Array<{ attachmentId: string; byteLength: number | null }> };
+    expect(listed.attachments.map((entry) => [entry.attachmentId, entry.byteLength])).toEqual([
+      [pngSha, null],
+      [bigSha, null]
+    ]);
+
+    const image = (await client.callTool({
+      name: 'hebra_read_attachment',
+      arguments: { id, attachmentId: pngSha }
+    })) as CallToolResult;
+    expect(image.isError).not.toBe(true);
+    expect(image.content[1]).toEqual({
+      type: 'image',
+      data: Buffer.from(png).toString('base64'),
+      mimeType: 'image/png'
+    });
+    // Quedó en la caché del motor (su almacén de adjuntos), no en otra.
+    expect(await mcp.port.blobRead(pngSha)).toEqual(png);
+
+    const tooLarge = (await client.callTool({
+      name: 'hebra_read_attachment',
+      arguments: { id, attachmentId: bigSha }
+    })) as CallToolResult;
+    expect(tooLarge.isError).toBe(true);
+    expect(JSON.parse(textOf(tooLarge))).toEqual({
+      error: 'attachment_too_large',
+      byteLength: 5 * 1024 * 1024 + 1,
+      maxBytes: 5 * 1024 * 1024
+    });
   });
 
   it('hebra_edit_note con edición a la vez en otro dispositivo: conflict_copy con copyId, sin reintento', async () => {

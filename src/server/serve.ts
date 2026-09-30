@@ -81,6 +81,7 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
       instance.recordEditConflict(operationId, id, copyId),
     organize: (input) => instance.organize(input),
     restoreVersion: (input) => instance.restoreVersion(input),
+    fetchAttachment: (input) => instance.fetchAttachment(input),
     noteRead: (id) => instance.port.noteRead(id),
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
     requestRound: () => {

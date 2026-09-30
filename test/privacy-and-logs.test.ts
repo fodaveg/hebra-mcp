@@ -13,7 +13,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from '../src/server/register-tools';
 import type { ServerContext } from '../src/server/context';
 import { buildTestContext, UNRESOLVED_PRIVACY_CONFIG, type TestContext } from './fixtures/test-context';
-import { BAIT_FOLDER, BAIT_TAG } from './fixtures/test-library';
+import { BAIT_ATTACHMENT, BAIT_FOLDER, BAIT_TAG } from './fixtures/test-library';
 import { baitCalls } from './fixtures/bait-calls';
 
 const TOOL_NAMES = [
@@ -31,7 +31,9 @@ const TOOL_NAMES = [
   'hebra_restore_note',
   'hebra_list_versions',
   'hebra_read_version',
-  'hebra_restore_version'
+  'hebra_restore_version',
+  'hebra_list_attachments',
+  'hebra_read_attachment'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -45,7 +47,9 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
     versionId: 1,
     expectedRevision: 'r1.x',
     operationId: 'op'
-  }
+  },
+  hebra_list_attachments: { id: 'lo-que-sea' },
+  hebra_read_attachment: { id: 'lo-que-sea', attachmentId: 'a'.repeat(64) }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
@@ -107,6 +111,11 @@ describe('filtro de privados y logs, por todas las herramientas', () => {
     expect(loggedLines).not.toContain(test.library.publicNoteTitle);
     // Ni el argumento de una llamada (SPEC.md §6.4: «ni argumentos de herramientas»).
     expect(loggedLines).not.toContain(test.library.privateFolderNoteId);
+    // Ni el nombre ni el contenido de un adjunto, aunque la nota sea visible y se haya
+    // leído (adjuntos en solo lectura, 30 sep 2026), ni su hash.
+    expect(allOutput).toContain(BAIT_ATTACHMENT);
+    expect(loggedLines).not.toContain(BAIT_ATTACHMENT);
+    expect(loggedLines).not.toContain(test.library.attachments.text);
   });
 
   it('un log de cada llamada es un JSON con tool/ok, sin más campos de contenido', async () => {

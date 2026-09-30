@@ -58,7 +58,13 @@ describe('capacidades', () => {
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);
     expect(capabilities.notAllowed).toEqual(
-      expect.arrayContaining(['delete_or_purge_notes', 'folder_management', 'attachments'])
+      expect.arrayContaining(['delete_or_purge_notes', 'folder_management'])
+    );
+    // Adjuntos en solo lectura (30 sep 2026): ya no están en `notAllowed`, con su límite.
+    expect(capabilities.notAllowed).not.toContain('attachments');
+    expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
+    expect(capabilities.tools).toEqual(
+      expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment'])
     );
   });
 

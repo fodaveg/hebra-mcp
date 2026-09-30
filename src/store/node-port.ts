@@ -54,6 +54,7 @@ import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
   HebraLibraryPort,
+  NoteAttachmentRow,
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
@@ -302,6 +303,46 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => this.engine.noteVersionRead(versionId));
   }
 
+  async noteAttachments(noteId: string): Promise<NoteAttachmentRow[]> {
+    return this.read(() => this.attachmentRows(noteId));
+  }
+
+  /**
+   * La consulta de `noteAttachments`, sin cola (también la usa `writeExclusive`). SQL
+   * propio de hebra-mcp sobre `note_blob_refs` y `blobs` de `schema.sql`: la fila de
+   * `blobs` puede no existir (un `![[sha256:…]]` de otro dispositivo cuyos bytes nunca
+   * bajaron) y entonces no se sabe ni el tamaño ni el tipo hasta leerlo.
+   */
+  private attachmentRows(noteId: string): NoteAttachmentRow[] {
+    const rows = this.db
+      .prepare(
+        `SELECT lower(r.sha256) AS sha256, r.ordinal AS ordinal, b.byte_length AS byte_length,
+                b.mime AS mime, coalesce(b.present, 0) AS present
+         FROM note_blob_refs r
+         LEFT JOIN blobs b ON b.sha256 = r.sha256
+         WHERE r.note_id = ?
+         ORDER BY r.ordinal, r.sha256`
+      )
+      .all(noteId) as Array<{
+      sha256: string;
+      ordinal: number;
+      byte_length: number | null;
+      mime: string | null;
+      present: number;
+    }>;
+    return rows.map((row) => ({
+      sha256: String(row.sha256),
+      ordinal: Number(row.ordinal),
+      byteLength: row.byte_length === null ? null : Number(row.byte_length),
+      mime: row.mime ?? null,
+      present: Number(row.present) !== 0
+    }));
+  }
+
+  async blobRead(sha256: string): Promise<Uint8Array | null> {
+    return this.read(() => this.engine.blobRead(sha256));
+  }
+
   /**
    * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
    * las operaciones de nota, lo que lee el filtro de privados y el registro de
@@ -328,6 +369,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => this.visibilityRows(),
         trashIndex: () => this.trashRows(),
+        noteAttachments: (noteId) => this.attachmentRows(noteId),
         operations: sqliteOperationStore(this.db)
       })
     );

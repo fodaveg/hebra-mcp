@@ -41,7 +41,7 @@ import { applyEdits, type TextEdit } from './edits';
 import { writeRejected } from './errors';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
-import type { NoteVersion, NoteVisibilityEntry, TrashIndex } from './types';
+import type { NoteAttachmentRow, NoteVersion, NoteVisibilityEntry, TrashIndex } from './types';
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
 export interface NoteWriteStore {
@@ -71,6 +71,8 @@ export interface NoteWriteStore {
   notesVisibilityIndex(): NoteVisibilityEntry[];
   /** Lo que lee el filtro de la papelera (`src/privacy/trash-filter.ts`). */
   trashIndex(): TrashIndex;
+  /** Adjuntos de una nota (`note_blob_refs`), para `fetchAttachment`. */
+  noteAttachments(noteId: string): NoteAttachmentRow[];
   /** Registro de idempotencia de `editNote`. */
   operations: OperationStore;
 }
@@ -178,6 +180,21 @@ export interface OrganizeSaved {
   favorite: boolean;
   archived: boolean;
   trashed: boolean;
+}
+
+/**
+ * Traer al disco los bytes de un adjunto (adjuntos en solo lectura, ampliación de D2 del
+ * 30 sep 2026). No devuelve los bytes: los lee quien pide, del almacén compartido, con
+ * su propio filtro. Lo hace el escritor porque bajar un blob escribe (`blobPut` del
+ * motor guarda los bytes y su fila): un lector se lo pide por `writer.sock`.
+ */
+export interface FetchAttachmentInput {
+  /** La nota VISIBLE que lo adjunta. */
+  noteId: string;
+  /** SHA-256 en hexadecimal, uno de los `note_blob_refs` de esa nota. */
+  sha256: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy: PrivacyConfig;
 }
 
 export interface RestoreVersionInput {
@@ -620,6 +637,38 @@ export class NoteWriter {
     });
     this.written();
     return result;
+  }
+
+  /**
+   * Trae al disco los bytes de un adjunto, sin devolverlos (`FetchAttachmentInput`).
+   * Primero, en UN turno de la cola y con la configuración de privados de quien pide:
+   * la nota tiene que ser visible (oculta, en la papelera o inexistente: `not_found`), no
+   * estar bloqueada (`note_locked`: sus adjuntos van cifrados con ella) y adjuntar ESE
+   * SHA-256 (si no, `not_found`). Después, fuera del turno (la descarga pasa por la misma
+   * cola cuando guarda), `download`: `readBlob` del motor de sync, que baja el objeto de
+   * Blob V2, lo descifra, verifica el hash y lo guarda en su almacén de adjuntos, la
+   * única caché que hay. Devuelve si los bytes quedaron aquí. Nunca escribe en la nota
+   * ni crea, cambia o borra adjuntos.
+   */
+  async fetchAttachment(
+    input: FetchAttachmentInput,
+    download: ((sha256: string) => Promise<boolean>) | null
+  ): Promise<boolean> {
+    const sha256 = input.sha256.toLowerCase();
+    const present = await this.target.writeExclusive(async (store) => {
+      const filter = privacyInTurn(store, input.privacy);
+      const note = await store.noteRead(input.noteId);
+      if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
+        throw writeRejected('not_found');
+      }
+      if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
+      const row = store.noteAttachments(note.id).find((entry) => entry.sha256 === sha256);
+      if (!row) throw writeRejected('not_found');
+      return row.present;
+    });
+    // `readBlob` mira primero lo local (y verifica el hash): se le pide aunque la fila
+    // diga que está, por si el fichero se quedó a medias.
+    return download ? download(sha256) : present;
   }
 
   /**

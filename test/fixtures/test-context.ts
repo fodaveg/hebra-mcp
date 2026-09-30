@@ -53,6 +53,8 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
       writer.recordEditConflict(operationId, id, copyId),
     organize: (input) => writer.organize(input),
     restoreVersion: (input) => writer.restoreVersion(input),
+    // Sin sync: solo dice si los bytes ya estaban aquí (no hay relé del que bajarlos).
+    fetchAttachment: (input) => writer.fetchAttachment(input, null),
     noteRead: (id) => port.noteRead(id),
     onConflictCopy: () => () => {},
     requestRound: () => Promise.resolve(null)

@@ -125,4 +125,38 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       expect(FORBIDDEN_IMPORT.exec(text)?.[0] ?? null, relative(root, file)).toBeNull();
     }
   });
+
+  /**
+   * Adjuntos en SOLO LECTURA (ampliación de D2, 30 sep 2026): nada escribe adjuntos. El
+   * único `blobPut` es el de la vista de sync (`src/store/sync-port.ts`), que el motor usa
+   * para guardar lo que baja del relé; ni el puerto de las herramientas, ni la instancia,
+   * ni el turno de escritura lo tienen, y ninguna otra fuente (servidor incluido) lo llama.
+   */
+  it('adjuntos en solo lectura: blobPut solo en la vista de sync del motor', async () => {
+    const blobWrite = /\.\s*(blobPut|blobPutFromPath)\s*\(/;
+    for (const file of [...sourceFiles(), ...serverFiles()]) {
+      if (relative(root, file) === join('src', 'store', 'sync-port.ts')) continue;
+      const text = readFileSync(file, 'utf8');
+      expect(blobWrite.exec(text)?.[0] ?? null, relative(root, file)).toBeNull();
+    }
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      expect(methodNames(port)).not.toContain('blobPut');
+      const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      expect(storeKeys.filter((key) => /^(blob|file)/.test(key))).toEqual([]);
+    } finally {
+      port.close();
+    }
+  });
 });
+
+/** Todo `src/server` (herramientas incluidas), que no está en `SURFACE_DIRS`. */
+function serverFiles(): string[] {
+  const out: string[] = [];
+  for (const dir of ['src/server', 'src/server/tools']) {
+    for (const entry of readdirSync(join(root, dir))) {
+      if (entry.endsWith('.ts')) out.push(join(root, dir, entry));
+    }
+  }
+  return out;
+}
