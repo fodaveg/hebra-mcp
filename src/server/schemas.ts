@@ -165,3 +165,13 @@ export const restoreVersionInputShape = {
     .string()
     .describe('Id único de esta restauración (un UUID). Reintentar con el mismo no la repite.')
 };
+
+/** Adjuntos en solo lectura (ampliación de D2, 30 sep 2026). */
+export const listAttachmentsInputShape = {
+  id: z.string()
+};
+
+export const readAttachmentInputShape = {
+  id: z.string(),
+  attachmentId: z.string().describe('attachmentId de hebra_list_attachments (SHA-256).')
+};

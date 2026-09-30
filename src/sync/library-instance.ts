@@ -49,6 +49,7 @@ import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
   HebraLibraryPort,
+  NoteAttachmentRow,
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
@@ -65,6 +66,7 @@ import {
   type OrganizeInput,
   type OrganizeSaved,
   type RestoreVersionInput,
+  type FetchAttachmentInput,
   type NoteWriteStore,
   type NoteWriteTarget
 } from '../store/writes';
@@ -205,7 +207,11 @@ export class LibraryInstance implements NoteWriteTarget {
     this.current = port;
     if (previous) await previous.closeWhenIdle();
     if (this.options.sync) {
-      const runner = await SyncRunner.create({ ...this.options.sync, port: port.syncStorePort() });
+      const runner = await SyncRunner.create({
+        emitAttachment: (outcome) => logEvent({ event: 'attachment.fetch', outcome }),
+        ...this.options.sync,
+        port: port.syncStorePort()
+      });
       runner.onConflictCopy((copy) => {
         for (const listener of this.conflictListeners) listener(copy);
       });
@@ -306,6 +312,14 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.writer.restoreVersion(input);
   }
 
+  /** Trae al disco los bytes de un adjunto (`NoteWriter.fetchAttachment`) con el motor
+   *  de sync de ESTE escritor; sin sync, solo dice si ya estaban. Rechaza con
+   *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
+  fetchAttachment(input: FetchAttachmentInput): Promise<boolean> {
+    const runner = this.runner;
+    return this.writer.fetchAttachment(input, runner ? (sha256) => runner.readBlob(sha256) : null);
+  }
+
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y
    *  `errorsByCode` se leen igual de la base; las rondas son del otro proceso. */
   async status(): Promise<InstanceStatus> {
@@ -368,6 +382,9 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       current().noteVersionsList(noteId),
     noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>
       current().noteVersionRead(versionId),
+    noteAttachments: (noteId: string): Promise<NoteAttachmentRow[]> =>
+      current().noteAttachments(noteId),
+    blobRead: (sha256: string): Promise<Uint8Array | null> => current().blobRead(sha256),
     close: (): void => current().close()
   };
 }

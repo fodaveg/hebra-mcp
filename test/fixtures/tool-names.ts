@@ -25,7 +25,10 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_read_version',
   'hebra_restore_note',
   'hebra_restore_version',
-  'hebra_trash_note'
+  'hebra_trash_note',
+  // Adjuntos en solo lectura (30 sep 2026).
+  'hebra_list_attachments',
+  'hebra_read_attachment'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */

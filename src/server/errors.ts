@@ -28,3 +28,12 @@ export function toErrorResult(error: ToolError): CallToolResult {
 export function toOkResult(payload: unknown): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(payload) }] };
 }
+
+/**
+ * Una salida que no es un JSON en texto sino contenido MCP ya montado (`hebra_read_attachment`:
+ * `image`, `text` o `resource` embebido). `register-tools.ts` la devuelve tal cual, sin
+ * pasarla por `toOkResult`.
+ */
+export class ToolContent {
+  constructor(readonly result: CallToolResult) {}
+}

@@ -25,6 +25,10 @@
  *   ni de purga: una acción desconocida es `invalid_request`.
  * - `restoreVersion` `{id, versionId, expectedRevision, operationId, privacy}` → lo
  *   mismo que `editNote` (`EditNoteOutcome`), restaurando una versión anterior.
+ * - `fetchAttachment` `{noteId, sha256, privacy}` → `{available}`: el escritor baja al
+ *   disco compartido los bytes de un adjunto de una nota visible (adjuntos en solo
+ *   lectura, 30 sep 2026). La respuesta NUNCA lleva los bytes: el lector los lee del
+ *   disco, con su filtro.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -73,6 +77,7 @@ import {
   type CreateNoteInput,
   type CreateNoteResult,
   type EditNoteInput,
+  type FetchAttachmentInput,
   type OrganizeInput,
   type RestoreVersionInput
 } from '../store/writes';
@@ -101,6 +106,7 @@ export type WriterSocketOp =
   | 'editNote'
   | 'organize'
   | 'restoreVersion'
+  | 'fetchAttachment'
   | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
@@ -109,8 +115,11 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'editNote',
   'organize',
   'restoreVersion',
+  'fetchAttachment',
   'status'
 ]);
+
+const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** Códigos de error del protocolo: cerrados, sin texto libre. Los de
  *  `WriteRejectionCode` son los rechazos de la edición y la organización
@@ -146,6 +155,8 @@ export interface WriterSocketHandlers {
   organize(input: OrganizeInput): Promise<OrganizeOutcome>;
   /** Restaura una versión, espera la ronda y devuelve el estado de sync. */
   restoreVersion(input: RestoreVersionInput): Promise<EditNoteOutcome>;
+  /** Trae al disco los bytes de un adjunto; nunca los devuelve. */
+  fetchAttachment(input: FetchAttachmentInput): Promise<{ available: boolean }>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -236,6 +247,14 @@ function revisionFieldsOf(params: Record<string, unknown>): {
     throw new InvalidRequest();
   }
   return { expectedRevision, operationId };
+}
+
+function fetchAttachmentInputOf(params: Record<string, unknown>): FetchAttachmentInput {
+  const { noteId, sha256 } = params;
+  if (!isId(noteId) || typeof sha256 !== 'string' || !SHA256_HEX.test(sha256)) {
+    throw new InvalidRequest();
+  }
+  return { noteId, sha256, privacy: privacyOf(params.privacy) };
 }
 
 function restoreVersionInputOf(params: Record<string, unknown>): RestoreVersionInput {
@@ -466,6 +485,9 @@ export class WriterSocketServer {
           break;
         case 'restoreVersion':
           result = await handlers.restoreVersion(restoreVersionInputOf(envelope.params));
+          break;
+        case 'fetchAttachment':
+          result = await handlers.fetchAttachment(fetchAttachmentInputOf(envelope.params));
           break;
         case 'status':
           result = await handlers.status();

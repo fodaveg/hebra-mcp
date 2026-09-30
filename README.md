@@ -2,14 +2,14 @@
 
 Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, editar por
 sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
-mandar a la papelera y sacar de ella, y restaurar versiones anteriores de notas; nunca
-purgar ni vaciar la papelera, ni gestionar carpetas, que se crean desde la app Hebra;
-`SPEC.md` §5) a
+mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas y leer sus
+adjuntos; nunca purgar ni vaciar la papelera, escribir adjuntos ni gestionar carpetas, que
+se crean desde la app Hebra; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 30 de septiembre de 2026: el servidor MCP tiene 19 herramientas (detalle en
+Estado a 30 de septiembre de 2026: el servidor MCP tiene 21 herramientas (detalle en
 `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
@@ -20,12 +20,14 @@ Estado a 30 de septiembre de 2026: el servidor MCP tiene 19 herramientas (detall
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version`.
+- Adjuntos, solo lectura: `hebra_list_attachments` y `hebra_read_attachment` (hasta 5 MiB;
+  imágenes PNG, JPEG, GIF y WebP, PDF, texto plano, Markdown, CSV y JSON).
 
 Emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
 por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
 `https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
-su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12); los adjuntos quedan para
-otro lote.
+su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12); escribir adjuntos queda
+fuera.
 
 ## Requisitos
 
@@ -146,8 +148,8 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 - `src/store/sqlite-conn-node.ts` — adaptador `node:sqlite` → `SqliteConn` (la interfaz
   que espera `sqlite-engine.ts` de Hebra, por duck typing con `@sqlite.org/sqlite-wasm`).
 - `src/store/blob-store-fs.ts` — adjuntos en disco (`<dir>/blobs/aa/bb/<sha256>`,
-  escritura atómica). v1 de hebra-mcp no sirve adjuntos; existe porque el motor de Hebra
-  siempre necesita un `BlobBytesStore`.
+  escritura atómica): la caché de adjuntos del motor, donde queda lo que baja
+  `hebra_read_attachment` del relé. hebra-mcp no escribe adjuntos por ninguna otra vía.
 - `src/store/node-port.ts`, `src/store/types.ts` — el puerto de lectura/escritura propio
   de hebra-mcp sobre el motor (`HebraLibraryPort`): deliberadamente más estrecho que el
   `LibraryStorePort` completo de Hebra, ver el comentario de cabecera de `node-port.ts`.

@@ -32,12 +32,17 @@ export interface McpDevice {
   logged: Array<{ event: SyncLogEventName; fields: SyncLogFields }>;
 }
 
-export async function mcpDevice(relay: InMemoryLibraryRelay): Promise<McpDevice> {
+/** `blobs`: el relé en memoria también como transporte de Blob V2 (adjuntos). */
+export async function mcpDevice(
+  relay: InMemoryLibraryRelay,
+  options: { blobs?: boolean } = {}
+): Promise<McpDevice> {
   const port = await openNodeLibraryPort({ sqlitePath: ':memory:', deviceLabel: 'Claude' });
   const logged: McpDevice['logged'] = [];
   const runner = await SyncRunner.create({
     port: port.syncStorePort(),
     transport: relay,
+    blobTransport: options.blobs ? relay : null,
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
     intervalMs: null,
@@ -54,7 +59,11 @@ export interface AppDevice {
   events: LibrarySyncEvent[];
 }
 
-export async function appDevice(relay: InMemoryLibraryRelay, label = 'Mac'): Promise<AppDevice> {
+export async function appDevice(
+  relay: InMemoryLibraryRelay,
+  label = 'Mac',
+  options: { blobs?: boolean } = {}
+): Promise<AppDevice> {
   const { conn } = openNodeSqliteConn(':memory:');
   const engine = await SqliteLibraryEngine.open(conn, label);
   const port = new LocalLibraryPort(engine);
@@ -65,6 +74,7 @@ export async function appDevice(relay: InMemoryLibraryRelay, label = 'Mac'): Pro
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
     keyEpoch: 1,
+    blobTransport: options.blobs ? relay : null,
     onEvent: (event) => events.push(event)
   });
   return { engine, port, sync, events };

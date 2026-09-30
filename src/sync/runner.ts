@@ -24,6 +24,7 @@
  * llavero son L2.
  */
 import {
+  HttpBlobRelayV2,
   HttpLibraryTransport,
   LibrarySyncEngine,
   type BlobRelayConnectionProviderV2,
@@ -89,9 +90,13 @@ export interface SyncRunnerOptions {
   connection?: BlobRelayConnectionProviderV2;
   /** `fetch` del transporte HTTP por defecto (tests). */
   fetcher?: typeof globalThis.fetch;
-  /** Objetos de Blob V2. v1 no sirve adjuntos: sin él, el motor solo mueve texto. */
+  /** Objetos de Blob V2, para bajar adjuntos bajo demanda (`readBlob`, adjuntos en solo
+   *  lectura, 30 sep 2026). Si falta y hay `connection`, `HttpBlobRelayV2` sobre ella,
+   *  como Hebra (`LibraryApp.svelte`); `null` lo desactiva (solo texto). */
   blobTransport?: LibraryBlobTransport | null;
   emit?: SyncEmit;
+  /** Resultado cerrado de cada `readBlob` (log `attachment.fetch`; tests). */
+  emitAttachment?: (outcome: 'ok' | 'missing' | 'error' | 'revoked') => void;
   /** Cada cuánto hay ronda periódica; `null` la desactiva (tests). */
   intervalMs?: number | null;
   now?: () => number;
@@ -164,7 +169,15 @@ export class SyncRunner implements SyncStatusSource {
       identity: options.identity,
       vaultKey: options.vaultKey,
       keyEpoch: options.keyEpoch ?? 1,
-      blobTransport: options.blobTransport ?? null,
+      blobTransport:
+        options.blobTransport !== undefined
+          ? options.blobTransport
+          : options.connection
+            ? new HttpBlobRelayV2(
+                options.connection,
+                options.fetcher ?? globalThis.fetch.bind(globalThis)
+              )
+            : null,
       now: options.now,
       onEvent: (event) => runner?.handleEngineEvent(event)
     });
@@ -279,6 +292,32 @@ export class SyncRunner implements SyncStatusSource {
     }
     this.resolveFirstRound();
     return round;
+  }
+
+  /**
+   * Bytes de un adjunto aquí, bajándolos del relé si hace falta (`readBlob` del motor:
+   * Blob V2, descifrado, hash verificado y guardado en su almacén de adjuntos). `true` si
+   * quedaron en el disco. Nunca lanza: sin transporte de blobs, revocado, sin red o si el
+   * relé no lo tiene, `false`. Log cerrado `attachment.fetch` con el resultado, sin hash
+   * ni nombre.
+   */
+  async readBlob(sha256: string): Promise<boolean> {
+    let outcome: 'ok' | 'missing' | 'error' | 'revoked' = 'revoked';
+    try {
+      if (this.stopped || this.revokedFlag) return false;
+      const bytes = await this.engine.readBlob(sha256);
+      outcome = bytes ? 'ok' : 'missing';
+      return bytes !== null;
+    } catch {
+      outcome = 'error';
+      return false;
+    } finally {
+      try {
+        this.options.emitAttachment?.(outcome);
+      } catch {
+        // Un logger que lanza no cambia el resultado.
+      }
+    }
   }
 
   async syncStatus(): Promise<SyncStatusSnapshot> {

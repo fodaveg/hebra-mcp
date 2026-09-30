@@ -131,10 +131,16 @@ afterEach(async () => {
 });
 
 describe('escritor y lector en proceso, con sync sobre el relé en memoria', () => {
-  async function pair() {
+  async function pair(options: { blobs?: boolean } = {}) {
     const dataDir = tempDataDir();
     const relay = new InMemoryLibraryRelay();
-    const sync = { transport: relay, identity: IDENTITY, vaultKey: VAULT_KEY, intervalMs: null };
+    const sync = {
+      transport: relay,
+      blobTransport: options.blobs ? relay : null,
+      identity: IDENTITY,
+      vaultKey: VAULT_KEY,
+      intervalMs: null
+    };
     const writer = await LibraryInstance.open({
       dataDir,
       sync,
@@ -370,6 +376,32 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"restoreVersion","outcome":"forwarded"');
   });
 
+  it('adjunto desde un lector: el escritor lo baja al disco compartido y el lector lo lee de ahí', async () => {
+    const { relay, writer, client } = await pair({ blobs: true });
+    const app = await appDevice(relay, 'Mac', { blobs: true });
+    expect((await app.sync.runRound()).result).toBe('ok');
+    const text = `${BAIT_TEXT} dentro de un adjunto\n`;
+    const sha = (await app.engine.blobPut(new TextEncoder().encode(text), { mime: 'text/plain' })).sha256;
+    const id = await appCreate(app, `# Con adjunto\n\n![[sha256:${sha}|${BAIT_TEXT}.txt]]\n`);
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await writer.syncRunner!.requestRound();
+    expect(await writer.port.blobRead(sha)).toBeNull();
+
+    const result = (await client.callTool({
+      name: 'hebra_read_attachment',
+      arguments: { id, attachmentId: sha }
+    })) as CallToolResult;
+    expect(result.isError).not.toBe(true);
+    expect(result.content[1]).toEqual({ type: 'text', text });
+    expect(await writer.port.blobRead(sha)).not.toBeNull();
+
+    // Por el socket solo viajó `{available}`, y ni el nombre ni el contenido van a stderr.
+    expect(stderrText()).toContain('"event":"write.forward","op":"fetchAttachment","outcome":"forwarded"');
+    expect(stderrText()).toContain('"event":"attachment.fetch","outcome":"ok"');
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).not.toContain(sha);
+  });
+
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Visible\n\ntexto', privacy: OPEN });
@@ -419,6 +451,7 @@ describe('protocolo de writer.sock', () => {
       revision: `r1.v${input.versionId}`,
       sync: 'not_linked'
     }),
+    fetchAttachment: async (input) => ({ available: input.sha256.startsWith('a') }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -592,6 +625,25 @@ describe('protocolo de writer.sock', () => {
     }
   });
 
+  it('fetchAttachment por el socket: privacidad obligatoria, hash validado y respuesta sin bytes', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const valid = { noteId: 'n1', sha256: 'a'.repeat(64), privacy: OPEN };
+    expect(await requestWriter(path, 'fetchAttachment', valid, 2_000)).toEqual({ available: true });
+    for (const params of [
+      { ...valid, privacy: undefined },
+      { ...valid, sha256: 'A'.repeat(64) },
+      { ...valid, sha256: '../../etc/passwd' },
+      { ...valid, sha256: 'a'.repeat(63) },
+      { ...valid, noteId: '' }
+    ]) {
+      await expect(requestWriter(path, 'fetchAttachment', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
+  });
+
   it('el límite por defecto admite las sustituciones máximas de editNote en el peor escape JSON', () => {
     const worst = JSON.stringify({
       id: 1,
@@ -689,6 +741,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         outcome: 'saved' as const,
         revision: 'r1.x'
       }),
+      fetchAttachment: async () => false,
       noteRead: async () => null,
       onConflictCopy: () => () => undefined,
       requestRound: async () => null
@@ -770,6 +823,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('x');
         },
         restoreVersion: async () => {
+          throw new Error('x');
+        },
+        fetchAttachment: async () => {
           throw new Error('x');
         },
         status: async () => {

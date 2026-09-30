@@ -10,6 +10,7 @@ import { EDITS_MAX_COUNT, EDITS_TOTAL_MAX_LENGTH } from '../store/edits';
 import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
 import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes';
 import { LIMITS } from './pagination';
+import { ATTACHMENT_MAX_BYTES } from './tools/attachments';
 
 /** Herramientas que registra `register-tools.ts`, ordenadas. Una herramienta nueva se
  *  añade aquí Y en `test/fixtures/tool-names.ts` (un test compara ambas listas). */
@@ -18,12 +19,14 @@ export const CAPABILITY_TOOLS: readonly string[] = [
   'hebra_create_note',
   'hebra_edit_note',
   'hebra_links',
+  'hebra_list_attachments',
   'hebra_list_folders',
   'hebra_list_notes',
   'hebra_list_tags',
   'hebra_list_trash',
   'hebra_list_versions',
   'hebra_move_note',
+  'hebra_read_attachment',
   'hebra_read_note',
   'hebra_read_version',
   'hebra_restore_note',
@@ -39,7 +42,7 @@ export const CAPABILITY_TOOLS: readonly string[] = [
 const NOT_ALLOWED = [
   'purge_notes_or_empty_trash_or_irreversible_delete',
   'folder_management',
-  'attachments'
+  'attachment_writes'
 ] as const;
 
 export interface Capabilities {
@@ -55,6 +58,8 @@ export interface Capabilities {
     createNoteBodyChars: number;
     appendTextChars: number;
     editNote: { maxEdits: number; maxTotalChars: number; operationIdChars: number };
+    /** Adjuntos en solo lectura: bytes descifrados por adjunto. */
+    attachmentBytes: number;
   };
   notAllowed: string[];
   /** ¿Hay carpetas o etiquetas privadas configuradas? Solo el booleano. */
@@ -78,7 +83,8 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
         maxEdits: EDITS_MAX_COUNT,
         maxTotalChars: EDITS_TOTAL_MAX_LENGTH,
         operationIdChars: OPERATION_ID_MAX_LENGTH
-      }
+      },
+      attachmentBytes: ATTACHMENT_MAX_BYTES
     },
     notAllowed: [...NOT_ALLOWED],
     privacyConfigured: privacy.privateFolders.length > 0 || privacy.privateTags.length > 0
@@ -92,6 +98,6 @@ export const SERVER_INSTRUCTIONS = [
   'Las listas (hebra_search, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders, hebra_list_trash) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
   'hebra_search y hebra_list_notes aceptan `fields` para pedir solo algunos campos.',
   'Para editar: lee con hebra_read_note, usa su `revision` como expectedRevision en hebra_edit_note y un operationId nuevo por edición.',
-  'No permite purgar notas, vaciar la papelera ni borrar de forma irreversible, ni gestionar carpetas ni adjuntos. Algunas notas pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran.',
+  'No permite purgar notas, vaciar la papelera ni borrar de forma irreversible, ni gestionar carpetas, ni añadir, cambiar o borrar adjuntos (los adjuntos solo se leen: hebra_list_attachments, hebra_read_attachment). Algunas notas pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran.',
   'hebra_status devuelve el estado del sync y `capabilities` (versión, herramientas y límites).'
 ].join('\n');

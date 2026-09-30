@@ -50,6 +50,7 @@ import type {
   CreateNoteInput,
   CreateNoteResult,
   EditNoteInput,
+  FetchAttachmentInput,
   OrganizeInput,
   RestoreVersionInput
 } from '../store/writes';
@@ -72,6 +73,8 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   editNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   organize: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   restoreVersion: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  // Bajar y descifrar un adjunto del relé (hasta el máximo de Hebra, 25 MiB).
+  fetchAttachment: 60_000,
   status: 5_000
 };
 
@@ -285,6 +288,19 @@ export function buildRoutedWriteContext(
         (value) => asEditOutcome(value, input.id),
         () => local.restoreVersion(input)
       ),
+    // Solo trae los bytes al disco compartido; el lector los lee de ahí con su filtro.
+    fetchAttachment: (input: FetchAttachmentInput) =>
+      routed(
+        'fetchAttachment',
+        { noteId: input.noteId, sha256: input.sha256, privacy: input.privacy },
+        (value) => {
+          if (!isRecord(value) || typeof value.available !== 'boolean') {
+            throw new Error('writer_protocol');
+          }
+          return { available: value.available };
+        },
+        () => local.fetchAttachment(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -301,6 +317,7 @@ export function writerSocketHandlers(
     editNote: (input) => local.editNote(input),
     organize: (input) => local.organize(input),
     restoreVersion: (input) => local.restoreVersion(input),
+    fetchAttachment: (input) => local.fetchAttachment(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;

@@ -78,6 +78,22 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
         expectedRevision: 'r1.x',
         operationId: 'bait-3'
       }
+    },
+    // Adjuntos en solo lectura (30 sep 2026): los de la nota privada, `not_found`; los de
+    // la visible salen (su cebo `BAIT_ATTACHMENT` puede ir en la salida, nunca a stderr).
+    { name: 'hebra_list_attachments', arguments: { id: library.privateAttachmentNoteId } },
+    {
+      name: 'hebra_read_attachment',
+      arguments: { id: library.privateAttachmentNoteId, attachmentId: library.privateAttachmentSha }
+    },
+    {
+      name: 'hebra_read_attachment',
+      arguments: { id: library.attachmentsNoteId, attachmentId: library.privateAttachmentSha }
+    },
+    { name: 'hebra_list_attachments', arguments: { id: library.attachmentsNoteId } },
+    {
+      name: 'hebra_read_attachment',
+      arguments: { id: library.attachmentsNoteId, attachmentId: library.attachments.text }
     }
   ];
 }

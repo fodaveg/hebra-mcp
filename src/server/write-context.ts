@@ -21,7 +21,8 @@ import type {
   EditNoteSaved,
   OrganizeInput,
   OrganizeSaved,
-  RestoreVersionInput
+  RestoreVersionInput,
+  FetchAttachmentInput
 } from '../store/writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
@@ -36,6 +37,8 @@ export interface WriteContextSources {
   organize(input: OrganizeInput): Promise<OrganizeSaved>;
   /** Restaurar una versión en local (`NoteWriter.restoreVersion`), sin esperar ronda. */
   restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved>;
+  /** Traer al disco los bytes de un adjunto (`LibraryInstance.fetchAttachment`). */
+  fetchAttachment(input: FetchAttachmentInput): Promise<boolean>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
@@ -94,6 +97,10 @@ export interface WriteContext {
    *  conflicto de la ronda anotada en el registro), con la versión en vez de las
    *  sustituciones. */
   restoreVersion(input: RestoreVersionInput): Promise<EditNoteOutcome>;
+  /** Adjuntos en solo lectura: que los bytes estén en el disco compartido (los baja el
+   *  escritor si hace falta; un lector se lo pide por `writer.sock`). No los devuelve:
+   *  los lee la herramienta con su filtro. `available: false` si no se pudieron traer. */
+  fetchAttachment(input: FetchAttachmentInput): Promise<{ available: boolean }>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -237,6 +244,9 @@ export function buildWriteContext(
     editNote: (input: EditNoteInput) => saveAndAwaitRound(input, () => sources.editNote(input)),
     restoreVersion: (input: RestoreVersionInput) =>
       saveAndAwaitRound(input, () => sources.restoreVersion(input)),
+    fetchAttachment: async (input: FetchAttachmentInput) => ({
+      available: await sources.fetchAttachment(input)
+    }),
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
       const saved = await sources.organize(input);
       const wait = await awaitRound(roundTimeoutMs);
