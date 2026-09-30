@@ -10,12 +10,13 @@
  * solo es distinto de `null` si detrás queda al menos otra nota VISIBLE (se mira una de
  * más), para que una página final vacía no delate una cola de notas ocultas.
  *
- * `nextCursor` es el cursor REAL del almacén (misma clave `trashedAt:id` que el motor),
- * como en `hebra_list_notes`.
+ * Paginación común (`pagination.ts`): `nextCursor` va envuelto (`r1.…`, opaco) sobre la
+ * clave `trashedAt:id` del motor, como en `hebra_list_notes`.
  */
 import { encodeCursor } from '../../hebra';
 import { TrashFilter } from '../../privacy/trash-filter';
 import type { ToolContext } from '../context';
+import { LIMITS, effectiveLimit, fillPage, unwrapCursor, wrapCursor } from '../pagination';
 
 export interface TrashedNote {
   id: string;
@@ -29,27 +30,24 @@ export interface TrashedNote {
   isConflictCopy: boolean;
 }
 
-const DEFAULT_LIMIT = 50;
 const PAGE_SIZE = 100;
 
 export async function runListTrash(
   ctx: ToolContext,
   input: { cursor?: string; limit?: number }
 ): Promise<{ notes: TrashedNote[]; nextCursor: string | null }> {
-  const limit = Math.min(Math.max(input.limit ?? DEFAULT_LIMIT, 1), 100);
+  const limit = effectiveLimit(input.limit, LIMITS.listTrash);
+  const startCursor = input.cursor === undefined ? null : unwrapCursor('r1', input.cursor);
   const trash = await TrashFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
 
-  const notes: TrashedNote[] = [];
-  let lastCursor: string | null = null;
-  let cursor: string | null = input.cursor ?? null;
-  for (;;) {
-    const page = await ctx.port.notesPage(cursor, PAGE_SIZE, { kind: 'trash' });
-    for (const item of page.items) {
+  const page = await fillPage({
+    limit,
+    startCursor,
+    fetch: (cursor) => ctx.port.notesPage(cursor, PAGE_SIZE, { kind: 'trash' }),
+    accept: (item): TrashedNote | undefined => {
       const meta = trash.visibleMeta(item.id);
-      if (!meta) continue;
-      // Ya hay `limit`: esta es la de más, y solo dice que hay página siguiente.
-      if (notes.length === limit) return { notes, nextCursor: lastCursor };
-      notes.push({
+      if (!meta) return undefined;
+      return {
         id: item.id,
         title: item.title,
         folderPath: ctx.privacy.folderPath(meta.folderId),
@@ -58,10 +56,12 @@ export async function runListTrash(
         trashedAt: new Date(meta.trashedAt).toISOString(),
         updatedAt: new Date(item.updatedAt).toISOString(),
         isConflictCopy: item.conflict
-      });
-      lastCursor = encodeCursor([meta.trashedAt], item.id);
-    }
-    if (!page.nextCursor) return { notes, nextCursor: null };
-    cursor = page.nextCursor;
-  }
+      };
+    },
+    cursorAfter: (item) => encodeCursor([trash.visibleMeta(item.id)!.trashedAt], item.id)
+  });
+  return {
+    notes: page.items,
+    nextCursor: page.lastCursor === null ? null : wrapCursor('r1', page.lastCursor)
+  };
 }

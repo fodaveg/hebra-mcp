@@ -25,10 +25,11 @@ export const LIMITS = {
   listNotes: { default: 50, max: 100 },
   links: { default: null, max: 200 },
   listTags: { default: null, max: 500 },
-  listFolders: { default: null, max: 500 }
+  listFolders: { default: null, max: 500 },
+  listTrash: { default: 50, max: 100 }
 } as const;
 
-export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1';
+export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1';
 
 const CURSOR_MAX_LENGTH = 2_048;
 

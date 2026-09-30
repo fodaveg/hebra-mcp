@@ -21,20 +21,25 @@ export const CAPABILITY_TOOLS: readonly string[] = [
   'hebra_list_folders',
   'hebra_list_notes',
   'hebra_list_tags',
+  'hebra_list_trash',
+  'hebra_list_versions',
   'hebra_move_note',
   'hebra_read_note',
+  'hebra_read_version',
+  'hebra_restore_note',
+  'hebra_restore_version',
   'hebra_search',
   'hebra_set_archived',
   'hebra_set_favorite',
-  'hebra_status'
+  'hebra_status',
+  'hebra_trash_note'
 ];
 
 /** Lo que este servidor NO hace (D2, SPEC.md §5), por si un cliente lo intenta. */
 const NOT_ALLOWED = [
-  'delete_or_purge_notes',
+  'purge_notes_or_empty_trash_or_irreversible_delete',
   'folder_management',
-  'attachments',
-  'note_versions'
+  'attachments'
 ] as const;
 
 export interface Capabilities {
@@ -82,10 +87,11 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
 
 /** `instructions` del servidor MCP (van en `initialize`): fijas, sin datos de la biblioteca. */
 export const SERVER_INSTRUCTIONS = [
-  'Hebra es una biblioteca de notas Markdown. Este servidor la lee, busca, crea, edita y organiza (mover, favorita, archivar).',
-  'Las listas (hebra_search, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
+  'Hebra es una biblioteca de notas Markdown. Este servidor la lee, busca, crea, edita y organiza (mover, favorita, archivar), y manda notas a la papelera y las saca (reversible).',
+  'Versiones anteriores de una nota (hebra_list_versions, hebra_read_version): solo las de este dispositivo; hebra_restore_version es una edición nueva y pide `expectedRevision` y un operationId nuevo.',
+  'Las listas (hebra_search, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders, hebra_list_trash) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
   'hebra_search y hebra_list_notes aceptan `fields` para pedir solo algunos campos.',
   'Para editar: lee con hebra_read_note, usa su `revision` como expectedRevision en hebra_edit_note y un operationId nuevo por edición.',
-  'No permite borrar ni purgar notas, gestionar carpetas ni adjuntos. Algunas notas pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran.',
+  'No permite purgar notas, vaciar la papelera ni borrar de forma irreversible, ni gestionar carpetas ni adjuntos. Algunas notas pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran.',
   'hebra_status devuelve el estado del sync y `capabilities` (versión, herramientas y límites).'
 ].join('\n');

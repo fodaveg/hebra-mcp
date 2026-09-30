@@ -58,7 +58,7 @@ describe('capacidades', () => {
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);
     expect(capabilities.notAllowed).toEqual(
-      expect.arrayContaining(['delete_or_purge_notes', 'folder_management', 'attachments'])
+      expect.arrayContaining(['purge_notes_or_empty_trash_or_irreversible_delete', 'folder_management', 'attachments'])
     );
   });
 
