@@ -4,13 +4,15 @@ description: >-
   Consulta y escribe en la biblioteca de notas de Hebra (app de notas Markdown
   local-first con sync cifrado) mediante el MCP `hebra` (hebra-mcp): buscar, listar, leer notas, etiquetas,
   carpetas y enlaces; crear notas, añadir texto al final, editar partes de una nota por
-  sustituciones exactas, moverla a una carpeta existente, marcarla favorita y archivarla.
+  sustituciones exactas, moverla a una carpeta existente, marcarla favorita, archivarla,
+  mandarla a la papelera o sacarla, y ver o restaurar sus versiones anteriores.
   Usar cuando el usuario nombra Hebra o sus notas de Hebra: «busca en Hebra», «qué tengo en
   mis notas sobre X», «apúntalo en Hebra», «crea una nota en Hebra», «añade esto a la
   nota Y», «corrige/cambia X en la nota Z», «mueve la nota a la carpeta W», «archiva la
-  nota». NO sirve para borrar, mandar a la papelera, restaurar versiones, adjuntos ni
-  crear, renombrar o mover carpetas (el MCP no lo permite), ni para tareas (van a
-  Lumbre), ni para desarrollar el código de Hebra o de hebra-mcp.
+  nota», «tira la nota a la papelera», «recupera la versión de ayer». NO sirve para borrar
+  de forma definitiva ni vaciar la papelera, adjuntos ni crear, renombrar o mover carpetas
+  (el MCP no lo permite), ni para tareas (van a Lumbre), ni para desarrollar el código de
+  Hebra o de hebra-mcp.
 ---
 
 # Hebra
@@ -31,8 +33,8 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si solo ves 9 tools (sin `hebra_edit_note` ni las de organización), el conector tiene la
-  lista antigua: se reconecta con `/mcp`.
+- Si no ves las 19 tools (p. ej. sin `hebra_edit_note` o sin las de papelera y versiones),
+  el conector tiene la lista antigua: se reconecta con `/mcp`.
 - Ante un resultado raro (lista vacía, nota que debería existir), `hebra_status` primero:
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
   el sync, no la búsqueda.
@@ -40,24 +42,27 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 ## Qué puede y qué no
 
 Por diseño (`SPEC.md` §2, D2): el MCP modifica notas existentes, pero **solo por sustituciones
-puntuales sobre la versión leída**, nunca reescribiendo el cuerpo entero, y **nunca purga
-nada**. Las carpetas se crean, renombran y mueven **desde la app
+puntuales sobre la versión leída** (o restaurando una versión anterior entera), nunca
+reescribiendo el cuerpo entero, y **nunca purga nada**: una nota puede ir a la papelera y
+volver, pero la papelera nunca se vacía desde aquí. Las carpetas se crean, renombran y mueven **desde la app
 Hebra**, no desde aquí, porque los errores de esas operaciones revelaban carpetas privadas.
 
 | Puede | No puede (no hay tool) |
 |---|---|
 | Buscar, listar, leer, ver etiquetas, carpetas, enlaces y backlinks | Reescribir el cuerpo entero de una nota |
-| Crear una nota nueva (en una carpeta existente o en la raíz) | Borrar, mandar a la papelera, restaurar ni leer versiones |
+| Crear una nota nueva (en una carpeta existente o en la raíz) | Borrar para siempre (purgar) ni vaciar la papelera |
 | Añadir texto al FINAL de una nota | Crear, renombrar o mover carpetas |
 | Editar partes de una nota con `{find, replace}` (renombrar = editar el `# H1`; etiquetar = editar el texto) | Leer o subir adjuntos |
 | Mover una nota a una carpeta que ya existe | Renombrar una etiqueta en toda la biblioteca |
 | Marcar o quitar favorita; archivar o desarchivar | Editar una nota bloqueada (`note_locked`); sí se puede organizar |
+| Mandar una nota a la papelera, sacarla y listar la papelera | |
+| Ver las versiones anteriores de una nota y restaurar una (como edición nueva) | |
 
 Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo que sí existe:
 que cree la carpeta en la app y después mover la nota aquí, el texto listo para que lo
 pegue, o una edición por sustituciones.
 
-## Herramientas (13)
+## Herramientas (19)
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
@@ -73,10 +78,21 @@ pegue, o una edición por sustituciones.
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
 | `hebra_set_favorite` | `id`, `favorite` (bool) | Idempotente. Misma salida que mover. |
 | `hebra_set_archived` | `id`, `archived` (bool) | Idempotente. Misma salida que mover. |
+| `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
+| `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
+| `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
+| `hebra_list_versions` | `id` | `versions[{versionId, createdAt, byteLength}]`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. |
+| `hebra_read_version` | `id`, `versionId` | El cuerpo de esa versión. |
+| `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
 | `hebra_status` | nada | Estado del vínculo y del sync, sin contenido. |
 
-Nunca devuelve notas de la papelera. Las copias de conflicto salen con
-`isConflictCopy: true` y `conflictOf`.
+Fuera de las tres de la papelera, nunca devuelve notas de la papelera. Las copias de
+conflicto salen con `isConflictCopy: true` y `conflictOf`.
+
+Para «recupera cómo estaba la nota»: `hebra_list_versions` → `hebra_read_version` para
+enseñarle la que elija → `hebra_read_note` (por la `revision`) → `hebra_restore_version`
+con un UUID nuevo. Si la versión que busca no está, las del Mac no llegan aquí: que la
+restaure desde Hebra.
 
 `sync` en las respuestas de edición y organización: `uploaded` (ya subido), `pending`
 (guardado, sin subir aún), `error` (con `syncError`, p. ej. `offline`, `revoked`) o
@@ -140,7 +156,7 @@ título) ni especules sobre qué hay oculto.
 
 | Código | Qué significa | Qué hacer |
 |---|---|---|
-| `not_found` | No existe, está en la papelera, está oculta, la carpeta no existe, o el resultado sería privado | Busca de nuevo; si sigue, díselo sin suponer cuál de las causas es. |
+| `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado | Busca de nuevo (en la papelera, con `hebra_list_trash`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
 | `invalid_input` | Límite superado, entrada mal formada, `revision` de otra nota o ilegible, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200) y parámetros. |
 | `revision_conflict` | La nota cambió desde que la leíste | Vuelve a leerla, rehaz las sustituciones sobre el cuerpo nuevo y usa un `operationId` nuevo. |
