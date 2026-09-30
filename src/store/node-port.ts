@@ -52,7 +52,13 @@ import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore } from './operations';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
-import type { HebraLibraryPort, NoteVisibilityEntry } from './types';
+import type {
+  HebraLibraryPort,
+  NoteVersion,
+  NoteVersionsList,
+  NoteVisibilityEntry,
+  TrashIndex
+} from './types';
 import type { NoteWriteStore, NoteWriteTarget } from './writes';
 
 export interface OpenNodeLibraryOptions {
@@ -245,6 +251,57 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     }));
   }
 
+  async trashIndex(): Promise<TrashIndex> {
+    return this.read(() => this.trashRows());
+  }
+
+  /**
+   * La consulta de `trashIndex`, sin cola (también la usa `writeExclusive`). SQL propio
+   * de hebra-mcp sobre `notes`, `note_tags` y `folders` de `schema.sql`, igual que
+   * `visibilityRows`, pero con la carpeta GUARDADA de cada nota (no la efectiva) y todas
+   * las filas de carpeta, lápidas incluidas: `folderTrash` de Hebra deja las carpetas
+   * como lápida (`deleted = 1`, con su nombre y su padre) y manda sus notas a la
+   * papelera sin tocar su `folder_id`, así que solo subiendo por esas filas se sabe si
+   * una nota de la papelera venía de una carpeta privada (`src/privacy/trash-filter.ts`).
+   */
+  private trashRows(): TrashIndex {
+    const notes = this.db
+      .prepare(
+        `SELECT n.id AS id, coalesce(n.folder_id, 'root') AS folder_id,
+                n.trashed_at AS trashed_at, GROUP_CONCAT(t.tag, char(10)) AS tags
+         FROM notes n
+         LEFT JOIN note_tags t ON t.note_id = n.id
+         WHERE n.deleted = 0 AND n.trashed_at IS NOT NULL
+         GROUP BY n.id`
+      )
+      .all() as Array<{ id: string; folder_id: string; trashed_at: number; tags: string | null }>;
+    const folders = this.db
+      .prepare('SELECT id, parent_id, name, deleted FROM folders')
+      .all() as Array<{ id: string; parent_id: string | null; name: string | null; deleted: number }>;
+    return {
+      notes: notes.map((row) => ({
+        id: row.id,
+        folderId: row.folder_id,
+        tags: row.tags ? row.tags.split('\n') : [],
+        trashedAt: Number(row.trashed_at)
+      })),
+      folders: folders.map((row) => ({
+        id: row.id,
+        parentId: row.parent_id,
+        name: row.name,
+        deleted: Number(row.deleted) !== 0
+      }))
+    };
+  }
+
+  async noteVersionsList(noteId: string): Promise<NoteVersionsList> {
+    return this.read(() => this.engine.noteVersionsList(noteId));
+  }
+
+  async noteVersionRead(versionId: number): Promise<NoteVersion | null> {
+    return this.read(() => this.engine.noteVersionRead(versionId));
+  }
+
   /**
    * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
    * las operaciones de nota, lo que lee el filtro de privados y el registro de
@@ -261,9 +318,16 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteSetFavorite: (id, favorite) => this.engine.noteSetFavorite(id, favorite),
         noteArchive: (id) => this.engine.noteArchive(id),
         noteUnarchive: (id) => this.engine.noteUnarchive(id),
+        noteTrash: (id) => this.engine.noteTrash(id),
+        noteRestore: (id) => this.engine.noteRestore(id),
+        noteVersionRead: (versionId) => this.engine.noteVersionRead(versionId),
+        noteVersionSnapshot: async (noteId) => {
+          await this.engine.noteVersionSnapshot(noteId);
+        },
         libraryId: () => this.engine.libraryOpen().libraryId,
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => this.visibilityRows(),
+        trashIndex: () => this.trashRows(),
         operations: sqliteOperationStore(this.db)
       })
     );

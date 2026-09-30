@@ -127,3 +127,41 @@ export const setArchivedInputShape = {
   id: z.string(),
   archived: z.boolean()
 };
+
+/** Papelera (ampliación de D2, 30 sep 2026): mandar y sacar, por id. Nada de purgar ni
+ *  vaciar la papelera. */
+export const trashNoteInputShape = {
+  id: z.string()
+};
+
+export const restoreNoteInputShape = {
+  id: z.string().describe('Id de una nota de hebra_list_trash.')
+};
+
+export const listTrashInputShape = {
+  cursor: z.string().optional(),
+  limit: z.number().int().min(1).max(100).optional()
+};
+
+/** Versiones anteriores (ampliación de D2, 30 sep 2026). */
+const VERSION_ID = z.number().int().min(1).describe('versionId de hebra_list_versions.');
+
+export const listVersionsInputShape = {
+  id: z.string()
+};
+
+export const readVersionInputShape = {
+  id: z.string(),
+  versionId: VERSION_ID
+};
+
+/** Sin `.min()`/`.max()` en `operationId`: como `editNoteInputShape`, lo aplica
+ *  `versions.ts` con `invalid_input`. */
+export const restoreVersionInputShape = {
+  id: z.string(),
+  versionId: VERSION_ID,
+  expectedRevision: z.string().describe('La `revision` que devolvió hebra_read_note.'),
+  operationId: z
+    .string()
+    .describe('Id único de esta restauración (un UUID). Reintentar con el mismo no la repite.')
+};

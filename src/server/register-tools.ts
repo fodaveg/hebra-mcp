@@ -9,6 +9,8 @@
  * `runTool`: pasan igual por `privacy_config_unresolved` primero y por el log cerrado de
  * cada llamada. No hay herramientas de carpetas (opción A de David, 28 sep 2026: sus
  * errores revelaban carpetas privadas).
+ * Las seis de papelera y versiones (ampliación de D2, 30 sep 2026) van igual, al final.
+ * Ninguna purga ni vacía la papelera.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -39,12 +41,23 @@ import { runListTags } from './tools/list-tags';
 import { runReadNote } from './tools/read-note';
 import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
+import {
+  listTrashInputShape,
+  listVersionsInputShape,
+  readVersionInputShape,
+  restoreNoteInputShape,
+  restoreVersionInputShape,
+  trashNoteInputShape
+} from './schemas';
+import { runListTrash } from './tools/list-trash';
+import { runRestoreNote, runTrashNote } from './tools/organize';
+import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
 
 /** Recuento de resultados a loguear (§6.4): solo un número, nunca su contenido. */
 function countOf(result: unknown): number | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const record = result as Record<string, unknown>;
-  for (const key of ['results', 'notes', 'tags', 'folders'] as const) {
+  for (const key of ['results', 'notes', 'tags', 'folders', 'versions'] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
   }
@@ -221,5 +234,74 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     },
     async (input) =>
       runTool(ctx, 'hebra_set_archived', (toolCtx) => runSetArchived(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_trash_note',
+    {
+      title: 'Mandar una nota a la papelera',
+      description:
+        'Manda una nota a la papelera de Hebra. Se puede sacar con hebra_restore_note o desde Hebra: no la borra.',
+      inputSchema: trashNoteInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_trash_note', (toolCtx) => runTrashNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_restore_note',
+    {
+      title: 'Sacar una nota de la papelera',
+      description:
+        'Saca una nota de la papelera, a su carpeta si sigue existiendo o, si no, a la raíz.',
+      inputSchema: restoreNoteInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_restore_note', (toolCtx) => runRestoreNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_trash',
+    {
+      title: 'Listar la papelera',
+      description:
+        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas.',
+      inputSchema: listTrashInputShape
+    },
+    async (input) => runTool(ctx, 'hebra_list_trash', (toolCtx) => runListTrash(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_versions',
+    {
+      title: 'Versiones anteriores de una nota',
+      description:
+        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo, de los últimos 7 días.',
+      inputSchema: listVersionsInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_list_versions', (toolCtx) => runListVersions(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_read_version',
+    {
+      title: 'Leer una versión anterior',
+      description: 'Lee el cuerpo de una versión anterior de una nota (versionId de hebra_list_versions).',
+      inputSchema: readVersionInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_read_version', (toolCtx) => runReadVersion(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_restore_version',
+    {
+      title: 'Restaurar una versión anterior',
+      description:
+        'Deja el cuerpo de una versión anterior como una edición nueva de la nota, sobre la revisión leída con hebra_read_note (expectedRevision). Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Lo que había queda como versión anterior. Reintentar con el mismo operationId no la repite.',
+      inputSchema: restoreVersionInputShape
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_restore_version', (toolCtx) => runRestoreVersion(toolCtx, input))
   );
 }

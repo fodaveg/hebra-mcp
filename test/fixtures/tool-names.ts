@@ -18,8 +18,21 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_search',
   'hebra_set_archived',
   'hebra_set_favorite',
-  'hebra_status'
+  'hebra_status',
+  // Papelera y versiones (ampliación de D2, 30 sep 2026).
+  'hebra_list_trash',
+  'hebra_list_versions',
+  'hebra_read_version',
+  'hebra_restore_note',
+  'hebra_restore_version',
+  'hebra_trash_note'
 ].sort();
+
+/** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
+export const FORBIDDEN_TRASH_TOOLS: readonly string[] = [
+  'hebra_purge_note',
+  'hebra_empty_trash'
+];
 
 /** Las tres de gestión de carpetas que quedaron fuera del MCP (opción A de David, 28 sep
  *  2026: sus errores revelaban carpetas privadas). Ningún transporte las lista. */

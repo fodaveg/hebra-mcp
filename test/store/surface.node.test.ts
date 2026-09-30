@@ -8,20 +8,23 @@ import { LibraryInstance } from '../../src/sync/library-instance';
 
 /**
  * D2 (SPEC.md §3, §5), ampliada el 28 sep 2026: el MCP edita notas y las organiza
- * (`noteMove`, favorita, archivar), pero papelera, purga, versiones, adjuntos, renombrar
- * etiquetas y gestionar carpetas (`folder*`: opción A de David, 28 sep 2026, sus errores
- * revelaban carpetas privadas) siguen fuera. Tres comprobaciones sobre lo que el servidor
- * puede alcanzar de
+ * (`noteMove`, favorita, archivar); ampliada otra vez el 30 sep 2026: manda notas a la
+ * papelera y las saca (`noteTrash`/`noteRestore`) y lee y restaura versiones
+ * (`noteVersionsList`, `noteVersionRead`, `noteVersionSnapshot`). Siguen fuera: purgar
+ * (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento (`trashCounts`, contaría
+ * las privadas), purgar versiones, adjuntos, renombrar etiquetas y gestionar carpetas
+ * (`folder*`: opción A de David, 28 sep 2026, sus errores revelaban carpetas privadas).
+ * Tres comprobaciones sobre lo que el servidor puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
  * 2. Ningún objeto que esos módulos entregan (el puerto, su vista de sync, la instancia y
  *    su `port`) TIENE un método así.
- * 3. Ninguna fuente LLAMA a uno (`.noteTrash(`…) ni importa los módulos de Hebra que los
+ * 3. Ninguna fuente LLAMA a uno (`.notePurge(`…) ni importa los módulos de Hebra que los
  *    implementan (`local-port`, `web-port`, `native-port`, `tag-rename`, `tags-reindex`).
  */
 
 const FORBIDDEN =
-  'noteTrash|noteRestore|notePurge|noteClearConflict|noteVersion\\w*|folderCreate|folderRename|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|tagRename';
+  'notePurge|noteClearConflict|noteVersionsPurge\\w*|folderCreate|folderRename|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|trashCounts|tagRename';
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
 const FORBIDDEN_IMPORT =
@@ -54,6 +57,29 @@ function methodNames(value: object): string[] {
 }
 
 describe('superficie de src/store, src/sync y src/lock (D2)', () => {
+  it('la lista prohíbe purgar y vaciar la papelera y deja mandar, sacar y las versiones', () => {
+    for (const name of [
+      'notePurge',
+      'trashEmpty',
+      'trashCounts',
+      'noteVersionsPurgeExpired',
+      'folderTrash',
+      'filePurge'
+    ]) {
+      expect(FORBIDDEN_NAME.test(name), name).toBe(true);
+      expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(true);
+    }
+    for (const name of [
+      'noteTrash',
+      'noteRestore',
+      'noteVersionsList',
+      'noteVersionRead',
+      'noteVersionSnapshot'
+    ]) {
+      expect(FORBIDDEN_NAME.test(name), name).toBe(false);
+    }
+  });
+
   it('ningún módulo exporta una mutación prohibida', async () => {
     const files = sourceFiles();
     expect(files.length).toBeGreaterThan(8);

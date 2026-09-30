@@ -5,9 +5,10 @@
  *
  * Lado del lector, `buildRoutedWriteContext`: un `WriteContext` que
  * - en el escritor, escribe en local, como siempre;
- * - en un lector, reenvía `createNote`, `appendToNote`, `editNote` y `organize` al
- *   escritor. Las tres últimas vuelven ya con la ronda esperada allí
- *   (`appendAndAwaitRound`, `WriteContext.editNote`/`organize`), así que `awaitRound` y
+ * - en un lector, reenvía `createNote`, `appendToNote`, `editNote`, `organize` (que
+ *   incluye mandar a la papelera y sacar de ella) y `restoreVersion` al escritor. Todas
+ *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
+ *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
  *   Todas llevan además la configuración de privados de ESTE lector, que el escritor
  *   aplica dentro del turno en que escribe;
@@ -49,7 +50,8 @@ import type {
   CreateNoteInput,
   CreateNoteResult,
   EditNoteInput,
-  OrganizeInput
+  OrganizeInput,
+  RestoreVersionInput
 } from '../store/writes';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
@@ -69,6 +71,7 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   appendToNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   editNote: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   organize: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  restoreVersion: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   status: 5_000
 };
 
@@ -111,13 +114,15 @@ function asOrganizeOutcome(value: unknown): OrganizeOutcome {
   if (
     typeof value.folderId === 'string' &&
     typeof value.favorite === 'boolean' &&
-    typeof value.archived === 'boolean'
+    typeof value.archived === 'boolean' &&
+    typeof value.trashed === 'boolean'
   ) {
     return {
       id: value.id,
       folderId: value.folderId,
       favorite: value.favorite,
       archived: value.archived,
+      trashed: value.trashed,
       ...sync
     };
   }
@@ -265,6 +270,21 @@ export function buildRoutedWriteContext(
         asOrganizeOutcome,
         () => local.organize(input)
       ),
+    // Como `editNote`: todo en el escritor, y un reintento con el mismo `operationId` no
+    // restaura dos veces.
+    restoreVersion: (input: RestoreVersionInput) =>
+      routed(
+        'restoreVersion',
+        {
+          id: input.id,
+          versionId: input.versionId,
+          expectedRevision: input.expectedRevision,
+          operationId: input.operationId,
+          privacy: input.privacy
+        },
+        (value) => asEditOutcome(value, input.id),
+        () => local.restoreVersion(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -280,6 +300,7 @@ export function writerSocketHandlers(
     appendToNote: (input) => appendAndAwaitRound(local, input),
     editNote: (input) => local.editNote(input),
     organize: (input) => local.organize(input),
+    restoreVersion: (input) => local.restoreVersion(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;
