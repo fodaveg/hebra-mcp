@@ -7,13 +7,13 @@ Hechos de Hebra medidos en `~/code/hebra` en `cf883cb9` (26 sep 2026), solo lect
 
 Dar a Claude (Claude Code y Claude Desktop) acceso a la biblioteca de notas de Hebra mediante un
 servidor MCP que **lee** la biblioteca y **crea, edita y organiza** contenido sin riesgo de perder
-texto (D2, ampliada el 28 sep 2026).
+texto (D2, ampliada el 28 sep 2026 y, con la papelera y las versiones anteriores, el 30 sep 2026).
 
 ## 2. Aceptación de v1
 
 1. David vincula `hebra-mcp` a su biblioteca desde el flujo de aprobación de Hebra
    (Ajustes > Sincronización) y el proceso descarga la biblioteca completa.
-2. Desde Claude Code, las trece herramientas de §5 responden con el esquema de §5.
+2. Desde Claude Code, las diecinueve herramientas de §5 responden con el esquema de §5.
 3. Una nota creada o ampliada desde Claude aparece en Hebra (Mac e iPhone) tras un ciclo de sync.
 4. Si Claude añade texto a una nota que David está editando a la vez, aparece una copia de
    conflicto visible en Hebra y ningún texto se pierde.
@@ -29,7 +29,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | # | Decisión | Motivo / descartes |
 |---|---|---|
 | D1 | **Dispositivo propio**: proceso Node que se vincula a la biblioteca como un dispositivo más por el flujo de aprobación, con su propia SQLite y el MISMO motor de sync de Hebra. Transporte MCP: **stdio** primero; conector remoto más adelante (D6). | El sync va cifrado de punta a punta: el relé de `app.lumbre.pro` no puede leer notas. Descartados: leer la SQLite del contenedor del Mac y un MCP en el servidor de Lumbre (este último, revocado por D6). |
-| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Ampliada el 28 sep 2026** («me parecen ok tus decisiones del mcp. adelante con ellas»): 1) el MCP puede modificar notas existentes; 2) por **sustituciones puntuales** `{find, replace}` sobre la revisión leída, nunca reescribiendo el cuerpo entero (renombrar = editar el H1); 3) primer lote = edición + organización (mover nota, favorita, archivar/desarchivar; las carpetas, ver 5); papelera, versiones y adjuntos van en otro lote, y **nunca** purga nada irreversible; 4) nunca mueve una nota a una carpeta privada ni le pone una etiqueta privada, por ninguna vía: se rechaza sin escribir y con el mismo error que un destino inexistente; 5) **opción A** (28 sep 2026): crear, renombrar y mover carpetas quedan **fuera** del MCP, porque sus errores revelarían carpetas privadas (`folder_name_taken` delataba una hermana privada; renombrar o mover una carpeta con una privada dentro respondía distinto); las carpetas se crean desde la app Hebra, y el MCP solo mueve notas a carpetas que ya existen. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra) y ya permitía editar (`noteSave` con `expectedLocalSeq`/`baseBodySha256`). |
+| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Ampliada el 28 sep 2026** («me parecen ok tus decisiones del mcp. adelante con ellas»): 1) el MCP puede modificar notas existentes; 2) por **sustituciones puntuales** `{find, replace}` sobre la revisión leída, nunca reescribiendo el cuerpo entero (renombrar = editar el H1); 3) primer lote = edición + organización (mover nota, favorita, archivar/desarchivar; las carpetas, ver 5); papelera y versiones entraron el 30 sep (ver 6), los adjuntos van en otro lote, y **nunca** purga nada irreversible; 4) nunca mueve una nota a una carpeta privada ni le pone una etiqueta privada, por ninguna vía: se rechaza sin escribir y con el mismo error que un destino inexistente; 5) **opción A** (28 sep 2026): crear, renombrar y mover carpetas quedan **fuera** del MCP, porque sus errores revelarían carpetas privadas (`folder_name_taken` delataba una hermana privada; renombrar o mover una carpeta con una privada dentro respondía distinto); las carpetas se crean desde la app Hebra, y el MCP solo mueve notas a carpetas que ya existen; 6) **papelera y versiones** (30 sep 2026, «acepto tus recomendaciones»): el MCP manda una nota visible a la papelera, la saca y lista la papelera, pero **nunca** purga, vacía la papelera ni borra nada de forma irreversible; en la papelera rige el mismo filtro (una nota de carpeta privada o subcarpeta, también si la carpeta ya se borró, o con etiqueta privada o descendiente no aparece, y mandarla o sacarla responde `not_found`, igual que una inexistente), y restaurar nunca deja una nota en una carpeta que el cliente no ve. Lista y lee las versiones anteriores de una nota visible, y restaurar una versión es una **edición nueva** con el mismo control de concurrencia que `hebra_edit_note` (revisión leída; choque = copia de conflicto visible); una versión cuyo cuerpo lleva una etiqueta privada no se devuelve ni se restaura (misma respuesta que una inexistente, regla 4). Las demás herramientas siguen sin devolver notas de la papelera. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra) y ya permitía editar (`noteSave` con `expectedLocalSeq`/`baseBodySha256`). |
 | D3 | **Ve toda la biblioteca salvo** carpetas o etiquetas marcadas como privadas en la configuración del MCP. El filtro vive en el MCP y se aplica antes de devolver nada a la IA. | |
 | D4 | **Cuándo** (revisada el 26 sep 2026): **BEAR-22 queda cerrada** por decisión de David (la biblioteca actual es de prueba y la va a reimportar desde Obsidian). Se hacen **todos los lotes ya**, en orden L0 → L1 → L2 (en cuanto Lumbre despliegue L2a) → L3 → L4. Objetivo: que David use Hebra en serio con el MCP cuanto antes. | La versión anterior esperaba a BEAR-22 para todo lo que cambiara el sync o el vínculo en Hebra. |
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
@@ -40,7 +40,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 13 herramientas + filtro de privados
+                                        ├─ servidor MCP: 19 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -99,7 +99,8 @@ Lo que **no** sirve tal cual y resuelve hebra-mcp sin tocar Hebra:
 ## 5. Herramientas MCP de v1
 
 Reglas comunes:
-- Las notas en la papelera nunca se devuelven.
+- Las notas en la papelera nunca se devuelven, salvo por las herramientas de la papelera
+  (`hebra_list_trash`, `hebra_trash_note`, `hebra_restore_note`), con su propio filtro (§6.3).
 - Las copias de conflicto se devuelven marcadas.
 - Toda salida pasa por el filtro de privados (§6.3).
 - Los identificadores son los `id` de nota del almacén.
@@ -119,6 +120,12 @@ Reglas comunes:
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
 | `hebra_set_favorite` | `id`, `favorite` | igual que `hebra_move_note` |
 | `hebra_set_archived` | `id`, `archived` | igual que `hebra_move_note` |
+| `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
+| `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
+| `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
+| `hebra_list_versions` | `id` | `{id, versions: [{versionId, createdAt, byteLength}]}`, la más reciente primero, sin cuerpo ni `cause`. |
+| `hebra_read_version` | `id`, `versionId` | `{id, versionId, createdAt, byteLength, body}`. |
+| `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` (≤ 200) | igual que `hebra_edit_note`, con los mismos errores salvo los de las sustituciones. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked}`. Sin contenido de notas. |
 
 Detalle de las escrituras (D2):
@@ -166,20 +173,41 @@ Detalle de las escrituras (D2):
   carpeta visible con una privada dentro respondía distinto que sin ella). Las carpetas se crean
   desde la app Hebra; llamar a una de esas herramientas da el error genérico del SDK de herramienta
   inexistente.
-- **Privacidad de las escrituras** (decisión 4): toda escritura (crear, añadir, editar, organizar)
-  lleva la configuración de privados de quien la pide (también la del lector por `writer.sock`, que
-  la exige) y el escritor la aplica dentro del turno en que escribe y sobre el resultado: origen
-  visible, destino visible, cuerpo resultante sin etiquetas privadas ni descendientes. Lo que no,
-  `not_found`, igual que una nota o carpeta inexistente (§6.3 «Escrituras»): una nota con etiqueta
-  privada ya no se crea ni se amplía (antes, `hidden: true`).
-- **Estado de sync** (edición y organización): se espera la ronda como mucho 10 s y `sync` dice
-  `uploaded` (ronda `ok` y fila ya limpia), `pending` (guardado; sin ronda a tiempo o aún sucio),
+- **Privacidad de las escrituras** (decisión 4): toda escritura (crear, añadir, editar, organizar,
+  papelera y restaurar una versión) lleva la configuración de privados de quien la pide (también
+  la del lector por `writer.sock`, que la exige) y el escritor la aplica dentro del turno en que
+  escribe y sobre el resultado: origen visible, destino visible, cuerpo resultante sin etiquetas
+  privadas ni descendientes. Lo que no, `not_found`, igual que una nota o carpeta inexistente
+  (§6.3 «Escrituras»): una nota con etiqueta privada ya no se crea ni se amplía (antes,
+  `hidden: true`).
+- **Estado de sync** (edición, organización, papelera y restaurar una versión): se espera la
+  ronda como mucho 10 s y `sync` dice `uploaded` (ronda `ok` y fila ya limpia), `pending` (guardado; sin ronda a tiempo o aún sucio),
   `error` (ronda con otro código: `syncError`, p. ej. `offline`, `revoked`) o `not_linked` (sin
   emparejar). Una copia de conflicto de la ronda para esa nota da `conflict_copy` con `copyId`, sin
   reintento automático.
-- No se exponen `noteTrash`, `noteRestore`, `notePurge`, `folderTrash`, `file*`, `trashEmpty`,
-  versiones ni `tagRename`: el servidor ni siquiera las importa en su capa de herramientas
-  (`test/store/surface.node.test.ts`).
+- **Papelera** (`hebra_trash_note`, `hebra_restore_note`, `hebra_list_trash`; decisión 6 de D2,
+  30 sep 2026): mandar y sacar son dos acciones más de `organize` (`trashNote`/`restoreNote`,
+  sobre `noteTrash`/`noteRestore` del motor), por el mismo escritor, el mismo reenvío y la misma
+  privacidad dentro del turno; las dos son idempotentes y se deshacen la una a la otra. Restaurar
+  deja la nota en su carpeta si sigue viva y, si se borró, en la raíz (la carpeta efectiva de una
+  lápida, igual que en Hebra). La lista sale de `notesPage({kind: 'trash'})`; se rellena hasta
+  `limit` con notas visibles y mira una de más para que `nextCursor` no delate una cola de notas
+  ocultas.
+- **Versiones anteriores** (`hebra_list_versions`, `hebra_read_version`, `hebra_restore_version`;
+  decisión 6 de D2): son las instantáneas **locales** del almacén de hebra-mcp (`note_versions` de
+  Hebra: el cuerpo que sustituyó un guardado o un cambio bajado por el sync, una cada 5 minutos
+  como mucho, 7 días); no viajan por sync, así que no son las del Mac. No se devuelve `cause`
+  (en un renombrado de etiquetas en lote nombra las etiquetas y podría nombrar una privada).
+  El motor no tiene una operación de restaurar: como «Restaurar» en Hebra
+  (`LibraryEditor.svelte`), es `noteVersionSnapshot` (instantánea ya del cuerpo actual, para
+  que lo que había se pueda recuperar) + `noteSave` normal. Va por la vía de `hebra_edit_note`:
+  un turno de la cola en el escritor (op `restoreVersion` de `writer.sock`), la base de
+  `expectedRevision`, idempotencia en el mismo registro (con huella propia: un `operationId` de
+  una edición no vale para restaurar) y la copia de conflicto de la ronda anotada para el
+  reintento.
+- No se exponen `notePurge`, `trashEmpty`, `trashCounts` (contaría las privadas),
+  `noteVersionsPurgeExpired`, `folderTrash`, `file*` ni `tagRename`: el servidor ni siquiera las
+  importa en su capa de herramientas (`test/store/surface.node.test.ts`).
 - Los nombres exactos de los métodos del almacén para búsqueda, etiquetas y enlaces se fijan en L0
   leyendo `sqlite-engine.ts` y `graph-store.ts` en el SHA fijado.
 
@@ -237,13 +265,32 @@ El dispositivo acumula tres secretos:
     etiquetas privadas o solo presentes en notas ocultas tampoco.
   - `outgoing` de `hebra_links`: un enlace a una nota oculta sale como `ref` sin resolver.
   - `backlinks`: omiten las notas ocultas.
-- **Escrituras** (crear, añadir, editar y organizar): no pueden apuntar a una carpeta privada ni a
-  una nota oculta, ni dejar una nota en una carpeta privada o con una etiqueta privada (o
+- **Escrituras** (crear, añadir, editar, organizar, papelera y restaurar una versión): no pueden
+  apuntar a una carpeta privada ni a una nota oculta, ni dejar una nota en una carpeta privada o con una etiqueta privada (o
   descendiente); responden `not_found` sin escribir, igual que un destino inexistente (decisión 4 de
   David, 28 sep 2026). Se comprueba en la herramienta y otra vez en el escritor, dentro del turno en
   que escribe, con la configuración de quien pide (§5, «Detalle de las escrituras»). Una nota con
   etiqueta privada ya no se crea ni se amplía. El MCP no crea, renombra ni mueve carpetas (opción A,
   §5): sus errores revelarían carpetas privadas.
+- **Papelera** (decisión 6 de D2, 30 sep 2026; `src/privacy/trash-filter.ts`): una nota de la
+  papelera está oculta si tiene una etiqueta privada (o descendiente) o si su carpeta es privada
+  (o subcarpeta). Si su carpeta ya se borró (`folderTrash` de Hebra deja la carpeta como lápida,
+  con nombre y padre, y manda sus notas a la papelera sin tocar su `folder_id`), se sube por las
+  lápidas hasta una carpeta viva o la raíz: oculta si esa carpeta viva es privada o si alguna ruta
+  intermedia (la de la carpeta viva más los nombres de las lápidas) es una ruta privada
+  configurada, así que una carpeta privada borrada y vuelta a crear con el mismo nombre no destapa
+  las notas de la vieja. Cerrado ante la duda: una fila que falta, sin nombre o en ciclo, oculta.
+  Una nota oculta no sale en `hebra_list_trash` (sin recuento, y sin un `nextCursor` que delate
+  que quedan ocultas detrás), y `hebra_trash_note`/`hebra_restore_note` sobre ella responden
+  `not_found`, igual que una inexistente. Restaurar deja la nota en su carpeta si sigue viva o en
+  la raíz: con esta regla, lo que se ve en la papelera nunca acaba en una carpeta privada al
+  restaurarlo. Se comprueba en la herramienta y otra vez en el escritor, dentro del turno.
+- **Versiones** (decisión 6 de D2): solo de una nota visible (viva; oculta, en la papelera o
+  inexistente, `not_found`). Una versión cuyo cuerpo lleva una etiqueta privada (o descendiente),
+  con las etiquetas de `deriveNote` (las que Hebra guardaría al restaurarla), no se lista, no se
+  lee y no se restaura: `not_found`, igual que una versión que no existe o que es de otra nota.
+  La lista no dice cuántas se saltó ni devuelve `cause`. Restaurar lo vuelve a comprobar el
+  escritor dentro del turno, sobre el cuerpo resultante, como cualquier edición.
 - **Cerrado ante la duda**: si una carpeta de `privateFolders` no existe (renombrada o borrada), el
   servidor responde a toda herramienta con `privacy_config_unresolved` hasta que se corrija la
   configuración. No se sirve nada con un filtro que no se puede aplicar.
@@ -260,11 +307,15 @@ El dispositivo acumula tres secretos:
 ### 6.5 Contenido de notas como entrada a la IA
 
 El texto de una nota puede contener instrucciones dirigidas al modelo. El daño posible está acotado
-por D2 (ampliada el 28 sep 2026): sin borrar, purgar ni vaciar la papelera, y sin poder llevar nada a
-una carpeta o etiqueta privada, lo peor que puede hacer una instrucción inyectada es crear notas,
-añadir texto, sustituir fragmentos de una nota visible, o mover (a carpetas que ya existen),
-archivar y marcar notas visibles. Las carpetas no se tocan. Todo queda visible en Hebra y es revertible allí (las «Versiones anteriores» de Hebra
-guardan el cuerpo previo a una edición); una edición concurrente produce una copia de conflicto.
+por D2 (ampliada el 28 y el 30 sep 2026): sin borrar, purgar ni vaciar la papelera, y sin poder
+llevar nada a una carpeta o etiqueta privada, lo peor que puede hacer una instrucción inyectada es
+crear notas, añadir texto, sustituir fragmentos de una nota visible o restaurarle una versión
+anterior, mover (a carpetas que ya existen), archivar y marcar notas visibles, y **mandar notas
+visibles a la papelera** (o sacar de ella notas visibles). Las carpetas no se tocan. Todo queda
+visible en Hebra y es revertible, allí y desde el MCP: una nota mandada a la papelera se saca con
+`hebra_restore_note` o desde Hebra (nada la purga), y las «Versiones anteriores» guardan el cuerpo
+previo a una edición o a una restauración (en Hebra, las del dispositivo; en el MCP, las suyas);
+una edición concurrente produce una copia de conflicto.
 
 ## 7. Emparejado (primera vez)
 
@@ -336,17 +387,20 @@ Comando `hebra-mcp pair`, interactivo en terminal:
   - Protocolo: JSON por líneas con `id` de petición. `createNote {body, folderId, privacy}`,
     `appendToNote {id, text, privacy}` (responde `{outcome, copyId?}` con la ronda de sync ya
     esperada en el escritor, igual que `hebra_append_to_note`), `editNote {id, edits,
-    expectedRevision, operationId, privacy}` y `organize {action, …, privacy}` (responden el
-    resultado completo de `hebra_edit_note` y de la organización, con la ronda ya esperada y
+    expectedRevision, operationId, privacy}`, `organize {action, …, privacy}` (también
+    `trashNote`/`restoreNote`; ninguna acción de purga) y `restoreVersion {id, versionId,
+    expectedRevision, operationId, privacy}` (responden el resultado completo de
+    `hebra_edit_note`, de la organización o de `hebra_restore_version`, con la ronda ya esperada y
     `sync`), y `status` (el estado de sync del escritor). `privacy` es la configuración de
-    privados del lector y es obligatoria en las cuatro escrituras: sin ella, `invalid_request`.
+    privados del lector y es obligatoria en las cinco escrituras: sin ella, `invalid_request`.
     Errores con código cerrado, nunca con el mensaje; los rechazos de una sustitución llevan su
     índice (`edit`). Una línea de más de `MAX_MESSAGE_BYTES` (el cuerpo máximo de §5 con el peor
     escape JSON, más 64 KiB; las sustituciones de `editNote` suman como mucho lo mismo) se rechaza
     sin leerla entera. El escritor vuelve a comprobar los límites de §5.
-  - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note` y las tres de
-    organización de notas al escritor. El filtro de privados y los límites se aplican en la herramienta del
-    lector, **antes** de reenviar y con su configuración, y el escritor vuelve a aplicar esa misma
+  - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note`, las tres de
+    organización de notas, las dos de la papelera y `hebra_restore_version` al escritor (las
+    lecturas de la papelera y de las versiones las sirve él mismo). El filtro de privados y los
+    límites se aplican en la herramienta del lector, **antes** de reenviar y con su configuración, y el escritor vuelve a aplicar esa misma
     configuración (la recibe en `privacy`) dentro del turno en que escribe: no la conoce ni la
     supone igual.
   - Si no hay socket, nadie escucha o no responde a tiempo, el lector intenta tomar el bloqueo en ese
@@ -542,8 +596,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.7 Aceptación
 
-1. Desde claude.ai web, móvil y una sesión en la nube, las trece herramientas de §5 responden;
-   lo creado, añadido, editado u organizado aparece en Hebra.
+1. Desde claude.ai web, móvil y una sesión en la nube, las diecinueve herramientas de §5
+   responden; lo creado, añadido, editado, organizado, mandado a la papelera o restaurado aparece
+   en Hebra.
 2. Las notas privadas no llegan por ninguna herramienta.
 3. `grep` de las notas-cebo en `docker logs` y en el log de Caddy da 0.
 4. `/mcp` sin token responde 401 y `oauth-revoke-all` corta el acceso.
