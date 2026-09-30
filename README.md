@@ -95,6 +95,21 @@ usa Hebra). `scripts/check-no-hebra-code.mjs`
 comprueba que ningún fichero versionado fuera de `vendor/` es idéntico, byte a byte, a
 uno del submódulo.
 
+## Instalar la skill opcional
+
+La skill `hebra` vive en `skills/hebra/`. No es necesaria para usar el MCP, pero enseña al
+agente qué puede y qué no puede hacer, cómo editar por sustituciones y qué hacer con cada
+error. Se instala desde este repositorio con [`skills`](https://skills.sh) (requiere
+Node.js), que la deja en `~/.agents/skills/hebra` y la enlaza en cada cliente elegido:
+
+```sh
+npx --yes skills add fodaveg/hebra-mcp -g -y \
+  --skill hebra \
+  --agent codex claude-code
+```
+
+Para actualizarla tras un cambio en `skills/hebra/`, se repite el mismo comando.
+
 ## Build y tests
 
 ```sh
