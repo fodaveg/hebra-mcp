@@ -19,6 +19,10 @@ export const BAIT_FOLDER = 'CEBO_PRIVADO_7f3a';
  *  privada. */
 export const BAIT_TAG = 'CEBO_PRIVADO_TAG_c92e';
 
+/** Cuerpos de `versionedNoteId`: el de la versión anterior y el actual. */
+export const VERSIONED_OLD_BODY = '# Nota con versiones\n\nPrimera redacción.\n';
+export const VERSIONED_NEW_BODY = '# Nota con versiones\n\nSegunda redacción.\n';
+
 export interface TestLibrary {
   sqlitePath: string;
   /** Título de la nota pública principal, para resolver enlaces por título. */
@@ -31,8 +35,28 @@ export interface TestLibrary {
   privateTagNoteId: string;
   /** En la raíz; enlaza a `publicNoteId` por título (para backlinks). */
   linkingNoteId: string;
-  /** En la papelera: nunca debe salir por ninguna herramienta. */
+  /** En la papelera, en la raíz: solo sale por `hebra_list_trash` (y se puede restaurar). */
   trashedNoteId: string;
+  /** En la papelera, desde `Proyectos/Lumbre` (sigue viva): vuelve allí al restaurarla. */
+  trashedPublicFolderNoteId: string;
+  /** En la papelera, desde `Diario/2026` (privada): lleva `BAIT_FOLDER`, nunca sale. */
+  trashedPrivateFolderNoteId: string;
+  /** En la papelera, con `#secreto/personal`: lleva `BAIT_TAG`, nunca sale. */
+  trashedPrivateTagNoteId: string;
+  /** En la papelera porque se BORRÓ su carpeta, `Diario/Viejo` (subcarpeta de una privada,
+   *  ahora lápida): lleva `BAIT_FOLDER`, nunca sale. Restaurarla la dejaría en la raíz. */
+  trashedDeletedPrivateFolderNoteId: string;
+  /** En la papelera porque se borró su carpeta, `Proyectos/Antiguo` (pública, ahora
+   *  lápida): sale en la papelera y vuelve a la raíz al restaurarla, como en Hebra. */
+  trashedDeletedPublicFolderNoteId: string;
+  /** Nota visible con UNA versión anterior visible (`VERSIONED_OLD_BODY`); su cuerpo
+   *  actual es `VERSIONED_NEW_BODY`. */
+  versionedNoteId: string;
+  versionedNoteVersionId: number;
+  /** Nota visible HOY cuya versión anterior llevaba `#secreto/personal` y `BAIT_TAG`: esa
+   *  versión no se lista, no se lee ni se restaura. */
+  formerlyPrivateNoteId: string;
+  formerlyPrivateVersionId: number;
   /** Dos notas VIVAS con el mismo título, en carpetas distintas (para `ambiguous_title`). */
   duplicateTitle: string;
   duplicateNoteAId: string;
@@ -66,6 +90,25 @@ async function createNote(
     props: derived.props
   });
   return (await engine.noteRead(created.id))!;
+}
+
+/** Guarda `body` en una nota que ya existe, con los derivados y la base de lo leído. */
+async function saveBody(engine: SqliteLibraryEngine, id: string, body: string): Promise<void> {
+  const row = (await engine.noteRead(id))!;
+  const derived = deriveNote(body);
+  await engine.noteSave({
+    id,
+    body,
+    title: derived.title,
+    titleNorm: derived.titleNorm,
+    excerpt: derived.excerpt,
+    expectedLocalSeq: row.localSeq,
+    baseBodySha256: row.bodySha256,
+    tags: derived.tags,
+    links: derived.links,
+    blobRefs: derived.blobRefs,
+    props: derived.props
+  });
 }
 
 export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary> {
@@ -107,6 +150,61 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
   const trashedNote = await createNote(engine, null, '# Nota en la papelera\nEsto nunca debe salir.\n');
   await engine.noteTrash(trashedNote.id);
 
+  // Papelera (ampliación de D2, 30 sep 2026): notas visibles y ocultas en la papelera,
+  // también las que llegaron ahí porque se borró su carpeta (`folderTrash` deja la carpeta
+  // como lápida y no toca el `folder_id` de sus notas).
+  const trashedPublicFolderNote = await createNote(
+    engine,
+    lumbre.id,
+    '# Borrador de Lumbre tirado\nTexto público en la papelera.\n'
+  );
+  await engine.noteTrash(trashedPublicFolderNote.id);
+  const trashedPrivateFolderNote = await createNote(
+    engine,
+    diario2026.id,
+    `# Diario tirado\n${BAIT_FOLDER}: en la papelera, nunca debe salir.\n`
+  );
+  await engine.noteTrash(trashedPrivateFolderNote.id);
+  const trashedPrivateTagNote = await createNote(
+    engine,
+    null,
+    `# Secreto tirado\n#secreto/personal\n${BAIT_TAG}: en la papelera, nunca debe salir.\n`
+  );
+  await engine.noteTrash(trashedPrivateTagNote.id);
+  const diarioViejo = await engine.folderCreate(diario.id, 'Viejo');
+  const trashedDeletedPrivateFolderNote = await createNote(
+    engine,
+    diarioViejo.id,
+    `# Diario viejo\n${BAIT_FOLDER}: su carpeta privada se borró.\n`
+  );
+  await engine.folderTrash(diarioViejo.id);
+  const antiguo = await engine.folderCreate(proyectos.id, 'Antiguo');
+  const trashedDeletedPublicFolderNote = await createNote(
+    engine,
+    antiguo.id,
+    '# Nota de carpeta borrada\nSu carpeta pública se borró.\n'
+  );
+  await engine.folderTrash(antiguo.id);
+
+  // Versiones anteriores: el motor guarda el cuerpo que un guardado sustituye (el primero
+  // de una nota, sin esperar los 5 minutos). `createNote` guarda sobre el cuerpo vacío
+  // (sin versión); el segundo guardado deja la primera redacción como versión.
+  // En su propia carpeta, `Historial`, para no mover los recuentos de la raíz.
+  const historial = await engine.folderCreate(null, 'Historial');
+  const versionedNote = await createNote(engine, historial.id, VERSIONED_OLD_BODY);
+  await saveBody(engine, versionedNote.id, VERSIONED_NEW_BODY);
+  const formerlyPrivate = await createNote(
+    engine,
+    historial.id,
+    `# Nota que fue secreta\n#secreto/personal\n${BAIT_TAG}: esto era privado.\n`
+  );
+  await saveBody(engine, formerlyPrivate.id, '# Nota que fue secreta\n\nYa no es privada.\n');
+  const onlyVersion = (noteId: string): number => {
+    const { items } = engine.noteVersionsList(noteId);
+    if (items.length !== 1) throw new Error(`test-library: se esperaba una versión, hay ${items.length}`);
+    return items[0]!.id;
+  };
+
   const codeFenceNote = await createNote(
     engine,
     null,
@@ -139,6 +237,9 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     throw new Error(`test-library: se esperaba una copia de conflicto, salió "${conflictResult.outcome}"`);
   }
 
+  const versionedNoteVersionId = onlyVersion(versionedNote.id);
+  const formerlyPrivateVersionId = onlyVersion(formerlyPrivate.id);
+
   db.close();
 
   return {
@@ -150,6 +251,15 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     privateTagNoteId: privateTagNote.id,
     linkingNoteId: linkingNote.id,
     trashedNoteId: trashedNote.id,
+    trashedPublicFolderNoteId: trashedPublicFolderNote.id,
+    trashedPrivateFolderNoteId: trashedPrivateFolderNote.id,
+    trashedPrivateTagNoteId: trashedPrivateTagNote.id,
+    trashedDeletedPrivateFolderNoteId: trashedDeletedPrivateFolderNote.id,
+    trashedDeletedPublicFolderNoteId: trashedDeletedPublicFolderNote.id,
+    versionedNoteId: versionedNote.id,
+    versionedNoteVersionId: versionedNoteVersionId,
+    formerlyPrivateNoteId: formerlyPrivate.id,
+    formerlyPrivateVersionId: formerlyPrivateVersionId,
     duplicateTitle,
     duplicateNoteAId: duplicateA.id,
     duplicateNoteBId: duplicateB.id,

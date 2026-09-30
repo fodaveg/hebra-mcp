@@ -52,6 +52,7 @@ function ctxFor(mcp: McpDevice): ServerContext {
     recordEditConflict: (operationId, id, copyId) =>
       mcp.writer.recordEditConflict(operationId, id, copyId),
     organize: (input) => mcp.writer.organize(input),
+    restoreVersion: (input) => mcp.writer.restoreVersion(input),
     noteRead: (id) => mcp.port.noteRead(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     requestRound: () => mcp.runner.requestRound()
@@ -234,6 +235,94 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
     const seen = await app.port.noteRead(id);
     expect(seen?.folderId).toBe(folder.id);
     expect(seen?.archivedAt).not.toBeNull();
+  });
+
+  it('papelera: mandar y sacar una nota cruza al otro dispositivo en los dos sentidos', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+
+    const id = await appCreate(app, '# Para la papelera\n\ntexto');
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const call = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(textOf((await client!.callTool({ name, arguments: args })) as CallToolResult)) as Record<
+        string,
+        unknown
+      >;
+    expect(await call('hebra_trash_note', { id })).toEqual({ id, trashed: true, sync: 'uploaded' });
+    await app.sync.runRound();
+    expect((await app.port.noteRead(id))?.trashedAt).not.toBeNull();
+
+    expect(await call('hebra_restore_note', { id })).toMatchObject({ id, folderPath: '', sync: 'uploaded' });
+    await app.sync.runRound();
+    const seen = await app.port.noteRead(id);
+    expect(seen?.trashedAt).toBeNull();
+    expect(seen?.body).toBe('# Para la papelera\n\ntexto');
+  });
+
+  it('hebra_restore_version con edición a la vez en otro dispositivo: conflict_copy, sin perder texto', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+
+    const id = await appCreate(app, '# Con versiones\n\nREDACCIÓN ORIGINAL');
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const call = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(textOf((await client!.callTool({ name, arguments: args })) as CallToolResult)) as Record<
+        string,
+        unknown
+      >;
+    // Una edición desde Claude deja la redacción original como versión LOCAL de hebra-mcp.
+    const first = await call('hebra_read_note', { id });
+    expect(
+      await call('hebra_edit_note', {
+        id,
+        edits: [{ find: 'REDACCIÓN ORIGINAL', replace: 'SEGUNDA REDACCIÓN' }],
+        expectedRevision: first.revision,
+        operationId: 'op-sync-version-1'
+      })
+    ).toMatchObject({ outcome: 'saved', sync: 'uploaded' });
+    await app.sync.runRound();
+    const versions = (await call('hebra_list_versions', { id })).versions as Array<{ versionId: number }>;
+    expect(versions).toHaveLength(1);
+    const read = await call('hebra_read_note', { id });
+
+    // El Mac edita y sincroniza; Claude restaura sobre su copia local, aún vieja.
+    await appSave(app, id, '# Con versiones\n\nSEGUNDA REDACCIÓN\n\nEDICIÓN DEL MAC');
+    await app.sync.runRound();
+
+    const args = {
+      id,
+      versionId: versions[0]!.versionId,
+      expectedRevision: read.revision,
+      operationId: 'op-sync-version-2'
+    };
+    const parsed = await call('hebra_restore_version', args);
+    expect(parsed.outcome).toBe('conflict_copy');
+    expect(typeof parsed.copyId).toBe('string');
+    // Reintentar con el mismo operationId devuelve la misma copia, sin restaurar otra vez.
+    expect(await call('hebra_restore_version', args)).toMatchObject({
+      outcome: 'conflict_copy',
+      copyId: parsed.copyId,
+      replayed: true
+    });
+
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+    await app.sync.runRound();
+    for (const bodies of [await allBodies(mcp.port), await allBodies(app.port)]) {
+      const family = bodies.filter((note) => note.id === id || note.conflictOf === id);
+      expect(family.filter((note) => note.conflictOf === id)).toHaveLength(1);
+      const joined = family.map((note) => note.body).join('\n---\n');
+      expect(joined).toContain('EDICIÓN DEL MAC');
+      expect(joined).toContain('REDACCIÓN ORIGINAL');
+    }
   });
 
   it('hebra_edit_note con edición a la vez en otro dispositivo: conflict_copy con copyId, sin reintento', async () => {

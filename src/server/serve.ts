@@ -80,6 +80,7 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     recordEditConflict: (operationId, id, copyId) =>
       instance.recordEditConflict(operationId, id, copyId),
     organize: (input) => instance.organize(input),
+    restoreVersion: (input) => instance.restoreVersion(input),
     noteRead: (id) => instance.port.noteRead(id),
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
     requestRound: () => {

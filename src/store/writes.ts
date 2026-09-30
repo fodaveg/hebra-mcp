@@ -15,6 +15,11 @@
  * - `editNote`: sustituciones puntuales (`./edits.ts`) sobre la versión que el agente
  *   leyó (`./revision.ts`), con el filtro de privados construido DENTRO del turno y la
  *   idempotencia de `./operations.ts`. Ver su comentario.
+ * - `organize`: mover, favorita, archivar y, desde el 30 sep 2026, mandar a la papelera
+ *   y sacar de ella (`noteTrash`/`noteRestore`, reversibles). Nunca purga ni vacía la
+ *   papelera.
+ * - `restoreVersion` (30 sep 2026): restaurar una «versión anterior» es una edición
+ *   nueva, con la revisión, la idempotencia y la copia de conflicto de `editNote`.
  *
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
@@ -31,11 +36,12 @@ import {
 } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
+import { TrashFilter } from '../privacy/trash-filter';
 import { applyEdits, type TextEdit } from './edits';
 import { writeRejected } from './errors';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
-import type { NoteVisibilityEntry } from './types';
+import type { NoteVersion, NoteVisibilityEntry, TrashIndex } from './types';
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
 export interface NoteWriteStore {
@@ -49,11 +55,22 @@ export interface NoteWriteStore {
   noteSetFavorite(id: string, favorite: boolean): Promise<NoteRow>;
   noteArchive(id: string): Promise<NoteRow>;
   noteUnarchive(id: string): Promise<NoteRow>;
+  /** Papelera (ampliación de D2, 30 sep 2026): mandar y sacar, las dos reversibles e
+   *  idempotentes en el motor. Purgar y vaciar la papelera NO están, ni aquí ni en
+   *  ningún sitio de hebra-mcp (`test/store/surface.node.test.ts`). */
+  noteTrash(id: string): Promise<NoteRow>;
+  noteRestore(id: string): Promise<NoteRow>;
+  /** «Versiones anteriores»: leer una, y la instantánea forzada del cuerpo actual que
+   *  Hebra pide antes de restaurar (`noteVersionSnapshot`, no toca la fila de la nota). */
+  noteVersionRead(versionId: number): NoteVersion | null;
+  noteVersionSnapshot(noteId: string): Promise<void>;
   /** `meta.library_id` del almacén (para la revisión). */
   libraryId(): string;
   /** Lo que lee el filtro de privados, en este mismo turno. */
   foldersList(): FoldersList;
   notesVisibilityIndex(): NoteVisibilityEntry[];
+  /** Lo que lee el filtro de la papelera (`src/privacy/trash-filter.ts`). */
+  trashIndex(): TrashIndex;
   /** Registro de idempotencia de `editNote`. */
   operations: OperationStore;
 }
@@ -131,8 +148,10 @@ export type EditNoteSaved =
 /**
  * Organización de notas (D2 ampliada, 28 sep 2026): mover una nota a una carpeta que ya
  * existe, favorita, archivar y desarchivar. Todo por id; la raíz es `ROOT_FOLDER_ID`
- * (`"root"`, la que lista `hebra_list_folders` con ruta vacía). Sin papelera, versiones
- * ni adjuntos (otro lote) y sin nada irreversible.
+ * (`"root"`, la que lista `hebra_list_folders` con ruta vacía). Desde el 30 sep 2026
+ * (ampliación de D2), también mandar una nota a la papelera (`trashNote`) y sacarla
+ * (`restoreNote`): cada una se deshace con la otra, desde Hebra o desde el MCP. Sin
+ * adjuntos (otro lote) y sin nada irreversible: ni purga ni vaciar la papelera.
  *
  * Crear, renombrar y mover CARPETAS quedan fuera del MCP (opción A de David, 28 sep
  * 2026): `folder_name_taken` delataba el nombre de una hermana privada, y renombrar o
@@ -142,20 +161,35 @@ export type EditNoteSaved =
 export type OrganizeAction =
   | { action: 'moveNote'; id: string; folderId: string }
   | { action: 'setFavorite'; id: string; favorite: boolean }
-  | { action: 'setArchived'; id: string; archived: boolean };
+  | { action: 'setArchived'; id: string; archived: boolean }
+  | { action: 'trashNote'; id: string }
+  | { action: 'restoreNote'; id: string };
 
 export type OrganizeActionName = OrganizeAction['action'];
 
 /** Igual que `EditNoteInput.privacy`: la configuración de quien pide. */
 export type OrganizeInput = OrganizeAction & { privacy: PrivacyConfig };
 
-/** Lo que queda tras organizar una nota: carpeta efectiva, favorita, archivada. La ruta
- *  para enseñar la calcula la herramienta con SU filtro. */
+/** Lo que queda tras organizar una nota: carpeta efectiva, favorita, archivada y si está
+ *  en la papelera. La ruta para enseñar la calcula la herramienta con SU filtro. */
 export interface OrganizeSaved {
   id: string;
   folderId: string;
   favorite: boolean;
   archived: boolean;
+  trashed: boolean;
+}
+
+export interface RestoreVersionInput {
+  id: string;
+  /** Id de la versión (`hebra_list_versions`). Tiene que ser de ESTA nota. */
+  versionId: number;
+  /** Igual que en `EditNoteInput`: la `revision` que el agente leyó. */
+  expectedRevision: string;
+  /** Igual que en `EditNoteInput`: idempotencia, en el mismo registro. */
+  operationId: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy: PrivacyConfig;
 }
 
 /** Los errores del motor de Hebra que la organización de notas puede dar. */
@@ -172,7 +206,8 @@ function noteSaved(row: NoteRow): OrganizeSaved {
     id: row.id,
     folderId: row.effectiveFolderId,
     favorite: row.favorite,
-    archived: row.archivedAt !== null
+    archived: row.archivedAt !== null,
+    trashed: row.trashedAt !== null
   };
 }
 
@@ -193,6 +228,14 @@ function editFingerprint(input: EditNoteInput): string {
       input.expectedRevision,
       input.edits.map((edit) => [edit.find, edit.replace])
     ])
+  );
+}
+
+/** Igual que `editFingerprint`: comparten registro, así que la operación va en la huella
+ *  y un `operationId` de una edición no vale para restaurar (`operation_id_reused`). */
+function restoreVersionFingerprint(input: RestoreVersionInput): string {
+  return sha256Hex(
+    JSON.stringify(['restoreVersion', input.id, input.expectedRevision, input.versionId])
   );
 }
 
@@ -414,6 +457,94 @@ export class NoteWriter {
   }
 
   /**
+   * Restaurar una «versión anterior» (ampliación de D2, 30 sep 2026): una edición NUEVA
+   * que deja el cuerpo de la versión, como «Restaurar» en Hebra (`restoreVersion` de
+   * `LibraryEditor.svelte`: instantánea YA del cuerpo actual y guardado normal). Mismo
+   * turno y mismos pasos que `editNote`, con la versión en lugar de las sustituciones:
+   * 1. Idempotencia, en el mismo registro (huella propia, `restoreVersionFingerprint`).
+   * 2. Nota visible para quien pide (oculta, en la papelera o inexistente: `not_found`).
+   * 3. Nota bloqueada: `note_locked`.
+   * 4. Revisión: igual que `editNote` (`invalid_input` / `revision_conflict`).
+   * 5. La versión tiene que existir y ser de ESTA nota; si su cuerpo lleva una etiqueta
+   *    privada (o descendiente), tampoco vale: `not_found` en los tres casos, igual que
+   *    una versión que no existe (regla 4 de D2: nunca llevar una nota a una etiqueta
+   *    privada por ninguna vía, y sin delatar que la versión era privada).
+   * 6. Instantánea forzada del cuerpo actual (`noteVersionSnapshot`), para que lo que
+   *    había se pueda recuperar, y `noteSave` con la base de la revisión: si otro
+   *    dispositivo la cambió a la vez, copia de conflicto visible, como `editNote`.
+   */
+  async restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved> {
+    const { result, wrote } = await this.target.writeExclusive(async (store) => {
+      const now = Date.now();
+      const log = store.operations;
+      log.purgeExpired(now);
+      const fingerprint = restoreVersionFingerprint(input);
+      const previous = log.lookup(input.operationId);
+      if (previous && previous.fingerprint !== fingerprint) {
+        throw writeRejected('operation_id_reused');
+      }
+      const filter = privacyInTurn(store, input.privacy);
+      const note = await store.noteRead(input.id);
+      if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
+        throw writeRejected('not_found');
+      }
+      const libraryId = store.libraryId();
+      const revisionOf = (row: { localSeq: number; bodySha256: string }): string =>
+        encodeRevision({
+          libraryId,
+          noteId: input.id,
+          localSeq: row.localSeq,
+          bodySha256: row.bodySha256
+        });
+
+      if (previous?.state === 'done' && isEditNoteSaved(previous.result)) {
+        return { result: { ...previous.result, replayed: true as const }, wrote: false };
+      }
+      if (previous?.state === 'started' && note.bodySha256 === previous.targetBodySha256) {
+        const saved: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
+        log.finish(input.operationId, saved);
+        return { result: { ...saved, replayed: true as const }, wrote: false };
+      }
+
+      if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
+      const revision = decodeRevision(input.expectedRevision);
+      if (!revision || revision.noteId !== input.id) throw writeRejected('invalid_input');
+      if (revision.libraryId !== libraryId || revision.bodySha256 !== note.bodySha256) {
+        throw writeRejected('revision_conflict');
+      }
+      const version = store.noteVersionRead(input.versionId);
+      if (!version || version.noteId !== input.id) throw writeRejected('not_found');
+      if (version.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
+      const saveInput = saveInputFor(note, version.body, revision);
+      if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
+        throw writeRejected('not_found');
+      }
+      if (version.body === note.body) {
+        const unchanged: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
+        return { result: unchanged, wrote: false };
+      }
+
+      log.begin({
+        operationId: input.operationId,
+        fingerprint,
+        noteId: input.id,
+        targetBodySha256: sha256Hex(version.body),
+        now
+      });
+      await store.noteVersionSnapshot(input.id);
+      const saved = await store.noteSave(saveInput);
+      const outcome: EditNoteSaved =
+        saved.outcome === 'saved'
+          ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
+          : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+      log.finish(input.operationId, outcome);
+      return { result: outcome, wrote: true };
+    });
+    if (wrote) this.written();
+    return result;
+  }
+
+  /**
    * Organización de notas (D2 ampliada, 28 sep 2026), en UN turno de la cola del
    * almacén, con el filtro de privados de quien pide construido sobre el almacén de ESTE
    * turno:
@@ -424,15 +555,19 @@ export class NoteWriter {
    *   destino es privado).
    * Favorita y archivar son idempotentes (fijan un estado). Una nota bloqueada se puede
    * organizar: nada de esto toca su cuerpo.
+   *
+   * Papelera (ampliación de D2, 30 sep 2026), también idempotentes:
+   * - `trashNote`: una nota visible va a la papelera; una que ya está en la papelera y
+   *   el filtro de la papelera deja ver (`TrashFilter`) se queda como está.
+   * - `restoreNote`: una nota de la papelera visible para el filtro de la papelera sale
+   *   de ella; una nota viva y visible se queda como está. El filtro de la papelera ya
+   *   comprueba el DESTINO (su carpeta si sigue viva, si no la raíz): nunca deja la nota
+   *   en una carpeta privada ni con una etiqueta privada.
+   * Lo demás (oculta, inexistente, lápida), `not_found`, sin distinguir.
    */
   async organize(input: OrganizeInput): Promise<OrganizeSaved> {
     const result = await this.target.writeExclusive(async (store) => {
-      const filter = PrivacyFilter.fromSnapshot(
-        store.foldersList(),
-        store.notesVisibilityIndex(),
-        input.privacy
-      );
-      if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
+      const filter = privacyInTurn(store, input.privacy);
 
       const requireVisibleFolder = (id: string): void => {
         if (!filter.folderExists(id) || filter.isFolderHidden(id)) throw writeRejected('not_found');
@@ -442,6 +577,18 @@ export class NoteWriter {
         if (!row || row.trashedAt !== null || filter.isHiddenNote(id)) {
           throw writeRejected('not_found');
         }
+      };
+      /** La nota, viva y visible, o en la papelera y visible para el filtro de la
+       *  papelera; si no, `not_found`. */
+      const visibleLiveOrTrashed = async (id: string): Promise<NoteRow> => {
+        const row = await store.noteRead(id);
+        if (!row) throw writeRejected('not_found');
+        const visible =
+          row.trashedAt === null
+            ? !filter.isHiddenNote(id)
+            : TrashFilter.fromSnapshot(filter, store.trashIndex(), input.privacy).isVisible(id);
+        if (!visible) throw writeRejected('not_found');
+        return row;
       };
 
       try {
@@ -458,6 +605,14 @@ export class NoteWriter {
             return noteSaved(
               input.archived ? await store.noteArchive(input.id) : await store.noteUnarchive(input.id)
             );
+          case 'trashNote': {
+            const row = await visibleLiveOrTrashed(input.id);
+            return noteSaved(row.trashedAt === null ? await store.noteTrash(input.id) : row);
+          }
+          case 'restoreNote': {
+            const row = await visibleLiveOrTrashed(input.id);
+            return noteSaved(row.trashedAt === null ? row : await store.noteRestore(input.id));
+          }
         }
       } catch (error) {
         throw organizeRejection(error);

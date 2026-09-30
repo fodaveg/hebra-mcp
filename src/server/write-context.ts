@@ -20,7 +20,8 @@ import type {
   EditNoteInput,
   EditNoteSaved,
   OrganizeInput,
-  OrganizeSaved
+  OrganizeSaved,
+  RestoreVersionInput
 } from '../store/writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
@@ -33,6 +34,8 @@ export interface WriteContextSources {
   recordEditConflict(operationId: string, id: string, copyId: string): Promise<void>;
   /** La organización local (`NoteWriter.organize`), sin esperar ronda. */
   organize(input: OrganizeInput): Promise<OrganizeSaved>;
+  /** Restaurar una versión en local (`NoteWriter.restoreVersion`), sin esperar ronda. */
+  restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
@@ -87,6 +90,10 @@ export interface WriteContext {
   /** Organización completa: escribe, espera la ronda y devuelve el estado de sync. En un
    *  lector, todo ocurre en el escritor (`./forward.ts`). */
   organize(input: OrganizeInput): Promise<OrganizeOutcome>;
+  /** Restaurar una versión: lo mismo que `editNote` (ronda, estado de sync y copia de
+   *  conflicto de la ronda anotada en el registro), con la versión en vez de las
+   *  sustituciones. */
+  restoreVersion(input: RestoreVersionInput): Promise<EditNoteOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -190,36 +197,46 @@ export function buildWriteContext(
     }
   }
 
+  /** Guardado con revisión (`editNote`, `restoreVersion`): guarda, espera la ronda y,
+   *  si la ronda produjo una copia de conflicto PARA ESTA nota, la devuelve y la anota
+   *  en el registro de idempotencia. */
+  async function saveAndAwaitRound(
+    input: { id: string; operationId: string },
+    save: () => Promise<EditNoteSaved>
+  ): Promise<EditNoteOutcome> {
+    let raceCopyId: string | undefined;
+    const unsubscribe = sources.onConflictCopy((copy) => {
+      if (copy.recordId === input.id && raceCopyId === undefined) raceCopyId = copy.copyId;
+    });
+    try {
+      const saved = await save();
+      const wait = await awaitRound(roundTimeoutMs);
+      let result: EditNoteSaved = saved;
+      if (saved.outcome === 'saved' && raceCopyId !== undefined) {
+        // Otro dispositivo editó la misma nota: el motor dejó el texto de la edición en
+        // una copia visible. Sin reintento automático; queda anotado para un reintento
+        // con el mismo `operationId`.
+        result = { id: saved.id, outcome: 'conflict_copy', copyId: raceCopyId };
+        if (saved.replayed) result.replayed = true;
+        await sources
+          .recordEditConflict(input.operationId, input.id, raceCopyId)
+          .catch(() => undefined);
+      }
+      const target = result.outcome === 'conflict_copy' ? result.copyId : result.id;
+      return { ...result, ...syncFieldsOf(wait, await dirtyOf(target)) };
+    } finally {
+      unsubscribe();
+    }
+  }
+
   return {
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
     onConflictCopy: (listener) => sources.onConflictCopy(listener),
     awaitRound,
-    async editNote(input: EditNoteInput): Promise<EditNoteOutcome> {
-      let raceCopyId: string | undefined;
-      const unsubscribe = sources.onConflictCopy((copy) => {
-        if (copy.recordId === input.id && raceCopyId === undefined) raceCopyId = copy.copyId;
-      });
-      try {
-        const saved = await sources.editNote(input);
-        const wait = await awaitRound(roundTimeoutMs);
-        let result: EditNoteSaved = saved;
-        if (saved.outcome === 'saved' && raceCopyId !== undefined) {
-          // Otro dispositivo editó la misma nota: el motor dejó el texto de la edición en
-          // una copia visible. Sin reintento automático; queda anotado para un reintento
-          // con el mismo `operationId`.
-          result = { id: saved.id, outcome: 'conflict_copy', copyId: raceCopyId };
-          if (saved.replayed) result.replayed = true;
-          await sources
-            .recordEditConflict(input.operationId, input.id, raceCopyId)
-            .catch(() => undefined);
-        }
-        const target = result.outcome === 'conflict_copy' ? result.copyId : result.id;
-        return { ...result, ...syncFieldsOf(wait, await dirtyOf(target)) };
-      } finally {
-        unsubscribe();
-      }
-    },
+    editNote: (input: EditNoteInput) => saveAndAwaitRound(input, () => sources.editNote(input)),
+    restoreVersion: (input: RestoreVersionInput) =>
+      saveAndAwaitRound(input, () => sources.restoreVersion(input)),
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
       const saved = await sources.organize(input);
       const wait = await awaitRound(roundTimeoutMs);

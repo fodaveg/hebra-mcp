@@ -47,7 +47,13 @@ import { WriterLock, type WriterLockOptions } from '../lock/writer-lock';
 import { logEvent } from '../log/logger';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
-import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
+import type {
+  HebraLibraryPort,
+  NoteVersion,
+  NoteVersionsList,
+  NoteVisibilityEntry,
+  TrashIndex
+} from '../store/types';
 import {
   NoteWriter,
   type AppendToNoteInput,
@@ -58,6 +64,7 @@ import {
   type EditNoteSaved,
   type OrganizeInput,
   type OrganizeSaved,
+  type RestoreVersionInput,
   type NoteWriteStore,
   type NoteWriteTarget
 } from '../store/writes';
@@ -295,6 +302,10 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.writer.organize(input);
   }
 
+  restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved> {
+    return this.writer.restoreVersion(input);
+  }
+
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y
    *  `errorsByCode` se leen igual de la base; las rondas son del otro proceso. */
   async status(): Promise<InstanceStatus> {
@@ -352,6 +363,11 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
+    trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
+    noteVersionsList: (noteId: string): Promise<NoteVersionsList> =>
+      current().noteVersionsList(noteId),
+    noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>
+      current().noteVersionRead(versionId),
     close: (): void => current().close()
   };
 }

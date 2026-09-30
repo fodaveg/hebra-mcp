@@ -1,9 +1,9 @@
 /**
  * Filtro de privados y logs, de punta a punta por el protocolo MCP (`InMemoryTransport`
  * del SDK, sin spawnear un proceso: eso lo cubre `test/e2e/stdio-server.test.ts`).
- * Recorre las NUEVE herramientas (las 7 de lectura de L1 y las 2 de escritura de L3b)
- * con argumentos que casarían el cebo (SPEC.md §10 L1, §6.3, §6.4): ni el resultado ni
- * stderr pueden traerlo.
+ * Recorre todas las herramientas (`test/fixtures/bait-calls.ts`, también las de papelera
+ * y versiones del 30 sep 2026) con argumentos que casarían el cebo (SPEC.md §10 L1,
+ * §6.3, §6.4): ni el resultado ni stderr pueden traerlo.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -25,8 +25,28 @@ const TOOL_NAMES = [
   'hebra_links',
   'hebra_status',
   'hebra_create_note',
-  'hebra_append_to_note'
+  'hebra_append_to_note',
+  'hebra_list_trash',
+  'hebra_trash_note',
+  'hebra_restore_note',
+  'hebra_list_versions',
+  'hebra_read_version',
+  'hebra_restore_version'
 ] as const;
+
+/** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
+const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record<string, unknown>>> = {
+  hebra_trash_note: { id: 'lo-que-sea' },
+  hebra_restore_note: { id: 'lo-que-sea' },
+  hebra_list_versions: { id: 'lo-que-sea' },
+  hebra_read_version: { id: 'lo-que-sea', versionId: 1 },
+  hebra_restore_version: {
+    id: 'lo-que-sea',
+    versionId: 1,
+    expectedRevision: 'r1.x',
+    operationId: 'op'
+  }
+};
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
   const server = new McpServer({ name: 'hebra-mcp-test', version: '0.0.0' });
@@ -44,7 +64,7 @@ function textOf(result: CallToolResult): string {
     .join('\n');
 }
 
-describe('filtro de privados y logs, por las 9 herramientas', () => {
+describe('filtro de privados y logs, por todas las herramientas', () => {
   let test: TestContext | undefined;
   let client: Client | undefined;
   let server: McpServer | undefined;
@@ -142,7 +162,7 @@ describe('privacy_config_unresolved (carpeta configurada que no existe)', () => 
                 ? { body: '# lo que sea' }
                 : name === 'hebra_append_to_note'
                   ? { id: 'lo-que-sea', text: 'lo que sea' }
-                  : {};
+                  : (TRASH_AND_VERSION_ARGS[name] ?? {});
       const result = (await client.callTool({ name, arguments: arguments_ })) as CallToolResult;
       expect(result.isError).toBe(true);
       expect(JSON.parse(textOf(result))).toEqual({ error: 'privacy_config_unresolved' });

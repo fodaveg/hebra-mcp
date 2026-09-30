@@ -311,6 +311,65 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"organize","outcome":"forwarded"');
   });
 
+  it('papelera y versiones desde un lector: las hace el escritor, con la privacidad del lector', async () => {
+    const { writer, reader, client } = await pair();
+    const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres', privacy: OPEN });
+
+    expect((await call(client, 'hebra_trash_note', { id: created.id })).value).toEqual({
+      id: created.id,
+      trashed: true,
+      sync: 'uploaded'
+    });
+    expect((await writer.port.noteRead(created.id))?.trashedAt).not.toBeNull();
+    const listed = (await call(client, 'hebra_list_trash')).value.notes as Array<{ id: string }>;
+    expect(listed.map((note) => note.id)).toContain(created.id);
+    expect((await call(client, 'hebra_restore_note', { id: created.id })).value).toMatchObject({
+      id: created.id,
+      folderPath: '',
+      sync: 'uploaded'
+    });
+    expect((await writer.port.noteRead(created.id))?.trashedAt).toBeNull();
+
+    // Una edición deja la versión; restaurarla desde el lector la guarda el escritor.
+    const read = await call(client, 'hebra_read_note', { id: created.id });
+    await call(client, 'hebra_edit_note', {
+      id: created.id,
+      edits: [{ find: 'dos', replace: BAIT_TEXT }],
+      expectedRevision: read.value.revision,
+      operationId: 'op-fwd-version-1'
+    });
+    const versions = (await call(client, 'hebra_list_versions', { id: created.id })).value
+      .versions as Array<{ versionId: number }>;
+    expect(versions).toHaveLength(1);
+    const reread = await call(client, 'hebra_read_note', { id: created.id });
+    const restored = await call(client, 'hebra_restore_version', {
+      id: created.id,
+      versionId: versions[0]!.versionId,
+      expectedRevision: reread.value.revision,
+      operationId: 'op-fwd-version-2'
+    });
+    expect(restored.value).toMatchObject({ id: created.id, outcome: 'saved', sync: 'uploaded' });
+    expect((await writer.port.noteRead(created.id))?.body).toBe('# Reenviada\n\nuno dos tres');
+
+    // La configuración del LECTOR viaja con la petición y el escritor la aplica dentro del
+    // turno: con una carpeta configurada que no existe, cerrado ante la duda, sin escribir.
+    const routedWrite = buildRoutedWriteContext(reader, localWriteContext(reader));
+    await routedWrite.organize({ action: 'trashNote', id: created.id, privacy: OPEN });
+    const direct = await routedWrite
+      .organize({
+        action: 'restoreNote',
+        id: created.id,
+        privacy: { privateFolders: [['no-existe']], privateTags: [] }
+      })
+      .catch((error: unknown) => error);
+    expect(direct).toMatchObject({ code: 'privacy_config_unresolved' });
+    expect((await writer.port.noteRead(created.id))?.trashedAt).not.toBeNull();
+
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).toContain('"event":"write.forward","op":"organize","outcome":"forwarded"');
+    expect(stderrText()).toContain('"event":"write.forward","op":"restoreVersion","outcome":"forwarded"');
+  });
+
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Visible\n\ntexto', privacy: OPEN });
@@ -351,6 +410,13 @@ describe('protocolo de writer.sock', () => {
       folderId: 'root',
       favorite: false,
       archived: false,
+      trashed: input.action === 'trashNote',
+      sync: 'not_linked'
+    }),
+    restoreVersion: async (input) => ({
+      id: input.id,
+      outcome: 'saved',
+      revision: `r1.v${input.versionId}`,
       sync: 'not_linked'
     }),
     status: async () => ({
@@ -486,6 +552,46 @@ describe('protocolo de writer.sock', () => {
     }
   });
 
+  it('papelera y restoreVersion por el socket: privacidad obligatoria, entrada revalidada y sin purga', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const privacy = { privateFolders: [['diario']], privateTags: ['secreto'] };
+    for (const action of ['trashNote', 'restoreNote']) {
+      expect(await requestWriter(path, 'organize', { action, id: 'n1', privacy }, 2_000)).toMatchObject({
+        id: 'n1',
+        trashed: action === 'trashNote'
+      });
+      await expect(
+        requestWriter(path, 'organize', { action, id: 'n1' }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    // Ninguna acción de purga ni de vaciar la papelera existe en el protocolo.
+    for (const action of ['purgeNote', 'notePurge', 'emptyTrash', 'trashEmpty']) {
+      await expect(
+        requestWriter(path, 'organize', { action, id: 'n1', privacy }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+
+    const valid = { id: 'n1', versionId: 7, expectedRevision: 'r1.x', operationId: 'op', privacy };
+    expect(await requestWriter(path, 'restoreVersion', valid, 2_000)).toMatchObject({
+      outcome: 'saved',
+      revision: 'r1.v7'
+    });
+    for (const params of [
+      { ...valid, privacy: undefined },
+      { ...valid, versionId: 0 },
+      { ...valid, versionId: 1.5 },
+      { ...valid, versionId: '7' },
+      { ...valid, operationId: '' },
+      { ...valid, expectedRevision: 'x'.repeat(2_000) }
+    ]) {
+      await expect(requestWriter(path, 'restoreVersion', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
+  });
+
   it('el límite por defecto admite las sustituciones máximas de editNote en el peor escape JSON', () => {
     const worst = JSON.stringify({
       id: 1,
@@ -575,7 +681,13 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         id: input.id,
         folderId: 'root',
         favorite: false,
-        archived: false
+        archived: false,
+        trashed: false
+      }),
+      restoreVersion: async (input) => ({
+        id: input.id,
+        outcome: 'saved' as const,
+        revision: 'r1.x'
       }),
       noteRead: async () => null,
       onConflictCopy: () => () => undefined,
@@ -655,6 +767,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('x');
         },
         organize: async () => {
+          throw new Error('x');
+        },
+        restoreVersion: async () => {
           throw new Error('x');
         },
         status: async () => {

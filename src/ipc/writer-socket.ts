@@ -20,8 +20,11 @@
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
  *   escritor.
  * - `organize` `{action, …, privacy}` → `OrganizeOutcome` (mover nota, favorita,
- *   archivar), igual: ronda esperada y privacidad del lector. Sin acciones de carpetas
- *   (opción A de David, 28 sep 2026): una acción desconocida es `invalid_request`.
+ *   archivar y, desde el 30 sep 2026, `trashNote`/`restoreNote`), igual: ronda esperada
+ *   y privacidad del lector. Sin acciones de carpetas (opción A de David, 28 sep 2026)
+ *   ni de purga: una acción desconocida es `invalid_request`.
+ * - `restoreVersion` `{id, versionId, expectedRevision, operationId, privacy}` → lo
+ *   mismo que `editNote` (`EditNoteOutcome`), restaurando una versión anterior.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -70,7 +73,8 @@ import {
   type CreateNoteInput,
   type CreateNoteResult,
   type EditNoteInput,
-  type OrganizeInput
+  type OrganizeInput,
+  type RestoreVersionInput
 } from '../store/writes';
 
 export const WRITER_SOCKET_FILE = 'writer.sock';
@@ -91,13 +95,20 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
 
-export type WriterSocketOp = 'createNote' | 'appendToNote' | 'editNote' | 'organize' | 'status';
+export type WriterSocketOp =
+  | 'createNote'
+  | 'appendToNote'
+  | 'editNote'
+  | 'organize'
+  | 'restoreVersion'
+  | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'createNote',
   'appendToNote',
   'editNote',
   'organize',
+  'restoreVersion',
   'status'
 ]);
 
@@ -133,6 +144,8 @@ export interface WriterSocketHandlers {
   editNote(input: EditNoteInput): Promise<EditNoteOutcome>;
   /** Organiza, espera la ronda y devuelve el estado de sync. */
   organize(input: OrganizeInput): Promise<OrganizeOutcome>;
+  /** Restaura una versión, espera la ronda y devuelve el estado de sync. */
+  restoreVersion(input: RestoreVersionInput): Promise<EditNoteOutcome>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -206,9 +219,12 @@ function privacyOf(value: unknown): PrivacyConfig {
   return { privateFolders, privateTags };
 }
 
-function editInputOf(params: Record<string, unknown>): EditNoteInput {
-  const { id, edits, expectedRevision, operationId, privacy } = params;
-  if (!isId(id)) throw new InvalidRequest();
+/** `operationId` y `expectedRevision` de `editNote` y `restoreVersion`. */
+function revisionFieldsOf(params: Record<string, unknown>): {
+  expectedRevision: string;
+  operationId: string;
+} {
+  const { expectedRevision, operationId } = params;
   if (
     typeof operationId !== 'string' ||
     operationId.length === 0 ||
@@ -219,6 +235,22 @@ function editInputOf(params: Record<string, unknown>): EditNoteInput {
   if (typeof expectedRevision !== 'string' || expectedRevision.length > REVISION_MAX_LENGTH) {
     throw new InvalidRequest();
   }
+  return { expectedRevision, operationId };
+}
+
+function restoreVersionInputOf(params: Record<string, unknown>): RestoreVersionInput {
+  const { id, versionId } = params;
+  if (!isId(id)) throw new InvalidRequest();
+  if (typeof versionId !== 'number' || !Number.isSafeInteger(versionId) || versionId < 1) {
+    throw new InvalidRequest();
+  }
+  return { id, versionId, ...revisionFieldsOf(params), privacy: privacyOf(params.privacy) };
+}
+
+function editInputOf(params: Record<string, unknown>): EditNoteInput {
+  const { id, edits, privacy } = params;
+  if (!isId(id)) throw new InvalidRequest();
+  const { expectedRevision, operationId } = revisionFieldsOf(params);
   if (!Array.isArray(edits)) throw new InvalidRequest();
   const parsed: TextEdit[] = edits.map((edit: unknown) => {
     if (!isPlainObject(edit) || typeof edit.find !== 'string' || typeof edit.replace !== 'string') {
@@ -243,6 +275,10 @@ function organizeInputOf(params: Record<string, unknown>): OrganizeInput {
     case 'setArchived':
       if (!isId(id) || typeof params.archived !== 'boolean') throw new InvalidRequest();
       return { action: 'setArchived', id, archived: params.archived, privacy };
+    case 'trashNote':
+    case 'restoreNote':
+      if (!isId(id)) throw new InvalidRequest();
+      return { action: params.action, id, privacy };
     default:
       throw new InvalidRequest();
   }
@@ -427,6 +463,9 @@ export class WriterSocketServer {
           break;
         case 'organize':
           result = await handlers.organize(organizeInputOf(envelope.params));
+          break;
+        case 'restoreVersion':
+          result = await handlers.restoreVersion(restoreVersionInputOf(envelope.params));
           break;
         case 'status':
           result = await handlers.status();
