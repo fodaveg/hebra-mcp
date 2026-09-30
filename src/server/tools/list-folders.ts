@@ -3,8 +3,11 @@
  * privadas (y su subárbol) no aparecen; el recuento de las demás es de notas VISIBLES,
  * no el `noteCount` de `foldersList()` (que no descuenta las ocultas por etiqueta:
  * aceptación #5, una nota oculta por etiqueta tampoco cuenta en una carpeta visible).
+ * `limit`/`cursor` paginan la lista ya filtrada (cursor = el id de la última carpeta
+ * devuelta); sin `limit`, todas.
  */
 import type { ToolContext } from '../context';
+import { LIMITS, effectiveLimit, slicePage } from '../pagination';
 
 export interface FolderCount {
   id: string;
@@ -12,7 +15,10 @@ export interface FolderCount {
   count: number;
 }
 
-export async function runListFolders(ctx: ToolContext): Promise<{ folders: FolderCount[] }> {
+export async function runListFolders(
+  ctx: ToolContext,
+  input: { limit?: number; cursor?: string } = {}
+): Promise<{ folders: FolderCount[]; nextCursor: string | null }> {
   const { folders } = await ctx.port.foldersList();
   const visibleCounts = new Map<string, number>();
   for (const { folderId } of ctx.privacy.visibleNotes().values()) {
@@ -27,5 +33,10 @@ export async function runListFolders(ctx: ToolContext): Promise<{ folders: Folde
       count: visibleCounts.get(folder.id) ?? 0
     });
   }
-  return { folders: result };
+  const page = slicePage(result, 'f1', {
+    limit: effectiveLimit(input.limit, LIMITS.listFolders),
+    cursor: input.cursor,
+    keyOf: (entry) => entry.id
+  });
+  return { folders: page.items, nextCursor: page.nextCursor };
 }

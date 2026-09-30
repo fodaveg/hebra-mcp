@@ -107,19 +107,45 @@ Reglas comunes:
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `folder?` (ruta), `tag?` | `results: [{id, title, folderPath, tags, snippet, updatedAt}]` |
-| `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50); orden por `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, updatedAt}], nextCursor}` |
+| `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
-| `hebra_list_tags` | nada | `tags: [{tag, count}]` (anidadas como `a/b`) |
-| `hebra_list_folders` | nada | `folders: [{id, path, count}]` |
-| `hebra_links` | `id` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}]}` |
+| `hebra_list_tags` | `limit?` (1-500; sin él, todas), `cursor?` | `{tags: [{tag, count}], nextCursor}` (anidadas como `a/b`) |
+| `hebra_list_folders` | `limit?` (1-500; sin él, todas), `cursor?` | `{folders: [{id, path, count}], nextCursor}` |
+| `hebra_links` | `id`, `limit?` (1-200; sin él, todo), `cursor?` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}], nextCursor}` |
 | `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | `{id, outcome: "saved" \| "conflict_copy", copyId?}` |
 | `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; `find` no vacío; `find` + `replace` de todas ≤ 100 000 caracteres), `expectedRevision`, `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", revision?, copyId?, replayed?, sync, syncError?}`. Errores: `revision_conflict`, `no_match` / `ambiguous_match` / `overlapping_edits` (con `edit`: índice), `note_locked`, `operation_id_reused`, `not_found`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
 | `hebra_set_favorite` | `id`, `favorite` | igual que `hebra_move_note` |
 | `hebra_set_archived` | `id`, `archived` | igual que `hebra_move_note` |
-| `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked}`. Sin contenido de notas. |
+| `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
+
+Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
+- **Paginación común** (`src/server/pagination.ts`): `hebra_search`, `hebra_list_notes`, `hebra_links`,
+  `hebra_list_tags` y `hebra_list_folders` aceptan `limit` y `cursor` y devuelven `nextCursor`, que es
+  `null` al final. Los valores por defecto no cambian (búsqueda 20, notas 50; etiquetas, carpetas y
+  enlaces, todo si no hay `limit`). El cursor es opaco y lleva un prefijo por herramienta: el de una
+  no vale en otra (`invalid_input`). En las listas de notas es la clave del último resultado
+  devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento.
+  En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
+- **Las ocultas no se notan** (§6.3): una página se rellena hasta `limit` solo con notas visibles;
+  `nextCursor` existe solo si hay otra nota VISIBLE detrás (se mira una por delante), así que ni el
+  tamaño de la página ni la presencia del cursor dependen de cuántas notas privadas hay ni de dónde
+  están. El cursor lleva la clave de una nota ya devuelta, nunca la de una oculta.
+- **`hebra_links`**: `limit` vale para `outgoing` y para `backlinks` a la vez y hay UN `cursor` para las
+  dos listas; `nextCursor` existe si a alguna le queda algo, y la que ya terminó sale vacía en las
+  páginas siguientes.
+- **Filtros comunes**: `folder` (ruta), `subfolders` y `tag` se llaman y se comportan igual en
+  `hebra_search` y `hebra_list_notes` (`subfolders` es nuevo en la búsqueda). Una carpeta o etiqueta
+  privada o inexistente da lista vacía en ambas. No hubo renombrados, así que no hay alias.
+- **`fields?`** (`hebra_search`, `hebra_list_notes`): cada elemento lleva `id` y solo los campos pedidos,
+  en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
+- **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
+  editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` y los tamaños de
+  las escrituras; `notAllowed` lista lo que no hace (borrar o purgar, carpetas, adjuntos, versiones);
+  `privacyConfigured` es solo un booleano: ni nombres de carpetas o etiquetas privadas ni contenido.
 
 Detalle de las escrituras (D2):
 - `hebra_create_note` usa `noteCreate(folderId)` y después `noteSave` con los derivados de

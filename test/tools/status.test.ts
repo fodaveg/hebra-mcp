@@ -11,7 +11,8 @@ describe('hebra_status', () => {
 
   it('L1: linked false y campos de sync a null (SPEC.md §10 L1)', async () => {
     test = await buildTestContext();
-    const status = await runStatus(test.ctx);
+    const { capabilities, ...status } = await runStatus(test.ctx);
+    expect(capabilities.server.name).toBe('hebra-mcp');
     expect(status).toEqual({
       linked: false,
       lastSyncAt: null,

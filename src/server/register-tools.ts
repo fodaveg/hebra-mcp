@@ -19,7 +19,9 @@ import {
   createNoteInputShape,
   editNoteInputShape,
   linksInputShape,
+  listFoldersInputShape,
   listNotesInputShape,
+  listTagsInputShape,
   moveNoteInputShape,
   readNoteInputShape,
   searchInputShape,
@@ -82,12 +84,12 @@ async function runTool(
   }
 }
 
-export function registerTools(server: McpServer, ctx: ServerContext): void {
+export function registerTools(server: McpServer, ctx: ServerContext, version = 'unknown'): void {
   server.registerTool(
     'hebra_search',
     {
       title: 'Buscar notas',
-      description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta.',
+      description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
       inputSchema: searchInputShape
     },
     async (input) => runTool(ctx, 'hebra_search', (toolCtx) => runSearch(toolCtx, input))
@@ -97,7 +99,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     'hebra_list_notes',
     {
       title: 'Listar notas',
-      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, más recientes primero.',
+      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, más recientes primero. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
       inputSchema: listNotesInputShape
     },
     async (input) => runTool(ctx, 'hebra_list_notes', (toolCtx) => runListNotes(toolCtx, input))
@@ -118,25 +120,28 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     'hebra_list_tags',
     {
       title: 'Listar etiquetas',
-      description: 'Lista las etiquetas de la biblioteca (anidadas como a/b) con su recuento de notas.'
+      description: 'Lista las etiquetas de la biblioteca (anidadas como a/b) con su recuento de notas.',
+      inputSchema: listTagsInputShape
     },
-    async () => runTool(ctx, 'hebra_list_tags', (toolCtx) => runListTags(toolCtx))
+    async (input) => runTool(ctx, 'hebra_list_tags', (toolCtx) => runListTags(toolCtx, input))
   );
 
   server.registerTool(
     'hebra_list_folders',
     {
       title: 'Listar carpetas',
-      description: 'Lista las carpetas de la biblioteca con su recuento de notas.'
+      description: 'Lista las carpetas de la biblioteca con su recuento de notas.',
+      inputSchema: listFoldersInputShape
     },
-    async () => runTool(ctx, 'hebra_list_folders', (toolCtx) => runListFolders(toolCtx))
+    async (input) =>
+      runTool(ctx, 'hebra_list_folders', (toolCtx) => runListFolders(toolCtx, input))
   );
 
   server.registerTool(
     'hebra_links',
     {
       title: 'Enlaces de una nota',
-      description: 'Enlaces salientes y entrantes (backlinks) de una nota, por id.',
+      description: 'Enlaces salientes y entrantes (backlinks) de una nota, por id. Paginada (`limit`, `cursor`, `nextCursor`).',
       inputSchema: linksInputShape
     },
     async (input) => runTool(ctx, 'hebra_links', (toolCtx) => runLinks(toolCtx, input))
@@ -146,9 +151,10 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
     'hebra_status',
     {
       title: 'Estado del vínculo',
-      description: 'Estado del vínculo con Hebra y del sync. Sin contenido de notas.'
+      description:
+        'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.'
     },
-    async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx))
+    async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx, version))
   );
 
   server.registerTool(

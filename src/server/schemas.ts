@@ -6,11 +6,37 @@
  */
 import { z } from 'zod';
 
+/** Paginación común (SPEC.md §5): `limit` acotado por herramienta y `cursor` opaco, el
+ *  `nextCursor` de la página anterior. */
+const cursorField = z
+  .string()
+  .optional()
+  .describe('`nextCursor` de la página anterior (opaco). Ausente: primera página.');
+
+/** Campos que se pueden pedir con `fields` (`id` sale siempre). */
+export const SEARCH_FIELDS = ['title', 'folderPath', 'tags', 'snippet', 'updatedAt'] as const;
+export const LIST_NOTES_FIELDS = [
+  'title',
+  'folderPath',
+  'tags',
+  'excerpt',
+  'updatedAt',
+  'isConflictCopy'
+] as const;
+
 export const searchInputShape = {
   query: z.string().min(1),
   limit: z.number().int().min(1).max(50).optional(),
+  cursor: cursorField,
   folder: z.string().optional(),
-  tag: z.string().optional()
+  /** Igual que en `hebra_list_notes`: con `folder`, incluye su subárbol. */
+  subfolders: z.boolean().optional(),
+  tag: z.string().optional(),
+  fields: z
+    .array(z.enum(SEARCH_FIELDS))
+    .min(1)
+    .optional()
+    .describe('Solo estos campos de cada resultado (`id` siempre). Ausente: todos.')
 };
 
 export const listNotesInputShape = {
@@ -20,8 +46,13 @@ export const listNotesInputShape = {
    *  siempre. Sin `folder`, no tiene efecto. */
   subfolders: z.boolean().optional(),
   tag: z.string().optional(),
-  cursor: z.string().optional(),
-  limit: z.number().int().min(1).max(100).optional()
+  cursor: cursorField,
+  limit: z.number().int().min(1).max(100).optional(),
+  fields: z
+    .array(z.enum(LIST_NOTES_FIELDS))
+    .min(1)
+    .optional()
+    .describe('Solo estos campos de cada nota (`id` siempre). Ausente: todos.')
 };
 
 export const readNoteInputShape = {
@@ -29,8 +60,23 @@ export const readNoteInputShape = {
   title: z.string().optional()
 };
 
+/** `limit` y `cursor` valen para `outgoing` y `backlinks` a la vez; `nextCursor` existe
+ *  si a alguna de las dos le queda algo. Sin `limit`, todo. */
 export const linksInputShape = {
-  id: z.string()
+  id: z.string(),
+  limit: z.number().int().min(1).max(200).optional(),
+  cursor: cursorField
+};
+
+/** Sin `limit`, todas (como antes de paginar). */
+export const listTagsInputShape = {
+  limit: z.number().int().min(1).max(500).optional(),
+  cursor: cursorField
+};
+
+export const listFoldersInputShape = {
+  limit: z.number().int().min(1).max(500).optional(),
+  cursor: cursorField
 };
 
 /** Sin `.max()` a propósito (SPEC.md §5, L3b): el límite de `body` lo aplica

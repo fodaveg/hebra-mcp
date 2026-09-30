@@ -5,7 +5,14 @@
  */
 import type { ToolContext } from '../context';
 import type { HebraStatus } from '../../status/status-source';
+import { buildCapabilities, type Capabilities } from '../capabilities';
 
-export async function runStatus(ctx: ToolContext): Promise<HebraStatus> {
-  return ctx.status.getStatus();
+/** `capabilities` (SPEC.md §5): qué hace el servidor, sus límites y lo que no permite,
+ *  sin nombres privados ni contenido. `serverVersion` es el de `buildMcpServer`. */
+export async function runStatus(
+  ctx: ToolContext,
+  serverVersion = 'unknown'
+): Promise<HebraStatus & { capabilities: Capabilities }> {
+  const status = await ctx.status.getStatus();
+  return { ...status, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
 }
