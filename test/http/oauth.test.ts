@@ -10,7 +10,7 @@ import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } fr
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
-import type { HebraOAuthProvider } from '../../src/oauth/provider';
+import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { startTestHttpApp, textOf, type TestHttpApp } from '../fixtures/http-app';
@@ -39,6 +39,7 @@ let deviceActive: boolean;
 let available: boolean;
 let requestCount: number;
 let exchangeCount: number;
+let introspectCount: number;
 let grantExpiresAt: string;
 let brokerDevice: string;
 let brokerVault: string;
@@ -77,6 +78,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
       accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
   }
   if (path === 'introspect') {
+    introspectCount += 1;
     if (!deviceActive || body.accessToken !== UPSTREAM) return response({ active: false });
     return response({ active: true, credentialId: GRANT_ID, clientId, resource, scope: 'hebra:mcp', accountId: ACCOUNT,
       pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
@@ -99,7 +101,7 @@ beforeEach(async () => {
     recoveryCode: await encodeRecoveryCode({ relayOrigin: 'https://app.lumbre.pro', syncVaultId: VAULT, keyEpoch: 1, vaultKey: randomBytes(32) }),
     device: { opaqueDeviceId: DEVICE, lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }
   });
-  approved = false; deviceActive = true; available = true; requestCount = 0; exchangeCount = 0;
+  approved = false; deviceActive = true; available = true; requestCount = 0; exchangeCount = 0; introspectCount = 0;
   clockOffset = 0;
   brokerPair = PAIR_ID; brokerVault = VAULT; brokerDevice = DEVICE;
   grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -294,6 +296,8 @@ describe('consentimiento y vínculo exacto', () => {
     const issued = await issuedTokens();
     expect((await mcpCall(issued.access_token)).status).toBe(200);
     deviceActive = false;
+    // El access ya consultado vale hasta que caduca su introspección guardada (30 s).
+    clockOffset = INTROSPECTION_CACHE_MS;
     await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
     expect((await mcpCall(issued.access_token)).status).toBe(401);
     const refresh = await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token });
@@ -456,5 +460,162 @@ describe('consentimiento y vínculo exacto', () => {
     expect((await mcpCall(UPSTREAM)).status).toBe(401);
     expect((await mcpCall('lmcp_at_' + randomBytes(32).toString('base64url'))).status).toBe(401);
     expect((await mcpCall(issued.access_token)).status).toBe(200);
+  });
+});
+
+/** Entradas vivas de la caché, sin exponer su contenido en la API del proveedor. */
+function cachedIntrospections(): Map<string, { expiresAt: number }> {
+  return (provider as unknown as { introspections: Map<string, { expiresAt: number }> }).introspections;
+}
+
+describe('caché de la introspección positiva', () => {
+  it('dos peticiones seguidas consultan Lumbre una vez; pasada la ventana, otra', async () => {
+    expect(INTROSPECTION_CACHE_MS).toBe(30_000);
+    const issued = await issuedTokens();
+    const base = introspectCount;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base + 1);
+    clockOffset = 25_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base + 1);
+    clockOffset = INTROSPECTION_CACHE_MS;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base + 2);
+    expect(cachedIntrospections().size).toBe(1);
+  });
+
+  it('una concesión revocada en Lumbre sigue entrando hasta caducar la entrada; después 401 y familia borrada', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    const base = introspectCount;
+    deviceActive = false;
+    clockOffset = 25_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base);
+    clockOffset = INTROSPECTION_CACHE_MS;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base + 1);
+    expect(cachedIntrospections().size).toBe(0);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    expect(await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8')).not.toContain(GRANT_ID);
+    // El negativo no se guardó: con Lumbre activo otra vez, la familia sigue muerta.
+    deviceActive = true;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+  });
+
+  it('Lumbre caído: una entrada vigente entra; una caducada da 503 sin alargarse', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    available = false;
+    clockOffset = 25_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    clockOffset = INTROSPECTION_CACHE_MS;
+    const outage = await mcpCall(issued.access_token);
+    expect(outage.status).toBe(503);
+    expect(await outage.json()).toEqual({ error: 'temporarily_unavailable' });
+    expect(cachedIntrospections().size).toBe(0);
+    // Volver atrás el reloj no resucita la entrada caducada.
+    clockOffset = 25_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(503);
+    available = true;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+  });
+
+  it('un error del backchannel no se guarda: cada petición vuelve a consultar', async () => {
+    const issued = await issuedTokens();
+    const base = introspectCount;
+    available = false;
+    expect((await mcpCall(issued.access_token)).status).toBe(503);
+    expect((await mcpCall(issued.access_token)).status).toBe(503);
+    expect(cachedIntrospections().size).toBe(0);
+    available = true;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base + 1);
+    expect(cachedIntrospections().size).toBe(1);
+  });
+
+  it('una introspección activa pero de otro vínculo no se guarda y corta la familia', async () => {
+    const issued = await issuedTokens();
+    brokerDevice = OTHER_DEVICE;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(cachedIntrospections().size).toBe(0);
+    brokerDevice = DEVICE;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+  });
+
+  it('revokeToken corta al momento aunque haya entrada vigente', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(cachedIntrospections().size).toBe(1);
+    const base = introspectCount;
+    await provider.revokeToken({ client_id: DCR_CLIENT_ID } as never, { token: issued.refresh_token } as never);
+    expect(cachedIntrospections().size).toBe(0);
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base);
+  });
+
+  it('oauth-revoke-all corta al momento y vacía la caché', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect(cachedIntrospections().size).toBe(1);
+    const base = introspectCount;
+    await revokeAllTokens(context.dataDir, Date.now() + 1);
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base);
+    expect(cachedIntrospections().size).toBe(0);
+  });
+
+  it('el cambio del emparejado local corta al momento, sin consultar Lumbre', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    const base = introspectCount;
+    await store.set('device-identity', JSON.stringify({ opaqueDeviceId: OTHER_DEVICE,
+      lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }));
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base);
+    expect(cachedIntrospections().size).toBe(0);
+  });
+
+  it('perder el bearer de la familia corta al momento aunque haya entrada vigente', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    const base = introspectCount;
+    const grants = (provider as unknown as { grants: { delete(id: string): Promise<void> } }).grants;
+    await grants.delete([...cachedIntrospections().keys()][0]!);
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base);
+    expect(cachedIntrospections().size).toBe(0);
+  });
+
+  it('el refresh consulta Lumbre siempre, también con entrada vigente', async () => {
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    const base = introspectCount;
+    deviceActive = false;
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+    expect(introspectCount).toBe(base + 1);
+    expect(cachedIntrospections().size).toBe(0);
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+  });
+
+  it('la entrada caduca con la concesión si vence antes de la ventana', async () => {
+    const expiry = Date.now() + 10_000;
+    grantExpiresAt = new Date(expiry).toISOString();
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    expect([...cachedIntrospections().values()].map((entry) => entry.expiresAt)).toEqual([expiry]);
+    clockOffset = 10_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+  });
+
+  it('las familias que dejan de usarse no se acumulan', async () => {
+    const first = await issuedTokens();
+    expect((await mcpCall(first.access_token)).status).toBe(200);
+    clockOffset = INTROSPECTION_CACHE_MS;
+    const second = await issuedTokens();
+    expect((await mcpCall(second.access_token)).status).toBe(200);
+    expect(cachedIntrospections().size).toBe(1);
   });
 });
