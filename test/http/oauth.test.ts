@@ -734,3 +734,57 @@ describe('caché de la introspección positiva', () => {
     expect(cachedIntrospections().size).toBe(1);
   });
 });
+
+describe('recuperación de revocaciones', () => {
+  it('reiniciar tras persistir la baja de una familia revoca su bearer huérfano', async () => {
+    const issued = await issuedTokens();
+    const file = join(context.dataDir, OAUTH_TOKENS_FILE);
+    const saved = JSON.parse(await readFile(file, 'utf8')) as { version: 2; families: unknown[] };
+    expect(saved.families).toHaveLength(1);
+    // Estado durable si el proceso cae después del commit de tokens y antes del callback.
+    await writeFile(file, JSON.stringify({ ...saved, families: [] }));
+    expect(await store.get('hebra-mcp-oauth-grants')).not.toBe('{}');
+
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    expect(reopened).not.toBeNull();
+    expect(approved).toBe(false);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    await expect(reopened!.provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+  });
+
+  it('un fallo remoto conserva la revocación pendiente, niega acceso y reintenta al reiniciar', async () => {
+    const issued = await issuedTokens();
+    available = false;
+    await provider.revokeToken({ client_id: DCR_CLIENT_ID } as never, { token: issued.access_token } as never);
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(await store.get('hebra-mcp-oauth-grants')).not.toBe('{}');
+
+    available = true;
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    expect(reopened).not.toBeNull();
+    expect(approved).toBe(false);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    await expect(reopened!.provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+  });
+
+  it('perder el emparejado con Lumbre offline conserva el bearer para revocarlo al reiniciar', async () => {
+    const issued = await issuedTokens();
+    await store.set('device-identity', JSON.stringify({ opaqueDeviceId: OTHER_DEVICE,
+      lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }));
+    available = false;
+    await expect(provider.verifyAccessToken(issued.access_token)).rejects.toThrow();
+    expect(await store.get('hebra-mcp-oauth-grants')).not.toBe('{}');
+
+    await store.set('device-identity', JSON.stringify({ opaqueDeviceId: DEVICE,
+      lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }));
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    available = true;
+    const reopened = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET } });
+    expect(reopened).not.toBeNull();
+    expect(approved).toBe(false);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+  });
+});

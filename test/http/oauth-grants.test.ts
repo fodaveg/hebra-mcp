@@ -17,6 +17,7 @@ describe('promoción durable de una concesión', () => {
     const reopened = await GrantSecrets.open(store, []); // oauth-tokens.json aún no contiene la familia
     const revoked: string[] = [];
     await GrantSecrets.recoverPending(store, [], reopened, async (token) => { revoked.push(token); });
+    await reopened.recoverOrphans([], async (token) => { revoked.push(token); });
     expect(revoked).toEqual([bearer]);
     expect(reopened.get(familyId)).toBeNull();
     expect(await store.get('hebra-mcp-oauth-pending')).toBe('{}');
@@ -31,6 +32,7 @@ describe('promoción durable de una concesión', () => {
     const reopened = await GrantSecrets.open(store, [familyId]); // familia durable en oauth-tokens.json
     const revoked: string[] = [];
     await GrantSecrets.recoverPending(store, [familyId], reopened, async (token) => { revoked.push(token); });
+    await reopened.recoverOrphans([familyId], async (token) => { revoked.push(token); });
     expect(revoked).toEqual([]);
     expect(reopened.get(familyId)).toBe(bearer);
     expect(await store.get('hebra-mcp-oauth-pending')).toBe('{}');
