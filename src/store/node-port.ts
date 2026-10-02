@@ -62,6 +62,9 @@ import type {
 } from './types';
 import type { NoteWriteStore, NoteWriteTarget } from './writes';
 
+/** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de `sqlite-engine.ts`). */
+const LOCKED_BODY_PREFIX = 'hebra-locked:';
+
 export interface OpenNodeLibraryOptions {
   /** Ruta del fichero SQLite, o `:memory:` (tests). */
   sqlitePath: string;
@@ -365,6 +368,27 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
 
   async noteVersionRead(versionId: number): Promise<NoteVersion | null> {
     return this.read(() => this.engine.noteVersionRead(versionId));
+  }
+
+  /** Varias versiones con su cuerpo en UN turno de la cola, en el orden pedido; `null` si
+   *  ya no existe. */
+  async noteVersionsRead(versionIds: readonly number[]): Promise<Array<NoteVersion | null>> {
+    return this.read(() => versionIds.map((versionId) => this.engine.noteVersionRead(versionId)));
+  }
+
+  /** Si cada versión es el cuerpo de una nota BLOQUEADA, mirando solo el principio del
+   *  cuerpo (sin leerlo entero), en UN turno de la cola; `null` si ya no existe. SQL propio
+   *  sobre `note_versions` de `schema.sql`; el prefijo es `LOCKED_MARK` de Hebra. */
+  async noteVersionsLocked(versionIds: readonly number[]): Promise<Array<boolean | null>> {
+    return this.read(() =>
+      versionIds.map((versionId) => {
+        const row = this.prepared(
+          `SELECT substr(body, 1, ${LOCKED_BODY_PREFIX.length}) = '${LOCKED_BODY_PREFIX}' AS locked
+           FROM note_versions WHERE id = ?`
+        ).get(versionId) as { locked: number | bigint } | undefined;
+        return row === undefined ? null : Number(row.locked) !== 0;
+      })
+    );
   }
 
   async noteAttachments(noteId: string): Promise<NoteAttachmentRow[]> {

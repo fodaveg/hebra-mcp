@@ -125,6 +125,11 @@ export interface HebraLibraryPort {
   noteVersionsList(noteId: string): Promise<NoteVersionsList>;
   /** Una versión con su cuerpo, o `null` si ya no existe (caducada o purgada). */
   noteVersionRead(versionId: number): Promise<NoteVersion | null>;
+  /** `noteVersionRead` de varias versiones en UN turno de la cola, en el orden pedido. */
+  noteVersionsRead(versionIds: readonly number[]): Promise<Array<NoteVersion | null>>;
+  /** Si cada versión es de una nota BLOQUEADA, sin leer el cuerpo entero (solo su
+   *  prefijo); `null` si ya no existe. En UN turno de la cola. */
+  noteVersionsLocked(versionIds: readonly number[]): Promise<Array<boolean | null>>;
   /** Adjuntos de una nota, en el orden del cuerpo (ampliación de D2 del 30 sep 2026,
    *  adjuntos en solo lectura). Sin filtro: lo aplica la herramienta. */
   noteAttachments(noteId: string): Promise<NoteAttachmentRow[]>;

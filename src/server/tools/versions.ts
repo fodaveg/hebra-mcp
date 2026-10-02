@@ -28,6 +28,7 @@ import type { PrivacyFilter } from '../../privacy/filter';
 import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
 import type { NoteVersion } from '../../store/types';
 import { ToolError } from '../errors';
+import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
 import { mapWriteError } from './write-errors';
@@ -66,21 +67,70 @@ function listed(version: NoteVersion): ListedVersion {
   };
 }
 
-/** `hebra_list_versions`: las versiones visibles de una nota visible, de la más reciente
- *  a la más antigua. Sin cuerpo; sin recuento de las que se saltó. */
+/**
+ * `hebra_list_versions`: las versiones visibles de una nota visible, de la más reciente a
+ * la más antigua, paginadas (`limit` 1-200, 50 por defecto; `cursor` `v1.…`, opaco, con el
+ * id de la última versión devuelta). Sin cuerpo; sin recuento de las que se saltó.
+ *
+ * Solo se miran las versiones necesarias para llenar la página y saber si hay otra visible
+ * detrás (una más): ni el tamaño de la página ni `nextCursor` dependen de cuántas versiones
+ * ocultas hay. Con etiquetas privadas configuradas hay que leer el cuerpo (y analizarlo con
+ * `deriveNote`) de cada versión mirada; sin ellas, solo se mira si el cuerpo es el de una
+ * nota bloqueada, por su prefijo, sin leerlo entero ni analizarlo.
+ */
 export async function runListVersions(
   ctx: ToolContext,
-  input: { id: string }
-): Promise<{ id: string; versions: ListedVersion[] }> {
+  input: { id: string; limit?: number; cursor?: string }
+): Promise<{ id: string; versions: ListedVersion[]; nextCursor: string | null }> {
+  const limit = effectiveLimit(input.limit, LIMITS.listVersions);
+  const after = input.cursor !== undefined ? Number(unwrapCursor('v1', input.cursor)) : null;
+  if (after !== null && !Number.isInteger(after)) throw new ToolError('invalid_input');
   requireVisibleNote(ctx, input.id);
   const { items } = await ctx.port.noteVersionsList(input.id);
-  const versions: ListedVersion[] = [];
-  for (const item of items) {
-    const version = await ctx.port.noteVersionRead(item.id);
-    if (!version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)) continue;
-    versions.push(listed(version));
+
+  let position = 0;
+  if (after !== null) {
+    const index = items.findIndex((item) => item.id === after);
+    if (index < 0) throw new ToolError('invalid_input');
+    position = index + 1;
   }
-  return { id: input.id, versions };
+  const readBodies = ctx.privacyConfig.privateTags.length > 0;
+
+  const visible: ListedVersion[] = [];
+  let lastId: number | undefined;
+  let hasMore = false;
+  while (position < items.length && !hasMore) {
+    // Lo que falta para la página más la de mirar por delante, de una vez.
+    const chunk = items.slice(position, position + (limit - visible.length + 1));
+    position += chunk.length;
+    const ids = chunk.map((item) => item.id);
+    const hidden = readBodies
+      ? (await ctx.port.noteVersionsRead(ids)).map(
+          (version) =>
+            !version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)
+        )
+      : (await ctx.port.noteVersionsLocked(ids)).map(
+          (locked, index) => locked !== false || chunk[index]!.noteId !== input.id
+        );
+    for (const [index, item] of chunk.entries()) {
+      if (hidden[index]) continue;
+      if (visible.length >= limit) {
+        hasMore = true;
+        break;
+      }
+      visible.push({
+        versionId: item.id,
+        createdAt: new Date(item.createdAt).toISOString(),
+        byteLength: item.byteLength
+      });
+      lastId = item.id;
+    }
+  }
+  return {
+    id: input.id,
+    versions: visible,
+    nextCursor: hasMore && lastId !== undefined ? wrapCursor('v1', String(lastId)) : null
+  };
 }
 
 /** `hebra_read_version`: una versión con su cuerpo. `not_found` si la nota no es visible,

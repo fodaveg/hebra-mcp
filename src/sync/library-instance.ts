@@ -388,6 +388,10 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       current().noteVersionsList(noteId),
     noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>
       current().noteVersionRead(versionId),
+    noteVersionsRead: (versionIds: readonly number[]): Promise<Array<NoteVersion | null>> =>
+      current().noteVersionsRead(versionIds),
+    noteVersionsLocked: (versionIds: readonly number[]): Promise<Array<boolean | null>> =>
+      current().noteVersionsLocked(versionIds),
     noteAttachments: (noteId: string): Promise<NoteAttachmentRow[]> =>
       current().noteAttachments(noteId),
     blobRead: (sha256: string): Promise<Uint8Array | null> => current().blobRead(sha256),
