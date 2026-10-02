@@ -24,7 +24,7 @@ texto (D2, ampliada el 28 sep 2026 y, con la papelera y las versiones anteriores
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep 2026, cerradas)
+## 3. Decisiones de David (26 sep–2 oct 2026, cerradas)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
@@ -35,6 +35,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
 | D6 | **Conector remoto** (26 sep 2026): hebra-mcp tiene que funcionar como conector remoto de claude.ai (web, móvil, sesiones en la nube), y **corre en el servidor de Lumbre**, en un contenedor aparte. stdio sigue funcionando en local. Diseño en §12. | Revoca el descarte de D1: ese servidor guarda las claves de la biblioteca y puede leer las notas (quien tenga root en él). Descartados: una máquina de casa (Fedora o Mac) publicada con Tailscale Funnel, que mantenía el cifrado de punta a punta pero solo funcionaba con esa máquina encendida. |
 | D7 | **Autenticación del conector remoto** (revisada el 28 sep 2026): conservar el OAuth público de Hebra MCP y usar login y consentimiento de Lumbre para aprobar la biblioteca ya emparejada. | Sustituye la decisión del 26 sep de usar un secreto del dueño. El login no entrega la clave de biblioteca ni reasocia otra biblioteca. |
+| D8 | **Mejoras de paginación y adjuntos** (2 oct 2026): 1) caché de introspección de 30 s (por familia de token); 2) paginación de versiones (limit 1-200, def. 50) y adjuntos (limit 1-200 opcional); 3) lectura de adjuntos de texto por tramos (offset, maxChars 1–100 000, def. 100 000, con totalChars, truncated y nextOffset). Riesgo aceptado: la ventana de 30 s vale para toda revocación hecha en Lumbre (concesión, biblioteca o dispositivo Blob V2), y con Lumbre caído una entrada vigente sigue dando acceso hasta 30 s. El refresh nunca usa la caché. | Medidas de escala y usabilidad. |
 
 ## 4. Arquitectura
 
@@ -102,20 +103,20 @@ Lo que **no** sirve tal cual y resuelve hebra-mcp sin tocar Hebra:
 Reglas comunes:
 - Las notas en la papelera nunca se devuelven, salvo por las herramientas de la papelera
   (`hebra_list_trash`, `hebra_trash_note`, `hebra_restore_note`), con su propio filtro (§6.3).
-- Las copias de conflicto se devuelven marcadas.
+- `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` (el id de la nota original) solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
 - Toda salida pasa por el filtro de privados (§6.3).
 - Los identificadores son los `id` de nota del almacén.
 - Las fechas van en ISO 8601.
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, updatedAt}], nextCursor}` |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
 | `hebra_list_tags` | `limit?` (1-500; sin él, todas), `cursor?` | `{tags: [{tag, count}], nextCursor}` (anidadas como `a/b`) |
 | `hebra_list_folders` | `limit?` (1-500; sin él, todas), `cursor?` | `{folders: [{id, path, count}], nextCursor}` |
 | `hebra_links` | `id`, `limit?` (1-200; sin él, todo), `cursor?` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}], nextCursor}` |
-| `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
+| `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra; si existe, el `title:` del frontmatter manda sobre el H1), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | `{id, outcome: "saved" \| "conflict_copy", copyId?}` |
 | `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; `find` no vacío; `find` + `replace` de todas ≤ 100 000 caracteres), `expectedRevision`, `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", revision?, copyId?, replayed?, sync, syncError?}`. Errores: `revision_conflict`, `no_match` / `ambiguous_match` / `overlapping_edits` (con `edit`: índice), `note_locked`, `operation_id_reused`, `not_found`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
@@ -124,18 +125,24 @@ Reglas comunes:
 | `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
 | `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
 | `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
-| `hebra_list_versions` | `id` | `{id, versions: [{versionId, createdAt, byteLength}]}`, la más reciente primero, sin cuerpo ni `cause`. |
+| `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. |
 | `hebra_read_version` | `id`, `versionId` | `{id, versionId, createdAt, byteLength, body}`. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` (≤ 200) | igual que `hebra_edit_note`, con los mismos errores salvo los de las sustituciones. |
-| `hebra_list_attachments` | `id` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}]}` en el orden del cuerpo. `attachmentId`: el SHA-256 del adjunto; `name`: el alias `\|nombre` del cuerpo o `null`; `mimeType` (orientativo) y `byteLength`: `null` si no se saben sin bajarlo. |
-| `hebra_read_attachment` | `id`, `attachmentId` | Un bloque de texto `{id, attachmentId, name, mimeType, byteLength}` y el contenido: `image` (base64 + `mimeType`), `text`, o `resource` embebido (`blob` base64, URI opaca `hebra-attachment:<sha256>`) para el PDF. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `attachment_unavailable`. |
+| `hebra_list_attachments` | `id`, `limit?` (1-200), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `attachmentId`: el SHA-256 del adjunto; `name`: el alias `\|nombre` del cuerpo o `null`; `mimeType` (orientativo) y `byteLength`: `null` si no se saben sin bajarlo. Errores: `not_found`, `note_locked`. |
+| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000; solo texto) | Imagen, PDF: un bloque `{id, attachmentId, name, mimeType, byteLength}` y el contenido íntegro como `image` (base64 + `mimeType`) o `resource` embebido (blob base64 + URI opaca `hebra-attachment:<sha256>`). Texto, Markdown, CSV, JSON: bloque `{id, attachmentId, name, mimeType, byteLength, totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `attachment_unavailable`. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
+
+Anotaciones MCP (2 oct 2026, decision D8):
+- Las 21 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`.
+- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`).
+- **Escritura con consecuencias** (`destructiveHint: false`, `idempotentHint: false`): `hebra_create_note` y `hebra_append_to_note` (las escrituras iniciales, no idempotentes sin `operationId`).
+- Todas `openWorldHint: false`.
 
 Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
 - **Paginación común** (`src/server/pagination.ts`): `hebra_search`, `hebra_list_notes`, `hebra_links`,
-  `hebra_list_tags` y `hebra_list_folders` aceptan `limit` y `cursor` y devuelven `nextCursor`, que es
-  `null` al final. Los valores por defecto no cambian (búsqueda 20, notas 50; etiquetas, carpetas y
-  enlaces, todo si no hay `limit`). El cursor es opaco y lleva un prefijo por herramienta: el de una
+  `hebra_list_tags`, `hebra_list_folders`, `hebra_list_trash`, `hebra_list_versions` y `hebra_list_attachments` aceptan `limit` y `cursor` y devuelven `nextCursor`, que es
+  `null` al final. Los valores por defecto son búsqueda 20, notas 50, papelera 50, versiones 50, adjuntos todo si no hay `limit`; etiquetas, carpetas y
+  enlaces, todo si no hay `limit`. El cursor es opaco y lleva un prefijo por herramienta: el de una
   no vale en otra (`invalid_input`). En las listas de notas es la clave del último resultado
   devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento.
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
@@ -153,12 +160,12 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` y los tamaños de
-  las escrituras y `attachmentBytes` (5 MiB); `notAllowed` lista lo que no hace (purgar o vaciar la
-  papelera, carpetas; los adjuntos salieron de la lista con la decisión 7 de D2, en solo lectura);
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listVersions`, `listAttachments`), los tamaños de las escrituras, `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000); `notAllowed` lista lo que no hace (purgar o vaciar la
+  papelera, carpetas, y escribir/cambiar/borrar adjuntos);
   `privacyConfigured` es solo un booleano: ni nombres de carpetas o etiquetas privadas ni contenido.
 
 Detalle de las escrituras (D2):
+- **Escrituras que no escriben nada** (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota ya tiene) no piden ni esperan ronda de sync, y responden `sync` según la fila: `not_linked` sin sync; `uploaded` si la nota no está sucia; `pending` si lo está (la sube la siguiente ronda periódica). Organizar a un estado que la nota ya tiene no la marca sucia ni sube su `local_seq`.
 - `hebra_create_note` usa `noteCreate(folderId)` y después `noteSave` con los derivados de
   `deriveNote(body)` (`types.ts:445-447`, `NoteSaveInput` en `types.ts:104`). El cuerpo tiene un
   límite de 100 000 caracteres.
@@ -259,6 +266,7 @@ Detalle de las escrituras (D2):
     válido sin NUL. Un JSON ilegible pasa como `text/plain`. Lo demás, incluida una «imagen» cuyos
     bytes no lo son: `attachment_type_not_allowed`.
   - Una nota bloqueada da `note_locked` (sus adjuntos van cifrados con ella).
+  - **Lectura de adjuntos de texto por tramos** (decisión 2b, 2 oct 2026): para texto plano, Markdown, CSV y JSON, `hebra_read_attachment` acepta `offset?` (carácter por el que empezar, def. 0) y `maxChars?` (1–100 000, def. 100 000). La respuesta lleva `totalChars`, `truncated` y `nextOffset` (`null` al final). Para leer el resto, repetir con `offset = nextOffset`. Imágenes y PDF no cambian: siempre íntegros.
 - No se exponen `notePurge`, `trashEmpty`, `trashCounts` (contaría las privadas),
   `noteVersionsPurgeExpired`, `folderTrash`, `file*` ni `tagRename`: el servidor ni siquiera las
   importa en su capa de herramientas (`test/store/surface.node.test.ts`). Tampoco `blobPut`: solo
@@ -490,7 +498,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 - **Ritmo de sync**:
   - Al arrancar: una ronda, y las lecturas esperan como mucho 10 s a que termine.
   - Después, una ronda cada 30 s mientras el proceso vive.
-  - Una ronda justo después de cada escritura.
+  - Una ronda justo después de cada escritura. Excepción (§5): una escritura que no cambia nada (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota ya tiene) no pide ronda.
   - En reposo, cada ronda es 1 petición HTTP y 0 escrituras (A6 de Hebra).
 - **Adjuntos** (decisión 7 de D2): se leen, nunca se escriben. Los bytes se bajan bajo demanda, al
   pedir `hebra_read_attachment` un adjunto que no esté en el disco, por `readBlob` del motor en el
@@ -586,9 +594,14 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - La solicitud y la concesión incluyen `pairedCredentialId`, `syncVaultId` y el
   `opaqueDeviceId` real del dispositivo Blob V2. Lumbre comprueba propietario, bóveda
   activa y la fila exacta `hebraBlobDevices` no revocada, vinculada a esa credencial.
-  Hebra compara los tres campos con su emparejado actual al canjear, acceder y refrescar,
-  y consulta introspección en Lumbre en cada uso. Revocar solo esa fila Blob V2 corta los
-  access/refresh posteriores aunque sobreviva la credencial de emparejado.
+  Hebra compara los tres campos con su emparejado actual al canjear, acceder y refrescar.
+  Consulta introspección en Lumbre al canjear y en cada refresh; en `/mcp` reutiliza en
+  memoria, por familia y durante 30 s (`INTROSPECTION_CACHE_MS`), un resultado positivo
+  y coherente con la concesión guardada, o hasta el `expiresAt` de la concesión si llega
+  antes (decisión D8). Nunca se guarda un `active: false`, un desajuste ni un error, y una
+  entrada caducada no se alarga si Lumbre no responde. Revocar solo esa fila Blob V2 corta
+  el refresh al momento y los access en un máximo de 30 s, aunque sobreviva la credencial
+  de emparejado.
 - Lumbre devuelve un `accountId` opaco, nunca `users.id`. La concesión upstream no se
   acepta directamente en `/mcp`, ni el token OAuth de Hebra autentica las APIs de Lumbre.
   Access/refresh de Claude quedan como hashes en `oauth-tokens.json` v2; el bearer de la
@@ -610,7 +623,10 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - El formato v2 y la revocación local son independientes de la revocación visible en la
   página de Lumbre. Revocar una familia por OAuth corta primero su acceso local y luego
   pide la revocación upstream. Revocar la concesión en Lumbre deja la introspección
-  inactiva y cierra la familia en el siguiente acceso; no borra notas ni el dispositivo.
+  inactiva y cierra la familia en el siguiente refresh o, en `/mcp`, en el primer acceso
+  tras caducar la introspección guardada (30 s como máximo); no borra notas ni el dispositivo.
+  El cambio de emparejado local, la revocación OAuth de la familia y `oauth-revoke-all` no
+  pasan por esa espera: cortan en la petición siguiente.
 - Los tests sintéticos comprueban el contrato local. Falta acreditar en producción el
   recorrido real Claude → login Lumbre → consentimiento → lectura → revocación → rechazo.
 
@@ -658,7 +674,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - Quien tenga root en el servidor, o escape de otro contenedor de ese host, lee y escribe toda la
   biblioteca, incluidas las notas privadas. El filtro de §6.3 solo actúa sobre la salida.
 - Revocar en Lumbre la concesión Hebra MCP, su biblioteca o el dispositivo Blob V2 exacto
-  invalida el acceso OAuth de Claude mediante introspección. Retirar la credencial de
+  invalida el acceso OAuth de Claude mediante introspección, con hasta 30 s de retraso en
+  `/mcp` por la caché de §12.2. Retirar la credencial de
   emparejado también invalida la concesión y corta el sync; `oauth-revoke-all` corta
   todas las familias locales.
 - Sin rotación de clave (§6.2), retirar el dispositivo no invalida la clave que ya tuvo.
@@ -681,7 +698,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | Lote | Qué | Criterio de cierre | Depende de |
 |---|---|---|---|
 | **C1** Secretos en fichero | `FileSecretStore` y selección explícita en `serve`, `pair` y `unpair`. | Tests: 0600/0700, escritura atómica, `unpair` lo deja vacío, valor corrupto = ausente, en modo fichero no se carga `@napi-rs/keyring`. | — |
-| **C2** `serve-http` | Streamable HTTP sin estado: `POST /mcp`, límite de cuerpo, `allowedHosts`, `/healthz`; no arranca sin auth. | Las 9 herramientas por el cliente HTTP del SDK; cebos fuera de stderr; dos `append` concurrentes correctos; suite stdio en verde. | — |
+| **C2** `serve-http` | Streamable HTTP sin estado: `POST /mcp`, límite de cuerpo, `allowedHosts`, `/healthz`; no arranca sin auth. | Las herramientas de lectura y creación de ese momento por el cliente HTTP del SDK; cebos fuera de stderr; dos `append` concurrentes correctos; suite stdio en verde. | — |
 | **C3** OAuth y consentimiento Lumbre | §12.2. | Sin token 401 con `resource_metadata`; vínculo exacto de dispositivo/bóveda, callback y PKCE, código de un uso, refresh/revocación y reconexión tras formato v1. El recorrido real con Claude queda en C6. | C2 y broker Lumbre |
 | **C4** Despliegue | Dockerfile, compose, Caddy y runbook para `mcp.hebra.pro`. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
 | **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |

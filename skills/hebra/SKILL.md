@@ -70,12 +70,12 @@ pegue, o una edición por sustituciones.
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `folder?`, `tag?` | `results[{id, title, folderPath, tags, snippet, updatedAt}]`. Ignora tildes. |
-| `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50) | Más recientes primero. Pagina con `nextCursor`. |
+| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`) | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}`. Ignora tildes. Pagina con `nextCursor`. |
+| `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
 | `hebra_read_note` | `id` **o** `title` (exactamente uno) | Cuerpo íntegro y **`revision`** (la necesita la edición). Título ambiguo → `ambiguous_title` con candidatos. |
-| `hebra_list_tags` | nada | Anidadas como `a/b`, con recuento. |
-| `hebra_list_folders` | nada | `folders[{id, path, count}]`. `path` para `folder`; `id` para `hebra_move_note`. |
-| `hebra_links` | `id` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. |
+| `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
+| `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
+| `hebra_links` | `id`, `limit?` 1-200, `cursor?` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. Pagina con `nextCursor`. |
 | `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El primer `# H1` del cuerpo es el título. |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | Añade `\n\n` + texto al final. `outcome: saved \| conflict_copy`. |
 | `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `sync`, `replayed`. |
@@ -85,24 +85,25 @@ pegue, o una edición por sustituciones.
 | `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
 | `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
 | `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
-| `hebra_list_versions` | `id` | `versions[{versionId, createdAt, byteLength}]`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. |
+| `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. Pagina con `nextCursor`. |
 | `hebra_read_version` | `id`, `versionId` | El cuerpo de esa versión. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
-| `hebra_list_attachments` | `id` | `attachments[{attachmentId, name, mimeType, byteLength}]` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. |
-| `hebra_read_attachment` | `id`, `attachmentId` | Un bloque con los datos del adjunto y su contenido: imagen, texto o PDF (recurso embebido). Hasta 5 MiB. Solo lectura. |
+| `hebra_list_attachments` | `id`, `limit?` 1-200, `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |
+| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (0), `maxChars?` (1–100 000, def. 100 000) | Imagen o PDF: contenido íntegro. Texto plano, Markdown, CSV, JSON: bloque con `{totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Hasta 5 MiB descifrados. Solo lectura. |
 | `hebra_status` | nada | Estado del vínculo y del sync, sin contenido. |
 
-Fuera de las tres de la papelera, nunca devuelve notas de la papelera. Las copias de
-conflicto salen con `isConflictCopy: true` y `conflictOf`.
+Fuera de las tres de la papelera, nunca devuelve notas de la papelera. `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
+
+Para paginar: pasa el `nextCursor` recibido en la siguiente llamada. `null` es el final.
 
 Para «recupera cómo estaba la nota»: `hebra_list_versions` → `hebra_read_version` para
 enseñarle la que elija → `hebra_read_note` (por la `revision`) → `hebra_restore_version`
 con un UUID nuevo. Si la versión que busca no está, las del Mac no llegan aquí: que la
 restaure desde Hebra.
 
-`sync` en las respuestas de edición y organización: `uploaded` (ya subido), `pending`
+`sync` en las respuestas de edición, organización, papelera y versiones: `uploaded` (ya subido), `pending`
 (guardado, sin subir aún), `error` (con `syncError`, p. ej. `offline`, `revoked`) o
-`not_linked`. `pending` no es un fallo: lo guardado sube en la siguiente ronda.
+`not_linked`. `pending` no es un fallo: lo guardado sube en la siguiente ronda. `hebra_create_note` y `hebra_append_to_note` no devuelven `sync`. Repetir una escritura que ya está aplicada responde al momento y puede decir `pending` si lo anterior aún no subió; no es un fallo.
 
 ## Cómo se edita
 
@@ -111,7 +112,7 @@ restaure desde Hebra.
 2. **Cada `find` es texto EXACTO del cuerpo leído** (espacios, saltos de línea, mayúsculas)
    y **tiene que aparecer exactamente una vez**. Si el trozo se repite, amplíalo con texto
    de alrededor hasta que sea único. Todos los `find` se buscan en el cuerpo leído, no en
-   el resultado de las sustituciones anteriores, y dos no pueden tocar el mismo tramo.
+   el resultado de las sustituciones anteriores, y dos no pueden tocar el mismo tramo. La suma de todos los `find` y `replace` no puede pasar de 100 000 caracteres.
 3. **Todas o ninguna**: si una sustitución falla, no se escribe nada.
 4. **`operationId`**: un UUID nuevo por cada edición distinta. Si se pierde la respuesta,
    reintenta con el MISMO `operationId` y la misma petición: devuelve lo mismo con
@@ -139,7 +140,8 @@ restaure desde Hebra.
    reintento crearía otra copia.
 6. **Tras escribir**, la nota aparece en Hebra tras un ciclo de sync. Si el usuario dice que no
    la ve, `hebra_status` (`pendingUpload`, `lastSyncOutcome`) antes de repetir nada.
-7. **Castellano** y el estilo de las notas que ya hay en la carpeta (lee una antes si dudas).8. **Título en el frontmatter**: las notas importadas de Obsidian sin `# H1` llevan el título
+7. **Castellano** y el estilo de las notas que ya hay en la carpeta (lee una antes si dudas).
+8. **Título en el frontmatter**: las notas importadas de Obsidian sin `# H1` llevan el título
    como `title:` en el frontmatter (migración de Hebra 89, 28 sep 2026). Al editarlas, no quites
    ni cambies esa línea salvo que el usuario pida renombrar la nota.
 
@@ -164,7 +166,7 @@ título) ni especules sobre qué hay oculto.
 |---|---|---|
 | `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado | Busca de nuevo (en la papelera, con `hebra_list_trash`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
-| `invalid_input` | Límite superado, entrada mal formada, `revision` de otra nota o ilegible, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200) y parámetros. |
+| `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200). Los límites de parámetros los rechaza el esquema del cliente MCP. |
 | `revision_conflict` | La nota cambió desde que la leíste | Vuelve a leerla, rehaz las sustituciones sobre el cuerpo nuevo y usa un `operationId` nuevo. |
 | `no_match` | Un `find` no aparece en el cuerpo leído (`edit` = su índice) | Cópialo exacto del cuerpo; no lo reescribas de memoria. |
 | `ambiguous_match` | Un `find` aparece más de una vez (`edit` = su índice) | Amplíalo con texto vecino hasta que sea único. |
