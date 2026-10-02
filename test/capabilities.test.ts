@@ -65,6 +65,9 @@ describe('capacidades', () => {
     // escrituras (`attachment_writes`), con su límite de lectura.
     expect(capabilities.notAllowed).toContain('attachment_writes');
     expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
+    expect(capabilities.limits.attachmentTextChars).toBe(100_000);
+    expect(capabilities.limits.listVersions).toEqual({ default: 50, max: 200 });
+    expect(capabilities.limits.listAttachments).toEqual({ max: 200 });
     expect(capabilities.tools).toEqual(
       expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment'])
     );

@@ -84,7 +84,7 @@ describe('hebra_search', () => {
     test = await buildTestContext();
     const { results } = await runSearch(test.ctx, {
       query: 'conflicto',
-      fields: ['isConflictCopy' as never]
+      fields: ['isConflictCopy']
     });
     expect(results.length).toBeGreaterThan(0);
     for (const result of results) {

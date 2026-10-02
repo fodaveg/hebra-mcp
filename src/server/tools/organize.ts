@@ -35,6 +35,7 @@ import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { OrganizeOutcome, SyncFields } from '../write-context';
+import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export type NoteOrganizeOutput = {
@@ -48,10 +49,6 @@ function syncOf(outcome: SyncFields): SyncFields {
   return outcome.syncError === undefined
     ? { sync: outcome.sync }
     : { sync: outcome.sync, syncError: outcome.syncError };
-}
-
-function requireVisibleNote(ctx: ToolContext, id: string): void {
-  if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
 }
 
 /** Viva y visible, o en la papelera y visible para el filtro de la papelera. */

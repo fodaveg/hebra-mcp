@@ -10,7 +10,7 @@ import { EDITS_MAX_COUNT, EDITS_TOTAL_MAX_LENGTH } from '../store/edits';
 import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
 import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes';
 import { LIMITS } from './pagination';
-import { ATTACHMENT_MAX_BYTES } from './tools/attachments';
+import { ATTACHMENT_MAX_BYTES, ATTACHMENT_TEXT_MAX_CHARS } from './tools/attachments';
 
 /** Herramientas que registra `register-tools.ts`, ordenadas. Una herramienta nueva se
  *  añade aquí Y en `test/fixtures/tool-names.ts` (un test compara ambas listas). */
@@ -56,11 +56,15 @@ export interface Capabilities {
     listTags: { max: number };
     listFolders: { max: number };
     listTrash: { default: number; max: number };
+    listVersions: { default: number; max: number };
+    listAttachments: { max: number };
     createNoteBodyChars: number;
     appendTextChars: number;
     editNote: { maxEdits: number; maxTotalChars: number; operationIdChars: number };
     /** Adjuntos en solo lectura: bytes descifrados por adjunto. */
     attachmentBytes: number;
+    /** `hebra_read_attachment` de texto: máximo de caracteres por tramo (`maxChars`). */
+    attachmentTextChars: number;
   };
   notAllowed: string[];
   /** ¿Hay carpetas o etiquetas privadas configuradas? Solo el booleano. */
@@ -79,6 +83,8 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
       listTags: { max: LIMITS.listTags.max },
       listFolders: { max: LIMITS.listFolders.max },
       listTrash: { default: LIMITS.listTrash.default, max: LIMITS.listTrash.max },
+      listVersions: { default: LIMITS.listVersions.default, max: LIMITS.listVersions.max },
+      listAttachments: { max: LIMITS.listAttachments.max },
       createNoteBodyChars: CREATE_BODY_MAX_LENGTH,
       appendTextChars: APPEND_TEXT_MAX_LENGTH,
       editNote: {
@@ -86,7 +92,8 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
         maxTotalChars: EDITS_TOTAL_MAX_LENGTH,
         operationIdChars: OPERATION_ID_MAX_LENGTH
       },
-      attachmentBytes: ATTACHMENT_MAX_BYTES
+      attachmentBytes: ATTACHMENT_MAX_BYTES,
+      attachmentTextChars: ATTACHMENT_TEXT_MAX_CHARS
     },
     notAllowed: [...NOT_ALLOWED],
     privacyConfigured: privacy.privateFolders.length > 0 || privacy.privateTags.length > 0

@@ -25,12 +25,13 @@
 import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import type { PrivacyFilter } from '../../privacy/filter';
-import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
+import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { NoteVersion } from '../../store/types';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
+import { requireValidOperationId, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export interface ListedVersion {
@@ -44,19 +45,11 @@ export interface ReadVersionOutput extends ListedVersion {
   body: string;
 }
 
-/** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de Hebra, igual que en
- *  `src/store/writes.ts`). Hebra no guarda versiones de una nota bloqueada; si alguna lo
- *  pareciera, no sale. */
-const LOCKED_BODY_PREFIX = 'hebra-locked:';
-
-/** `true` si el cuerpo de la versión no puede salir: etiqueta privada o bloqueado. */
+/** Hebra no guarda versiones de una nota bloqueada; si alguna lo pareciera, no sale.
+ *  `true` si el cuerpo de la versión no puede salir: etiqueta privada o bloqueado. */
 function versionIsHidden(privacy: PrivacyFilter, version: NoteVersion): boolean {
   if (version.body.startsWith(LOCKED_BODY_PREFIX)) return true;
   return privacy.hidesAnyTag(deriveNote(version.body).tags.map(({ tag }) => tag));
-}
-
-function requireVisibleNote(ctx: ToolContext, id: string): void {
-  if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
 }
 
 function listed(version: NoteVersion): ListedVersion {
@@ -154,9 +147,7 @@ export async function runRestoreVersion(
   input: { id: string; versionId: number; expectedRevision: string; operationId: string }
 ): Promise<EditNoteOutcome> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (input.operationId.length === 0 || input.operationId.length > OPERATION_ID_MAX_LENGTH) {
-    throw new ToolError('invalid_input');
-  }
+  requireValidOperationId(input.operationId);
   requireVisibleNote(ctx, input.id);
 
   let result: EditNoteOutcome;
