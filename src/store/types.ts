@@ -84,6 +84,9 @@ export interface NoteAttachmentRow {
 
 export interface HebraLibraryPort {
   libraryOpen(): Promise<LibraryOpenInfo>;
+  /** `meta.library_id` (para la revisión de `hebra_read_note`): no cambia mientras la
+   *  conexión vive, así que el puerto lo guarda tras la primera lectura. */
+  libraryId(): Promise<string>;
   noteCreate(folderId?: string | null): Promise<NoteRow>;
   noteRead(id: string): Promise<NoteRow | null>;
   noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
@@ -92,14 +95,20 @@ export interface HebraLibraryPort {
   tagsList(): Promise<TagsList>;
   /** `ref` es lo que iría entre `[[` y `]]` (sin alias): `id:…`, `Título`, `ruta/Título`. */
   resolveLink(ref: string): Promise<LinkResolution>;
+  /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. */
+  resolveLinks(refs: readonly string[]): Promise<LinkResolution[]>;
   backlinks(id: string, cursor?: string | null, limit?: number): Promise<NotesPage>;
   search(
     q: string,
     cursor: string | null,
     limit?: number,
-    filters?: SearchFilters | null
+    filters?: SearchFilters | null,
+    scope?: NotesScope | null
   ): Promise<SearchPage>;
   notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates>;
+  /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
+   *  de `notesByTitlePrefix`). */
+  notesByExactTitle(title: string): Promise<TitleCandidates>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
    *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
    *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota
@@ -116,6 +125,11 @@ export interface HebraLibraryPort {
   noteVersionsList(noteId: string): Promise<NoteVersionsList>;
   /** Una versión con su cuerpo, o `null` si ya no existe (caducada o purgada). */
   noteVersionRead(versionId: number): Promise<NoteVersion | null>;
+  /** `noteVersionRead` de varias versiones en UN turno de la cola, en el orden pedido. */
+  noteVersionsRead(versionIds: readonly number[]): Promise<Array<NoteVersion | null>>;
+  /** Si cada versión es de una nota BLOQUEADA, sin leer el cuerpo entero (solo su
+   *  prefijo); `null` si ya no existe. En UN turno de la cola. */
+  noteVersionsLocked(versionIds: readonly number[]): Promise<Array<boolean | null>>;
   /** Adjuntos de una nota, en el orden del cuerpo (ampliación de D2 del 30 sep 2026,
    *  adjuntos en solo lectura). Sin filtro: lo aplica la herramienta. */
   noteAttachments(noteId: string): Promise<NoteAttachmentRow[]>;

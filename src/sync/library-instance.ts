@@ -374,6 +374,7 @@ export class LibraryInstance implements NoteWriteTarget {
 function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
   return {
     libraryOpen: (): Promise<LibraryOpenInfo> => current().libraryOpen(),
+    libraryId: (): Promise<string> => current().libraryId(),
     noteCreate: (folderId?: string | null): Promise<NoteRow> => current().noteCreate(folderId),
     noteRead: (id: string): Promise<NoteRow | null> => current().noteRead(id),
     noteSave: (input: NoteSaveInput): Promise<NoteSaveResult> => current().noteSave(input),
@@ -382,22 +383,31 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     foldersList: (): Promise<FoldersList> => current().foldersList(),
     tagsList: (): Promise<TagsList> => current().tagsList(),
     resolveLink: (ref: string): Promise<LinkResolution> => current().resolveLink(ref),
+    resolveLinks: (refs: readonly string[]): Promise<LinkResolution[]> =>
+      current().resolveLinks(refs),
     backlinks: (id: string, cursor?: string | null, limit?: number): Promise<NotesPage> =>
       current().backlinks(id, cursor ?? null, limit),
     search: (
       q: string,
       cursor: string | null,
       limit?: number,
-      filters?: SearchFilters | null
-    ): Promise<SearchPage> => current().search(q, cursor, limit, filters),
+      filters?: SearchFilters | null,
+      scope?: NotesScope | null
+    ): Promise<SearchPage> => current().search(q, cursor, limit, filters, scope),
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
+    notesByExactTitle: (title: string): Promise<TitleCandidates> =>
+      current().notesByExactTitle(title),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
     noteVersionsList: (noteId: string): Promise<NoteVersionsList> =>
       current().noteVersionsList(noteId),
     noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>
       current().noteVersionRead(versionId),
+    noteVersionsRead: (versionIds: readonly number[]): Promise<Array<NoteVersion | null>> =>
+      current().noteVersionsRead(versionIds),
+    noteVersionsLocked: (versionIds: readonly number[]): Promise<Array<boolean | null>> =>
+      current().noteVersionsLocked(versionIds),
     noteAttachments: (noteId: string): Promise<NoteAttachmentRow[]> =>
       current().noteAttachments(noteId),
     blobRead: (sha256: string): Promise<Uint8Array | null> => current().blobRead(sha256),

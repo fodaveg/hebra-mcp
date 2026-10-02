@@ -1,19 +1,28 @@
 /**
  * `hebra_search` (SPEC.md §5): FTS5 sobre el cuerpo, con `folder?`/`subfolders?`/`tag?`
- * de filtro, `limit`/`cursor` y `fields?`. El puerto (`search`) ya filtra por etiqueta
- * (`SearchFilters.tags`); `folder?` no tiene filtro nativo (`SearchHit` no lleva
- * `folderId`), así que se aplica aquí, igual que el filtro de privados: la paginación
- * interna sigue pidiendo páginas hasta reunir `limit` resultados visibles o agotar el
- * almacén (SPEC.md §6.3). El cursor es la clave `(updatedAt, id)` del último resultado
- * devuelto, envuelta (`pagination.ts`): reanuda exactamente tras él.
+ * de filtro, `limit`/`cursor` y `fields?`. El puerto (`search`) filtra EN LA CONSULTA por
+ * etiqueta (`SearchFilters.tags`) y por carpeta (`NotesScope` de carpeta, con `subfolders`
+ * el subárbol efectivo de `folderSubtree`, el mismo de `hebra_list_notes`); solo el filtro
+ * de privados se aplica aquí, nota a nota: la paginación interna sigue pidiendo páginas
+ * hasta reunir `limit` resultados visibles o agotar el almacén (SPEC.md §6.3). El cursor
+ * es la clave `(updatedAt, id)` del último resultado devuelto, envuelta (`pagination.ts`):
+ * reanuda exactamente tras él.
+ *
+ * Carpeta: el ámbito del motor compara la carpeta GUARDADA de la nota con la carpeta pedida
+ * (o con su subárbol efectivo) y trata como raíz las notas cuya carpeta es lápida o
+ * desconocida, igual que la carpeta efectiva con la que filtraba esta herramienta. Con
+ * `subfolders`, el ámbito sigue el árbol de padres efectivos y no la coincidencia de
+ * prefijo de la ruta por nombre (que, con dos carpetas hermanas del mismo nombre, mezclaba
+ * sus notas).
  */
-import { canonicalTag, encodeCursor } from '../../hebra';
+import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import type { ToolContext } from '../context';
 import {
   LIMITS,
   effectiveLimit,
   fillPage,
   pickFields,
+  storePageSize,
   unwrapCursor,
   wrapCursor
 } from '../pagination';
@@ -26,9 +35,8 @@ export interface SearchResult {
   tags: string[];
   snippet: string;
   updatedAt: string;
+  isConflictCopy: boolean;
 }
-
-const PAGE_SIZE = 50;
 
 type SearchField = (typeof SEARCH_FIELDS)[number];
 
@@ -69,37 +77,37 @@ export async function runSearch(
     tagFilter = canonical;
   }
 
-  let folderId: string | undefined;
-  let folderPath = '';
+  let scope: NotesScope | null = null;
   if (input.folder !== undefined) {
     const resolved = ctx.privacy.folderIdForPath(input.folder);
     if (!resolved || ctx.privacy.isFolderHidden(resolved)) return empty;
-    folderId = resolved;
-    folderPath = ctx.privacy.folderPath(resolved);
+    scope = input.subfolders
+      ? { kind: 'folder', folderId: resolved, subfolders: true }
+      : { kind: 'folder', folderId: resolved };
   }
-  const inFolder = (noteFolderId: string): boolean => {
-    if (folderId === undefined) return true;
-    if (noteFolderId === folderId) return true;
-    if (!input.subfolders) return false;
-    const path = ctx.privacy.folderPath(noteFolderId);
-    return folderPath === '' || path.startsWith(`${folderPath}/`);
-  };
 
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor) =>
-      ctx.port.search(input.query, cursor, PAGE_SIZE, tagFilter ? { tags: [tagFilter] } : null),
+    fetch: (cursor, want) =>
+      ctx.port.search(
+        input.query,
+        cursor,
+        storePageSize(want),
+        tagFilter ? { tags: [tagFilter] } : null,
+        scope
+      ),
     accept: (hit) => {
       const meta = ctx.privacy.visibleMeta(hit.id);
-      if (!meta || !inFolder(meta.folderId)) return undefined;
+      if (!meta) return undefined;
       const result: SearchResult = {
         id: hit.id,
         title: hit.title,
         folderPath: ctx.privacy.folderPath(meta.folderId),
         tags: meta.tags,
         snippet: hit.snippet,
-        updatedAt: new Date(hit.updatedAt).toISOString()
+        updatedAt: new Date(hit.updatedAt).toISOString(),
+        isConflictCopy: hit.conflict
       };
       return pickFields(result, input.fields);
     },

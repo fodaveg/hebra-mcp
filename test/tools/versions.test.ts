@@ -56,7 +56,8 @@ describe('versiones anteriores', () => {
           createdAt: expect.any(String) as unknown as string,
           byteLength: Buffer.byteLength(VERSIONED_OLD_BODY, 'utf8')
         }
-      ]
+      ],
+      nextCursor: null
     });
     expect(await runReadVersion(await fresh(), { id, versionId })).toMatchObject({
       id,
@@ -71,7 +72,7 @@ describe('versiones anteriores', () => {
     // La nota es visible hoy…
     const read = await runReadNote(await fresh(), { id });
     // …pero su versión no sale, ni por la lista (sin recuento) ni por su id.
-    expect(await runListVersions(await fresh(), { id })).toEqual({ id, versions: [] });
+    expect(await runListVersions(await fresh(), { id })).toEqual({ id, versions: [], nextCursor: null });
     await expectNotFound(runReadVersion(await fresh(), { id, versionId }));
     // Restaurarla responde como una versión que no existe, sin escribir.
     await expectNotFound(

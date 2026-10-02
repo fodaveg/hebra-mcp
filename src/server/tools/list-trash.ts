@@ -16,7 +16,14 @@
 import { encodeCursor } from '../../hebra';
 import { TrashFilter } from '../../privacy/trash-filter';
 import type { ToolContext } from '../context';
-import { LIMITS, effectiveLimit, fillPage, unwrapCursor, wrapCursor } from '../pagination';
+import {
+  LIMITS,
+  effectiveLimit,
+  fillPage,
+  storePageSize,
+  unwrapCursor,
+  wrapCursor
+} from '../pagination';
 
 export interface TrashedNote {
   id: string;
@@ -30,8 +37,6 @@ export interface TrashedNote {
   isConflictCopy: boolean;
 }
 
-const PAGE_SIZE = 100;
-
 export async function runListTrash(
   ctx: ToolContext,
   input: { cursor?: string; limit?: number }
@@ -43,7 +48,7 @@ export async function runListTrash(
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor) => ctx.port.notesPage(cursor, PAGE_SIZE, { kind: 'trash' }),
+    fetch: (cursor, want) => ctx.port.notesPage(cursor, storePageSize(want), { kind: 'trash' }),
     accept: (item): TrashedNote | undefined => {
       const meta = trash.visibleMeta(item.id);
       if (!meta) return undefined;

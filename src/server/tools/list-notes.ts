@@ -24,6 +24,7 @@ import {
   LIMITS,
   effectiveLimit,
   fillPage,
+  storePageSize,
   pickFields,
   unwrapCursor,
   wrapCursor
@@ -39,8 +40,6 @@ export interface ListedNote {
   updatedAt: string;
   isConflictCopy: boolean;
 }
-
-const PAGE_SIZE = 100;
 
 type ListNotesField = (typeof LIST_NOTES_FIELDS)[number];
 
@@ -106,7 +105,7 @@ export async function runListNotes(
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor) => ctx.port.notesPage(cursor, PAGE_SIZE, scope),
+    fetch: (cursor, want) => ctx.port.notesPage(cursor, storePageSize(want), scope),
     accept: (item) => {
       const meta = ctx.privacy.visibleMeta(item.id);
       if (!meta) return undefined;

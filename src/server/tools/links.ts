@@ -12,7 +12,15 @@
 import { encodeCursor } from '../../hebra';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
-import { LIMITS, effectiveLimit, fillPage, slicePage, unwrapCursor, wrapCursor } from '../pagination';
+import {
+  LIMITS,
+  effectiveLimit,
+  fillPage,
+  slicePage,
+  storePageSize,
+  unwrapCursor,
+  wrapCursor
+} from '../pagination';
 import { scanOutgoingRefs } from './link-scan';
 
 export interface OutgoingLink {
@@ -25,8 +33,6 @@ export interface BacklinkNote {
   id: string;
   title: string;
 }
-
-const BACKLINKS_PAGE_SIZE = 100;
 
 /** Contenido del cursor: `o` = posición en `outgoing`, `b` = cursor de backlinks del
  *  almacén. Una parte ausente = esa lista ya terminó (en la primera página, ambas
@@ -75,8 +81,10 @@ export async function runLinks(
     const refs = scanOutgoingRefs(note.body);
     const start = Math.min(position.o, refs.length);
     const page = slicePage(refs.slice(start), 'l1', { limit });
-    for (const ref of page.items) {
-      const resolution = await ctx.port.resolveLink(ref);
+    // Todas las refs de la página, en UN turno de la cola del almacén.
+    const resolutions = await ctx.port.resolveLinks(page.items);
+    for (const [index, ref] of page.items.entries()) {
+      const resolution = resolutions[index]!;
       const candidate = resolution.status === 'resolved' ? resolution.candidates[0] : undefined;
       if (candidate && candidate.kind === 'note' && ctx.privacy.visibleMeta(candidate.id)) {
         outgoing.push({ ref, resolvedId: candidate.id, title: candidate.title });
@@ -93,7 +101,7 @@ export async function runLinks(
     const page = await fillPage({
       limit,
       startCursor: position.b,
-      fetch: (cursor) => ctx.port.backlinks(input.id, cursor, BACKLINKS_PAGE_SIZE),
+      fetch: (cursor, want) => ctx.port.backlinks(input.id, cursor, storePageSize(want)),
       accept: (item) =>
         ctx.privacy.visibleMeta(item.id) ? { id: item.id, title: item.title } : undefined,
       cursorAfter: (item) => encodeCursor([item.favorite ? 1 : 0, item.updatedAt], item.id)

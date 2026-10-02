@@ -9,6 +9,8 @@ import {
   fillPage,
   pickFields,
   slicePage,
+  STORE_PAGE_MAX,
+  storePageSize,
   unwrapCursor,
   wrapCursor
 } from '../src/server/pagination';
@@ -71,6 +73,30 @@ describe('fillPage', () => {
 
   it('una biblioteca solo de ocultas da una página vacía y sin cursor', async () => {
     expect(await pageThrough(build('hhh'), 5)).toEqual([[]]);
+  });
+
+  it('pide al almacén lo que falta más uno, y `storePageSize` lo acota al máximo del motor', async () => {
+    const wants: number[] = [];
+    const items = build('hhvhhvhvvv');
+    const store = fakeStore(items, 2);
+    const page = await fillPage({
+      limit: 3,
+      startCursor: null,
+      fetch: (cursor, want) => {
+        wants.push(want);
+        return store(cursor);
+      },
+      accept: (item) => (item.hidden ? undefined : item.id),
+      cursorAfter: (item) => String(items.indexOf(item))
+    });
+    expect(page.items).toEqual(['n2', 'n5', 'n7']);
+    // limit + 1 la primera vez; luego lo que falta + 1 (sin depender de cuántas ocultas hay
+    // por el camino: solo de lo ya aceptado).
+    expect(wants).toEqual([4, 4, 3, 2, 1]);
+    expect(storePageSize(Number.POSITIVE_INFINITY)).toBe(STORE_PAGE_MAX);
+    expect(storePageSize(101)).toBe(101);
+    expect(storePageSize(0)).toBe(1);
+    expect(storePageSize(10_000)).toBe(200);
   });
 });
 
