@@ -1,14 +1,12 @@
 /**
  * `hebra_read_note` (SPEC.md §5): `id` o `title`, exactamente uno. Por `id`,
- * `noteRead`; por `title`, coincidencia EXACTA (no el prefijo que da
- * `notesByTitlePrefix`, así que se filtra por `canonicalTitle`) entre las notas
- * VISIBLES. Una nota en la papelera, oculta por privacidad, o simplemente inexistente,
+ * `noteRead`; por `title`, coincidencia EXACTA (`title_norm = canonicalTitle(title)`,
+ * `notesByExactTitle`) entre las notas VISIBLES. Una nota en la papelera, oculta por privacidad, o simplemente inexistente,
  * responde igual: `not_found` (SPEC.md §6.3: «igual que una inexistente»).
  *
  * `revision` (D2 ampliada, 28 sep 2026): la versión leída, opaca, que `hebra_edit_note`
  * pide como `expectedRevision`.
  */
-import { canonicalTitle } from '../../hebra';
 import { encodeRevision } from '../../store/revision';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
@@ -27,18 +25,20 @@ export interface ReadNoteOutput {
   revision: string;
 }
 
-const TITLE_CANDIDATES_LIMIT = 50;
+/** Candidatas que enseña `ambiguous_title`: acotadas, pero DESPUÉS de filtrar las ocultas,
+ *  así que ni su número ni cuáles salen dependen de cuántas notas ocultas comparten título. */
+const AMBIGUOUS_CANDIDATES_MAX = 50;
 
+/** Coincidencia EXACTA de título entre las notas visibles. Se piden TODAS las notas con ese
+ *  título (`notesByExactTitle`) y se filtra después: con el prefijo del motor (cortado a 50)
+ *  una visible podía quedar detrás de 50 ocultas y dar un `not_found` falso. */
 async function resolveIdByTitle(ctx: ToolContext, title: string): Promise<string> {
-  const target = canonicalTitle(title);
-  const { items } = await ctx.port.notesByTitlePrefix(title, TITLE_CANDIDATES_LIMIT);
-  const candidates = items.filter(
-    (item) => canonicalTitle(item.title) === target && ctx.privacy.visibleMeta(item.id) !== undefined
-  );
+  const { items } = await ctx.port.notesByExactTitle(title);
+  const candidates = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   if (candidates.length === 0) throw new ToolError('not_found');
   if (candidates.length > 1) {
     throw new ToolError('ambiguous_title', {
-      candidates: candidates.map((candidate) => {
+      candidates: candidates.slice(0, AMBIGUOUS_CANDIDATES_MAX).map((candidate) => {
         const meta = ctx.privacy.visibleMeta(candidate.id)!;
         return { id: candidate.id, title: candidate.title, folderPath: ctx.privacy.folderPath(meta.folderId) };
       })

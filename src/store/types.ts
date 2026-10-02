@@ -106,6 +106,9 @@ export interface HebraLibraryPort {
     scope?: NotesScope | null
   ): Promise<SearchPage>;
   notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates>;
+  /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
+   *  de `notesByTitlePrefix`). */
+  notesByExactTitle(title: string): Promise<TitleCandidates>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
    *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
    *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota

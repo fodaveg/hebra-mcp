@@ -380,6 +380,8 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     ): Promise<SearchPage> => current().search(q, cursor, limit, filters, scope),
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
+    notesByExactTitle: (title: string): Promise<TitleCandidates> =>
+      current().notesByExactTitle(title),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
     noteVersionsList: (noteId: string): Promise<NoteVersionsList> =>

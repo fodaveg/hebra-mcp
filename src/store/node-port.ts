@@ -258,6 +258,34 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   /**
+   * TODAS las notas vivas cuyo título normalizado (`canonicalTitle`) es exactamente
+   * `title`, por id. `notesByTitlePrefix` del motor corta a 50 por prefijo: con más de 50
+   * notas del mismo título (o 50 ocultas por privacidad delante de la visible), las que
+   * quedan fuera no se veían. SQL propio sobre `notes`/`folders` de `schema.sql`, con la
+   * misma carpeta efectiva que `notesByTitlePrefix`; el filtro de privados lo aplica
+   * quien llama, sobre TODAS, antes de decidir nada.
+   */
+  async notesByExactTitle(title: string): Promise<TitleCandidates> {
+    const normalized = canonicalTitle(title);
+    return this.read(() => {
+      const rows = this.prepared(
+        `SELECT n.id AS id, n.title AS title,
+                CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id
+         FROM notes n LEFT JOIN folders f ON f.id = n.folder_id
+         WHERE n.title_norm = ? AND n.deleted = 0 AND n.trashed_at IS NULL
+         ORDER BY n.id`
+      ).all(normalized) as Array<{ id: string; title: string | null; folder_id: string }>;
+      return {
+        items: rows.map((row) => ({
+          id: String(row.id),
+          title: String(row.title ?? ''),
+          folderId: String(row.folder_id)
+        }))
+      };
+    });
+  }
+
+  /**
    * Carpeta efectiva y etiquetas de cada nota viva, en UNA consulta (§ comentario de
    * `./types.ts`). Carpeta efectiva: la propia `folder_id` si esa carpeta existe y no
    * es lápida, si no la raíz (`root`) — misma regla que `rowToNote`/`notesPageQuery` de
