@@ -127,6 +127,7 @@ function isFamily(value: unknown): value is Family {
 
 export class TokenStore {
   private queue: Promise<unknown> = Promise.resolve();
+  private familiesRemoved: ((ids: readonly string[]) => () => Promise<void>) | null = null;
 
   private constructor(
     private readonly dataDir: string,
@@ -160,25 +161,38 @@ export class TokenStore {
   /** Identificadores de familias persistidas para limpiar bearers huérfanos al reiniciar. */
   familyIds(): string[] { return this.families.map((family) => family.id); }
 
+  /** Tras persistir, invalida en síncrono y devuelve una limpieza esperable fuera de la cola. */
+  onFamiliesRemoved(handler: (ids: readonly string[]) => () => Promise<void>): void {
+    this.familiesRemoved = handler;
+  }
+
   private alive(family: Family, revokedBefore: number, now: number): boolean {
     return family.createdAt > revokedBefore && family.expiresAt > now;
   }
 
   /** Serializa una mutación y la persiste antes de resolver. */
   private mutate<T>(operation: () => T | Promise<T>): Promise<T> {
-    const run = this.queue.then(async () => {
+    const committed = this.queue.then(async () => {
       const before = structuredClone(this.families);
+      let result: T;
+      let removed: string[];
       try {
-        const result = await operation();
+        result = await operation();
+        const liveIds = new Set(this.familyIds());
+        removed = before.filter((family) => !liveIds.has(family.id)).map((family) => family.id);
         await writeJsonAtomic(this.dataDir, tokensFilePath(this.dataDir), {
           version: 2,
           families: this.families
         } satisfies TokensFile);
-        return result;
       } catch (error) { this.families = before; throw error; }
+      const cleanup = removed.length ? this.familiesRemoved?.(removed) : undefined;
+      return { result, cleanup };
     });
-    this.queue = run.catch(() => undefined);
-    return run;
+    this.queue = committed.then(() => undefined, () => undefined);
+    return committed.then(async ({ result, cleanup }) => {
+      if (cleanup) await cleanup();
+      return result;
+    });
   }
 
   private prune(revokedBefore: number, now: number): void {
@@ -218,6 +232,7 @@ export class TokenStore {
   ): Promise<IssuedTokens> {
     return this.mutate(async () => {
       const now = this.now();
+      const priorIds = this.familyIds();
       this.prune(revokedBefore, now);
       if (input.authorizedAt <= revokedBefore) throw new Error('authorization_revoked');
       if (this.families.length >= MAX_FAMILIES) throw new Error('too_many_families');
@@ -238,7 +253,9 @@ export class TokenStore {
       const accessToken = this.newAccess(family, now);
       const refreshToken = this.newRefresh(family);
       this.families.push(family);
-      await storeBearer(family.id, this.familyIds());
+      // Conservar bearers de familias podadas hasta que la eliminación sea durable;
+      // el observador los revoca y retira después de persistir los tokens.
+      await storeBearer(family.id, [...priorIds, family.id]);
       return this.issued(family, accessToken, refreshToken);
     });
   }

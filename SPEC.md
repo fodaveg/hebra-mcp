@@ -598,8 +598,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   Consulta introspección en Lumbre al canjear y en cada refresh; en `/mcp` reutiliza en
   memoria, por familia y durante 30 s (`INTROSPECTION_CACHE_MS`), un resultado positivo
   y coherente con la concesión guardada, o hasta el `expiresAt` de la concesión si llega
-  antes (decisión D8). Nunca se guarda un `active: false`, un desajuste ni un error, y una
-  entrada caducada no se alarga si Lumbre no responde. Revocar solo esa fila Blob V2 corta
+  antes (decisión D8). El plazo de 30 s se mide también con reloj monotónico: un retroceso
+  del reloj de pared no lo prolonga. Nunca se guarda un `active: false`, un desajuste ni un
+  error, y una entrada caducada no se alarga si Lumbre no responde. Revocar solo esa fila Blob V2 corta
   el refresh al momento y los access en un máximo de 30 s, aunque sobreviva la credencial
   de emparejado.
 - Lumbre devuelve un `accountId` opaco, nunca `users.id`. La concesión upstream no se
@@ -622,7 +623,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   `oauth-set-secret` devuelve un error claro.
 - El formato v2 y la revocación local son independientes de la revocación visible en la
   página de Lumbre. Revocar una familia por OAuth corta primero su acceso local y luego
-  pide la revocación upstream. Revocar la concesión en Lumbre deja la introspección
+  pide la revocación upstream. Reutilizar un refresh fuera de su margen, podar una familia
+  caducada o revocar uno de sus access también retira su bearer local y pide esa revocación.
+  Revocar la concesión en Lumbre deja la introspección
   inactiva y cierra la familia en el siguiente refresh o, en `/mcp`, en el primer acceso
   tras caducar la introspección guardada (30 s como máximo); no borra notas ni el dispositivo.
   El cambio de emparejado local, la revocación OAuth de la familia y `oauth-revoke-all` no

@@ -61,8 +61,11 @@ interface AuthorizationCode {
 interface CachedIntrospection {
   grant: string;
   checkedAt: number;
+  monotonicCheckedAt: number;
   expiresAt: number;
 }
+
+interface IntrospectionAttempt { invalidated: boolean }
 
 /** Huella por valor de la concesión guardada: otra concesión en la misma familia no reutiliza la entrada. */
 function grantFingerprint(grant: ActiveGrant): string {
@@ -104,8 +107,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private readonly codes = new Map<string, AuthorizationCode>();
   /** Una entrada por familia viva; solo en memoria, nunca se persiste ni se registra. */
   private readonly introspections = new Map<string, CachedIntrospection>();
-  /** Sube con cada invalidación: una introspección en vuelo no repone una entrada ya borrada. */
+  /** Sube con oauth-revoke-all: ninguna introspección anterior puede dar acceso ni reponer caché. */
   private introspectionEpoch = 0;
+  private readonly inFlightIntrospections = new Map<string, Set<IntrospectionAttempt>>();
   private seenRevokedBefore: number | null = null;
 
   constructor(options: HebraOAuthProviderOptions) {
@@ -118,6 +122,19 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     this.backchannel = options.backchannel;
     this.clients = options.clients ?? new ClaudeClientsStore({ now: options.now });
     this.now = options.now ?? Date.now;
+    this.tokens.onFamiliesRemoved((ids) => {
+      const removed = ids.map((id) => {
+        this.forgetIntrospection(id);
+        return { id, bearer: this.grants.get(id) };
+      });
+      return async () => {
+        for (const { id, bearer } of removed) {
+          await this.grants.delete(id).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+          if (bearer) await this.backchannel.revoke(bearer)
+            .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+        }
+      };
+    });
   }
 
   get clientsStore(): OAuthRegisteredClientsStore { return this.clients; }
@@ -276,7 +293,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   /** Olvida la introspección de una familia; va antes de cualquier espera del camino que la invalida. */
   private forgetIntrospection(familyId: string): void {
     this.introspections.delete(familyId);
-    this.introspectionEpoch += 1;
+    for (const attempt of this.inFlightIntrospections.get(familyId) ?? []) attempt.invalidated = true;
   }
 
   /** Corta una familia: primero la caché, después sus tokens y su bearer. */
@@ -291,23 +308,30 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const entry = this.introspections.get(familyId);
     if (!entry) return false;
     const now = this.now();
-    if (entry.grant === grant && now >= entry.checkedAt && now < entry.expiresAt) return true;
+    const monotonicNow = performance.now();
+    if (entry.grant === grant && now >= entry.checkedAt && now < entry.expiresAt &&
+      monotonicNow >= entry.monotonicCheckedAt && monotonicNow - entry.monotonicCheckedAt < INTROSPECTION_CACHE_MS) return true;
     this.introspections.delete(familyId);
     return false;
   }
 
   /** Guarda un resultado positivo ya comparado con `grant`; caduca a los 30 s o con la concesión. */
-  private rememberIntrospection(familyId: string, grant: ActiveGrant, checkedAt: number, epoch: number): void {
+  private rememberIntrospection(familyId: string, grant: ActiveGrant, checkedAt: number, monotonicCheckedAt: number, epoch: number): void {
     if (epoch !== this.introspectionEpoch) return;
     const now = this.now();
-    for (const [id, entry] of this.introspections) if (entry.expiresAt <= now || now < entry.checkedAt) this.introspections.delete(id);
+    const monotonicNow = performance.now();
+    for (const [id, entry] of this.introspections) {
+      if (entry.expiresAt <= now || now < entry.checkedAt || monotonicNow < entry.monotonicCheckedAt ||
+        monotonicNow - entry.monotonicCheckedAt >= INTROSPECTION_CACHE_MS) this.introspections.delete(id);
+    }
     const expiresAt = Math.min(checkedAt + INTROSPECTION_CACHE_MS, Date.parse(grant.expiresAt));
-    if (!(expiresAt > now)) { this.introspections.delete(familyId); return; }
+    if (!(expiresAt > now) || monotonicNow < monotonicCheckedAt ||
+      monotonicNow - monotonicCheckedAt >= INTROSPECTION_CACHE_MS) { this.introspections.delete(familyId); return; }
     if (!this.introspections.has(familyId) && this.introspections.size >= MAX_INTROSPECTIONS) {
       const oldest = this.introspections.keys().next();
       if (!oldest.done) this.introspections.delete(oldest.value);
     }
-    this.introspections.set(familyId, { grant: grantFingerprint(grant), checkedAt, expiresAt });
+    this.introspections.set(familyId, { grant: grantFingerprint(grant), checkedAt, monotonicCheckedAt, expiresAt });
   }
 
   /**
@@ -323,13 +347,25 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (useCache && this.cachedIntrospection(familyId, grantFingerprint(grant))) return true;
     const epoch = this.introspectionEpoch;
     const checkedAt = this.now();
-    const inspected = await this.backchannel.introspect(bearer);
+    const monotonicCheckedAt = performance.now();
+    const attempt: IntrospectionAttempt = { invalidated: false };
+    const attempts = this.inFlightIntrospections.get(familyId) ?? new Set<IntrospectionAttempt>();
+    attempts.add(attempt);
+    this.inFlightIntrospections.set(familyId, attempts);
+    let inspected: ActiveGrant | null;
+    try { inspected = await this.backchannel.introspect(bearer); }
+    finally {
+      attempts.delete(attempt);
+      if (attempts.size === 0) this.inFlightIntrospections.delete(familyId);
+    }
     if (!inspected) { await this.dropFamily(familyId); return false; }
+    // Otra petición pudo invalidar la familia mientras Lumbre respondía.
+    if (attempt.invalidated || epoch !== this.introspectionEpoch) return false;
     if (inspected.credentialId !== grant.credentialId || inspected.clientId !== grant.clientId ||
       inspected.accountId !== grant.accountId || inspected.expiresAt !== grant.expiresAt || !sameBinding(inspected, grant)) {
       await this.dropFamily(familyId); return false;
     }
-    this.rememberIntrospection(familyId, grant, checkedAt, epoch);
+    this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
     return true;
   }
 
@@ -406,17 +442,12 @@ export class HebraOAuthProvider implements OAuthServerProvider {
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {
     const before = await this.revokedBefore();
+    const access = this.tokens.verifyAccess(request.token, before);
     const family = this.tokens.lookupRefresh(request.token, client.client_id, before) ??
-      this.tokens.verifyAccess(request.token, before);
+      (access?.clientId === client.client_id ? access : null);
     // Antes de esperar nada: una petición concurrente no entra con la introspección guardada.
     if (family) this.forgetIntrospection(family.familyId);
     const result = await this.tokens.revoke(request.token, client.client_id);
-    if (family) this.forgetIntrospection(family.familyId);
-    if (result === 'family' && family) {
-      const bearer = this.grants.get(family.familyId);
-      await this.grants.delete(family.familyId);
-      if (bearer) await this.backchannel.revoke(bearer).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
-    }
     logEvent({ event: 'oauth.revoke', result });
   }
 }
