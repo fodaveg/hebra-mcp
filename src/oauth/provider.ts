@@ -297,11 +297,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     for (const attempt of this.inFlightIntrospections.get(familyId) ?? []) attempt.invalidated = true;
   }
 
-  /** Corta una familia: primero la caché, después sus tokens y su bearer. */
+  /** Corta una familia; el observador de TokenStore revoca y retira el bearer. */
   private async dropFamily(familyId: string): Promise<void> {
     this.forgetIntrospection(familyId);
     await this.tokens.dropFamily(familyId);
-    await this.grants.delete(familyId);
   }
 
   /** Entrada vigente y de esta misma concesión. Una caducada se borra y nunca se alarga. */
