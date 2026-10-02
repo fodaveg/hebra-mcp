@@ -68,6 +68,8 @@ export interface ServeContext {
 /**
  * Las escrituras sobre esta instancia, sin reenvío: las del escritor.
  *
+ * `isLinked`: hay runner de sync; así una escritura que no escribió nada (y no pide
+ * ronda) sabe distinguir `not_linked` de `uploaded`/`pending`.
  * `requestRound`: sin runner (sin emparejar), `null` (`not_linked`). Con runner, su
  * resultado; si el runner no hizo ronda (revocado o parado), un código en su lugar, para
  * que la herramienta diga `error` y no `not_linked`.
@@ -76,13 +78,14 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
   return buildWriteContext({
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
-    editNote: (input) => instance.editNote(input),
+    editNote: (input) => instance.editNoteLocal(input),
     recordEditConflict: (operationId, id, copyId) =>
       instance.recordEditConflict(operationId, id, copyId),
-    organize: (input) => instance.organize(input),
-    restoreVersion: (input) => instance.restoreVersion(input),
+    organize: (input) => instance.organizeLocal(input),
+    restoreVersion: (input) => instance.restoreVersionLocal(input),
     fetchAttachment: (input) => instance.fetchAttachment(input),
     noteRead: (id) => instance.port.noteRead(id),
+    isLinked: () => instance.syncRunner !== null,
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
     requestRound: () => {
       const runner = instance.syncRunner;

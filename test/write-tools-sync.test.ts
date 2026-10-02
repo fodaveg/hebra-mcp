@@ -48,14 +48,15 @@ function ctxFor(mcp: McpDevice): ServerContext {
   const write = buildWriteContext({
     createNote: (input) => mcp.writer.createNote(input),
     appendToNote: (input) => mcp.writer.appendToNote(input),
-    editNote: (input) => mcp.writer.editNote(input),
+    editNote: (input) => mcp.writer.editNoteLocal(input),
     recordEditConflict: (operationId, id, copyId) =>
       mcp.writer.recordEditConflict(operationId, id, copyId),
-    organize: (input) => mcp.writer.organize(input),
-    restoreVersion: (input) => mcp.writer.restoreVersion(input),
+    organize: (input) => mcp.writer.organizeLocal(input),
+    restoreVersion: (input) => mcp.writer.restoreVersionLocal(input),
     fetchAttachment: (input) => mcp.writer.fetchAttachment(input, (sha) => mcp.runner.readBlob(sha)),
     noteRead: (id) => mcp.port.noteRead(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
+    isLinked: () => true,
     requestRound: () => mcp.runner.requestRound()
   });
   return {

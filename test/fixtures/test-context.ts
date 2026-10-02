@@ -48,15 +48,16 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
   return buildWriteContext({
     createNote: (input) => writer.createNote(input),
     appendToNote: (input) => writer.appendToNote(input),
-    editNote: (input) => writer.editNote(input),
+    editNote: (input) => writer.editNoteLocal(input),
     recordEditConflict: (operationId, id, copyId) =>
       writer.recordEditConflict(operationId, id, copyId),
-    organize: (input) => writer.organize(input),
-    restoreVersion: (input) => writer.restoreVersion(input),
+    organize: (input) => writer.organizeLocal(input),
+    restoreVersion: (input) => writer.restoreVersionLocal(input),
     // Sin sync: solo dice si los bytes ya estaban aquí (no hay relé del que bajarlos).
     fetchAttachment: (input) => writer.fetchAttachment(input, null),
     noteRead: (id) => port.noteRead(id),
     onConflictCopy: () => () => {},
+    isLinked: () => false,
     requestRound: () => Promise.resolve(null)
   });
 }

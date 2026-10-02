@@ -63,6 +63,7 @@ import {
   type CreateNoteResult,
   type EditNoteInput,
   type EditNoteSaved,
+  type LocalWrite,
   type OrganizeInput,
   type OrganizeSaved,
   type RestoreVersionInput,
@@ -298,6 +299,21 @@ export class LibraryInstance implements NoteWriteTarget {
 
   editNote(input: EditNoteInput): Promise<EditNoteSaved> {
     return this.writer.editNote(input);
+  }
+
+  /** `editNote` diciendo si escribió (`NoteWriter.editNoteLocal`). */
+  editNoteLocal(input: EditNoteInput): Promise<LocalWrite<EditNoteSaved>> {
+    return this.writer.editNoteLocal(input);
+  }
+
+  /** `organize` diciendo si escribió (`NoteWriter.organizeLocal`). */
+  organizeLocal(input: OrganizeInput): Promise<LocalWrite<OrganizeSaved>> {
+    return this.writer.organizeLocal(input);
+  }
+
+  /** `restoreVersion` diciendo si escribió (`NoteWriter.restoreVersionLocal`). */
+  restoreVersionLocal(input: RestoreVersionInput): Promise<LocalWrite<EditNoteSaved>> {
+    return this.writer.restoreVersionLocal(input);
   }
 
   recordEditConflict(operationId: string, id: string, copyId: string): Promise<void> {

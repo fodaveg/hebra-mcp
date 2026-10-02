@@ -22,26 +22,34 @@ import type {
   OrganizeInput,
   OrganizeSaved,
   RestoreVersionInput,
-  FetchAttachmentInput
+  FetchAttachmentInput,
+  LocalWrite
 } from '../store/writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
-  /** El guardado local de una edición (`NoteWriter.editNote`), sin esperar ronda. */
-  editNote(input: EditNoteInput): Promise<EditNoteSaved>;
+  /** El guardado local de una edición (`NoteWriter.editNoteLocal`), sin esperar ronda.
+   *  `wrote: false`: no escribió nada (sin cambios o reintento): no se pide ronda. */
+  editNote(input: EditNoteInput): Promise<LocalWrite<EditNoteSaved>>;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda. */
   recordEditConflict(operationId: string, id: string, copyId: string): Promise<void>;
-  /** La organización local (`NoteWriter.organize`), sin esperar ronda. */
-  organize(input: OrganizeInput): Promise<OrganizeSaved>;
-  /** Restaurar una versión en local (`NoteWriter.restoreVersion`), sin esperar ronda. */
-  restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved>;
+  /** La organización local (`NoteWriter.organizeLocal`), sin esperar ronda. */
+  organize(input: OrganizeInput): Promise<LocalWrite<OrganizeSaved>>;
+  /** Restaurar una versión en local (`NoteWriter.restoreVersionLocal`), sin esperar ronda. */
+  restoreVersion(input: RestoreVersionInput): Promise<LocalWrite<EditNoteSaved>>;
   /** Traer al disco los bytes de un adjunto (`LibraryInstance.fetchAttachment`). */
   fetchAttachment(input: FetchAttachmentInput): Promise<boolean>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
+  /**
+   * Si esta instancia tiene sync (está emparejada). Solo se consulta cuando una escritura
+   * no escribió nada y por eso no pide ronda: con ronda, `not_linked` se deduce de que
+   * `requestRound` resuelve `null`.
+   */
+  isLinked(): boolean;
   /**
    * Pide una ronda de sync (SPEC.md §8: «una ronda justo después de cada escritura») y
    * resuelve con su resultado: un objeto con `result` (código cerrado del motor,
@@ -207,16 +215,28 @@ export function buildWriteContext(
   /** Guardado con revisión (`editNote`, `restoreVersion`): guarda, espera la ronda y,
    *  si la ronda produjo una copia de conflicto PARA ESTA nota, la devuelve y la anota
    *  en el registro de idempotencia. */
+  /** `SyncFields` de una escritura que no escribió nada: sin ronda ni espera. */
+  async function syncFieldsWithoutRound(id: string): Promise<SyncFields> {
+    if (!sources.isLinked()) return { sync: 'not_linked' };
+    return { sync: (await dirtyOf(id)) === false ? 'uploaded' : 'pending' };
+  }
+
   async function saveAndAwaitRound(
     input: { id: string; operationId: string },
-    save: () => Promise<EditNoteSaved>
+    save: () => Promise<LocalWrite<EditNoteSaved>>
   ): Promise<EditNoteOutcome> {
     let raceCopyId: string | undefined;
     const unsubscribe = sources.onConflictCopy((copy) => {
       if (copy.recordId === input.id && raceCopyId === undefined) raceCopyId = copy.copyId;
     });
     try {
-      const saved = await save();
+      const { result: saved, wrote } = await save();
+      if (!wrote) {
+        // Sin cambios o reintento: nada que subir, ni ronda ni espera. Un reintento de una
+        // edición que acabó en copia de conflicto ya la trae del registro (`saved`).
+        const target = saved.outcome === 'conflict_copy' ? saved.copyId : saved.id;
+        return { ...saved, ...(await syncFieldsWithoutRound(target)) };
+      }
       const wait = await awaitRound(roundTimeoutMs);
       let result: EditNoteSaved = saved;
       if (saved.outcome === 'saved' && raceCopyId !== undefined) {
@@ -248,7 +268,8 @@ export function buildWriteContext(
       available: await sources.fetchAttachment(input)
     }),
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
-      const saved = await sources.organize(input);
+      const { result: saved, wrote } = await sources.organize(input);
+      if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id)) };
       const wait = await awaitRound(roundTimeoutMs);
       return { ...saved, ...syncFieldsOf(wait, await dirtyOf(saved.id)) };
     }

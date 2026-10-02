@@ -727,23 +727,23 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         return { id: 'local', title: 'local', folderId: 'root' };
       },
       appendToNote: async (input) => ({ id: input.id, outcome: 'saved' as const }),
-      editNote: async (input) => ({ id: input.id, outcome: 'saved' as const, revision: 'r1.x' }),
+      editNote: async (input) => ({
+        result: { id: input.id, outcome: 'saved' as const, revision: 'r1.x' },
+        wrote: true
+      }),
       recordEditConflict: async () => undefined,
       organize: async (input) => ({
-        id: input.id,
-        folderId: 'root',
-        favorite: false,
-        archived: false,
-        trashed: false
+        result: { id: input.id, folderId: 'root', favorite: false, archived: false, trashed: false },
+        wrote: true
       }),
       restoreVersion: async (input) => ({
-        id: input.id,
-        outcome: 'saved' as const,
-        revision: 'r1.x'
+        result: { id: input.id, outcome: 'saved' as const, revision: 'r1.x' },
+        wrote: true
       }),
       fetchAttachment: async () => false,
       noteRead: async () => null,
       onConflictCopy: () => () => undefined,
+      isLinked: () => false,
       requestRound: async () => null
     });
     // `defineProperty`, no `Object.assign`: este copiaría el valor del getter una vez.

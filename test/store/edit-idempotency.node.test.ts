@@ -90,7 +90,10 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
     });
     instances.push(online);
     const again = await localWriteContext(online).editNote(input);
-    expect(again).toMatchObject({ outcome: 'saved', replayed: true, sync: 'uploaded' });
+    // El reintento no escribe, así que no pide ronda (R2): la fila sigue sucia y es `pending`
+    // hasta la siguiente ronda (la periódica, o esta explícita).
+    expect(again).toMatchObject({ outcome: 'saved', replayed: true, sync: 'pending' });
+    await online.syncRunner!.requestRound();
     expect(again.outcome === 'saved' && first.outcome === 'saved' && again.revision).toBe(
       first.outcome === 'saved' ? first.revision : null
     );
