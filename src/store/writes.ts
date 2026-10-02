@@ -209,6 +209,17 @@ export interface RestoreVersionInput {
   privacy: PrivacyConfig;
 }
 
+/**
+ * Resultado de una escritura que dice si de verdad escribió (`wrote`). Sin escritura (una
+ * edición sin cambios, un reintento con el mismo `operationId`, una organización que ya
+ * estaba en el estado pedido) no se pide ronda de sync ni se espera: no hay nada nuevo que
+ * subir (`src/server/write-context.ts`).
+ */
+export interface LocalWrite<T> {
+  result: T;
+  wrote: boolean;
+}
+
 /** Los errores del motor de Hebra que la organización de notas puede dar. */
 function organizeRejection(error: unknown): unknown {
   if (!(error instanceof LibraryError)) return error;
@@ -230,7 +241,7 @@ function noteSaved(row: NoteRow): OrganizeSaved {
 
 /** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de `sqlite-engine.ts`, Paridad Bear L
  *  §17). Una nota cuyo cuerpo empieza así no se edita, y una edición no puede producirlo. */
-const LOCKED_BODY_PREFIX = 'hebra-locked:';
+export const LOCKED_BODY_PREFIX = 'hebra-locked:';
 
 function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
@@ -285,14 +296,19 @@ function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): PrivacyFil
  *
  * `base`: la versión sobre la que se escribe. Por defecto, la de `note` (lo recién
  * leído); `editNote` pasa la de la revisión que trae el agente.
+ *
+ * `derived`: lo que ya devolvió `deriveNote(body)`, si quien llama lo analizó antes (para
+ * mirar sus etiquetas) y no quiere pagar el análisis dos veces. Tiene que ser el resultado
+ * COMPLETO de `deriveNote` sobre ESTE `body`, no una selección de campos.
  */
 export function saveInputFor(
   note: NoteRow,
   body: string,
-  base: { localSeq: number; bodySha256: string } = note
+  base: { localSeq: number; bodySha256: string } = note,
+  derived: ReturnType<typeof deriveNote> = deriveNote(body)
 ): NoteSaveInput {
   return {
-    ...deriveNote(body),
+    ...derived,
     id: note.id,
     body,
     expectedLocalSeq: base.localSeq,
@@ -342,7 +358,7 @@ export class NoteWriter {
         throw writeRejected('not_found');
       }
       const note = await store.noteCreate(folderId);
-      const saved = await store.noteSave(saveInputFor(note, input.body));
+      const saved = await store.noteSave(saveInputFor(note, input.body, note, derived));
       // Recién creada, nadie más la conoce: `redirected` aquí sería un fallo del motor,
       // no un conflicto. Se devuelve igual el id donde quedó el texto.
       const id = saved.outcome === 'saved' ? note.id : saved.redirectedTo;
@@ -402,6 +418,12 @@ export class NoteWriter {
    * con una copia visible, y quien espera la ronda lo anota con `recordEditConflict`.
    */
   async editNote(input: EditNoteInput): Promise<EditNoteSaved> {
+    return (await this.editNoteLocal(input)).result;
+  }
+
+  /** `editNote` diciendo si escribió (`LocalWrite`): lo usa `WriteContext` para no
+   *  esperar una ronda cuando no hubo nada que subir. */
+  async editNoteLocal(input: EditNoteInput): Promise<LocalWrite<EditNoteSaved>> {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
@@ -470,7 +492,7 @@ export class NoteWriter {
       return { result: outcome, wrote: true };
     });
     if (wrote) this.written();
-    return result;
+    return { result, wrote };
   }
 
   /**
@@ -491,6 +513,11 @@ export class NoteWriter {
    *    dispositivo la cambió a la vez, copia de conflicto visible, como `editNote`.
    */
   async restoreVersion(input: RestoreVersionInput): Promise<EditNoteSaved> {
+    return (await this.restoreVersionLocal(input)).result;
+  }
+
+  /** `restoreVersion` diciendo si escribió (`LocalWrite`), como `editNoteLocal`. */
+  async restoreVersionLocal(input: RestoreVersionInput): Promise<LocalWrite<EditNoteSaved>> {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
@@ -558,7 +585,7 @@ export class NoteWriter {
       return { result: outcome, wrote: true };
     });
     if (wrote) this.written();
-    return result;
+    return { result, wrote };
   }
 
   /**
@@ -583,18 +610,38 @@ export class NoteWriter {
    * Lo demás (oculta, inexistente, lápida), `not_found`, sin distinguir.
    */
   async organize(input: OrganizeInput): Promise<OrganizeSaved> {
-    const result = await this.target.writeExclusive(async (store) => {
+    return (await this.organizeLocal(input)).result;
+  }
+
+  /**
+   * `organize` diciendo si escribió (`LocalWrite`). Una nota que ya está en el estado
+   * pedido (favorita ya puesta, ya archivada, ya en esa carpeta, ya en la papelera, ya
+   * fuera de ella) se devuelve tal cual: sin llamar al motor (que subiría `local_seq` y
+   * la dejaría sucia sin nada nuevo que subir) y sin ronda de sync. La visibilidad y el
+   * destino se comprueban igual antes, así que un `not_found` no cambia.
+   */
+  async organizeLocal(input: OrganizeInput): Promise<LocalWrite<OrganizeSaved>> {
+    const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<OrganizeSaved>> => {
       const filter = privacyInTurn(store, input.privacy);
 
       const requireVisibleFolder = (id: string): void => {
         if (!filter.folderExists(id) || filter.isFolderHidden(id)) throw writeRejected('not_found');
       };
-      const requireVisibleNote = async (id: string): Promise<void> => {
+      const requireVisibleNote = async (id: string): Promise<NoteRow> => {
         const row = await store.noteRead(id);
         if (!row || row.trashedAt !== null || filter.isHiddenNote(id)) {
           throw writeRejected('not_found');
         }
+        return row;
       };
+      const unchanged = (row: NoteRow): LocalWrite<OrganizeSaved> => ({
+        result: noteSaved(row),
+        wrote: false
+      });
+      const written = (row: NoteRow): LocalWrite<OrganizeSaved> => ({
+        result: noteSaved(row),
+        wrote: true
+      });
       /** La nota, viva y visible, o en la papelera y visible para el filtro de la
        *  papelera; si no, `not_found`. */
       const visibleLiveOrTrashed = async (id: string): Promise<NoteRow> => {
@@ -610,33 +657,39 @@ export class NoteWriter {
 
       try {
         switch (input.action) {
-          case 'moveNote':
-            await requireVisibleNote(input.id);
+          case 'moveNote': {
+            const row = await requireVisibleNote(input.id);
             requireVisibleFolder(input.folderId);
-            return noteSaved(await store.noteMove(input.id, input.folderId));
-          case 'setFavorite':
-            await requireVisibleNote(input.id);
-            return noteSaved(await store.noteSetFavorite(input.id, input.favorite));
-          case 'setArchived':
-            await requireVisibleNote(input.id);
-            return noteSaved(
+            if (row.folderId === input.folderId) return unchanged(row);
+            return written(await store.noteMove(input.id, input.folderId));
+          }
+          case 'setFavorite': {
+            const row = await requireVisibleNote(input.id);
+            if (row.favorite === input.favorite) return unchanged(row);
+            return written(await store.noteSetFavorite(input.id, input.favorite));
+          }
+          case 'setArchived': {
+            const row = await requireVisibleNote(input.id);
+            if ((row.archivedAt !== null) === input.archived) return unchanged(row);
+            return written(
               input.archived ? await store.noteArchive(input.id) : await store.noteUnarchive(input.id)
             );
+          }
           case 'trashNote': {
             const row = await visibleLiveOrTrashed(input.id);
-            return noteSaved(row.trashedAt === null ? await store.noteTrash(input.id) : row);
+            return row.trashedAt === null ? written(await store.noteTrash(input.id)) : unchanged(row);
           }
           case 'restoreNote': {
             const row = await visibleLiveOrTrashed(input.id);
-            return noteSaved(row.trashedAt === null ? row : await store.noteRestore(input.id));
+            return row.trashedAt === null ? unchanged(row) : written(await store.noteRestore(input.id));
           }
         }
       } catch (error) {
         throw organizeRejection(error);
       }
     });
-    this.written();
-    return result;
+    if (outcome.wrote) this.written();
+    return outcome;
   }
 
   /**
