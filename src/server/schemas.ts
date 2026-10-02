@@ -14,7 +14,14 @@ const cursorField = z
   .describe('`nextCursor` de la página anterior (opaco). Ausente: primera página.');
 
 /** Campos que se pueden pedir con `fields` (`id` sale siempre). */
-export const SEARCH_FIELDS = ['title', 'folderPath', 'tags', 'snippet', 'updatedAt'] as const;
+export const SEARCH_FIELDS = [
+  'title',
+  'folderPath',
+  'tags',
+  'snippet',
+  'updatedAt',
+  'isConflictCopy'
+] as const;
 export const LIST_NOTES_FIELDS = [
   'title',
   'folderPath',
@@ -28,7 +35,8 @@ export const searchInputShape = {
   query: z.string().min(1),
   limit: z.number().int().min(1).max(50).optional(),
   cursor: cursorField,
-  folder: z.string().optional(),
+  folder: z.string().optional()
+    .describe('Ruta de carpeta, como `path` de hebra_list_folders.'),
   /** Igual que en `hebra_list_notes`: con `folder`, incluye su subárbol. */
   subfolders: z.boolean().optional(),
   tag: z.string().optional(),
@@ -40,7 +48,8 @@ export const searchInputShape = {
 };
 
 export const listNotesInputShape = {
-  folder: z.string().optional(),
+  folder: z.string().optional()
+    .describe('Ruta de carpeta, como `path` de hebra_list_folders.'),
   /** Con `folder`, incluye también las notas de sus subcarpetas (carpetas reales,
    *  decisión de David del 27 sep 2026). Ausente o `false`: solo las directas, como
    *  siempre. Sin `folder`, no tiene efecto. */
@@ -84,6 +93,7 @@ export const listFoldersInputShape = {
 export const createNoteInputShape = {
   body: z.string(),
   folder: z.string().optional()
+    .describe('Ruta de carpeta, como `path` de hebra_list_folders.')
 };
 
 /** Sin `.max()`: el límite de `text` lo aplica `append-to-note.ts`. */
@@ -139,7 +149,7 @@ export const restoreNoteInputShape = {
 };
 
 export const listTrashInputShape = {
-  cursor: z.string().optional(),
+  cursor: cursorField,
   limit: z.number().int().min(1).max(100).optional()
 };
 
@@ -147,7 +157,9 @@ export const listTrashInputShape = {
 const VERSION_ID = z.number().int().min(1).describe('versionId de hebra_list_versions.');
 
 export const listVersionsInputShape = {
-  id: z.string()
+  id: z.string(),
+  limit: z.number().int().min(1).max(200).optional().describe('Máximo de resultados por página.'),
+  cursor: cursorField
 };
 
 export const readVersionInputShape = {
@@ -168,10 +180,25 @@ export const restoreVersionInputShape = {
 
 /** Adjuntos en solo lectura (ampliación de D2, 30 sep 2026). */
 export const listAttachmentsInputShape = {
-  id: z.string()
+  id: z.string(),
+  limit: z.number().int().min(1).max(200).optional().describe('Máximo de resultados por página.'),
+  cursor: cursorField
 };
 
 export const readAttachmentInputShape = {
   id: z.string(),
-  attachmentId: z.string().describe('attachmentId de hebra_list_attachments (SHA-256).')
+  attachmentId: z.string().describe('attachmentId de hebra_list_attachments (SHA-256).'),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('Solo adjuntos de texto: carácter por el que empezar. Por defecto 0.'),
+  maxChars: z
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .optional()
+    .describe('Solo adjuntos de texto: cuántos caracteres devolver. Por defecto y máximo 100 000.')
 };

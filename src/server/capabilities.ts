@@ -55,6 +55,7 @@ export interface Capabilities {
     links: { max: number };
     listTags: { max: number };
     listFolders: { max: number };
+    listTrash: { default: number; max: number };
     createNoteBodyChars: number;
     appendTextChars: number;
     editNote: { maxEdits: number; maxTotalChars: number; operationIdChars: number };
@@ -77,6 +78,7 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
       links: { max: LIMITS.links.max },
       listTags: { max: LIMITS.listTags.max },
       listFolders: { max: LIMITS.listFolders.max },
+      listTrash: { default: LIMITS.listTrash.default, max: LIMITS.listTrash.max },
       createNoteBodyChars: CREATE_BODY_MAX_LENGTH,
       appendTextChars: APPEND_TEXT_MAX_LENGTH,
       editNote: {
@@ -95,7 +97,7 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
 export const SERVER_INSTRUCTIONS = [
   'Hebra es una biblioteca de notas Markdown. Este servidor la lee, busca, crea, edita y organiza (mover, favorita, archivar), y manda notas a la papelera y las saca (reversible).',
   'Versiones anteriores de una nota (hebra_list_versions, hebra_read_version): solo las de este dispositivo; hebra_restore_version es una edición nueva y pide `expectedRevision` y un operationId nuevo.',
-  'Las listas (hebra_search, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders, hebra_list_trash) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
+  'Las listas (hebra_search, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders, hebra_list_trash, hebra_list_versions, hebra_list_attachments) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
   'hebra_search y hebra_list_notes aceptan `fields` para pedir solo algunos campos.',
   'Para editar: lee con hebra_read_note, usa su `revision` como expectedRevision en hebra_edit_note y un operationId nuevo por edición.',
   'No permite purgar notas, vaciar la papelera ni borrar de forma irreversible, ni gestionar carpetas, ni añadir, cambiar o borrar adjuntos (los adjuntos solo se leen: hebra_list_attachments, hebra_read_attachment). Algunas notas pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran.',
