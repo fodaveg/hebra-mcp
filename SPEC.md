@@ -110,9 +110,9 @@ Reglas comunes:
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}` |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
-| `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`. |
+| `hebra_read_note` | `id` o `title` (exactamente uno) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`, como mucho 50 y solo visibles. |
 | `hebra_list_tags` | `limit?` (1-500; sin él, todas), `cursor?` | `{tags: [{tag, count}], nextCursor}` (anidadas como `a/b`) |
 | `hebra_list_folders` | `limit?` (1-500; sin él, todas), `cursor?` | `{folders: [{id, path, count}], nextCursor}` |
 | `hebra_links` | `id`, `limit?` (1-200; sin él, todo), `cursor?` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}], nextCursor}` |
@@ -125,11 +125,11 @@ Reglas comunes:
 | `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
 | `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
 | `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
-| `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. |
+| `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
 | `hebra_read_version` | `id`, `versionId` | `{id, versionId, createdAt, byteLength, body}`. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` (≤ 200) | igual que `hebra_edit_note`, con los mismos errores salvo los de las sustituciones. |
-| `hebra_list_attachments` | `id`, `limit?` (1-200), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `attachmentId`: el SHA-256 del adjunto; `name`: el alias `\|nombre` del cuerpo o `null`; `mimeType` (orientativo) y `byteLength`: `null` si no se saben sin bajarlo. Errores: `not_found`, `note_locked`. |
-| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000; solo texto) | Imagen, PDF: un bloque `{id, attachmentId, name, mimeType, byteLength}` y el contenido íntegro como `image` (base64 + `mimeType`) o `resource` embebido (blob base64 + URI opaca `hebra-attachment:<sha256>`). Texto, Markdown, CSV, JSON: bloque `{id, attachmentId, name, mimeType, byteLength, totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `attachment_unavailable`. |
+| `hebra_list_attachments` | `id`, `limit?` (1-200; sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `attachmentId`: el SHA-256 del adjunto; `name`: el alias `\|nombre` del cuerpo o `null`; `mimeType` (orientativo) y `byteLength`: `null` si no se saben sin bajarlo. Errores: `not_found`, `note_locked`, `invalid_input` (un `cursor` cuyo adjunto ya no está). |
+| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000). Solo cambian el resultado en los adjuntos de texto, pero se validan siempre: fuera de rango, `invalid_input`, también con imágenes y PDF. `attachmentId` acepta mayúsculas y el prefijo `sha256:`; si no es un SHA-256 en hexadecimal, `not_found`. | Imagen, PDF: un bloque `{id, attachmentId, name, mimeType, byteLength}` y el contenido íntegro como `image` (base64 + `mimeType`) o `resource` embebido (blob base64 + URI opaca `hebra-attachment:<sha256>`). Texto, Markdown, CSV, JSON: bloque `{id, attachmentId, name, mimeType, byteLength, totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Errores: `invalid_input`, `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `attachment_unavailable`. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8):
@@ -144,7 +144,7 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   `null` al final. Los valores por defecto son búsqueda 20, notas 50, papelera 50, versiones 50, adjuntos todo si no hay `limit`; etiquetas, carpetas y
   enlaces, todo si no hay `limit`. El cursor es opaco y lleva un prefijo por herramienta: el de una
   no vale en otra (`invalid_input`). En las listas de notas es la clave del último resultado
-  devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento.
+  devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento; en versiones, el id de la última versión devuelta, y en adjuntos, su `attachmentId`. Si ese elemento ya no está, el cursor da `invalid_input`.
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
 - **Las ocultas no se notan** (§6.3): una página se rellena hasta `limit` solo con notas visibles;
   `nextCursor` existe solo si hay otra nota VISIBLE detrás (se mira una por delante), así que ni el
@@ -266,7 +266,7 @@ Detalle de las escrituras (D2):
     válido sin NUL. Un JSON ilegible pasa como `text/plain`. Lo demás, incluida una «imagen» cuyos
     bytes no lo son: `attachment_type_not_allowed`.
   - Una nota bloqueada da `note_locked` (sus adjuntos van cifrados con ella).
-  - **Lectura de adjuntos de texto por tramos** (decisión 2b, 2 oct 2026): para texto plano, Markdown, CSV y JSON, `hebra_read_attachment` acepta `offset?` (carácter por el que empezar, def. 0) y `maxChars?` (1–100 000, def. 100 000). La respuesta lleva `totalChars`, `truncated` y `nextOffset` (`null` al final). Para leer el resto, repetir con `offset = nextOffset`. Imágenes y PDF no cambian: siempre íntegros.
+  - **Lectura de adjuntos de texto por tramos** (decisión 2b, 2 oct 2026): para texto plano, Markdown, CSV y JSON, `hebra_read_attachment` acepta `offset?` (carácter por el que empezar, def. 0) y `maxChars?` (1–100 000, def. 100 000). La respuesta lleva `totalChars`, `truncated` y `nextOffset` (`null` al final). Para leer el resto, repetir con `offset = nextOffset`. Imágenes y PDF no cambian: siempre íntegros, aunque `offset` y `maxChars` se validan igual (fuera de rango, `invalid_input`).
 - No se exponen `notePurge`, `trashEmpty`, `trashCounts` (contaría las privadas),
   `noteVersionsPurgeExpired`, `folderTrash`, `file*` ni `tagRename`: el servidor ni siquiera las
   importa en su capa de herramientas (`test/store/surface.node.test.ts`). Tampoco `blobPut`: solo
