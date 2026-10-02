@@ -9,7 +9,7 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 30 de septiembre de 2026: el servidor MCP tiene 21 herramientas (detalle en
+Estado a 2 de octubre de 2026: el servidor MCP tiene 21 herramientas (detalle en
 `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
@@ -19,9 +19,10 @@ Estado a 30 de septiembre de 2026: el servidor MCP tiene 21 herramientas (detall
 - Organización: `hebra_move_note`, `hebra_set_favorite` y `hebra_set_archived`.
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
-  `hebra_restore_version`.
-- Adjuntos, solo lectura: `hebra_list_attachments` y `hebra_read_attachment` (hasta 5 MiB;
-  imágenes PNG, JPEG, GIF y WebP, PDF, texto plano, Markdown, CSV y JSON).
+  `hebra_restore_version` (paginadas: limit 1-200, def. 50).
+- Adjuntos, solo lectura: `hebra_list_attachments` (paginados: limit 1-200) y `hebra_read_attachment`
+  (hasta 5 MiB descifrados; imágenes PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON;
+  lectura de texto por tramos: offset, maxChars 1–100 000, def. 100 000).
 
 Emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
 por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
