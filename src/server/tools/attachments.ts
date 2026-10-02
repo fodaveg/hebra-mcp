@@ -55,6 +55,8 @@ import { ToolContent, ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
 import type { NoteAttachmentRow } from '../../store/types';
+import { LOCKED_BODY_PREFIX } from '../../store/writes';
+import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 /** 5 MiB descifrados por adjunto (decisión de David, 30 sep 2026). */
@@ -211,7 +213,6 @@ function attachmentNames(body: string): Map<string, string> {
   return names;
 }
 
-const LOCKED_BODY_PREFIX = 'hebra-locked:';
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 /** La nota visible (si no, `not_found`) y no bloqueada (si no, `note_locked`), con sus
@@ -220,7 +221,7 @@ async function visibleNoteAttachments(
   ctx: ToolContext,
   id: string
 ): Promise<{ rows: NoteAttachmentRow[]; names: Map<string, string> }> {
-  if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
+  requireVisibleNote(ctx, id);
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
   if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw new ToolError('note_locked');

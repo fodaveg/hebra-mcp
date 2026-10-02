@@ -55,7 +55,7 @@ Hebra**, no desde aquí, porque los errores de esas operaciones revelaban carpet
 | Buscar, listar, leer, ver etiquetas, carpetas, enlaces y backlinks | Reescribir el cuerpo entero de una nota |
 | Crear una nota nueva (en una carpeta existente o en la raíz) | Borrar para siempre (purgar) ni vaciar la papelera |
 | Añadir texto al FINAL de una nota | Crear, renombrar o mover carpetas |
-| Editar partes de una nota con `{find, replace}` (renombrar = editar el `# H1`; etiquetar = editar el texto) | Añadir, subir, cambiar o borrar adjuntos |
+| Editar partes de una nota con `{find, replace}` (renombrar = editar el `title:` del frontmatter si lo tiene, si no el `# H1`; etiquetar = editar el texto) | Añadir, subir, cambiar o borrar adjuntos |
 | Mover una nota a una carpeta que ya existe | Renombrar una etiqueta en toda la biblioteca |
 | Marcar o quitar favorita; archivar o desarchivar | Editar una nota bloqueada (`note_locked`); sí se puede organizar |
 | Mandar una nota a la papelera, sacarla y listar la papelera | |
@@ -70,13 +70,13 @@ pegue, o una edición por sustituciones.
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`) | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}`. Ignora tildes. Pagina con `nextCursor`. |
+| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}`. Ignora tildes. Pagina con `nextCursor`. |
 | `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
-| `hebra_read_note` | `id` **o** `title` (exactamente uno) | Cuerpo íntegro y **`revision`** (la necesita la edición). Título ambiguo → `ambiguous_title` con candidatos. |
+| `hebra_read_note` | `id` **o** `title` (exactamente uno) | Cuerpo íntegro y **`revision`** (la necesita la edición). Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
 | `hebra_links` | `id`, `limit?` 1-200, `cursor?` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. Pagina con `nextCursor`. |
-| `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El primer `# H1` del cuerpo es el título. |
+| `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El título es el `title:` del frontmatter si lo hay y, si no, el primer `# H1` del cuerpo. |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | Añade `\n\n` + texto al final. `outcome: saved \| conflict_copy`. |
 | `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `sync`, `replayed`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
@@ -85,12 +85,12 @@ pegue, o una edición por sustituciones.
 | `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
 | `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
 | `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
-| `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. Pagina con `nextCursor`. |
+| `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. Pagina con `nextCursor`; un cursor cuya versión ya no existe da `invalid_input`. |
 | `hebra_read_version` | `id`, `versionId` | El cuerpo de esa versión. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
-| `hebra_list_attachments` | `id`, `limit?` 1-200, `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |
-| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (0), `maxChars?` (1–100 000, def. 100 000) | Imagen o PDF: contenido íntegro. Texto plano, Markdown, CSV, JSON: bloque con `{totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Hasta 5 MiB descifrados. Solo lectura. |
-| `hebra_status` | nada | Estado del vínculo y del sync, sin contenido. |
+| `hebra_list_attachments` | `id`, `limit?` 1-200 (sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |
+| `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (0), `maxChars?` (1–100 000, def. 100 000; se validan también con imagen y PDF, que salen íntegros) | Imagen o PDF: contenido íntegro. Texto plano, Markdown, CSV, JSON: bloque con `{totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Hasta 5 MiB descifrados. Solo lectura. |
+| `hebra_status` | nada | Estado del vínculo y del sync, sin contenido, y `capabilities` (versión, herramientas y `limits`: máximos de `limit`, tamaños de escritura, `attachmentBytes`, `attachmentTextChars`). |
 
 Fuera de las tres de la papelera, nunca devuelve notas de la papelera. `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
 
@@ -166,7 +166,7 @@ título) ni especules sobre qué hay oculto.
 |---|---|---|
 | `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado | Busca de nuevo (en la papelera, con `hebra_list_trash`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
-| `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200). Los límites de parámetros los rechaza el esquema del cliente MCP. |
+| `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, cursor ilegible, de otra herramienta o de un elemento que ya no existe, `offset`/`maxChars` fuera de rango, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200). Los límites de parámetros los rechaza el esquema del cliente MCP. |
 | `revision_conflict` | La nota cambió desde que la leíste | Vuelve a leerla, rehaz las sustituciones sobre el cuerpo nuevo y usa un `operationId` nuevo. |
 | `no_match` | Un `find` no aparece en el cuerpo leído (`edit` = su índice) | Cópialo exacto del cuerpo; no lo reescribas de memoria. |
 | `ambiguous_match` | Un `find` aparece más de una vez (`edit` = su índice) | Amplíalo con texto vecino hasta que sea único. |

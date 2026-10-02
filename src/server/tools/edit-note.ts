@@ -20,10 +20,10 @@
  */
 import { logEvent } from '../../log/logger';
 import { editsWithinLimits, type TextEdit } from '../../store/edits';
-import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
+import { requireValidOperationId, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export async function runEditNote(
@@ -32,10 +32,8 @@ export async function runEditNote(
 ): Promise<EditNoteOutcome> {
   if (!ctx.write) throw new ToolError('invalid_input');
   if (!editsWithinLimits(input.edits)) throw new ToolError('invalid_input');
-  if (input.operationId.length === 0 || input.operationId.length > OPERATION_ID_MAX_LENGTH) {
-    throw new ToolError('invalid_input');
-  }
-  if (!ctx.privacy.visibleMeta(input.id)) throw new ToolError('not_found');
+  requireValidOperationId(input.operationId);
+  requireVisibleNote(ctx, input.id);
 
   let result: EditNoteOutcome;
   try {

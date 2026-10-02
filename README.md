@@ -20,7 +20,7 @@ Estado a 2 de octubre de 2026: el servidor MCP tiene 21 herramientas (detalle en
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
-- Adjuntos, solo lectura: `hebra_list_attachments` (paginados: limit 1-200) y `hebra_read_attachment`
+- Adjuntos, solo lectura: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
   (hasta 5 MiB descifrados; imágenes PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON;
   lectura de texto por tramos: offset, maxChars 1–100 000, def. 100 000).
 

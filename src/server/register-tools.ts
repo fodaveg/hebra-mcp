@@ -199,7 +199,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Crear una nota',
       description:
-        'Crea una nota nueva en la biblioteca de Hebra (el primer H1 del cuerpo es el título), en una carpeta existente o en la raíz.',
+        'Crea una nota nueva en la biblioteca de Hebra (el título es el `title:` del frontmatter si lo hay y, si no, el primer H1 del cuerpo), en una carpeta existente o en la raíz.',
       inputSchema: createNoteInputShape,
       annotations: WRITE_NON_IDEMPOTENT
     },
@@ -224,7 +224,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Editar una nota',
       description:
-        'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Reintentar con el mismo operationId no repite la edición.',
+        'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su `title:` del frontmatter si lo tiene; si no, su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Reintentar con el mismo operationId no repite la edición.',
       inputSchema: editNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },

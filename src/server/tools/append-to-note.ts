@@ -22,6 +22,7 @@ import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
+import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export interface AppendToNoteOutput {
@@ -37,8 +38,7 @@ export async function runAppendToNote(
   if (!ctx.write) throw new ToolError('invalid_input');
   if (input.text.length > TEXT_MAX_LENGTH) throw new ToolError('invalid_input');
 
-  const meta = ctx.privacy.visibleMeta(input.id);
-  if (!meta) throw new ToolError('not_found');
+  requireVisibleNote(ctx, input.id);
 
   let result;
   try {
