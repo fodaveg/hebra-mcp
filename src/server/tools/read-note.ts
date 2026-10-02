@@ -60,7 +60,7 @@ export async function runReadNote(
   if (!meta) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
-  const { libraryId } = await ctx.port.libraryOpen();
+  const libraryId = await ctx.port.libraryId();
 
   const output: ReadNoteOutput = {
     id: note.id,

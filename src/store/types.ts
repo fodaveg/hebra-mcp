@@ -84,6 +84,9 @@ export interface NoteAttachmentRow {
 
 export interface HebraLibraryPort {
   libraryOpen(): Promise<LibraryOpenInfo>;
+  /** `meta.library_id` (para la revisión de `hebra_read_note`): no cambia mientras la
+   *  conexión vive, así que el puerto lo guarda tras la primera lectura. */
+  libraryId(): Promise<string>;
   noteCreate(folderId?: string | null): Promise<NoteRow>;
   noteRead(id: string): Promise<NoteRow | null>;
   noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
@@ -92,6 +95,8 @@ export interface HebraLibraryPort {
   tagsList(): Promise<TagsList>;
   /** `ref` es lo que iría entre `[[` y `]]` (sin alias): `id:…`, `Título`, `ruta/Título`. */
   resolveLink(ref: string): Promise<LinkResolution>;
+  /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. */
+  resolveLinks(refs: readonly string[]): Promise<LinkResolution[]>;
   backlinks(id: string, cursor?: string | null, limit?: number): Promise<NotesPage>;
   search(
     q: string,

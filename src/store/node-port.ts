@@ -27,7 +27,7 @@
  */
 import { chmod, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import {
   canonicalTitle,
   cleanSearchPage,
@@ -49,7 +49,7 @@ import {
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import { FsBlobStore } from './blob-store-fs';
 import { busyOtherInstance } from './errors';
-import { ensureOperationsTable, sqliteOperationStore } from './operations';
+import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
@@ -143,6 +143,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private readonly queue = new SerialQueue();
   private syncView: SyncStorePort | null = null;
   private closed = false;
+  /** Consultas propias ya preparadas (una vez por conexión; `close` las suelta). */
+  private readonly statements = new Map<string, StatementSync>();
+  private operationStore: OperationStore | null = null;
+  /** `meta.library_id`: lo escribe `bootstrapLibraryId` al abrir y nada lo cambia
+   *  mientras la conexión vive (`libraryReset` solo borra `binding` y `since_seq`). */
+  private libraryIdCache: string | null = null;
 
   constructor(
     private readonly engine: SqliteLibraryEngine,
@@ -163,8 +169,31 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.writable ? this.queue.run(operation) : Promise.reject(busyOtherInstance());
   }
 
+  /** Consulta propia preparada una sola vez por conexión (como `statementFor` de
+   *  `./sqlite-conn-node.ts`). La conexión es de `readBigInts`: igual que antes. */
+  private prepared(sql: string): StatementSync {
+    let statement = this.statements.get(sql);
+    if (!statement) {
+      statement = this.db.prepare(sql);
+      this.statements.set(sql, statement);
+    }
+    return statement;
+  }
+
+  /** El id de la biblioteca, sin turno de cola tras la primera vez. Solo dentro de un
+   *  turno de la cola (la primera llamada lee del motor). */
+  private libraryIdSync(): string {
+    this.libraryIdCache ??= this.engine.libraryOpen().libraryId;
+    return this.libraryIdCache;
+  }
+
   async libraryOpen(): Promise<LibraryOpenInfo> {
     return this.read(() => this.engine.libraryOpen());
+  }
+
+  async libraryId(): Promise<string> {
+    if (this.libraryIdCache !== null) return this.libraryIdCache;
+    return this.read(() => this.libraryIdSync());
   }
 
   async noteCreate(folderId?: string | null): Promise<NoteRow> {
@@ -196,6 +225,16 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return query
       ? this.read(() => this.engine.resolveLink(query))
       : { status: 'missing', candidates: [] };
+  }
+
+  /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. */
+  async resolveLinks(refs: readonly string[]): Promise<LinkResolution[]> {
+    return this.read(() =>
+      refs.map((ref): LinkResolution => {
+        const query = parseLinkRef(ref);
+        return query ? this.engine.resolveLink(query) : { status: 'missing', candidates: [] };
+      })
+    );
   }
 
   async backlinks(id: string, cursor: string | null = null, limit?: number): Promise<NotesPage> {
@@ -236,8 +275,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** La consulta de `notesVisibilityIndex`, sin cola: también la usa `writeExclusive`
    *  dentro de su turno. */
   private visibilityRows(): NoteVisibilityEntry[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.prepared(
         `SELECT n.id AS id,
                 CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
                 GROUP_CONCAT(t.tag, char(10)) AS tags
@@ -246,8 +284,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
          LEFT JOIN note_tags t ON t.note_id = n.id
          WHERE n.deleted = 0 AND n.trashed_at IS NULL
          GROUP BY n.id`
-      )
-      .all() as Array<{ id: string; folder_id: string; tags: string | null }>;
+    ).all() as Array<{ id: string; folder_id: string; tags: string | null }>;
     return rows.map((row) => ({
       id: row.id,
       folderId: row.folder_id,
@@ -269,19 +306,15 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * una nota de la papelera venía de una carpeta privada (`src/privacy/trash-filter.ts`).
    */
   private trashRows(): TrashIndex {
-    const notes = this.db
-      .prepare(
+    const notes = this.prepared(
         `SELECT n.id AS id, coalesce(n.folder_id, 'root') AS folder_id,
                 n.trashed_at AS trashed_at, GROUP_CONCAT(t.tag, char(10)) AS tags
          FROM notes n
          LEFT JOIN note_tags t ON t.note_id = n.id
          WHERE n.deleted = 0 AND n.trashed_at IS NOT NULL
          GROUP BY n.id`
-      )
-      .all() as Array<{ id: string; folder_id: string; trashed_at: number; tags: string | null }>;
-    const folders = this.db
-      .prepare('SELECT id, parent_id, name, deleted FROM folders')
-      .all() as Array<{ id: string; parent_id: string | null; name: string | null; deleted: number }>;
+    ).all() as Array<{ id: string; folder_id: string; trashed_at: number; tags: string | null }>;
+    const folders = this.prepared('SELECT id, parent_id, name, deleted FROM folders').all() as Array<{ id: string; parent_id: string | null; name: string | null; deleted: number }>;
     return {
       notes: notes.map((row) => ({
         id: row.id,
@@ -317,16 +350,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * bajaron) y entonces no se sabe ni el tamaño ni el tipo hasta leerlo.
    */
   private attachmentRows(noteId: string): NoteAttachmentRow[] {
-    const rows = this.db
-      .prepare(
+    const rows = this.prepared(
         `SELECT lower(r.sha256) AS sha256, r.ordinal AS ordinal, b.byte_length AS byte_length,
                 b.mime AS mime, coalesce(b.present, 0) AS present
          FROM note_blob_refs r
          LEFT JOIN blobs b ON b.sha256 = r.sha256
          WHERE r.note_id = ?
          ORDER BY r.ordinal, r.sha256`
-      )
-      .all(noteId) as Array<{
+    ).all(noteId) as Array<{
       sha256: string;
       ordinal: number;
       byte_length: number | null;
@@ -368,12 +399,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteVersionSnapshot: async (noteId) => {
           await this.engine.noteVersionSnapshot(noteId);
         },
-        libraryId: () => this.engine.libraryOpen().libraryId,
+        libraryId: () => this.libraryIdSync(),
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => this.visibilityRows(),
         trashIndex: () => this.trashRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),
-        operations: sqliteOperationStore(this.db)
+        operations: (this.operationStore ??= sqliteOperationStore(this.db))
       })
     );
   }
@@ -395,6 +426,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.statements.clear();
+    this.operationStore = null;
     this.db.close();
   }
 }

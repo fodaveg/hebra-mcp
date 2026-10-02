@@ -30,7 +30,7 @@
  *   tampoco vale en el otro).
  * - `unpair` borra el directorio de datos y, con él, el registro.
  */
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 export const OPERATION_TTL_MS = 24 * 60 * 60 * 1000;
 /** Longitud máxima de un `operationId` (un UUID mide 36; el margen es de sobra). */
@@ -79,14 +79,23 @@ export function ensureOperationsTable(db: DatabaseSync): void {
 }
 
 export function sqliteOperationStore(db: DatabaseSync): OperationStore {
+  // Preparadas una vez (la primera vez que se usan, no al crear el registro: en un lector
+  // la tabla puede no existir) y reutilizadas mientras viva la conexión.
+  const prepared = new Map<string, StatementSync>();
+  const statement = (sql: string): StatementSync => {
+    let found = prepared.get(sql);
+    if (!found) {
+      found = db.prepare(sql);
+      prepared.set(sql, found);
+    }
+    return found;
+  };
   return {
     lookup(operationId) {
-      const row = db
-        .prepare(
-          `SELECT operation_id, fingerprint, note_id, target_body_sha256, state, result, created_at
-           FROM hebra_mcp_operations WHERE operation_id = ?`
-        )
-        .get(operationId) as Record<string, unknown> | undefined;
+      const row = statement(
+        `SELECT operation_id, fingerprint, note_id, target_body_sha256, state, result, created_at
+         FROM hebra_mcp_operations WHERE operation_id = ?`
+      ).get(operationId) as Record<string, unknown> | undefined;
       if (!row) return null;
       return {
         operationId: String(row.operation_id),
@@ -99,7 +108,7 @@ export function sqliteOperationStore(db: DatabaseSync): OperationStore {
       };
     },
     begin(record) {
-      db.prepare(
+      statement(
         `INSERT OR REPLACE INTO hebra_mcp_operations
            (operation_id, fingerprint, note_id, target_body_sha256, state, result, created_at)
          VALUES (?, ?, ?, ?, 'started', NULL, ?)`
@@ -112,14 +121,12 @@ export function sqliteOperationStore(db: DatabaseSync): OperationStore {
       );
     },
     finish(operationId, result) {
-      db.prepare(
+      statement(
         `UPDATE hebra_mcp_operations SET state = 'done', result = ? WHERE operation_id = ?`
       ).run(JSON.stringify(result), operationId);
     },
     purgeExpired(now) {
-      db.prepare('DELETE FROM hebra_mcp_operations WHERE created_at < ?').run(
-        now - OPERATION_TTL_MS
-      );
+      statement('DELETE FROM hebra_mcp_operations WHERE created_at < ?').run(now - OPERATION_TTL_MS);
     }
   };
 }

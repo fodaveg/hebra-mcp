@@ -81,8 +81,10 @@ export async function runLinks(
     const refs = scanOutgoingRefs(note.body);
     const start = Math.min(position.o, refs.length);
     const page = slicePage(refs.slice(start), 'l1', { limit });
-    for (const ref of page.items) {
-      const resolution = await ctx.port.resolveLink(ref);
+    // Todas las refs de la página, en UN turno de la cola del almacén.
+    const resolutions = await ctx.port.resolveLinks(page.items);
+    for (const [index, ref] of page.items.entries()) {
+      const resolution = resolutions[index]!;
       const candidate = resolution.status === 'resolved' ? resolution.candidates[0] : undefined;
       if (candidate && candidate.kind === 'note' && ctx.privacy.visibleMeta(candidate.id)) {
         outgoing.push({ ref, resolvedId: candidate.id, title: candidate.title });

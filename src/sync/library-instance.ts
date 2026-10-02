@@ -358,6 +358,7 @@ export class LibraryInstance implements NoteWriteTarget {
 function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
   return {
     libraryOpen: (): Promise<LibraryOpenInfo> => current().libraryOpen(),
+    libraryId: (): Promise<string> => current().libraryId(),
     noteCreate: (folderId?: string | null): Promise<NoteRow> => current().noteCreate(folderId),
     noteRead: (id: string): Promise<NoteRow | null> => current().noteRead(id),
     noteSave: (input: NoteSaveInput): Promise<NoteSaveResult> => current().noteSave(input),
@@ -366,6 +367,8 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     foldersList: (): Promise<FoldersList> => current().foldersList(),
     tagsList: (): Promise<TagsList> => current().tagsList(),
     resolveLink: (ref: string): Promise<LinkResolution> => current().resolveLink(ref),
+    resolveLinks: (refs: readonly string[]): Promise<LinkResolution[]> =>
+      current().resolveLinks(refs),
     backlinks: (id: string, cursor?: string | null, limit?: number): Promise<NotesPage> =>
       current().backlinks(id, cursor ?? null, limit),
     search: (
