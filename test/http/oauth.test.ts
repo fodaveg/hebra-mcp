@@ -11,6 +11,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
+import { ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS } from '../../src/oauth/token-store';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { startTestHttpApp, textOf, type TestHttpApp } from '../fixtures/http-app';
@@ -40,6 +41,7 @@ let available: boolean;
 let requestCount: number;
 let exchangeCount: number;
 let introspectCount: number;
+let introspectionResponse: (() => Promise<Response>) | null;
 let grantExpiresAt: string;
 let brokerDevice: string;
 let brokerVault: string;
@@ -50,6 +52,12 @@ let stderrSpy: ReturnType<typeof vi.spyOn>;
 const clients: Client[] = [];
 
 const response = (value: object, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } });
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => { resolve = complete; });
+  return { promise, resolve };
+}
 
 /** Verifica que el cliente envía exclusivamente el backchannel autorizado. */
 async function broker(input: string | URL, init?: RequestInit): Promise<Response> {
@@ -79,6 +87,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
   }
   if (path === 'introspect') {
     introspectCount += 1;
+    if (introspectionResponse) return introspectionResponse();
     if (!deviceActive || body.accessToken !== UPSTREAM) return response({ active: false });
     return response({ active: true, credentialId: GRANT_ID, clientId, resource, scope: 'hebra:mcp', accountId: ACCOUNT,
       pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
@@ -102,6 +111,7 @@ beforeEach(async () => {
     device: { opaqueDeviceId: DEVICE, lumbreDeviceId: '33333333-3333-4333-8333-333333333333' }
   });
   approved = false; deviceActive = true; available = true; requestCount = 0; exchangeCount = 0; introspectCount = 0;
+  introspectionResponse = null;
   clockOffset = 0;
   brokerPair = PAIR_ID; brokerVault = VAULT; brokerDevice = DEVICE;
   grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -608,6 +618,111 @@ describe('caché de la introspección positiva', () => {
     expect([...cachedIntrospections().values()].map((entry) => entry.expiresAt)).toEqual([expiry]);
     clockOffset = 10_000;
     expect((await mcpCall(issued.access_token)).status).toBe(401);
+  });
+
+  it('un retroceso parcial del reloj no prolonga la caché más de 30 segundos reales', async () => {
+    const monotonic = performance.now.bind(performance);
+    let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonic() + elapsed);
+    const issued = await issuedTokens();
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    const base = introspectCount;
+    deviceActive = false;
+    clockOffset = 25_000;
+    elapsed = 25_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(200);
+    clockOffset = 10_000; // Sigue después de checkedAt, aunque el reloj de pared retrocedió.
+    elapsed = INTROSPECTION_CACHE_MS + 1_000;
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    expect(introspectCount).toBe(base + 1);
+  });
+
+  it('dos introspecciones simultáneas no aceptan el positivo llegado tras la baja de su familia', async () => {
+    const issued = await issuedTokens();
+    const firstBroker = deferred<Response>();
+    const secondBroker = deferred<Response>();
+    const bothStarted = deferred<void>();
+    let calls = 0;
+    introspectionResponse = () => {
+      calls += 1;
+      if (calls === 2) bothStarted.resolve();
+      return calls === 1 ? firstBroker.promise : secondBroker.promise;
+    };
+    const first = provider.verifyAccessToken(issued.access_token);
+    const second = provider.verifyAccessToken(issued.access_token);
+    const firstRejected = expect(first).rejects.toThrow();
+    const secondOutcome = second.then(() => 'accepted', () => 'rejected');
+    await bothStarted.promise;
+    firstBroker.resolve(response({ active: false }));
+    await firstRejected;
+    secondBroker.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
+      scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault,
+      opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt }));
+    const outcome = await secondOutcome;
+    expect(cachedIntrospections().size).toBe(0);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    expect(outcome).toBe('rejected');
+  });
+
+  it('dar de baja una familia no rechaza la introspección en vuelo de otra', async () => {
+    const removed = await issuedTokens();
+    const surviving = await issuedTokens();
+    const firstBroker = deferred<Response>();
+    const secondBroker = deferred<Response>();
+    const bothStarted = deferred<void>();
+    let calls = 0;
+    introspectionResponse = () => {
+      calls += 1;
+      if (calls === 2) bothStarted.resolve();
+      return calls === 1 ? firstBroker.promise : secondBroker.promise;
+    };
+    const first = expect(provider.verifyAccessToken(removed.access_token)).rejects.toThrow();
+    const second = expect(provider.verifyAccessToken(surviving.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    await bothStarted.promise;
+    firstBroker.resolve(response({ active: false }));
+    await first;
+    secondBroker.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
+      scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault,
+      opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt }));
+    await second;
+    expect(cachedIntrospections().size).toBe(1);
+  });
+
+  it('revocar un access caducado retira el bearer y la concesión de su familia', async () => {
+    const issued = await issuedTokens();
+    clockOffset = ACCESS_TOKEN_TTL_MS;
+    await provider.revokeToken({ client_id: DCR_CLIENT_ID } as never, { token: issued.access_token } as never);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    expect(approved).toBe(false);
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+  });
+
+  it('reutilizar un refresh pasado el margen limpia caché, bearer y concesión remota', async () => {
+    const issued = await issuedTokens();
+    const refreshed = await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token });
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json() as { access_token: string };
+    clockOffset = REFRESH_REUSE_GRACE_MS + 1;
+    expect((await mcpCall(next.access_token)).status).toBe(200);
+    expect(cachedIntrospections().size).toBe(1);
+    expect((await token({ grant_type: 'refresh_token', refresh_token: issued.refresh_token })).status).toBe(400);
+    expect(cachedIntrospections().size).toBe(0);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    expect(approved).toBe(false);
+  });
+
+  it('podar una familia caducada al emitir otra retira su bearer', async () => {
+    grantExpiresAt = new Date(Date.now() + 10_000).toISOString();
+    const first = await issuedTokens();
+    expect((await mcpCall(first.access_token)).status).toBe(200);
+    const firstFamily = first.refresh_token.split('.')[0]!.slice('hmcp_rt_'.length);
+    clockOffset = 10_000;
+    grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+    await issuedTokens();
+    const grants = (provider as unknown as { grants: { get(id: string): string | null } }).grants;
+    expect(cachedIntrospections().size).toBe(0);
+    expect(grants.get(firstFamily)).toBeNull();
+    expect(approved).toBe(false);
   });
 
   it('las familias que dejan de usarse no se acumulan', async () => {
