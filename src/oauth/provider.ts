@@ -129,9 +129,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       });
       return async () => {
         for (const { id, bearer } of removed) {
+          if (!bearer) continue;
+          try { await this.backchannel.revoke(bearer); }
+          catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); continue; }
           await this.grants.delete(id).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
-          if (bearer) await this.backchannel.revoke(bearer)
-            .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
         }
       };
     });

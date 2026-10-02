@@ -1,5 +1,6 @@
 /** Bearers upstream en el mismo almacén seguro que el emparejado, nunca en metadata OAuth. */
 import type { SecretStore } from '../secrets';
+import { logEvent } from '../log/logger';
 
 const KEY = 'hebra-mcp-oauth-grants';
 const PENDING_KEY = 'hebra-mcp-oauth-pending';
@@ -35,7 +36,7 @@ export class GrantSecrets {
 
   private constructor(private readonly store: SecretStore) {}
 
-  static async open(store: SecretStore, liveIds: readonly string[]): Promise<GrantSecrets> {
+  static async open(store: SecretStore, _liveIds: readonly string[]): Promise<GrantSecrets> {
     const result = new GrantSecrets(store);
     const raw = await store.get(KEY);
     if (raw !== null) {
@@ -43,7 +44,8 @@ export class GrantSecrets {
         const parsed: unknown = JSON.parse(raw);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid');
         for (const [id, token] of Object.entries(parsed)) {
-          if (FAMILY.test(id) && typeof token === 'string' && TOKEN.test(token) && liveIds.includes(id)) result.values.set(id, token);
+          // Un bearer sin familia local aún debe revocarse upstream tras un crash.
+          if (FAMILY.test(id) && typeof token === 'string' && TOKEN.test(token)) result.values.set(id, token);
         }
       } catch { /* Un fichero roto deja todas las concesiones sin bearer. */ }
     }
@@ -66,7 +68,14 @@ export class GrantSecrets {
         delete entries[key];
         continue;
       }
-      try { await revoke(entry.token); delete entries[key]; } catch { /* Se reintentará en el siguiente arranque. */ }
+      try { await revoke(entry.token); }
+      catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); continue; }
+      try {
+        if (entry.familyId && !liveIds.includes(entry.familyId) && grants.get(entry.familyId) === entry.token) {
+          await grants.delete(entry.familyId);
+        }
+        delete entries[key];
+      } catch { logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }); }
     }
     await store.set(PENDING_KEY, JSON.stringify(entries));
   }
@@ -109,15 +118,25 @@ export class GrantSecrets {
 
   get(id: string): string | null { return this.values.get(id) ?? null; }
 
+  /** Reintenta al arrancar los bearers cuyo token local ya no existe. */
+  async recoverOrphans(liveIds: readonly string[], revoke: (token: string) => Promise<void>): Promise<void> {
+    const live = new Set(liveIds);
+    for (const [id, token] of this.values) {
+      if (live.has(id)) continue;
+      try { await revoke(token); }
+      catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); continue; }
+      await this.delete(id).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+    }
+  }
+
   private async persist(): Promise<void> {
     await this.store.set(KEY, JSON.stringify(Object.fromEntries(this.values)));
   }
 
-  /** Limita huérfanos a las familias activas; serializa cambios de secreto. */
-  set(id: string, token: string, liveIds: readonly string[]): Promise<void> {
+  /** Conserva huérfanos hasta confirmar su revocación; serializa cambios de secreto. */
+  set(id: string, token: string, _liveIds: readonly string[]): Promise<void> {
     const run = this.queue.then(async () => {
       const before = new Map(this.values);
-      for (const key of this.values.keys()) if (!liveIds.includes(key)) this.values.delete(key);
       this.values.set(id, token);
       try { await this.persist(); } catch (error) { this.values.clear(); for (const [key, value] of before) this.values.set(key, value); throw error; }
     });

@@ -72,6 +72,7 @@ export async function loadOAuthHttpAuth(
   const revocations = new RevocationFile(dataDir);
   const grants = await GrantSecrets.open(secrets!, tokens.familyIds());
   await GrantSecrets.recoverPending(secrets!, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
+  await grants.recoverOrphans(tokens.familyIds(), (token) => backchannel.revoke(token));
   logEvent({ event: 'oauth.start', families: tokens.liveFamilyCount(await revocations.current()) });
   const provider = new HebraOAuthProvider({
     issuer: config.publicOrigin,

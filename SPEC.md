@@ -609,7 +609,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   concesión vive en el almacén de secretos existente. Los códigos pendientes y las
   concesiones sin familia se limpian o revocan al caducar/reiniciar. La marca de
   promoción se retira solo después de persistir la familia; si el proceso cae antes,
-  el siguiente arranque revoca la concesión upstream.
+  el siguiente arranque revoca la concesión upstream. Si una familia local desaparece,
+  su bearer queda guardado solo para reintentar la revocación upstream al arrancar;
+  se borra del almacén de secretos después de que Lumbre confirme la revocación.
 - `HEBRA_MCP_BACKCHANNEL_SECRET` es exclusivo de Hebra MCP, distinto del secreto de
   Lumbre MCP. Se envía como Bearer solo por TLS; ausencia o valor inválido impide arrancar
   la autenticación. Los errores de red/introspección rechazan el acceso temporalmente sin
