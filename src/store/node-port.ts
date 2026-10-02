@@ -206,9 +206,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     q: string,
     cursor: string | null,
     limit?: number,
-    filters?: SearchFilters | null
+    filters?: SearchFilters | null,
+    scope?: NotesScope | null
   ): Promise<SearchPage> {
-    return this.read(() => cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null)));
+    return this.read(() =>
+      cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null, scope ?? null))
+    );
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {

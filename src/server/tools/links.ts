@@ -12,7 +12,15 @@
 import { encodeCursor } from '../../hebra';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
-import { LIMITS, effectiveLimit, fillPage, slicePage, unwrapCursor, wrapCursor } from '../pagination';
+import {
+  LIMITS,
+  effectiveLimit,
+  fillPage,
+  slicePage,
+  storePageSize,
+  unwrapCursor,
+  wrapCursor
+} from '../pagination';
 import { scanOutgoingRefs } from './link-scan';
 
 export interface OutgoingLink {
@@ -25,8 +33,6 @@ export interface BacklinkNote {
   id: string;
   title: string;
 }
-
-const BACKLINKS_PAGE_SIZE = 100;
 
 /** Contenido del cursor: `o` = posición en `outgoing`, `b` = cursor de backlinks del
  *  almacén. Una parte ausente = esa lista ya terminó (en la primera página, ambas
@@ -93,7 +99,7 @@ export async function runLinks(
     const page = await fillPage({
       limit,
       startCursor: position.b,
-      fetch: (cursor) => ctx.port.backlinks(input.id, cursor, BACKLINKS_PAGE_SIZE),
+      fetch: (cursor, want) => ctx.port.backlinks(input.id, cursor, storePageSize(want)),
       accept: (item) =>
         ctx.privacy.visibleMeta(item.id) ? { id: item.id, title: item.title } : undefined,
       cursorAfter: (item) => encodeCursor([item.favorite ? 1 : 0, item.updatedAt], item.id)

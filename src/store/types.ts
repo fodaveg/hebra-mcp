@@ -97,7 +97,8 @@ export interface HebraLibraryPort {
     q: string,
     cursor: string | null,
     limit?: number,
-    filters?: SearchFilters | null
+    filters?: SearchFilters | null,
+    scope?: NotesScope | null
   ): Promise<SearchPage>;
   notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda

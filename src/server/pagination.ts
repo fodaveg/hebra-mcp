@@ -26,10 +26,22 @@ export const LIMITS = {
   links: { default: null, max: 200 },
   listTags: { default: null, max: 500 },
   listFolders: { default: null, max: 500 },
-  listTrash: { default: 50, max: 100 }
+  listTrash: { default: 50, max: 100 },
+  listVersions: { default: 50, max: 200 },
+  listAttachments: { default: null, max: 200 }
 } as const;
 
-export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1';
+/** Máximo de elementos que el motor devuelve por consulta de página (`PAGE_LIMIT_MAX` de
+ *  `sqlite-engine.ts`: `search`, `notesPage` y `backlinks` lo aplican con `clampLimit`). */
+export const STORE_PAGE_MAX = 200;
+
+/** Tamaño de página que se pide al almacén: `want` (lo que falta más uno) acotado a
+ *  `[1, STORE_PAGE_MAX]`. `want` puede ser infinito (sin `limit`). */
+export function storePageSize(want: number): number {
+  return Math.min(Math.max(want, 1), STORE_PAGE_MAX);
+}
+
+export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1';
 
 const CURSOR_MAX_LENGTH = 2_048;
 
@@ -66,12 +78,15 @@ interface StorePage<Item> {
  * Rellena una página con elementos aceptados (`accept` devuelve `undefined` para lo que
  * hay que saltar: oculto por privacidad o filtrado). Pide páginas al almacén hasta
  * reunir `limit` y confirmar que hay uno más, o agotarlo. `cursorAfter` da el cursor del
- * ALMACÉN posicionado justo tras un elemento.
+ * ALMACÉN posicionado justo tras un elemento. `fetch` recibe también `want`: lo que falta
+ * para llenar la página más uno (el de la mirada por delante); quien consulta lo acota al
+ * máximo del almacén (`storePageSize`). Es solo un tamaño de consulta: ni el contenido ni
+ * el tamaño de la página ni el cursor dependen de él.
  */
 export async function fillPage<Item, Out>(options: {
   limit: number;
   startCursor: string | null;
-  fetch(cursor: string | null): Promise<StorePage<Item>>;
+  fetch(cursor: string | null, want: number): Promise<StorePage<Item>>;
   accept(item: Item): Out | undefined;
   cursorAfter(item: Item): string;
 }): Promise<{ items: Out[]; lastCursor: string | null }> {
@@ -79,7 +94,7 @@ export async function fillPage<Item, Out>(options: {
   let lastItem: Item | undefined;
   let cursor = options.startCursor;
   for (;;) {
-    const page = await options.fetch(cursor);
+    const page = await options.fetch(cursor, options.limit - out.length + 1);
     for (const item of page.items) {
       const accepted = options.accept(item);
       if (accepted === undefined) continue;

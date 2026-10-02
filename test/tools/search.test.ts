@@ -67,4 +67,62 @@ describe('hebra_search', () => {
     const { results } = await runSearch(test.ctx, { query: 'oculta', tag: 'secreto' });
     expect(results).toHaveLength(0);
   });
+
+  it('marca la copia de conflicto con isConflictCopy y las demás en false', async () => {
+    test = await buildTestContext();
+    const { results } = await runSearch(test.ctx, { query: 'conflicto' });
+    const copy = results.find((result) => result.id === test!.library.conflictCopyId);
+    expect(copy?.isConflictCopy).toBe(true);
+    const { results: normal } = await runSearch(test.ctx, { query: 'pública' });
+    expect(normal.length).toBeGreaterThan(0);
+    for (const result of normal) {
+      expect(result.isConflictCopy).toBe(result.id === test!.library.conflictCopyId);
+    }
+  });
+
+  it('`fields` puede pedir isConflictCopy', async () => {
+    test = await buildTestContext();
+    const { results } = await runSearch(test.ctx, {
+      query: 'conflicto',
+      fields: ['isConflictCopy' as never]
+    });
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) {
+      expect(Object.keys(result).sort()).toEqual(['id', 'isConflictCopy']);
+    }
+  });
+
+  it('carpeta sin `subfolders`: solo las notas directas; con `subfolders`, todo el subárbol', async () => {
+    test = await buildTestContext();
+    const direct = await runSearch(test.ctx, { query: 'candidata', folder: 'proyectos' });
+    expect(direct.results.map((result) => result.id)).toEqual([test.library.duplicateNoteAId]);
+    const deep = await runSearch(test.ctx, {
+      query: 'candidata',
+      folder: 'proyectos',
+      subfolders: true
+    });
+    expect(deep.results.map((result) => result.id).sort()).toEqual(
+      [test.library.duplicateNoteAId, test.library.duplicateNoteBId].sort()
+    );
+    // La raíz con subcarpetas es toda la biblioteca visible; sin ellas, solo la raíz.
+    const all = await runSearch(test.ctx, { query: 'candidata', folder: '', subfolders: true });
+    expect(all.results).toHaveLength(2);
+    const rootOnly = await runSearch(test.ctx, { query: 'candidata', folder: '' });
+    expect(rootOnly.results).toHaveLength(0);
+  });
+
+  it('carpeta y etiqueta a la vez se combinan en la propia consulta', async () => {
+    test = await buildTestContext();
+    const { results } = await runSearch(test.ctx, {
+      query: 'lumbre',
+      folder: 'proyectos',
+      subfolders: true,
+      tag: 'proyectos/lumbre'
+    });
+    expect(results.length).toBeGreaterThan(0);
+    for (const result of results) {
+      expect(result.folderPath.toLowerCase().startsWith('proyectos')).toBe(true);
+      expect(result.tags).toContain('proyectos/lumbre');
+    }
+  });
 });

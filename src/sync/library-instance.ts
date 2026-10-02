@@ -372,8 +372,9 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       q: string,
       cursor: string | null,
       limit?: number,
-      filters?: SearchFilters | null
-    ): Promise<SearchPage> => current().search(q, cursor, limit, filters),
+      filters?: SearchFilters | null,
+      scope?: NotesScope | null
+    ): Promise<SearchPage> => current().search(q, cursor, limit, filters, scope),
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
