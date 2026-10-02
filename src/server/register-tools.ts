@@ -1,16 +1,12 @@
 /**
- * Registro de las 7 herramientas de lectura de L1 (SPEC.md §5, §10). Común a todas:
+ * Registro de las 21 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * organización, papelera, versiones y adjuntos en solo lectura. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
- * `hebra_create_note` y `hebra_append_to_note` (L3b), y `hebra_edit_note` y las tres de
- * organización de notas (D2 ampliada, 28 sep 2026), se registran con el mismo
- * `runTool`: pasan igual por `privacy_config_unresolved` primero y por el log cerrado de
- * cada llamada. No hay herramientas de carpetas (opción A de David, 28 sep 2026: sus
- * errores revelaban carpetas privadas).
- * Las seis de papelera y versiones (ampliación de D2, 30 sep 2026) van igual, al final.
- * Ninguna purga ni vacía la papelera.
+ * Ninguna purga ni vacía la papelera ni gestiona carpetas (opción A de David, 28 sep
+ * 2026: sus errores revelaban carpetas privadas). Cada una lleva sus `annotations` MCP.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -21,39 +17,58 @@ import {
   createNoteInputShape,
   editNoteInputShape,
   linksInputShape,
+  listAttachmentsInputShape,
   listFoldersInputShape,
   listNotesInputShape,
   listTagsInputShape,
+  listTrashInputShape,
+  listVersionsInputShape,
   moveNoteInputShape,
+  readAttachmentInputShape,
   readNoteInputShape,
+  readVersionInputShape,
+  restoreNoteInputShape,
+  restoreVersionInputShape,
   searchInputShape,
   setArchivedInputShape,
-  setFavoriteInputShape
+  setFavoriteInputShape,
+  trashNoteInputShape
 } from './schemas';
 import { runAppendToNote } from './tools/append-to-note';
+import { runListAttachments, runReadAttachment } from './tools/attachments';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
-import { runMoveNote, runSetArchived, runSetFavorite } from './tools/organize';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
 import { runListTags } from './tools/list-tags';
+import { runListTrash } from './tools/list-trash';
+import {
+  runMoveNote,
+  runRestoreNote,
+  runSetArchived,
+  runSetFavorite,
+  runTrashNote
+} from './tools/organize';
 import { runReadNote } from './tools/read-note';
 import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
-import {
-  listTrashInputShape,
-  listVersionsInputShape,
-  readVersionInputShape,
-  restoreNoteInputShape,
-  restoreVersionInputShape,
-  trashNoteInputShape
-} from './schemas';
-import { runListTrash } from './tools/list-trash';
-import { runRestoreNote, runTrashNote } from './tools/organize';
 import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
-import { listAttachmentsInputShape, readAttachmentInputShape } from './schemas';
-import { runListAttachments, runReadAttachment } from './tools/attachments';
+
+/** `annotations` MCP: ninguna herramienta es destructiva ni toca el mundo exterior. */
+const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
+const WRITE_IDEMPOTENT = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+} as const;
+const WRITE_NON_IDEMPOTENT = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: false
+} as const;
 
 /** Recuento de resultados a loguear (§6.4): solo un número, nunca su contenido. */
 function countOf(result: unknown): number | undefined {
@@ -105,7 +120,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Buscar notas',
       description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
-      inputSchema: searchInputShape
+      inputSchema: searchInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_search', (toolCtx) => runSearch(toolCtx, input))
   );
@@ -114,8 +130,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_list_notes',
     {
       title: 'Listar notas',
-      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, más recientes primero. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
-      inputSchema: listNotesInputShape
+      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      inputSchema: listNotesInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_list_notes', (toolCtx) => runListNotes(toolCtx, input))
   );
@@ -126,7 +143,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Leer una nota',
       description:
         'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla.',
-      inputSchema: readNoteInputShape
+      inputSchema: readNoteInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_read_note', (toolCtx) => runReadNote(toolCtx, input))
   );
@@ -135,8 +153,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_list_tags',
     {
       title: 'Listar etiquetas',
-      description: 'Lista las etiquetas de la biblioteca (anidadas como a/b) con su recuento de notas.',
-      inputSchema: listTagsInputShape
+      description: 'Lista las etiquetas de la biblioteca (anidadas como a/b) con su recuento de notas. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: listTagsInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_list_tags', (toolCtx) => runListTags(toolCtx, input))
   );
@@ -145,8 +164,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_list_folders',
     {
       title: 'Listar carpetas',
-      description: 'Lista las carpetas de la biblioteca con su recuento de notas.',
-      inputSchema: listFoldersInputShape
+      description: 'Lista las carpetas de la biblioteca con su recuento de notas. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: listFoldersInputShape,
+      annotations: READ_ONLY
     },
     async (input) =>
       runTool(ctx, 'hebra_list_folders', (toolCtx) => runListFolders(toolCtx, input))
@@ -157,7 +177,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Enlaces de una nota',
       description: 'Enlaces salientes y entrantes (backlinks) de una nota, por id. Paginada (`limit`, `cursor`, `nextCursor`).',
-      inputSchema: linksInputShape
+      inputSchema: linksInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_links', (toolCtx) => runLinks(toolCtx, input))
   );
@@ -167,7 +188,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Estado del vínculo',
       description:
-        'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.'
+        'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.',
+      annotations: READ_ONLY
     },
     async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx, version))
   );
@@ -178,7 +200,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Crear una nota',
       description:
         'Crea una nota nueva en la biblioteca de Hebra (el primer H1 del cuerpo es el título), en una carpeta existente o en la raíz.',
-      inputSchema: createNoteInputShape
+      inputSchema: createNoteInputShape,
+      annotations: WRITE_NON_IDEMPOTENT
     },
     async (input) => runTool(ctx, 'hebra_create_note', (toolCtx) => runCreateNote(toolCtx, input))
   );
@@ -189,7 +212,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Añadir texto a una nota',
       description:
         'Añade texto al final de una nota existente. Una edición concurrente produce una copia de conflicto visible, sin perder texto.',
-      inputSchema: appendToNoteInputShape
+      inputSchema: appendToNoteInputShape,
+      annotations: WRITE_NON_IDEMPOTENT
     },
     async (input) =>
       runTool(ctx, 'hebra_append_to_note', (toolCtx) => runAppendToNote(toolCtx, input))
@@ -201,7 +225,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Editar una nota',
       description:
         'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Reintentar con el mismo operationId no repite la edición.',
-      inputSchema: editNoteInputShape
+      inputSchema: editNoteInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) => runTool(ctx, 'hebra_edit_note', (toolCtx) => runEditNote(toolCtx, input))
   );
@@ -211,7 +236,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Mover una nota',
       description: 'Mueve una nota a otra carpeta, por ids ("root" es la raíz).',
-      inputSchema: moveNoteInputShape
+      inputSchema: moveNoteInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) => runTool(ctx, 'hebra_move_note', (toolCtx) => runMoveNote(toolCtx, input))
   );
@@ -221,7 +247,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Marcar como favorita',
       description: 'Marca (true) o desmarca (false) una nota como favorita.',
-      inputSchema: setFavoriteInputShape
+      inputSchema: setFavoriteInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) =>
       runTool(ctx, 'hebra_set_favorite', (toolCtx) => runSetFavorite(toolCtx, input))
@@ -232,7 +259,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Archivar una nota',
       description: 'Archiva (true) o desarchiva (false) una nota. No la borra ni la manda a la papelera.',
-      inputSchema: setArchivedInputShape
+      inputSchema: setArchivedInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) =>
       runTool(ctx, 'hebra_set_archived', (toolCtx) => runSetArchived(toolCtx, input))
@@ -244,7 +272,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Mandar una nota a la papelera',
       description:
         'Manda una nota a la papelera de Hebra. Se puede sacar con hebra_restore_note o desde Hebra: no la borra.',
-      inputSchema: trashNoteInputShape
+      inputSchema: trashNoteInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) => runTool(ctx, 'hebra_trash_note', (toolCtx) => runTrashNote(toolCtx, input))
   );
@@ -255,7 +284,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Sacar una nota de la papelera',
       description:
         'Saca una nota de la papelera, a su carpeta si sigue existiendo o, si no, a la raíz.',
-      inputSchema: restoreNoteInputShape
+      inputSchema: restoreNoteInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) =>
       runTool(ctx, 'hebra_restore_note', (toolCtx) => runRestoreNote(toolCtx, input))
@@ -266,8 +296,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Listar la papelera',
       description:
-        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas.',
-      inputSchema: listTrashInputShape
+        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: listTrashInputShape,
+      annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_list_trash', (toolCtx) => runListTrash(toolCtx, input))
   );
@@ -277,8 +308,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Versiones anteriores de una nota',
       description:
-        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo, de los últimos 7 días.',
-      inputSchema: listVersionsInputShape
+        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo, de los últimos 7 días. Paginada (`limit`, `cursor`, `nextCursor`); 50 por página por defecto.',
+      inputSchema: listVersionsInputShape,
+      annotations: READ_ONLY
     },
     async (input) =>
       runTool(ctx, 'hebra_list_versions', (toolCtx) => runListVersions(toolCtx, input))
@@ -289,7 +321,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer una versión anterior',
       description: 'Lee el cuerpo de una versión anterior de una nota (versionId de hebra_list_versions).',
-      inputSchema: readVersionInputShape
+      inputSchema: readVersionInputShape,
+      annotations: READ_ONLY
     },
     async (input) =>
       runTool(ctx, 'hebra_read_version', (toolCtx) => runReadVersion(toolCtx, input))
@@ -301,7 +334,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       title: 'Restaurar una versión anterior',
       description:
         'Deja el cuerpo de una versión anterior como una edición nueva de la nota, sobre la revisión leída con hebra_read_note (expectedRevision). Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Lo que había queda como versión anterior. Reintentar con el mismo operationId no la repite.',
-      inputSchema: restoreVersionInputShape
+      inputSchema: restoreVersionInputShape,
+      annotations: WRITE_IDEMPOTENT
     },
     async (input) =>
       runTool(ctx, 'hebra_restore_version', (toolCtx) => runRestoreVersion(toolCtx, input))
@@ -312,8 +346,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Adjuntos de una nota',
       description:
-        'Lista los adjuntos de una nota (imágenes, PDF, ficheros): attachmentId, name, mimeType y byteLength (null si no se sabe sin bajarlo). Solo lectura.',
-      inputSchema: listAttachmentsInputShape
+        'Lista los adjuntos de una nota (imágenes, PDF, ficheros): attachmentId, name, mimeType y byteLength (null si no se sabe sin bajarlo). Paginada (`limit`, `cursor`, `nextCursor`). Solo lectura.',
+      inputSchema: listAttachmentsInputShape,
+      annotations: READ_ONLY
     },
     async (input) =>
       runTool(ctx, 'hebra_list_attachments', (toolCtx) => runListAttachments(toolCtx, input))
@@ -324,8 +359,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer un adjunto',
       description:
-        'Devuelve un adjunto de una nota: imagen como imagen, texto como texto, PDF como recurso embebido. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Solo lectura.',
-      inputSchema: readAttachmentInputShape
+        'Devuelve un adjunto de una nota: imagen como imagen, texto como texto, PDF como recurso embebido. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Un adjunto de texto se devuelve por tramos de hasta 100 000 caracteres (`offset`, `maxChars`; la respuesta trae `truncated` y `nextOffset`). Solo lectura.',
+      inputSchema: readAttachmentInputShape,
+      annotations: READ_ONLY
     },
     async (input) =>
       runTool(ctx, 'hebra_read_attachment', (toolCtx) => runReadAttachment(toolCtx, input))

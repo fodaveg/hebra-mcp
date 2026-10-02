@@ -60,8 +60,10 @@ describe('capacidades', () => {
     expect(capabilities.notAllowed).toEqual(
       expect.arrayContaining(['purge_notes_or_empty_trash_or_irreversible_delete', 'folder_management'])
     );
-    // Adjuntos en solo lectura (30 sep 2026): ya no están en `notAllowed`, con su límite.
-    expect(capabilities.notAllowed).not.toContain('attachments');
+    expect(capabilities.limits.listTrash).toEqual({ default: 50, max: 100 });
+    // Adjuntos en solo lectura (30 sep 2026): solo se anuncia lo que NO se permite, las
+    // escrituras (`attachment_writes`), con su límite de lectura.
+    expect(capabilities.notAllowed).toContain('attachment_writes');
     expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
     expect(capabilities.tools).toEqual(
       expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment'])
