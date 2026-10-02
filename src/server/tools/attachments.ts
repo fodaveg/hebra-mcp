@@ -36,17 +36,33 @@
  * base64) con la URI opaca `hebra-attachment:<sha256>`, que no se puede abrir ni apunta a
  * ningún sitio.
  *
+ * Texto por tramos: un adjunto de texto sale como mucho en `maxChars` caracteres (1 a
+ * `ATTACHMENT_TEXT_MAX_CHARS`, por defecto el máximo) a partir de `offset` (por defecto 0),
+ * ambos en unidades de `string` (UTF-16). Su bloque de metadatos añade `totalChars`
+ * (longitud del texto entero), `truncated` (queda texto tras este tramo) y `nextOffset`
+ * (dónde seguir, o `null` si ya no queda). Un tramo nunca parte un par sustituto: si el
+ * corte cae en medio de uno, se retrocede un carácter (o, si ni así cabe uno, se incluye el
+ * par entero), y un `offset` que cae en medio de un par salta su mitad final. Con `offset`
+ * mayor o igual que el total, el texto sale vacío, sin `truncated` ni `nextOffset`.
+ * Imágenes y PDF no se trocean: `offset` y `maxChars` no cuentan con ellos, y su
+ * bloque de metadatos no cambia.
+ *
  * Logs (§6.4): los de `runTool` (herramienta y código) y `attachment.fetch` del motor
  * (resultado). Nunca nombres, hashes ni contenido.
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { ToolContent, ToolError } from '../errors';
 import type { ToolContext } from '../context';
+import { LIMITS, effectiveLimit, slicePage } from '../pagination';
 import type { NoteAttachmentRow } from '../../store/types';
 import { mapWriteError } from './write-errors';
 
 /** 5 MiB descifrados por adjunto (decisión de David, 30 sep 2026). */
 export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+
+/** Tramo máximo (y por defecto) de un adjunto de TEXTO, en caracteres de `string`
+ *  (unidades UTF-16): decisión de David, 30 sep 2026. */
+export const ATTACHMENT_TEXT_MAX_CHARS = 100_000;
 
 export const ALLOWED_ATTACHMENT_TYPES: readonly string[] = [
   'image/png',
@@ -220,24 +236,30 @@ export interface ListedAttachment {
   byteLength: number | null;
 }
 
-/** `hebra_list_attachments`: los adjuntos de una nota visible, en el orden del cuerpo. */
+/** `hebra_list_attachments`: los adjuntos de una nota visible, en el orden del cuerpo.
+ *  Sin `limit`, todos (como etiquetas y carpetas); con él (1-200) y `cursor`, por páginas
+ *  (`a1.…`, con el `attachmentId` del último devuelto). `nextCursor` es `null` al final. */
 export async function runListAttachments(
   ctx: ToolContext,
-  input: { id: string }
-): Promise<{ id: string; attachments: ListedAttachment[] }> {
+  input: { id: string; limit?: number; cursor?: string }
+): Promise<{ id: string; attachments: ListedAttachment[]; nextCursor: string | null }> {
+  const limit = effectiveLimit(input.limit, LIMITS.listAttachments);
   const { rows, names } = await visibleNoteAttachments(ctx, input.id);
-  return {
-    id: input.id,
-    attachments: rows.map((row) => {
-      const name = names.get(row.sha256) ?? null;
-      return {
-        attachmentId: row.sha256,
-        name,
-        mimeType: listedType(row.mime, name),
-        byteLength: row.byteLength
-      };
-    })
-  };
+  const all: ListedAttachment[] = rows.map((row) => {
+    const name = names.get(row.sha256) ?? null;
+    return {
+      attachmentId: row.sha256,
+      name,
+      mimeType: listedType(row.mime, name),
+      byteLength: row.byteLength
+    };
+  });
+  const page = slicePage(all, 'a1', {
+    limit,
+    ...(input.cursor !== undefined ? { cursor: input.cursor } : {}),
+    keyOf: (item) => item.attachmentId
+  });
+  return { id: input.id, attachments: page.items, nextCursor: page.nextCursor };
 }
 
 async function localBytes(ctx: ToolContext, sha256: string): Promise<Uint8Array | null> {
@@ -275,6 +297,35 @@ async function fetchBytes(ctx: ToolContext, noteId: string, sha256: string): Pro
   if (!available) throw new ToolError('attachment_unavailable');
 }
 
+const isHighSurrogate = (unit: number): boolean => unit >= 0xd800 && unit <= 0xdbff;
+const isLowSurrogate = (unit: number): boolean => unit >= 0xdc00 && unit <= 0xdfff;
+
+/** El tramo `[offset, offset + maxChars)` de `text` sin partir un par sustituto, y dónde
+ *  seguir (`null` si no queda texto). Ver la cabecera del fichero. */
+export function textChunk(
+  text: string,
+  offset: number,
+  maxChars: number
+): { text: string; nextOffset: number | null } {
+  const total = text.length;
+  if (offset >= total) return { text: '', nextOffset: null };
+  let start = offset;
+  if (start > 0 && isLowSurrogate(text.charCodeAt(start)) && isHighSurrogate(text.charCodeAt(start - 1))) {
+    start += 1;
+  }
+  let end = Math.min(start + maxChars, total);
+  if (
+    end < total &&
+    end > start &&
+    isHighSurrogate(text.charCodeAt(end - 1)) &&
+    isLowSurrogate(text.charCodeAt(end))
+  ) {
+    // El corte cae dentro de un par: se retrocede, o se incluye entero si no cabría nada.
+    end = end - 1 > start ? end - 1 : end + 1;
+  }
+  return { text: text.slice(start, end), nextOffset: end < total ? end : null };
+}
+
 function tooLarge(byteLength: number): ToolError {
   return new ToolError('attachment_too_large', { byteLength, maxBytes: ATTACHMENT_MAX_BYTES });
 }
@@ -282,8 +333,14 @@ function tooLarge(byteLength: number): ToolError {
 /** `hebra_read_attachment`: el contenido de un adjunto de una nota visible. */
 export async function runReadAttachment(
   ctx: ToolContext,
-  input: { id: string; attachmentId: string }
+  input: { id: string; attachmentId: string; offset?: number; maxChars?: number }
 ): Promise<ToolContent> {
+  const offset = input.offset ?? 0;
+  const maxChars = input.maxChars ?? ATTACHMENT_TEXT_MAX_CHARS;
+  if (!Number.isInteger(offset) || offset < 0) throw new ToolError('invalid_input');
+  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > ATTACHMENT_TEXT_MAX_CHARS) {
+    throw new ToolError('invalid_input');
+  }
   const raw = input.attachmentId.trim().toLowerCase();
   const sha256 = raw.startsWith('sha256:') ? raw.slice('sha256:'.length) : raw;
   if (!SHA256_HEX.test(sha256)) throw new ToolError('not_found');
@@ -317,10 +374,25 @@ export async function runReadAttachment(
     mimeType: detected.mimeType,
     byteLength: bytes.length
   };
-  const content: CallToolResult['content'] = [{ type: 'text', text: JSON.stringify(meta) }];
   if (detected.text !== undefined) {
-    content.push({ type: 'text', text: detected.text });
-  } else if (detected.mimeType.startsWith('image/')) {
+    const chunk = textChunk(detected.text, offset, maxChars);
+    return new ToolContent({
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify({
+            ...meta,
+            totalChars: detected.text.length,
+            truncated: chunk.nextOffset !== null,
+            nextOffset: chunk.nextOffset
+          })
+        },
+        { type: 'text', text: chunk.text }
+      ]
+    });
+  }
+  const content: CallToolResult['content'] = [{ type: 'text', text: JSON.stringify(meta) }];
+  if (detected.mimeType.startsWith('image/')) {
     content.push({
       type: 'image',
       data: Buffer.from(bytes).toString('base64'),
