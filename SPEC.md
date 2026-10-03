@@ -133,9 +133,9 @@ Reglas comunes:
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` (≤ 200) | igual que `hebra_edit_note`, con los mismos errores salvo los de las sustituciones. |
 | `hebra_list_attachments` | `id`, `limit?` (1-200; sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `attachmentId`: el SHA-256 del adjunto; `name`: el alias `\|nombre` del cuerpo o `null`; `mimeType` (orientativo) y `byteLength`: `null` si no se saben sin bajarlo. Errores: `not_found`, `note_locked`, `invalid_input` (un `cursor` cuyo adjunto ya no está). |
 | `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000). Solo cambian el resultado en los adjuntos de texto, pero se validan siempre: fuera de rango, `invalid_input`, también con imágenes y PDF. `attachmentId` acepta mayúsculas y el prefijo `sha256:`; si no es un SHA-256 en hexadecimal, `not_found`. | Imagen, PDF: un bloque `{id, attachmentId, name, mimeType, byteLength}` y el contenido íntegro como `image` (base64 + `mimeType`) o `resource` embebido (blob base64 + URI opaca `hebra-attachment:<sha256>`). Texto, Markdown, CSV, JSON: bloque `{id, attachmentId, name, mimeType, byteLength, totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Errores: `invalid_input`, `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `attachment_unavailable`. |
-| `hebra_create_folder` | `name` (1–255 caracteres tras recortar los espacios de los extremos; sin `/` ni caracteres de control), `parent?` (ruta existente, como `path` de `hebra_list_folders`) **o** `parentId?` (id; `"root"` = raíz), como mucho uno; sin ninguno, la raíz | `{id, path, created, sync, syncError?}`. Idempotente: si bajo ese padre ya hay una carpeta VISIBLE con ese nombre (NFC, sin espacios en los extremos y sin distinguir mayúsculas, como compara Hebra), la devuelve con `created: false`. Errores: `not_found` (padre oculto o inexistente), `folder_unavailable` (D9: ruta privada o choque con algo no visible), `invalid_input`. |
+| `hebra_create_folder` | `name` (1–255 caracteres tras recortar los espacios de los extremos; sin `/`, caracteres de control ni de formato invisibles, categoría Cf), `parent?` (ruta existente, como `path` de `hebra_list_folders`) **o** `parentId?` (id; `"root"` = raíz), como mucho uno; sin ninguno, la raíz | `{id, path, created, sync, syncError?}`. Idempotente: si bajo ese padre ya hay una carpeta VISIBLE con ese nombre (NFC, sin espacios en los extremos y sin distinguir mayúsculas, como compara Hebra), la devuelve con `created: false`. Errores: `not_found` (padre oculto o inexistente), `folder_unavailable` (D9: ruta privada o choque con algo no visible), `invalid_input`. |
 | `hebra_rename_folder` | `folderId`, `name` (las mismas reglas) | `{id, path, renamed, sync, syncError?}`. Idempotente: el nombre que ya tiene responde `renamed: false` sin escribir. Errores: `not_found` (oculta o inexistente), `folder_name_taken` (hermana VISIBLE con ese nombre), `folder_unavailable` (D9), `invalid_input` (también la raíz). |
-| `hebra_add_attachment` | `id`, `name` (1–255 caracteres tras recortar; sin `\|`, `[`, `]`, `\`, `#`, saltos de línea ni caracteres de control), `dataBase64` (base64 estándar; se ignoran espacios y saltos de línea), `mimeType?` (decide entre los tipos de texto, como en la lectura), `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", attachmentId, markdown, revision?, copyId?, replayed?, sync, syncError?}`. `attachmentId`: el SHA-256 de los bytes; `markdown`: la referencia añadida, `![[sha256:<attachmentId>\|<name>]]`. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `operation_id_reused`, `invalid_input`. |
+| `hebra_add_attachment` | `id`, `name` (1–255 caracteres tras recortar; sin `\|`, `[`, `]`, `\`, `#`, saltos de línea, caracteres de control ni de formato invisibles, Cf), `dataBase64` (base64 estándar; se ignoran espacios y saltos de línea), `mimeType?` (decide entre los tipos de texto, como en la lectura), `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", attachmentId, markdown, revision?, copyId?, replayed?, sync, syncError?}`. `attachmentId`: el SHA-256 de los bytes; `markdown`: la referencia añadida, `![[sha256:<attachmentId>\|<name>]]`. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `operation_id_reused`, `invalid_input`. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9):
@@ -217,10 +217,15 @@ Detalle de las escrituras (D2):
   privados de quien pide. Mover y borrar carpetas siguen fuera: no hay herramienta, ni el socket
   acepta esas acciones, y llamar a `hebra_move_folder` da el error genérico del SDK de herramienta
   inexistente. Reglas, en este orden, en la herramienta y otra vez en el escritor:
-  1. Nombre: lo recortado tiene entre 1 y 255 caracteres, sin `/` ni caracteres de control; si no,
-     `invalid_input` (lo que el motor rechace, `invalid_name`, también).
+  1. Nombre: lo recortado tiene entre 1 y 255 caracteres, sin `/`, caracteres de control,
+     separadores de línea ni caracteres de formato invisibles (Unicode Cf: U+200B, U+202E…, con
+     los que dos nombres que se ven iguales serían distintos); si no, `invalid_input` (lo que el
+     motor rechace, `invalid_name`, también).
   2. Carpeta de partida visible (el padre al crear; la propia carpeta al renombrar, nunca la raíz):
-     oculta o inexistente, `not_found`, igual que hoy al mover una nota.
+     oculta o inexistente, `not_found`, igual que hoy al mover una nota. Al renombrar, además, si
+     su propia ruta es privada o queda debajo de una, `folder_unavailable`, mirado en la
+     configuración y no solo en el índice de carpetas ocultas (con el índice bien, una así ya es
+     oculta y sale como `not_found`).
   3. **Desde la configuración, antes de mirar el motor**: si la ruta resultante (la del padre más el
      nombre, en minúsculas y sin espacios en los extremos, como la compara el filtro) es una carpeta
      privada configurada o queda debajo de una, `folder_unavailable`; al renombrar, también si la
@@ -289,6 +294,19 @@ Detalle de las escrituras (D2):
     edición). El blob se guarda antes que la nota: si el proceso muere entre los dos, el blob queda
     en el almacén local sin referencia y no se sube (el motor solo sube blobs referenciados por un
     registro vivo, `syncBlobsPending`); el reintento lo reutiliza.
+  - **La referencia tiene que contar como adjunto**: el escritor lo comprueba con `deriveNote`
+    (lo mismo que llena `note_blob_refs`). Si el cuerpo termina dentro de un bloque de código sin
+    cerrar, el texto añadido sería código (la misma semántica que `hebra_append_to_note`, que no
+    lo corrige): se cierra el bloque antes (`\n` + la primera marca que lo cierre, de tres a cinco
+    acentos graves o virgulillas) y se vuelve a comprobar. Si ni así cuenta (otra construcción sin cerrar, como
+    un comentario HTML `<!--`, se la traga), `invalid_input` sin guardar el blob.
+  - **Reintento tras una caída**: con el registro a medias (`started`), se da por guardado si el
+    cuerpo actual de la nota es el que se iba a guardar o si ya contiene esa referencia (otra
+    escritura o el sync pudo cambiarla después); se cierra el registro y responde `replayed: true`
+    sin volver a añadirla. En `started` no consta la copia de conflicto de un `redirected` dentro
+    del turno (solo pasa con una lápida). **Límite**: el registro caduca a las 24 h; pasado ese
+    plazo, un reintento con el mismo `operationId` es una petición nueva y, a diferencia de una
+    edición (cuya revisión ya no casaría), puede duplicar la referencia (el blob es el mismo).
   - Sube al relé en la ronda de después, como cualquier adjunto de Hebra: `planBlobUploads` y
     `uploadBlobs` de `LibrarySyncEngine` (Blob V2, `HttpBlobRelayV2` del `SyncRunner`) suben en
     paralelo con el registro de la nota los blobs referenciados, presentes y sin subir.
@@ -371,6 +389,11 @@ El dispositivo acumula tres secretos:
   `{ "privateFolders": ["Diario", "Salud/Médico"], "privateTags": ["privado", "diario"] }`.
 - **Qué se oculta**: una nota queda oculta si está en una carpeta privada **o en cualquier
   subcarpeta**, o si tiene una etiqueta privada **o una descendiente** (`diario` oculta `diario/2026`).
+  Una ruta privada oculta **todas** las carpetas vivas que la tienen: el sync puede traer
+  hermanas homónimas (dos dispositivos crean la misma carpeta a la vez; el motor solo impide
+  homónimas en local), que difieran en mayúsculas, en espacios de los extremos o en la forma
+  NFC/NFD de una tilde (las rutas se comparan en minúsculas, recortadas y en NFC). Hasta la
+  revisión de D9 (3 oct 2026) solo se ocultaba una de ellas, y las notas de las otras se veían.
 - **Cuándo se evalúa**: al construir cada respuesta, a partir de los ids de carpeta y las etiquetas
   canónicas (`canonicalTag` de Hebra) del almacén, no del texto.
 - **Qué no se filtra**: la configuración no viaja por sync; es del proceso local.
@@ -545,8 +568,11 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     índice (`edit`). Una línea de más de `MAX_MESSAGE_BYTES` se rechaza sin leerla entera: lo mayor
     entre el cuerpo máximo de §5 con el peor escape JSON (las sustituciones de `editNote` suman como
     mucho lo mismo) y el base64 de un adjunto de 5 MiB (6 990 508 caracteres, que JSON no escapa),
-    más 64 KiB; hoy manda el adjunto, 7 056 044 bytes (D9). El escritor vuelve a comprobar los
-    límites de §5.
+    más un margen de 512 KiB para el sobre, la configuración de privados y los saltos de línea de
+    un base64 partido cada 76 caracteres (hasta 367 924 bytes con `\r\n` escapados); hoy manda el
+    adjunto, 7 514 796 bytes (D9). El escritor vuelve a comprobar los límites de §5. Cada
+    conexión tiene como mucho UNA petición en vuelo: las líneas se atienden en orden y, mientras
+    hay una en curso, la conexión deja de leer, para que no acumule varios mensajes de ese tamaño.
   - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note`, las tres de
     organización de notas, las dos de la papelera, `hebra_restore_version`, las dos de carpetas y
     `hebra_add_attachment` al escritor (las
@@ -592,7 +618,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 | R5 | Una configuración de privados mal escrita expone notas. | Cerrado ante la duda (§6.3) y tests de subárbol, etiqueta anidada, backlinks, fragmentos y recuentos. |
 | R6 | Un fallo de hebra-mcp en el emparejado o en las escrituras ensucia la biblioteca de David. | BEAR-22 está cerrada, así que L4 no espera a nada más que a L2 y L3. Aun así, L2 y L3 se prueban primero contra una bóveda de pruebas propia, creada en el relé de producción por la misma vía que `createTestVaultState` de Hebra (`test-vault.ts:178-189`): bóveda y credencial propias, aisladas de la biblioteca de David. No existe relé de staging. La biblioteca actual es de prueba y David la reimporta desde Obsidian, así que el riesgo es para la medición, no para los datos. |
 | R10 | Adjuntos (decisión 7 de D2): la caché de adjuntos del motor crece con cada adjunto leído y no se purga sola; y un adjunto sin fila en `blobs` (un `sha256:` de otro dispositivo) se baja entero antes de saber si pasa de 5 MiB (hasta los 25 MiB de Hebra, `MAX_ATTACHMENT_BYTES`). | Solo se baja lo que se pide, de una nota visible, uno cada vez; `unpair` borra la caché con el resto del directorio de datos. Un tope de caché o una petición de tamaño antes de bajar serían un cambio en Hebra (Blob V2 no guarda el tamaño). |
-| R11 | Añadir adjuntos (D9) obliga a que un adjunto de 5 MiB en base64 quepa en `writer.sock`, en `POST /mcp` y en el borde (Caddy): los topes pasan de unos 650 KiB a unos 7 MB, y una petición autenticada puede ocupar eso en memoria. Además, un modelo difícilmente escribe megabytes de base64 en una llamada: en la práctica cabrán imágenes pequeñas. | El tope sigue siendo exacto (lo mayor entre el cuerpo de §5 y el base64 de 5 MiB, más 64 KiB) y en HTTP se comprueba la credencial antes de leer el cuerpo. Una vía por ruta local (solo stdio) sería otra decisión. |
+| R11 | Añadir adjuntos (D9) obliga a que un adjunto de 5 MiB en base64 quepa en `writer.sock`, en `POST /mcp` y en el borde (Caddy): los topes pasan de unos 650 KiB a unos 7,5 MB (8 MB en el borde), y una petición autenticada puede ocupar eso en memoria. Además, un modelo difícilmente escribe megabytes de base64 en una llamada: en la práctica cabrán imágenes pequeñas. | El tope sigue siendo exacto (lo mayor entre el cuerpo de §5 y el base64 de 5 MiB, más 512 KiB para el sobre y los saltos de línea), en HTTP se comprueba la credencial antes de leer el cuerpo, y en `writer.sock` cada conexión tiene como mucho una petición en vuelo. Una vía por ruta local (solo stdio) sería otra decisión. |
 | R7 | Lumbre no admite hoy devolver el código de emparejado a un CLI (P2). | L2a: redirección loopback con PKCE obligatorio, pedida a la sesión de Lumbre. L2 no empieza sin ella. |
 | R9 | Aprobar exige que el dispositivo que aprueba tenga `recoveryExported` (`identity-vault.ts:151`) (P7). | **Cerrado**: David confirmó el 26 sep 2026 que exportó el código de recuperación en el Mac. Es un dato dicho por él, no medido en el contenedor: si la aprobación falla en L4 con ese motivo, se revisa esto primero. |
 | R8 | **Cerrado** (L5, 26 sep 2026): Hebra (`035db7e6`) añadió `agent` a `DEVICE_LINK_PLATFORMS` (`device-link.ts:54`) y el relé de Lumbre en producción ya lo acepta. hebra-mcp declara `agent` (`LINK_PLATFORM`, `device-link.ts:38`); Hebra lo muestra como «Claude», no como «Mac». | v1 usa `agent` con la etiqueta «Claude (hebra-mcp)», saneada por `sanitizeDeviceLabel`. Petición P3 cerrada. |
@@ -642,9 +668,10 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   - `POST /mcp` con credencial, que se comprueba antes de leer el cuerpo. `GET` y `DELETE /mcp`
     responden 405, como lumbre-mcp. Nada bajo `/mcp/…`: el token no va nunca en la URL.
   - Tope de cuerpo con 413: el mismo `MAX_MESSAGE_BYTES` de `writer.sock` (§8), lo mayor entre el
-    cuerpo máximo de §5 con el peor escape JSON y el base64 de un adjunto de 5 MiB, más 64 KiB. Hasta
-    D9 eran 664 KiB; desde D9, 7 056 044 bytes, y el borde (`deploy/mcp-hebra-pro.caddy`) corta un
-    poco antes, en 7 MB.
+    cuerpo máximo de §5 con el peor escape JSON y el base64 de un adjunto de 5 MiB, más 512 KiB.
+    Hasta D9 eran 664 KiB; desde D9, 7 514 796 bytes. El borde (`deploy/mcp-hebra-pro.caddy`)
+    admite 8 MB, por encima: el corte exacto con 413 es el de la app, y el borde solo para lo
+    desmedido.
   - `Host` y `Origin` tienen que ser el host público. Un host de loopback solo vale si la conexión
     viene de loopback (healthcheck, tests).
   - `GET /healthz`: 204 sin cuerpo ni autenticación.
