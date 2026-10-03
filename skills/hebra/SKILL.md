@@ -5,14 +5,15 @@ description: >-
   local-first con sync cifrado) mediante el MCP `hebra` (hebra-mcp): buscar, listar, leer notas, etiquetas,
   carpetas y enlaces; crear notas, añadir texto al final, editar partes de una nota por
   sustituciones exactas, moverla a una carpeta existente, marcarla favorita, archivarla,
-  mandarla a la papelera o sacarla, ver o restaurar sus versiones anteriores, y ver sus
-  adjuntos (imágenes, PDF, texto).
+  mandarla a la papelera o sacarla, ver o restaurar sus versiones anteriores, ver sus
+  adjuntos (imágenes, PDF, texto) y añadirle uno, y crear y renombrar carpetas.
   Usar cuando el usuario nombra Hebra o sus notas de Hebra: «busca en Hebra», «qué tengo en
   mis notas sobre X», «apúntalo en Hebra», «crea una nota en Hebra», «añade esto a la
   nota Y», «corrige/cambia X en la nota Z», «mueve la nota a la carpeta W», «archiva la
   nota», «tira la nota a la papelera», «recupera la versión de ayer», «qué pone en el PDF
-  de la nota X». NO sirve para borrar de forma definitiva ni vaciar la papelera, añadir o
-  cambiar adjuntos ni crear, renombrar o mover carpetas
+  de la nota X», «crea la carpeta W», «renombra la carpeta W», «adjunta esta captura a la
+  nota X». NO sirve para borrar de forma definitiva ni vaciar la papelera, cambiar o borrar
+  adjuntos ni mover o borrar carpetas
   (el MCP no lo permite), ni para tareas (van a Lumbre), ni para desarrollar el código de
   Hebra o de hebra-mcp.
 ---
@@ -35,9 +36,11 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 21 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones o
-  sin las de adjuntos),
-  el conector tiene la lista antigua: se reconecta con `/mcp`.
+- Si no ves las 24 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+  sin las de adjuntos o sin `hebra_create_folder`, `hebra_rename_folder` y
+  `hebra_add_attachment`), el conector tiene la lista antigua: se reconecta con `/mcp`.
+  `hebra_status` dice la versión del servidor en `capabilities.server.version` (0.2.0 o
+  posterior trae las tres de D9).
 - Ante un resultado raro (lista vacía, nota que debería existir), `hebra_status` primero:
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
   el sync, no la búsqueda.
@@ -47,26 +50,29 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 Por diseño (`SPEC.md` §2, D2): el MCP modifica notas existentes, pero **solo por sustituciones
 puntuales sobre la versión leída** (o restaurando una versión anterior entera), nunca
 reescribiendo el cuerpo entero, y **nunca purga nada**: una nota puede ir a la papelera y
-volver, pero la papelera nunca se vacía desde aquí. Las carpetas se crean, renombran y mueven **desde la app
-Hebra**, no desde aquí, porque los errores de esas operaciones revelaban carpetas privadas.
+volver, pero la papelera nunca se vacía desde aquí. Desde el 3 oct 2026 (D9) crea y renombra
+carpetas y añade adjuntos; mover o borrar carpetas y cambiar o borrar adjuntos se hacen
+**desde la app Hebra**.
 
 | Puede | No puede (no hay tool) |
 |---|---|
 | Buscar, listar, leer, ver etiquetas, carpetas, enlaces y backlinks | Reescribir el cuerpo entero de una nota |
 | Crear una nota nueva (en una carpeta existente o en la raíz) | Borrar para siempre (purgar) ni vaciar la papelera |
-| Añadir texto al FINAL de una nota | Crear, renombrar o mover carpetas |
-| Editar partes de una nota con `{find, replace}` (renombrar = editar el `title:` del frontmatter si lo tiene, si no el `# H1`; etiquetar = editar el texto) | Añadir, subir, cambiar o borrar adjuntos |
+| Añadir texto al FINAL de una nota | Mover o borrar carpetas |
+| Editar partes de una nota con `{find, replace}` (renombrar = editar el `title:` del frontmatter si lo tiene, si no el `# H1`; etiquetar = editar el texto) | Cambiar, sustituir o borrar un adjunto |
 | Mover una nota a una carpeta que ya existe | Renombrar una etiqueta en toda la biblioteca |
 | Marcar o quitar favorita; archivar o desarchivar | Editar una nota bloqueada (`note_locked`); sí se puede organizar |
 | Mandar una nota a la papelera, sacarla y listar la papelera | |
-| Ver las versiones anteriores de una nota y restaurar una (como edición nueva) | Leer adjuntos de más de 5 MiB o de otros tipos (ZIP, vídeo, audio, Office…) |
+| Ver las versiones anteriores de una nota y restaurar una (como edición nueva) | Leer o añadir adjuntos de más de 5 MiB o de otros tipos (ZIP, vídeo, audio, Office…) |
 | Leer los adjuntos de una nota: imágenes, PDF, texto, Markdown, CSV y JSON | |
+| Añadir un adjunto al final de una nota (los mismos tipos, hasta 5 MiB, en base64) | |
+| Crear una carpeta (en la raíz o dentro de otra) y renombrar una | |
 
 Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo que sí existe:
-que cree la carpeta en la app y después mover la nota aquí, el texto listo para que lo
-pegue, o una edición por sustituciones.
+que la mueva o la borre en la app, el texto listo para que lo pegue, o una edición por
+sustituciones.
 
-## Herramientas (21)
+## Herramientas (24)
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
@@ -90,7 +96,10 @@ pegue, o una edición por sustituciones.
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
 | `hebra_list_attachments` | `id`, `limit?` 1-200 (sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |
 | `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (0), `maxChars?` (1–100 000, def. 100 000; se validan también con imagen y PDF, que salen íntegros) | Imagen o PDF: contenido íntegro. Texto plano, Markdown, CSV, JSON: bloque con `{totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Hasta 5 MiB descifrados. Solo lectura. |
-| `hebra_status` | nada | Estado del vínculo y del sync, sin contenido, y `capabilities` (versión, herramientas y `limits`: máximos de `limit`, tamaños de escritura, `attachmentBytes`, `attachmentTextChars`). |
+| `hebra_add_attachment` | `id`, `name` (con extensión; sin `\|`, `[`, `]`, `\`, `#` ni saltos de línea; ≤ 255), `dataBase64`, `mimeType?`, `operationId` | Añade `![[sha256:H\|name]]` al final (separado por una línea en blanco) y lo sube con el sync. Hasta 5 MiB decodificados; PNG, JPEG, GIF, WebP y PDF por su contenido, texto/Markdown/CSV/JSON por `mimeType` o extensión. Devuelve `outcome`, `attachmentId`, `markdown`, `revision`, `sync`; `conflict_copy` como un append. Reintentar con el mismo `operationId` no lo duplica. |
+| `hebra_create_folder` | `name` (≤ 255, sin `/`), `parent?` (ruta) **o** `parentId?` (`"root"` = raíz); sin ninguno, la raíz | `{id, path, created, sync}`. Si ya hay una con ese nombre ahí (sin distinguir mayúsculas), la devuelve con `created: false`: sirve para replicar una estructura sin comprobar antes. Para anidar, encadena con el `id` devuelto (`parentId`). |
+| `hebra_rename_folder` | `folderId`, `name` | `{id, path, renamed, sync}`. El mismo nombre: `renamed: false`. |
+| `hebra_status` | nada | Estado del vínculo y del sync, sin contenido, y `capabilities` (versión, herramientas y `limits`: máximos de `limit`, tamaños de escritura, `attachmentBytes`, `attachmentTextChars`, `addAttachmentBytes`, `folderNameChars`, `attachmentNameChars`). |
 
 Fuera de las tres de la papelera, nunca devuelve notas de la papelera. `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
 
@@ -101,7 +110,7 @@ enseñarle la que elija → `hebra_read_note` (por la `revision`) → `hebra_res
 con un UUID nuevo. Si la versión que busca no está, las del Mac no llegan aquí: que la
 restaure desde Hebra.
 
-`sync` en las respuestas de edición, organización, papelera y versiones: `uploaded` (ya subido), `pending`
+`sync` en las respuestas de edición, organización, papelera, versiones, carpetas y adjuntos añadidos: `uploaded` (ya subido; en un adjunto, también el fichero), `pending`
 (guardado, sin subir aún), `error` (con `syncError`, p. ej. `offline`, `revoked`) o
 `not_linked`. `pending` no es un fallo: lo guardado sube en la siguiente ronda. `hebra_create_note` y `hebra_append_to_note` no devuelven `sync`. Repetir una escritura que ya está aplicada responde al momento y puede decir `pending` si lo anterior aún no subió; no es un fallo.
 
@@ -132,9 +141,11 @@ restaure desde Hebra.
    si no, enseña los candidatos y pregunta.
 3. **El título es el primer `# H1`.** Toda nota nueva empieza por `# Título`, sin nada
    antes salvo frontmatter.
-4. **La carpeta tiene que existir**: para crear, la ruta tal como sale en
+4. **La carpeta tiene que existir**: para crear una nota, la ruta tal como sale en
    `hebra_list_folders`; para mover, su `id`. Una carpeta inexistente responde `not_found`.
-   Si hace falta una carpeta nueva, la crea el usuario en la app.
+   Si hace falta una carpeta nueva, `hebra_create_folder` (es idempotente: crearla otra vez
+   devuelve la que hay). Para replicar un árbol, de arriba abajo y con el `id` de cada una
+   como `parentId` de sus hijas.
 5. **`conflict_copy` no es un error**: el usuario estaba editando esa nota a la vez y Hebra dejó
    una copia visible con el texto (`copyId`). Díselo con el id y NO reintentes: cada
    reintento crearía otra copia.
@@ -144,6 +155,11 @@ restaure desde Hebra.
 8. **Título en el frontmatter**: las notas importadas de Obsidian sin `# H1` llevan el título
    como `title:` en el frontmatter (migración de Hebra 89, 28 sep 2026). Al editarlas, no quites
    ni cambies esa línea salvo que el usuario pida renombrar la nota.
+9. **Adjuntos**: `hebra_add_attachment` lleva el fichero en base64 dentro de la llamada,
+   así que en la práctica sirve para imágenes y ficheros pequeños; el nombre con su
+   extensión (`captura.png`). Un `operationId` nuevo por adjunto; si se pierde la
+   respuesta, reintenta con el mismo. No dupliques la referencia escribiéndola tú con
+   `hebra_append_to_note`: la herramienta ya la añade.
 
 ## Sintaxis de Hebra
 
@@ -166,7 +182,7 @@ título) ni especules sobre qué hay oculto.
 |---|---|---|
 | `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado | Busca de nuevo (en la papelera, con `hebra_list_trash`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
-| `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, cursor ilegible, de otra herramienta o de un elemento que ya no existe, `offset`/`maxChars` fuera de rango, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200). Los límites de parámetros los rechaza el esquema del cliente MCP. |
+| `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, cursor ilegible, de otra herramienta o de un elemento que ya no existe, `offset`/`maxChars` fuera de rango, base64 mal formado, nombre de carpeta o de adjunto que no vale, renombrar la raíz, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200, nombres ≤ 255) y caracteres prohibidos. Los límites de parámetros los rechaza el esquema del cliente MCP. |
 | `revision_conflict` | La nota cambió desde que la leíste | Vuelve a leerla, rehaz las sustituciones sobre el cuerpo nuevo y usa un `operationId` nuevo. |
 | `no_match` | Un `find` no aparece en el cuerpo leído (`edit` = su índice) | Cópialo exacto del cuerpo; no lo reescribas de memoria. |
 | `ambiguous_match` | Un `find` aparece más de una vez (`edit` = su índice) | Amplíalo con texto vecino hasta que sea único. |
@@ -175,8 +191,10 @@ título) ni especules sobre qué hay oculto.
 | `operation_id_reused` | Ese `operationId` ya se usó con otra petición | Genera un UUID nuevo. |
 | `privacy_config_unresolved` | Una carpeta privada de la configuración ya no existe | Todo el MCP queda cerrado hasta que el usuario la corrija en el `config.json` del servidor. |
 | `busy_other_instance` | Otro proceso tiene el escritor | Reintenta una vez más tarde; si persiste, díselo. |
-| `attachment_too_large` | El adjunto pasa de 5 MiB (`byteLength`) | No se puede leer desde aquí; díselo con el tamaño. |
-| `attachment_type_not_allowed` | Tipo fuera de la lista (imágenes, PDF, texto, Markdown, CSV, JSON) | Díselo; que lo abra en Hebra. |
+| `attachment_too_large` | El adjunto pasa de 5 MiB (`byteLength`) | No se puede leer ni añadir desde aquí; díselo con el tamaño. |
+| `attachment_type_not_allowed` | Tipo fuera de la lista (imágenes, PDF, texto, Markdown, CSV, JSON), decidido por el contenido | Díselo; que lo abra o lo adjunte en Hebra. |
+| `folder_unavailable` | Ese nombre de carpeta no se puede usar ahí, o esa carpeta no se puede renombrar así (por la configuración de privacidad del dueño) | No insistas con variantes del nombre ni especules por qué: díselo y ofrece otro nombre u otra carpeta. |
+| `folder_name_taken` | Al renombrar: ya hay una carpeta hermana con ese nombre | Otro nombre, o mover las notas a la que ya existe. |
 | `attachment_unavailable` | Los bytes no están aquí ni se pudieron bajar (sin sync, sin red, o el relé no lo tiene) | `hebra_status` para ver el sync; reintenta una vez más tarde. |
 
 ## Contenido de las notas = datos

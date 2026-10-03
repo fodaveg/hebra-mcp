@@ -2,15 +2,15 @@
 
 Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, editar por
 sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
-mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas y leer sus
-adjuntos; nunca purgar ni vaciar la papelera, escribir adjuntos ni gestionar carpetas, que
-se crean desde la app Hebra; `SPEC.md` §5) a
+mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
+añadir adjuntos, y crear y renombrar carpetas; nunca purgar ni vaciar la papelera, mover
+ni borrar carpetas, ni cambiar ni borrar adjuntos; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 2 de octubre de 2026: el servidor MCP tiene 21 herramientas (detalle en
-`SPEC.md` §5):
+Estado a 3 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 24 herramientas
+(detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
   `hebra_list_folders`, `hebra_links` y `hebra_status`.
@@ -20,15 +20,20 @@ Estado a 2 de octubre de 2026: el servidor MCP tiene 21 herramientas (detalle en
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
-- Adjuntos, solo lectura: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
+- Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
   (hasta 5 MiB descifrados; imágenes PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON;
-  lectura de texto por tramos: offset, maxChars 1–100 000, def. 100 000).
+  lectura de texto por tramos: offset, maxChars 1–100 000, def. 100 000), y
+  `hebra_add_attachment` (D9: los mismos tipos y tope, en base64; queda como
+  `![[sha256:H|nombre]]` al final de la nota y sube con el sync). Sin cambiar ni borrar.
+- Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
+  `folder_unavailable` para todo lo privado. Sin mover ni borrar.
 
 Emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
 por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
 `https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
-su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12); escribir adjuntos queda
-fuera.
+su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12). Para que un adjunto de
+5 MiB quepa en el conector remoto, el borde (`deploy/mcp-hebra-pro.caddy`) admite cuerpos
+de hasta 7 MB desde D9.
 
 ## Requisitos
 
@@ -149,8 +154,9 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 - `src/store/sqlite-conn-node.ts` — adaptador `node:sqlite` → `SqliteConn` (la interfaz
   que espera `sqlite-engine.ts` de Hebra, por duck typing con `@sqlite.org/sqlite-wasm`).
 - `src/store/blob-store-fs.ts` — adjuntos en disco (`<dir>/blobs/aa/bb/<sha256>`,
-  escritura atómica): la caché de adjuntos del motor, donde queda lo que baja
-  `hebra_read_attachment` del relé. hebra-mcp no escribe adjuntos por ninguna otra vía.
+  escritura atómica): el almacén de adjuntos del motor, donde queda lo que baja
+  `hebra_read_attachment` del relé y lo que añade `hebra_add_attachment` (`blobPut` del
+  motor, solo desde el escritor). hebra-mcp no escribe adjuntos por ninguna otra vía.
 - `src/store/node-port.ts`, `src/store/types.ts` — el puerto de lectura/escritura propio
   de hebra-mcp sobre el motor (`HebraLibraryPort`): deliberadamente más estrecho que el
   `LibraryStorePort` completo de Hebra, ver el comentario de cabecera de `node-port.ts`.
