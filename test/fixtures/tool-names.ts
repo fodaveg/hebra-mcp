@@ -28,7 +28,11 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_trash_note',
   // Adjuntos en solo lectura (30 sep 2026).
   'hebra_list_attachments',
-  'hebra_read_attachment'
+  'hebra_read_attachment',
+  // Carpetas y adjuntos (D9, 3 oct 2026).
+  'hebra_create_folder',
+  'hebra_rename_folder',
+  'hebra_add_attachment'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
@@ -37,10 +41,13 @@ export const FORBIDDEN_TRASH_TOOLS: readonly string[] = [
   'hebra_empty_trash'
 ];
 
-/** Las tres de gestión de carpetas que quedaron fuera del MCP (opción A de David, 28 sep
- *  2026: sus errores revelaban carpetas privadas). Ningún transporte las lista. */
+/** Lo que sigue fuera del MCP tras D9 (3 oct 2026, que trajo crear y renombrar carpetas
+ *  y añadir adjuntos): mover y borrar carpetas, y cambiar o borrar adjuntos. Ningún
+ *  transporte las lista. */
 export const REMOVED_FOLDER_TOOLS: readonly string[] = [
-  'hebra_create_folder',
-  'hebra_rename_folder',
-  'hebra_move_folder'
+  'hebra_move_folder',
+  'hebra_delete_folder',
+  'hebra_trash_folder',
+  'hebra_delete_attachment',
+  'hebra_replace_attachment'
 ];

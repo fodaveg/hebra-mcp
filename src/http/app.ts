@@ -40,16 +40,17 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { logEvent } from '../log/logger';
 import { buildMcpServer } from '../server/build-server';
 import type { ServerContext } from '../server/context';
-import { CREATE_BODY_MAX_LENGTH } from '../store/writes';
+import { MAX_WRITE_MESSAGE_BYTES } from '../store/writes';
 import { isLoopbackHostname, MCP_PATH, type HttpConfig } from './config';
 
 /**
- * Tope del cuerpo de `POST /mcp`, en bytes. El cuerpo legítimo más grande es un
- * `hebra_create_note` con el cuerpo máximo de §5 (100 000 caracteres), que en JSON
- * ocupa como mucho 6 bytes por unidad UTF-16 (`\uXXXX` de un carácter de control), más
- * el sobre JSON-RPC: el mismo cálculo que `MAX_MESSAGE_BYTES` de `writer.sock`.
+ * Tope del cuerpo de `POST /mcp`, en bytes: el mismo que una línea de `writer.sock`
+ * (`MAX_WRITE_MESSAGE_BYTES`). El cuerpo legítimo más grande era un `hebra_create_note`
+ * con el cuerpo máximo de §5 escapado (665 536 bytes); desde D9 (3 oct 2026) es un
+ * `hebra_add_attachment` con el base64 de un adjunto de 5 MiB más el sobre JSON-RPC
+ * (7 056 044 bytes). La credencial se comprueba antes de leer un solo byte.
  */
-export const MAX_MCP_BODY_BYTES = CREATE_BODY_MAX_LENGTH * 6 + 64 * 1024;
+export const MAX_MCP_BODY_BYTES = MAX_WRITE_MESSAGE_BYTES;
 
 /** Código JSON-RPC del 413 (rango de errores de servidor), el mismo que lumbre-mcp. */
 const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;

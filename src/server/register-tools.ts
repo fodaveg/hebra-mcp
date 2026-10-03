@@ -1,20 +1,24 @@
 /**
- * Registro de las 21 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
- * organización, papelera, versiones y adjuntos en solo lectura. Todas pasan por `runTool`:
+ * Registro de las 24 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * organización, papelera, versiones, adjuntos y, desde D9 (3 oct 2026), crear y renombrar
+ * carpetas y añadir adjuntos. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
- * Ninguna purga ni vacía la papelera ni gestiona carpetas (opción A de David, 28 sep
- * 2026: sus errores revelaban carpetas privadas). Cada una lleva sus `annotations` MCP.
+ * Ninguna purga ni vacía la papelera, mueve ni borra carpetas, ni cambia ni borra
+ * adjuntos. Cada una lleva sus `annotations` MCP.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { resolveToolContext, type ServerContext, type ToolContext } from './context';
 import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
+  addAttachmentInputShape,
   appendToNoteInputShape,
+  createFolderInputShape,
   createNoteInputShape,
+  renameFolderInputShape,
   editNoteInputShape,
   linksInputShape,
   listAttachmentsInputShape,
@@ -34,7 +38,9 @@ import {
   setFavoriteInputShape,
   trashNoteInputShape
 } from './schemas';
+import { runAddAttachment } from './tools/add-attachment';
 import { runAppendToNote } from './tools/append-to-note';
+import { runCreateFolder, runRenameFolder } from './tools/folders';
 import { runListAttachments, runReadAttachment } from './tools/attachments';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
@@ -365,5 +371,44 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     },
     async (input) =>
       runTool(ctx, 'hebra_read_attachment', (toolCtx) => runReadAttachment(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_create_folder',
+    {
+      title: 'Crear una carpeta',
+      description:
+        'Crea una carpeta dentro de otra que ya existe (`parent`, su ruta, o `parentId`; sin ninguno, la raíz). Si ya hay una con ese nombre ahí, la devuelve con `created: false`. folder_unavailable: ese nombre no se puede usar ahí. No mueve ni borra carpetas.',
+      inputSchema: createFolderInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_create_folder', (toolCtx) => runCreateFolder(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_rename_folder',
+    {
+      title: 'Renombrar una carpeta',
+      description:
+        'Renombra una carpeta por id (de hebra_list_folders). folder_name_taken: ya hay una hermana con ese nombre; folder_unavailable: no se puede renombrar así. El nombre que ya tiene responde `renamed: false`. No mueve ni borra carpetas.',
+      inputSchema: renameFolderInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_rename_folder', (toolCtx) => runRenameFolder(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_add_attachment',
+    {
+      title: 'Añadir un adjunto a una nota',
+      description:
+        'Añade un fichero (base64) al final de una nota como `![[sha256:…|nombre]]`, igual que adjunta Hebra, y lo sube con el sync. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Una edición concurrente produce una copia de conflicto visible. Reintentar con el mismo operationId no lo añade dos veces. No cambia ni borra adjuntos.',
+      inputSchema: addAttachmentInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_add_attachment', (toolCtx) => runAddAttachment(toolCtx, input))
   );
 }

@@ -119,9 +119,49 @@ export const editNoteInputShape = {
 };
 
 /** Organización de notas (D2 ampliada): todo por id, los de `hebra_list_notes`/
- *  `hebra_list_folders`. La raíz es la carpeta `"root"`. Sin herramientas de carpetas
- *  (opción A de David, 28 sep 2026). */
+ *  `hebra_list_folders`. La raíz es la carpeta `"root"`. */
 const FOLDER_ID_HINT = 'Id de carpeta de hebra_list_folders ("root" es la raíz).';
+
+/** Carpetas (D9, 3 oct 2026): crear y renombrar. Sin `.max()` en `name`: el nombre lo
+ *  valida `src/store/folders.ts` con `invalid_input`, sin eco de la entrada. */
+const FOLDER_NAME_HINT =
+  'Nombre de la carpeta (hasta 255 caracteres, sin "/"; se recortan los espacios de los extremos).';
+
+export const createFolderInputShape = {
+  name: z.string().describe(FOLDER_NAME_HINT),
+  parent: z
+    .string()
+    .optional()
+    .describe('Ruta de la carpeta padre, como `path` de hebra_list_folders. Sin `parent` ni `parentId`, la raíz.'),
+  parentId: z
+    .string()
+    .optional()
+    .describe('Id de la carpeta padre (hebra_list_folders; "root" es la raíz), en vez de `parent`.')
+};
+
+export const renameFolderInputShape = {
+  folderId: z.string().describe(FOLDER_ID_HINT),
+  name: z.string().describe(FOLDER_NAME_HINT)
+};
+
+/** Añadir un adjunto (D9). Sin `.max()`: el tamaño (5 MiB decodificados), el nombre y
+ *  `operationId` los aplica `add-attachment.ts` con sus códigos, sin eco de la entrada. */
+export const addAttachmentInputShape = {
+  id: z.string(),
+  name: z
+    .string()
+    .describe('Nombre del fichero, con extensión (p. ej. `captura.png`). Sin | [ ] \\ # ni saltos de línea.'),
+  dataBase64: z
+    .string()
+    .describe('Contenido en base64 estándar (como mucho 5 MiB decodificados); se ignoran espacios y saltos de línea.'),
+  mimeType: z
+    .string()
+    .optional()
+    .describe('Tipo declarado. Las imágenes y el PDF se reconocen por su contenido; para texto, Markdown, CSV o JSON basta este tipo o la extensión del nombre.'),
+  operationId: z
+    .string()
+    .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a añadir el adjunto.')
+};
 
 export const moveNoteInputShape = {
   id: z.string(),

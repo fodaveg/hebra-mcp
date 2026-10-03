@@ -117,11 +117,11 @@ describe('organización', () => {
     expect(await runSetFavorite(await fresh(), { id, favorite: false })).toMatchObject({ favorite: false });
   });
 
-  it('sin herramientas de carpetas: tools/list no las trae y llamarlas es una herramienta inexistente', async () => {
-    // Opción A de David (28 sep 2026): crear, renombrar y mover carpetas quedan fuera del
-    // MCP porque sus errores revelaban carpetas privadas. «Carpeta privada = inexistente»
-    // al mover una NOTA lo cubre el test de arriba («mover una nota a una carpeta
-    // privada responde igual que a una inexistente»).
+  it('sin mover ni borrar carpetas ni cambiar adjuntos: tools/list no las trae y llamarlas es una herramienta inexistente', async () => {
+    // D9 (3 oct 2026) trajo crear y renombrar carpetas y añadir adjuntos
+    // (`test/tools/folders.test.ts`, `test/tools/add-attachment.test.ts`); mover y borrar
+    // carpetas y cambiar o borrar adjuntos siguen fuera del MCP. «Carpeta privada =
+    // inexistente» al mover una NOTA lo cubre el test de arriba.
     test = await buildTestContext();
     const server = new McpServer({ name: 'hebra-mcp-organize-test', version: '0.0.0' });
     registerTools(server, test.serverContext);

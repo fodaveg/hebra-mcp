@@ -13,14 +13,19 @@
  */
 import type { NoteRow } from '../hebra';
 import type {
+  AddAttachmentInput,
+  AddAttachmentSaved,
   AppendToNoteInput,
   AppendToNoteResult,
+  CreateFolderInput,
   CreateNoteInput,
   CreateNoteResult,
   EditNoteInput,
   EditNoteSaved,
+  FolderSaved,
   OrganizeInput,
   OrganizeSaved,
+  RenameFolderInput,
   RestoreVersionInput,
   FetchAttachmentInput,
   LocalWrite
@@ -41,8 +46,18 @@ export interface WriteContextSources {
   restoreVersion(input: RestoreVersionInput): Promise<LocalWrite<EditNoteSaved>>;
   /** Traer al disco los bytes de un adjunto (`LibraryInstance.fetchAttachment`). */
   fetchAttachment(input: FetchAttachmentInput): Promise<boolean>;
+  /** Crear y renombrar una carpeta en local (`NoteWriter.createFolderLocal`/
+   *  `renameFolderLocal`, D9), sin esperar ronda. */
+  createFolder(input: CreateFolderInput): Promise<LocalWrite<FolderSaved>>;
+  renameFolder(input: RenameFolderInput): Promise<LocalWrite<FolderSaved>>;
+  /** Añadir un adjunto en local (`NoteWriter.addAttachmentLocal`, D9), sin esperar ronda. */
+  addAttachment(input: AddAttachmentInput): Promise<LocalWrite<AddAttachmentSaved>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
+  /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`) y para un blob
+   *  (`HebraLibraryPort.blobUploaded`). */
+  folderDirty(id: string): Promise<boolean | null>;
+  blobUploaded(sha256: string): Promise<boolean | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Si esta instancia tiene sync (está emparejada). Solo se consulta cuando una escritura
@@ -88,6 +103,13 @@ export type EditNoteOutcome = EditNoteSaved & SyncFields;
 /** Lo que devuelven las herramientas de organización antes de poner rutas. */
 export type OrganizeOutcome = OrganizeSaved & SyncFields;
 
+/** Crear o renombrar una carpeta (D9), antes de poner la ruta. */
+export type FolderOutcome = FolderSaved & SyncFields;
+
+/** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
+ *  estado de sync (`uploaded` exige además el blob ya subido). */
+export type AddAttachmentOutcome = EditNoteOutcome & { attachmentId: string; markdown: string };
+
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
@@ -109,6 +131,13 @@ export interface WriteContext {
    *  escritor si hace falta; un lector se lo pide por `writer.sock`). No los devuelve:
    *  los lee la herramienta con su filtro. `available: false` si no se pudieron traer. */
   fetchAttachment(input: FetchAttachmentInput): Promise<{ available: boolean }>;
+  /** Crear o renombrar una carpeta (D9): escribe, espera la ronda y devuelve el estado de
+   *  sync, como `organize`. Sin escritura (ya existía, ya se llamaba así), sin ronda. */
+  createFolder(input: CreateFolderInput): Promise<FolderOutcome>;
+  renameFolder(input: RenameFolderInput): Promise<FolderOutcome>;
+  /** Añadir un adjunto (D9): como `editNote` (ronda, estado de sync, copia de conflicto
+   *  de la ronda anotada en el registro), con el adjunto en la salida. */
+  addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -212,18 +241,48 @@ export function buildWriteContext(
     }
   }
 
-  /** Guardado con revisión (`editNote`, `restoreVersion`): guarda, espera la ronda y,
-   *  si la ronda produjo una copia de conflicto PARA ESTA nota, la devuelve y la anota
-   *  en el registro de idempotencia. */
-  /** `SyncFields` de una escritura que no escribió nada: sin ronda ni espera. */
-  async function syncFieldsWithoutRound(id: string): Promise<SyncFields> {
-    if (!sources.isLinked()) return { sync: 'not_linked' };
-    return { sync: (await dirtyOf(id)) === false ? 'uploaded' : 'pending' };
+  /** Si una carpeta sigue sin subir; `null` si no se sabe. */
+  async function folderDirtyOf(id: string): Promise<boolean | null> {
+    try {
+      return await sources.folderDirty(id);
+    } catch {
+      return null;
+    }
   }
 
+  /** Un adjunto añadido está subido cuando la nota (o su copia) ya no está sucia Y el blob
+   *  ya está en el relé; `null` si alguna de las dos cosas no se sabe. */
+  function attachmentDirtyOf(sha256: string): (id: string) => Promise<boolean | null> {
+    return async (id) => {
+      const note = await dirtyOf(id);
+      let uploaded: boolean | null;
+      try {
+        uploaded = await sources.blobUploaded(sha256);
+      } catch {
+        uploaded = null;
+      }
+      if (note === true || uploaded === false) return true;
+      return note === false && uploaded === true ? false : null;
+    };
+  }
+
+  /** `SyncFields` de una escritura que no escribió nada: sin ronda ni espera. */
+  async function syncFieldsWithoutRound(
+    id: string,
+    dirty: (id: string) => Promise<boolean | null> = dirtyOf
+  ): Promise<SyncFields> {
+    if (!sources.isLinked()) return { sync: 'not_linked' };
+    return { sync: (await dirty(id)) === false ? 'uploaded' : 'pending' };
+  }
+
+  /** Guardado con revisión (`editNote`, `restoreVersion`, `addAttachment`): guarda,
+   *  espera la ronda y, si la ronda produjo una copia de conflicto PARA ESTA nota, la
+   *  devuelve y la anota en el registro de idempotencia. `dirty` dice si lo escrito sigue
+   *  sin subir (por defecto, la fila de la nota). */
   async function saveAndAwaitRound(
     input: { id: string; operationId: string },
-    save: () => Promise<LocalWrite<EditNoteSaved>>
+    save: () => Promise<LocalWrite<EditNoteSaved>>,
+    dirty: (id: string) => Promise<boolean | null> = dirtyOf
   ): Promise<EditNoteOutcome> {
     let raceCopyId: string | undefined;
     const unsubscribe = sources.onConflictCopy((copy) => {
@@ -235,7 +294,7 @@ export function buildWriteContext(
         // Sin cambios o reintento: nada que subir, ni ronda ni espera. Un reintento de una
         // edición que acabó en copia de conflicto ya la trae del registro (`saved`).
         const target = saved.outcome === 'conflict_copy' ? saved.copyId : saved.id;
-        return { ...saved, ...(await syncFieldsWithoutRound(target)) };
+        return { ...saved, ...(await syncFieldsWithoutRound(target, dirty)) };
       }
       const wait = await awaitRound(roundTimeoutMs);
       let result: EditNoteSaved = saved;
@@ -250,10 +309,18 @@ export function buildWriteContext(
           .catch(() => undefined);
       }
       const target = result.outcome === 'conflict_copy' ? result.copyId : result.id;
-      return { ...result, ...syncFieldsOf(wait, await dirtyOf(target)) };
+      return { ...result, ...syncFieldsOf(wait, await dirty(target)) };
     } finally {
       unsubscribe();
     }
+  }
+
+  /** Carpetas (D9): como `organize`, con la fila de `folders`. */
+  async function folderWrite(local: Promise<LocalWrite<FolderSaved>>): Promise<FolderOutcome> {
+    const { result: saved, wrote } = await local;
+    if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id, folderDirtyOf)) };
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...saved, ...syncFieldsOf(wait, await folderDirtyOf(saved.id)) };
   }
 
   return {
@@ -267,6 +334,23 @@ export function buildWriteContext(
     fetchAttachment: async (input: FetchAttachmentInput) => ({
       available: await sources.fetchAttachment(input)
     }),
+    createFolder: (input: CreateFolderInput) => folderWrite(sources.createFolder(input)),
+    renameFolder: (input: RenameFolderInput) => folderWrite(sources.renameFolder(input)),
+    async addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome> {
+      // El adjunto (hash y referencia) sale del guardado; el resto, como una edición.
+      let added: AddAttachmentSaved | undefined;
+      const outcome = await saveAndAwaitRound(
+        input,
+        async () => {
+          const local = await sources.addAttachment(input);
+          added = local.result;
+          return { result: local.result.note, wrote: local.wrote };
+        },
+        // `dirty` solo se llama después de guardar, con `added` ya puesto.
+        (id) => attachmentDirtyOf(added!.attachmentId)(id)
+      );
+      return { ...outcome, attachmentId: added!.attachmentId, markdown: added!.markdown };
+    },
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
       const { result: saved, wrote } = await sources.organize(input);
       if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id)) };

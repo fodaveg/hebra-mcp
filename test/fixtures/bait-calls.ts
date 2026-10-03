@@ -4,7 +4,13 @@
  * (`test/privacy-and-logs.test.ts`) y el de Streamable HTTP (`test/http/serve-http.test.ts`),
  * para que el cebo se pruebe igual por los dos transportes.
  */
-import { BAIT_FOLDER, BAIT_TAG, type TestLibrary } from './test-library';
+import {
+  ATTACHMENT_PNG,
+  BAIT_ATTACHMENT,
+  BAIT_FOLDER,
+  BAIT_TAG,
+  type TestLibrary
+} from './test-library';
 
 export interface BaitCall {
   name: string;
@@ -94,6 +100,36 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     {
       name: 'hebra_read_attachment',
       arguments: { id: library.attachmentsNoteId, attachmentId: library.attachments.text }
+    },
+    // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
+    // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
+    // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en
+    // la nota privada (`not_found`) y otro, al final, en una visible con el cebo de
+    // adjuntos en el nombre (puede salir en la salida, nunca en stderr).
+    { name: 'hebra_create_folder', arguments: { parent: 'Diario', name: BAIT_FOLDER } },
+    { name: 'hebra_create_folder', arguments: { name: 'Diario' } },
+    {
+      name: 'hebra_rename_folder',
+      arguments: { folderId: library.folders.diario2026, name: BAIT_FOLDER }
+    },
+    { name: 'hebra_rename_folder', arguments: { folderId: library.folders.historial, name: 'Diario' } },
+    {
+      name: 'hebra_add_attachment',
+      arguments: {
+        id: library.privateFolderNoteId,
+        name: `${BAIT_FOLDER}.png`,
+        dataBase64: Buffer.from(ATTACHMENT_PNG).toString('base64'),
+        operationId: 'bait-4'
+      }
+    },
+    {
+      name: 'hebra_add_attachment',
+      arguments: {
+        id: library.attachmentsNoteId,
+        name: `${BAIT_ATTACHMENT}.png`,
+        dataBase64: Buffer.from(ATTACHMENT_PNG).toString('base64'),
+        operationId: 'bait-5'
+      }
     }
   ];
 }

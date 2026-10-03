@@ -6,7 +6,8 @@
  * Lado del lector, `buildRoutedWriteContext`: un `WriteContext` que
  * - en el escritor, escribe en local, como siempre;
  * - en un lector, reenvía `createNote`, `appendToNote`, `editNote`, `organize` (que
- *   incluye mandar a la papelera y sacar de ella) y `restoreVersion` al escritor. Todas
+ *   incluye mandar a la papelera y sacar de ella), `restoreVersion` y, desde D9 (3 oct
+ *   2026), `createFolder`, `renameFolder` y `addAttachment` al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -45,20 +46,25 @@ import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from '../status/status-source';
 import { busyOtherInstance } from '../store/errors';
 import type {
+  AddAttachmentInput,
   AppendToNoteInput,
   AppendToNoteResult,
+  CreateFolderInput,
   CreateNoteInput,
   CreateNoteResult,
   EditNoteInput,
   FetchAttachmentInput,
   OrganizeInput,
+  RenameFolderInput,
   RestoreVersionInput
 } from '../store/writes';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
   AWAIT_ROUND_TIMEOUT_MS,
   appendAndAwaitRound,
+  type AddAttachmentOutcome,
   type EditNoteOutcome,
+  type FolderOutcome,
   type OrganizeOutcome,
   type SyncFields,
   type SyncState,
@@ -75,6 +81,10 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   restoreVersion: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Bajar y descifrar un adjunto del relé (hasta el máximo de Hebra, 25 MiB).
   fetchAttachment: 60_000,
+  createFolder: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  renameFolder: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  // Hasta 7 MB de petición, el `blobPut` (con `fsync`) y la ronda.
+  addAttachment: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   status: 5_000
 };
 
@@ -144,6 +154,25 @@ function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
     return { id, outcome: 'conflict_copy', copyId: value.copyId, ...replayed, ...sync };
   }
   throw new Error('writer_protocol');
+}
+
+/** Valida el `FolderOutcome` que devuelve el escritor (D9). */
+function asFolderOutcome(value: unknown): FolderOutcome {
+  if (!isRecord(value) || typeof value.id !== 'string' || typeof value.changed !== 'boolean') {
+    throw new Error('writer_protocol');
+  }
+  return { id: value.id, changed: value.changed, ...syncFieldsFrom(value) };
+}
+
+/** Valida el `AddAttachmentOutcome` que devuelve el escritor (D9): el de una edición más
+ *  el adjunto. */
+function asAttachmentOutcome(value: unknown, id: string): AddAttachmentOutcome {
+  const edit = asEditOutcome(value, id);
+  const record = value as Record<string, unknown>;
+  if (typeof record.attachmentId !== 'string' || typeof record.markdown !== 'string') {
+    throw new Error('writer_protocol');
+  }
+  return { ...edit, attachmentId: record.attachmentId, markdown: record.markdown };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -301,6 +330,38 @@ export function buildRoutedWriteContext(
         },
         () => local.fetchAttachment(input)
       ),
+    // Carpetas y adjuntos (D9): todo en el escritor, con la privacidad de ESTE lector.
+    createFolder: (input: CreateFolderInput) =>
+      routed(
+        'createFolder',
+        { parentId: input.parentId, name: input.name, privacy: input.privacy },
+        asFolderOutcome,
+        () => local.createFolder(input)
+      ),
+    renameFolder: (input: RenameFolderInput) =>
+      routed(
+        'renameFolder',
+        { id: input.id, name: input.name, privacy: input.privacy },
+        asFolderOutcome,
+        () => local.renameFolder(input)
+      ),
+    // Los bytes viajan en base64 (el escritor los vuelve a validar). Como una edición, si
+    // la conexión se corta tras enviarla no se repite: el agente reintenta con el mismo
+    // `operationId` sin duplicar la referencia.
+    addAttachment: (input: AddAttachmentInput) =>
+      routed(
+        'addAttachment',
+        {
+          id: input.id,
+          name: input.name,
+          dataBase64: Buffer.from(input.bytes).toString('base64'),
+          mimeType: input.mimeType,
+          operationId: input.operationId,
+          privacy: input.privacy
+        },
+        (value) => asAttachmentOutcome(value, input.id),
+        () => local.addAttachment(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -318,6 +379,9 @@ export function writerSocketHandlers(
     organize: (input) => local.organize(input),
     restoreVersion: (input) => local.restoreVersion(input),
     fetchAttachment: (input) => local.fetchAttachment(input),
+    createFolder: (input) => local.createFolder(input),
+    renameFolder: (input) => local.renameFolder(input),
+    addAttachment: (input) => local.addAttachment(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;

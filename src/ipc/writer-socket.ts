@@ -29,6 +29,13 @@
  *   disco compartido los bytes de un adjunto de una nota visible (adjuntos en solo
  *   lectura, 30 sep 2026). La respuesta NUNCA lleva los bytes: el lector los lee del
  *   disco, con su filtro.
+ * - `createFolder` `{parentId, name, privacy}` y `renameFolder` `{id, name, privacy}` (D9,
+ *   3 oct 2026) → `FolderOutcome` (`{id, changed, sync, syncError?}`), con la ronda ya
+ *   esperada. Sin acciones de mover ni borrar carpetas.
+ * - `addAttachment` `{id, name, dataBase64, mimeType, operationId, privacy}` (D9) →
+ *   `AddAttachmentOutcome`, con la ronda ya esperada. Los bytes van en base64 del lector
+ *   al escritor, nunca de vuelta, y el escritor los decodifica con la misma regla
+ *   estricta que la herramienta.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -57,7 +64,13 @@ import { dirname, join } from 'node:path';
 import { LibraryError } from '../hebra';
 import { logEvent } from '../log/logger';
 import type { PrivacyConfig } from '../privacy/config';
-import type { EditNoteOutcome, OrganizeOutcome } from '../server/write-context';
+import type {
+  AddAttachmentOutcome,
+  EditNoteOutcome,
+  FolderOutcome,
+  OrganizeOutcome
+} from '../server/write-context';
+import { decodeAttachmentBase64 } from '../store/attachment-content';
 import { editsWithinLimits, type TextEdit } from '../store/edits';
 import {
   busyOtherInstance,
@@ -65,6 +78,7 @@ import {
   isWriteRejectionCode,
   StoreError,
   WRITE_REJECTION_CODES,
+  writeRejected,
   type WriteRejectionCode
 } from '../store/errors';
 import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
@@ -72,27 +86,38 @@ import { REVISION_MAX_LENGTH } from '../store/revision';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
+  MAX_WRITE_MESSAGE_BYTES,
+  type AddAttachmentInput,
   type AppendToNoteInput,
   type AppendToNoteResult,
+  type CreateFolderInput,
   type CreateNoteInput,
   type CreateNoteResult,
   type EditNoteInput,
   type FetchAttachmentInput,
   type OrganizeInput,
+  type RenameFolderInput,
   type RestoreVersionInput
 } from '../store/writes';
 
 export const WRITER_SOCKET_FILE = 'writer.sock';
 
 /**
- * Tamaño máximo de una línea del protocolo, en bytes. `JSON.stringify` escapa un
- * carácter de control como `\uXXXX` (6 bytes por unidad UTF-16), que es el peor caso
- * (un carácter no ASCII ocupa como mucho 3 bytes de UTF-8 por unidad). El margen cubre
- * el sobre (`id`, `op`, `folderId`…) y, en las operaciones que la llevan, la
- * configuración de privados del lector. Las sustituciones de `editNote` suman como mucho
- * lo mismo que el cuerpo de `createNote` (`EDITS_TOTAL_MAX_LENGTH`).
+ * Tamaño máximo de una línea del protocolo, en bytes (`MAX_WRITE_MESSAGE_BYTES`, ver su
+ * cálculo): lo mayor entre el cuerpo de `createNote` con el peor escape JSON (`\uXXXX`, 6
+ * bytes por unidad UTF-16; las sustituciones de `editNote` suman como mucho lo mismo) y
+ * el base64 de un adjunto de 5 MiB de `addAttachment` (D9), más el margen del sobre y de
+ * la configuración de privados del lector.
  */
-export const MAX_MESSAGE_BYTES = CREATE_BODY_MAX_LENGTH * 6 + 64 * 1024;
+export const MAX_MESSAGE_BYTES = MAX_WRITE_MESSAGE_BYTES;
+
+/** Longitud máxima, sin recortar, del nombre de una carpeta o de un adjunto que llega por
+ *  el socket. El escritor lo valida después con la regla de cada uno (255 tras recortar);
+ *  esto solo corta lo desmedido antes de mirarlo. */
+const MAX_NAME_INPUT_LENGTH = 1024;
+
+/** Longitud máxima del `mimeType` declarado de un adjunto. */
+const MAX_MIME_LENGTH = 255;
 
 /** Una respuesta nunca lleva cuerpos: basta con mucho menos. */
 const MAX_RESPONSE_BYTES = 64 * 1024;
@@ -107,6 +132,9 @@ export type WriterSocketOp =
   | 'organize'
   | 'restoreVersion'
   | 'fetchAttachment'
+  | 'createFolder'
+  | 'renameFolder'
+  | 'addAttachment'
   | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
@@ -116,6 +144,9 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'organize',
   'restoreVersion',
   'fetchAttachment',
+  'createFolder',
+  'renameFolder',
+  'addAttachment',
   'status'
 ]);
 
@@ -157,6 +188,11 @@ export interface WriterSocketHandlers {
   restoreVersion(input: RestoreVersionInput): Promise<EditNoteOutcome>;
   /** Trae al disco los bytes de un adjunto; nunca los devuelve. */
   fetchAttachment(input: FetchAttachmentInput): Promise<{ available: boolean }>;
+  /** Crea o renombra una carpeta (D9), espera la ronda y devuelve el estado de sync. */
+  createFolder(input: CreateFolderInput): Promise<FolderOutcome>;
+  renameFolder(input: RenameFolderInput): Promise<FolderOutcome>;
+  /** Añade un adjunto (D9), espera la ronda y devuelve el estado de sync. */
+  addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -255,6 +291,52 @@ function fetchAttachmentInputOf(params: Record<string, unknown>): FetchAttachmen
     throw new InvalidRequest();
   }
   return { noteId, sha256, privacy: privacyOf(params.privacy) };
+}
+
+function isName(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_NAME_INPUT_LENGTH;
+}
+
+function createFolderInputOf(params: Record<string, unknown>): CreateFolderInput {
+  const { parentId, name } = params;
+  if (!isId(parentId) || !isName(name)) throw new InvalidRequest();
+  return { parentId, name, privacy: privacyOf(params.privacy) };
+}
+
+function renameFolderInputOf(params: Record<string, unknown>): RenameFolderInput {
+  const { id, name } = params;
+  if (!isId(id) || !isName(name)) throw new InvalidRequest();
+  return { id, name, privacy: privacyOf(params.privacy) };
+}
+
+/** `addAttachment` (D9): el base64 se decodifica aquí con la regla estricta de la
+ *  herramienta (`decodeAttachmentBase64`); uno mal formado es `invalid_request`, y uno
+ *  de más de 5 MiB, `attachment_too_large` (el rechazo de siempre del escritor). Nombre,
+ *  tipo y tamaño los vuelve a comprobar `NoteWriter.addAttachment`. */
+function addAttachmentInputOf(params: Record<string, unknown>): AddAttachmentInput {
+  const { id, name, dataBase64, mimeType, operationId } = params;
+  if (!isId(id) || !isName(name) || typeof dataBase64 !== 'string') throw new InvalidRequest();
+  if (
+    mimeType !== null &&
+    mimeType !== undefined &&
+    (typeof mimeType !== 'string' || mimeType.length > MAX_MIME_LENGTH)
+  ) {
+    throw new InvalidRequest();
+  }
+  if (
+    typeof operationId !== 'string' ||
+    operationId.length === 0 ||
+    operationId.length > OPERATION_ID_MAX_LENGTH
+  ) {
+    throw new InvalidRequest();
+  }
+  const privacy = privacyOf(params.privacy);
+  const decoded = decodeAttachmentBase64(dataBase64);
+  if (!decoded.ok) {
+    if (decoded.code === 'attachment_too_large') throw writeRejected('attachment_too_large');
+    throw new InvalidRequest();
+  }
+  return { id, name, bytes: decoded.bytes, mimeType: mimeType ?? null, operationId, privacy };
 }
 
 function restoreVersionInputOf(params: Record<string, unknown>): RestoreVersionInput {
@@ -488,6 +570,15 @@ export class WriterSocketServer {
           break;
         case 'fetchAttachment':
           result = await handlers.fetchAttachment(fetchAttachmentInputOf(envelope.params));
+          break;
+        case 'createFolder':
+          result = await handlers.createFolder(createFolderInputOf(envelope.params));
+          break;
+        case 'renameFolder':
+          result = await handlers.renameFolder(renameFolderInputOf(envelope.params));
+          break;
+        case 'addAttachment':
+          result = await handlers.addAttachment(addAttachmentInputOf(envelope.params));
           break;
         case 'status':
           result = await handlers.status();

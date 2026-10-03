@@ -96,6 +96,16 @@ export interface TestLibrary {
    *  cuenta como enlace (SPEC.md §5, `hebra_links`; hallazgo del coordinador, 26 sep
    *  2026, sobre `deriveNote` vs. un regex propio). */
   codeFenceNoteId: string;
+  /** Ids de las carpetas vivas (D9, crear y renombrar carpetas): `Proyectos`,
+   *  `Proyectos/Lumbre`, `Diario` (privada), `Diario/2026`, `Historial` y `Adjuntos`. */
+  folders: {
+    proyectos: string;
+    lumbre: string;
+    diario: string;
+    diario2026: string;
+    historial: string;
+    adjuntos: string;
+  };
 }
 
 async function createNote(
@@ -335,6 +345,14 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     duplicateNoteAId: duplicateA.id,
     duplicateNoteBId: duplicateB.id,
     conflictCopyId: conflictResult.redirectedTo,
-    codeFenceNoteId: codeFenceNote.id
+    codeFenceNoteId: codeFenceNote.id,
+    folders: {
+      proyectos: proyectos.id,
+      lumbre: lumbre.id,
+      diario: diario.id,
+      diario2026: diario2026.id,
+      historial: historial.id,
+      adjuntos: adjuntos.id
+    }
   };
 }

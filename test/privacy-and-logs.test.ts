@@ -33,7 +33,10 @@ const TOOL_NAMES = [
   'hebra_read_version',
   'hebra_restore_version',
   'hebra_list_attachments',
-  'hebra_read_attachment'
+  'hebra_read_attachment',
+  'hebra_create_folder',
+  'hebra_rename_folder',
+  'hebra_add_attachment'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -49,7 +52,16 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
     operationId: 'op'
   },
   hebra_list_attachments: { id: 'lo-que-sea' },
-  hebra_read_attachment: { id: 'lo-que-sea', attachmentId: 'a'.repeat(64) }
+  hebra_read_attachment: { id: 'lo-que-sea', attachmentId: 'a'.repeat(64) },
+  hebra_create_folder: { name: 'lo que sea' },
+  hebra_rename_folder: { folderId: 'lo-que-sea', name: 'lo que sea' },
+  hebra_add_attachment: {
+    id: 'lo-que-sea',
+    name: 'a.txt',
+    dataBase64: 'YQ==',
+    mimeType: 'text/plain',
+    operationId: 'op'
+  }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {

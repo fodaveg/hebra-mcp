@@ -402,6 +402,70 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).not.toContain(sha);
   });
 
+  it('carpetas y adjuntos desde un lector (D9): los hace el escritor por writer.sock, con la privacidad del lector', async () => {
+    const { writer, reader } = await pair({ blobs: true });
+    const ctx: ServerContext = {
+      port: reader.port,
+      privacyConfig: { privateFolders: [['privada']], privateTags: [] },
+      status: new RoutedStatusSource(reader, true),
+      write: buildRoutedWriteContext(reader, localWriteContext(reader))
+    };
+    // La carpeta privada del LECTOR existe (la crea el escritor sin filtro: el MCP del
+    // escritor no tiene privados).
+    await writer.createFolderLocal({ parentId: 'root', name: 'Privada', privacy: OPEN });
+    const client = await connect(ctx);
+
+    const created = await call(client, 'hebra_create_folder', { name: BAIT_TEXT });
+    expect(created.value).toMatchObject({ path: BAIT_TEXT.toLowerCase(), created: true, sync: 'uploaded' });
+    const folderId = created.value.id as string;
+    expect((await writer.port.foldersList()).folders.find((folder) => folder.id === folderId)?.name).toBe(
+      BAIT_TEXT
+    );
+    const renamed = await call(client, 'hebra_rename_folder', { folderId, name: 'Audits' });
+    expect(renamed.value).toEqual({ id: folderId, path: 'audits', renamed: true, sync: 'uploaded' });
+
+    // La ruta privada del lector: la rechaza la herramienta antes de reenviar…
+    expect(await call(client, 'hebra_create_folder', { name: 'Privada' })).toEqual({
+      isError: true,
+      value: { error: 'folder_unavailable' }
+    });
+    // …y el escritor, con la misma configuración, si le llega por el socket.
+    const direct = await ctx.write!
+      .createFolder({ parentId: 'root', name: 'privada', privacy: ctx.privacyConfig })
+      .catch((error: unknown) => error);
+    expect(direct).toMatchObject({ code: 'folder_unavailable' });
+
+    const note = await writer.createNote({ body: '# Con captura\n\ntexto', privacy: OPEN });
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+    const added = await call(client, 'hebra_add_attachment', {
+      id: note.id,
+      name: `${BAIT_TEXT}.png`,
+      dataBase64: png.toString('base64'),
+      operationId: 'op-fwd-adjunto'
+    });
+    expect(added.value).toMatchObject({ id: note.id, outcome: 'saved', sync: 'uploaded' });
+    const sha = added.value.attachmentId as string;
+    expect((await writer.port.noteRead(note.id))?.body).toBe(
+      `# Con captura\n\ntexto\n\n![[sha256:${sha}|${BAIT_TEXT}.png]]`
+    );
+    expect(await writer.port.blobRead(sha)).toEqual(new Uint8Array(png));
+    expect(await writer.port.blobUploaded(sha)).toBe(true);
+    // Reintento por el socket: el escritor lo reconoce por su `operationId`.
+    const again = await call(client, 'hebra_add_attachment', {
+      id: note.id,
+      name: `${BAIT_TEXT}.png`,
+      dataBase64: png.toString('base64'),
+      operationId: 'op-fwd-adjunto'
+    });
+    expect(again.value).toMatchObject({ outcome: 'saved', replayed: true });
+
+    for (const op of ['createFolder', 'renameFolder', 'addAttachment']) {
+      expect(stderrText()).toContain(`"event":"write.forward","op":"${op}","outcome":"forwarded"`);
+    }
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).not.toContain(sha);
+  });
+
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Visible\n\ntexto', privacy: OPEN });
@@ -452,6 +516,16 @@ describe('protocolo de writer.sock', () => {
       sync: 'not_linked'
     }),
     fetchAttachment: async (input) => ({ available: input.sha256.startsWith('a') }),
+    createFolder: async (input) => ({ id: `f-${input.parentId}`, changed: true, sync: 'not_linked' }),
+    renameFolder: async (input) => ({ id: input.id, changed: true, sync: 'not_linked' }),
+    addAttachment: async (input) => ({
+      id: input.id,
+      outcome: 'saved',
+      revision: 'r1.x',
+      attachmentId: 'a'.repeat(64),
+      markdown: `![[sha256:${'a'.repeat(64)}|${input.name}]]`,
+      sync: 'not_linked'
+    }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -541,8 +615,9 @@ describe('protocolo de writer.sock', () => {
     await expect(
       requestWriter(path, 'organize', { action: 'setFavorite', id: 'n1', favorite: true }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
-    // Ni acciones de carpetas: fuera del MCP (opción A de David, 28 sep 2026).
-    for (const action of ['createFolder', 'renameFolder', 'moveFolder']) {
+    // Ni acciones de carpetas dentro de `organize`: crear y renombrar son ops propias desde
+    // D9 (3 oct 2026), y mover o borrar carpetas no lo es ninguna.
+    for (const action of ['createFolder', 'renameFolder', 'moveFolder', 'trashFolder']) {
       await expect(
         requestWriter(
           path,
@@ -644,6 +719,80 @@ describe('protocolo de writer.sock', () => {
     }
   });
 
+  it('carpetas y addAttachment por el socket (D9): privacidad obligatoria, entrada revalidada', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    expect(
+      await requestWriter(path, 'createFolder', { parentId: 'root', name: 'x', privacy: OPEN }, 2_000)
+    ).toMatchObject({ id: 'f-root', changed: true });
+    expect(await requestWriter(path, 'renameFolder', { id: 'f1', name: 'x', privacy: OPEN }, 2_000)).toMatchObject({
+      id: 'f1',
+      changed: true
+    });
+    for (const [op, params] of [
+      ['createFolder', { parentId: 'root', name: 'x' }],
+      ['createFolder', { parentId: '', name: 'x', privacy: OPEN }],
+      ['createFolder', { parentId: 'root', name: 'x'.repeat(1_025), privacy: OPEN }],
+      ['renameFolder', { id: 'f1', name: 'x' }],
+      ['renameFolder', { id: 'f1', name: 7, privacy: OPEN }]
+    ] as const) {
+      await expect(requestWriter(path, op, params, 2_000)).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+
+    const valid = {
+      id: 'n1',
+      name: 'a.txt',
+      dataBase64: Buffer.from('hola').toString('base64'),
+      mimeType: 'text/plain',
+      operationId: 'op-1',
+      privacy: OPEN
+    };
+    expect(await requestWriter(path, 'addAttachment', valid, 2_000)).toMatchObject({
+      id: 'n1',
+      outcome: 'saved'
+    });
+    for (const params of [
+      { ...valid, privacy: undefined },
+      { ...valid, dataBase64: 'no es base64!' },
+      { ...valid, dataBase64: '' },
+      { ...valid, operationId: '' },
+      { ...valid, mimeType: 7 },
+      { ...valid, id: '' }
+    ]) {
+      await expect(requestWriter(path, 'addAttachment', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
+    // Un adjunto de 5 MiB cabe en una línea; uno de 5 MiB + 1 cabe en la línea pero el
+    // escritor lo rechaza con su código.
+    const max = Buffer.alloc(5 * 1024 * 1024, 0x61).toString('base64');
+    expect(
+      await requestWriter(path, 'addAttachment', { ...valid, dataBase64: max }, 10_000)
+    ).toMatchObject({ outcome: 'saved' });
+    const over = Buffer.alloc(5 * 1024 * 1024 + 1, 0x61).toString('base64');
+    await expect(
+      requestWriter(path, 'addAttachment', { ...valid, dataBase64: over }, 10_000)
+    ).rejects.toMatchObject({ code: 'attachment_too_large' });
+  });
+
+  it('el límite por defecto admite el base64 de un adjunto de 5 MiB con su sobre (D9)', () => {
+    const worst = JSON.stringify({
+      id: 1,
+      op: 'addAttachment',
+      params: {
+        id: 'x'.repeat(200),
+        name: '\u0001'.repeat(1_024),
+        dataBase64: Buffer.alloc(5 * 1024 * 1024).toString('base64'),
+        mimeType: '\u0001'.repeat(255),
+        operationId: '\u0001'.repeat(200),
+        privacy: OPEN
+      }
+    });
+    expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
+    expect(MAX_MESSAGE_BYTES).toBe(7_056_044);
+  });
+
   it('el límite por defecto admite las sustituciones máximas de editNote en el peor escape JSON', () => {
     const worst = JSON.stringify({
       id: 1,
@@ -741,7 +890,19 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         wrote: true
       }),
       fetchAttachment: async () => false,
+      createFolder: async (input) => ({ result: { id: input.parentId, changed: true }, wrote: true }),
+      renameFolder: async (input) => ({ result: { id: input.id, changed: true }, wrote: true }),
+      addAttachment: async (input) => ({
+        result: {
+          note: { id: input.id, outcome: 'saved' as const, revision: 'r1.x' },
+          attachmentId: 'a'.repeat(64),
+          markdown: ''
+        },
+        wrote: true
+      }),
       noteRead: async () => null,
+      folderDirty: async () => null,
+      blobUploaded: async () => null,
       onConflictCopy: () => () => undefined,
       isLinked: () => false,
       requestRound: async () => null
@@ -826,6 +987,15 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('x');
         },
         fetchAttachment: async () => {
+          throw new Error('x');
+        },
+        createFolder: async () => {
+          throw new Error('x');
+        },
+        renameFolder: async () => {
+          throw new Error('x');
+        },
+        addAttachment: async () => {
           throw new Error('x');
         },
         status: async () => {

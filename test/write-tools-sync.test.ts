@@ -14,6 +14,7 @@
  * del Mac, y `sync.conflict_copy` dispara EN LA MISMA ronda que la herramienta espera
  * (`awaitRound`), así que la salida de la llamada ya es `conflict_copy`.
  */
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -54,7 +55,12 @@ function ctxFor(mcp: McpDevice): ServerContext {
     organize: (input) => mcp.writer.organizeLocal(input),
     restoreVersion: (input) => mcp.writer.restoreVersionLocal(input),
     fetchAttachment: (input) => mcp.writer.fetchAttachment(input, (sha) => mcp.runner.readBlob(sha)),
+    createFolder: (input) => mcp.writer.createFolderLocal(input),
+    renameFolder: (input) => mcp.writer.renameFolderLocal(input),
+    addAttachment: (input) => mcp.writer.addAttachmentLocal(input),
     noteRead: (id) => mcp.port.noteRead(id),
+    folderDirty: (id) => mcp.port.folderDirty(id),
+    blobUploaded: (sha256) => mcp.port.blobUploaded(sha256),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     isLinked: () => true,
     requestRound: () => mcp.runner.requestRound()
@@ -426,5 +432,158 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
       expect(joined).toContain('EDICIÓN DEL MAC');
       expect(joined).toContain('TEXTO DE CLAUDE');
     }
+  });
+});
+
+/** Un PNG de verdad (1×1, transparente). */
+const PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+const PNG = new Uint8Array(Buffer.from(PNG_BASE64, 'base64'));
+const PNG_SHA = createHash('sha256').update(PNG).digest('hex');
+
+describe('carpetas y adjuntos (D9) contra el sync real: cruzan a otro dispositivo', () => {
+  let mcp: McpDevice | undefined;
+  let app: AppDevice | undefined;
+  const opened: Array<{ client: Client; server: McpServer; device: McpDevice }> = [];
+
+  afterEach(async () => {
+    for (const entry of opened.splice(0)) {
+      await entry.client.close();
+      await entry.server.close();
+      entry.device.port.close();
+    }
+    mcp = undefined;
+    app = undefined;
+  });
+
+  async function open(device: McpDevice): Promise<Client> {
+    const { client, server } = await connectClient(ctxFor(device));
+    opened.push({ client, server, device });
+    return client;
+  }
+
+  async function call(client: Client, name: string, args: Record<string, unknown>) {
+    const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
+    return { isError: result.isError === true, result, value: JSON.parse(textOf(result)) as Record<string, unknown> };
+  }
+
+  it('hebra_create_folder y hebra_rename_folder: la carpeta aparece en el otro dispositivo tras la ronda', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay);
+    app = await appDevice(relay);
+    const client = await open(mcp);
+
+    const created = await call(client, 'hebra_create_folder', { name: 'Audits' });
+    expect(created.value).toMatchObject({ path: 'audits', created: true, sync: 'uploaded' });
+    const id = created.value.id as string;
+    const sub = await call(client, 'hebra_create_folder', { parentId: id, name: 'Capturas' });
+    expect(sub.value).toMatchObject({ path: 'audits/capturas', created: true, sync: 'uploaded' });
+
+    expect((await app.sync.runRound()).result).toBe('ok');
+    let folders = new Map((await app.port.foldersList()).folders.map((folder) => [folder.id, folder]));
+    expect(folders.get(id)?.name).toBe('Audits');
+    expect(folders.get(sub.value.id as string)).toMatchObject({ name: 'Capturas', parentId: id });
+
+    const renamed = await call(client, 'hebra_rename_folder', { folderId: id, name: 'Auditorías' });
+    expect(renamed.value).toEqual({ id, path: 'auditorías', renamed: true, sync: 'uploaded' });
+    expect((await app.sync.runRound()).result).toBe('ok');
+    folders = new Map((await app.port.foldersList()).folders.map((folder) => [folder.id, folder]));
+    expect(folders.get(id)?.name).toBe('Auditorías');
+
+    // Repetir no escribe: ni carpeta nueva ni ronda.
+    const again = await call(client, 'hebra_create_folder', { name: 'auditorías' });
+    expect(again.value).toEqual({ id, path: 'auditorías', created: false, sync: 'uploaded' });
+  });
+
+  it('hebra_add_attachment: el blob SUBE con la ronda, y lo leen la app de Hebra y un segundo hebra-mcp', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay, { blobs: true });
+    app = await appDevice(relay, 'Mac', { blobs: true });
+    const id = await appCreate(app, '# Para capturas\n\ntexto');
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await mcp.runner.requestRound();
+    const client = await open(mcp);
+
+    const added = await call(client, 'hebra_add_attachment', {
+      id,
+      name: 'captura.png',
+      dataBase64: PNG_BASE64,
+      operationId: 'op-sync-png'
+    });
+    const markdown = `![[sha256:${PNG_SHA}|captura.png]]`;
+    // `uploaded` = la nota sin cambios pendientes Y el blob en el relé, en la misma ronda.
+    expect(added.value).toMatchObject({
+      id,
+      outcome: 'saved',
+      attachmentId: PNG_SHA,
+      markdown,
+      sync: 'uploaded'
+    });
+    expect(await mcp.port.blobUploaded(PNG_SHA)).toBe(true);
+
+    // La app de Hebra (su motor, no el nuestro): la nota trae la referencia y los bytes
+    // bajan del relé, porque esta app nunca los tuvo.
+    expect((await app.sync.runRound()).result).toBe('ok');
+    expect((await app.port.noteRead(id))?.body).toBe(`# Para capturas\n\ntexto\n\n${markdown}`);
+    expect(await app.port.blobRead(PNG_SHA)).toBeNull();
+    expect(await app.sync.readBlob(PNG_SHA)).toEqual(PNG);
+
+    // Un segundo hebra-mcp, vacío: la nota llega con la ronda y el adjunto se lee por la
+    // herramienta, que lo baja del relé.
+    const second = await mcpDevice(relay, { blobs: true });
+    expect((await second.runner.requestRound())?.result).toBe('ok');
+    expect(await second.port.blobRead(PNG_SHA)).toBeNull();
+    const secondClient = await open(second);
+    const read = await secondClient.callTool({
+      name: 'hebra_read_attachment',
+      arguments: { id, attachmentId: PNG_SHA }
+    });
+    expect(read.isError).not.toBe(true);
+    expect((read as CallToolResult).content[1]).toEqual({
+      type: 'image',
+      data: PNG_BASE64,
+      mimeType: 'image/png'
+    });
+    expect(await second.port.blobRead(PNG_SHA)).toEqual(PNG);
+  });
+
+  it('hebra_add_attachment con edición a la vez en otro dispositivo: conflict_copy, y el adjunto sigue subido', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay, { blobs: true });
+    app = await appDevice(relay, 'Mac', { blobs: true });
+    const id = await appCreate(app, '# Compartida\n\ntexto base');
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await mcp.runner.requestRound();
+
+    // El Mac edita y sincroniza; Claude añade sobre su copia local, aún vieja.
+    await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
+    expect((await app.sync.runRound()).result).toBe('ok');
+
+    const client = await open(mcp);
+    const args = { id, name: 'captura.png', dataBase64: PNG_BASE64, operationId: 'op-sync-conflicto' };
+    const added = await call(client, 'hebra_add_attachment', args);
+    expect(added.value).toMatchObject({ outcome: 'conflict_copy', attachmentId: PNG_SHA });
+    const copyId = added.value.copyId as string;
+    expect(typeof copyId).toBe('string');
+    expect(copyId).not.toBe(id);
+    expect(added.value.revision).toBeUndefined();
+
+    // El reintento devuelve la misma copia, sin añadir la referencia otra vez.
+    const again = await call(client, 'hebra_add_attachment', args);
+    expect(again.value).toMatchObject({ outcome: 'conflict_copy', copyId, replayed: true });
+
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+    await app.sync.runRound();
+    const markdown = `![[sha256:${PNG_SHA}|captura.png]]`;
+    for (const bodies of [await allBodies(mcp.port), await allBodies(app.port)]) {
+      const family = bodies.filter((note) => note.id === id || note.conflictOf === id);
+      expect(family.filter((note) => note.conflictOf === id)).toHaveLength(1);
+      const joined = family.map((note) => note.body).join('\n---\n');
+      expect(joined).toContain('EDICIÓN DEL MAC');
+      expect(joined.split(markdown)).toHaveLength(2);
+    }
+    // La copia referencia el blob: subió, y la app lo baja del relé.
+    expect(await app.sync.readBlob(PNG_SHA)).toEqual(PNG);
   });
 });

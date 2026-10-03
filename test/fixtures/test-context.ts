@@ -55,7 +55,12 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
     restoreVersion: (input) => writer.restoreVersionLocal(input),
     // Sin sync: solo dice si los bytes ya estaban aquí (no hay relé del que bajarlos).
     fetchAttachment: (input) => writer.fetchAttachment(input, null),
+    createFolder: (input) => writer.createFolderLocal(input),
+    renameFolder: (input) => writer.renameFolderLocal(input),
+    addAttachment: (input) => writer.addAttachmentLocal(input),
     noteRead: (id) => port.noteRead(id),
+    folderDirty: (id) => port.folderDirty(id),
+    blobUploaded: (sha256) => port.blobUploaded(sha256),
     onConflictCopy: () => () => {},
     isLinked: () => false,
     requestRound: () => Promise.resolve(null)

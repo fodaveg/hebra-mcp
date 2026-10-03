@@ -57,20 +57,40 @@ describe('capacidades', () => {
     expect(capabilities.limits.listNotes).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);
-    expect(capabilities.notAllowed).toEqual(
-      expect.arrayContaining(['purge_notes_or_empty_trash_or_irreversible_delete', 'folder_management'])
-    );
+    // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover
+    // o borrar carpetas y cambiar o borrar adjuntos, no.
+    expect(capabilities.notAllowed).toEqual([
+      'purge_notes_or_empty_trash_or_irreversible_delete',
+      'folder_move_or_delete',
+      'attachment_change_or_delete'
+    ]);
     expect(capabilities.limits.listTrash).toEqual({ default: 50, max: 100 });
-    // Adjuntos en solo lectura (30 sep 2026): solo se anuncia lo que NO se permite, las
-    // escrituras (`attachment_writes`), con su límite de lectura.
-    expect(capabilities.notAllowed).toContain('attachment_writes');
     expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
     expect(capabilities.limits.attachmentTextChars).toBe(100_000);
+    expect(capabilities.limits.addAttachmentBytes).toBe(5 * 1024 * 1024);
+    expect(capabilities.limits.attachmentNameChars).toBe(255);
+    expect(capabilities.limits.folderNameChars).toBe(255);
     expect(capabilities.limits.listVersions).toEqual({ default: 50, max: 200 });
     expect(capabilities.limits.listAttachments).toEqual({ max: 200 });
     expect(capabilities.tools).toEqual(
-      expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment'])
+      expect.arrayContaining([
+        'hebra_list_attachments',
+        'hebra_read_attachment',
+        'hebra_add_attachment',
+        'hebra_create_folder',
+        'hebra_rename_folder'
+      ])
     );
+  });
+
+  it('las `instructions` ya no dicen que no gestiona carpetas ni añade adjuntos (D9)', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_create_folder');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_rename_folder');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_add_attachment');
+    expect(SERVER_INSTRUCTIONS).not.toContain('ni gestionar carpetas');
+    expect(SERVER_INSTRUCTIONS).not.toContain('ni añadir, cambiar o borrar adjuntos');
+    expect(SERVER_INSTRUCTIONS).toContain('ni mover o borrar carpetas');
+    expect(SERVER_INSTRUCTIONS).toContain('ni cambiar o borrar adjuntos');
   });
 
   it('con privados configurados solo sale un booleano, nunca sus nombres', async () => {

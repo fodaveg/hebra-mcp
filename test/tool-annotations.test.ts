@@ -1,6 +1,7 @@
 /**
- * `annotations` MCP de las 21 herramientas (C3 del audit): cada una contra una tabla
- * escrita aquí, para que un cambio de contrato sea una decisión y no un descuido.
+ * `annotations` MCP de las 24 herramientas (C3 del audit; D9 del 3 oct 2026): cada una
+ * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
+ * descuido.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -42,6 +43,11 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_restore_note: WRITE_IDEMPOTENT,
   hebra_edit_note: WRITE_IDEMPOTENT,
   hebra_restore_version: WRITE_IDEMPOTENT,
+  // D9: crear devuelve la que ya hay, renombrar al mismo nombre no escribe, y añadir un
+  // adjunto se reintenta con su `operationId` sin duplicarlo.
+  hebra_create_folder: WRITE_IDEMPOTENT,
+  hebra_rename_folder: WRITE_IDEMPOTENT,
+  hebra_add_attachment: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

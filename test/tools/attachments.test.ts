@@ -172,7 +172,7 @@ describe('adjuntos en solo lectura', () => {
     expect(error).toMatchObject({ code: 'not_found' });
   });
 
-  it('por MCP: contenido image/text/resource, cebos fuera de stderr y ninguna herramienta que escriba adjuntos', async () => {
+  it('por MCP: contenido image/text/resource, cebos fuera de stderr y ninguna herramienta que cambie o borre adjuntos', async () => {
     test = await buildTestContext();
     const writes: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
@@ -188,10 +188,15 @@ describe('adjuntos en solo lectura', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       const names = (await client.listTools()).tools.map((tool) => tool.name);
       expect(names).toEqual(expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment']));
-      // Ninguna herramienta que añada, suba, cambie o borre adjuntos.
+      // Añadir es `hebra_add_attachment` (D9, 3 oct 2026) y nada más: ninguna herramienta
+      // que suba por otra vía, cambie, sustituya o borre adjuntos, blobs o ficheros.
       for (const name of names) {
-        expect(name).not.toMatch(/(add|put|upload|delete|remove|write|update)_(attachment|blob|file)/i);
+        if (name === 'hebra_add_attachment') continue;
+        expect(name).not.toMatch(
+          /(add|put|upload|delete|remove|write|update|replace|change)_(attachment|blob|file)/i
+        );
       }
+      expect(names).toContain('hebra_add_attachment');
 
       const { attachments, attachmentsNoteId: id } = test.library;
       const types: string[] = [];
