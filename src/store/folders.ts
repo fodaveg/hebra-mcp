@@ -33,16 +33,18 @@ import type { PrivacyFilter } from '../privacy/filter';
  *  replican las carpetas, las tiene en disco). */
 export const FOLDER_NAME_MAX_LENGTH = 255;
 
-/** Controles (saltos de línea incluidos) y la barra. */
-const FOLDER_NAME_FORBIDDEN = /[\u0000-\u001f\u007f/]/;
+/** Controles (saltos de línea incluidos), la barra y los caracteres de formato invisibles
+ *  de Unicode (categoría Cf: U+200B, U+202E…), con los que dos nombres que se ven iguales
+ *  serían distintos, o uno se leería al revés. */
+const FOLDER_NAME_FORBIDDEN = /[\u0000-\u001f\u007f/]|\p{Cf}/u;
 
 /** U+2028 y U+2029 (separadores de línea de Unicode), fuera de la expresión regular para
  *  que ningún editor los convierta en el carácter literal, que la rompería. */
 const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029)];
 
 /** El nombre recortado si vale: no vacío, sin `/` (`validName` del motor), sin caracteres
- *  de control ni separadores de línea y de a lo sumo `FOLDER_NAME_MAX_LENGTH`. Si no,
- *  `null`. */
+ *  de control, de formato (Cf) ni separadores de línea y de a lo sumo
+ *  `FOLDER_NAME_MAX_LENGTH`. Si no, `null`. */
 export function validFolderName(raw: string): string | null {
   const name = raw.trim();
   if (name.length === 0 || name.length > FOLDER_NAME_MAX_LENGTH) return null;
@@ -120,6 +122,11 @@ export function planRenameFolder(
   const name = validFolderName(rawName);
   if (name === null || folderId === ROOT_FOLDER_ID) return reject('invalid_input');
   if (!isVisibleFolder(filter, folderId)) return reject('not_found');
+  // Su propia ruta, desde la configuración y sin fiarse del índice de carpetas ocultas:
+  // una carpeta en una ruta privada (o debajo) no se renombra aunque el índice no la
+  // hubiera marcado (p. ej. una homónima que no resolvió). Con el índice bien, una así ya
+  // es oculta y sale arriba como `not_found`, igual que una inexistente.
+  if (filter.isPrivateFolderPath(filter.folderSegments(folderId))) return reject('folder_unavailable');
   if (filter.hasHiddenFolderBelow(folderId)) return reject('folder_unavailable');
   const parentId = filter.folderParent(folderId) ?? ROOT_FOLDER_ID;
   const renamed = [...filter.folderSegments(parentId), pathSegment(name)];

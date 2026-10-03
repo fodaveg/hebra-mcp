@@ -29,6 +29,7 @@ import { ROOT_FOLDER_ID } from '../hebra';
 import type { HebraLibraryPort, TrashIndex, TrashedNoteEntry, FolderRowFact } from '../store/types';
 import type { PrivacyConfig } from './config';
 import type { PrivacyFilter } from './filter';
+import { privacyPathKey } from './folder-index';
 
 /** Lo que se enseña de una nota de la papelera visible. */
 export interface TrashedNoteMeta {
@@ -51,7 +52,7 @@ export class TrashFilter {
   ) {
     for (const note of index.notes) this.notes.set(note.id, note);
     for (const row of index.folders) this.rows.set(row.id, row);
-    this.privatePaths = new Set(config.privateFolders.map((segments) => segments.join('/')));
+    this.privatePaths = new Set(config.privateFolders.map((segments) => privacyPathKey(segments)));
   }
 
   /** Sobre el almacén de ahora; `live` es el filtro de esta misma llamada. */
@@ -119,7 +120,7 @@ export class TrashFilter {
     }
     const full = [...anchorPath, ...tombstoneNames];
     for (let length = 1; length <= full.length; length += 1) {
-      if (this.privatePaths.has(full.slice(0, length).join('/'))) return undefined;
+      if (this.privatePaths.has(privacyPathKey(full.slice(0, length)))) return undefined;
     }
     return ROOT_FOLDER_ID;
   }

@@ -41,12 +41,17 @@ export class PrivacyFilter {
     let unresolved = false;
     const hidden = new Set<string>();
     for (const segments of config.privateFolders) {
-      const folderId = folders.idForPath(segments);
-      if (!folderId || folderId === ROOT_FOLDER_ID) {
+      // TODAS las carpetas con esa ruta, no una: el sync puede traer hermanas homónimas
+      // (`Privado` y `privado`, o la misma con la tilde compuesta y descompuesta), y
+      // cualquiera de ellas es la carpeta privada configurada.
+      const folderIds = folders.idsForPath(segments).filter((id) => id !== ROOT_FOLDER_ID);
+      if (folderIds.length === 0) {
         unresolved = true;
         continue;
       }
-      for (const id of folders.subtree(folderId)) hidden.add(id);
+      for (const folderId of folderIds) {
+        for (const id of folders.subtree(folderId)) hidden.add(id);
+      }
     }
     this.unresolved = unresolved;
     this.hiddenFolderIds = hidden;
@@ -117,11 +122,13 @@ export class PrivacyFilter {
    * renombrar una carpeta (D9), con la misma respuesta exista o no esa carpeta.
    */
   isPrivateFolderPath(segments: readonly string[]): boolean {
+    // En NFC los dos lados (`privacyPathKey`), igual que el índice de rutas.
+    const wanted = segments.map((segment) => segment.normalize('NFC'));
     return this.privateFolderPaths.some(
       (path) =>
         path.length > 0 &&
-        path.length <= segments.length &&
-        path.every((segment, index) => segments[index] === segment)
+        path.length <= wanted.length &&
+        path.every((segment, index) => wanted[index] === segment.normalize('NFC'))
     );
   }
 

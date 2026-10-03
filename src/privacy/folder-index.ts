@@ -15,11 +15,27 @@ import {
 } from '../hebra';
 import type { HebraLibraryPort } from '../store/types';
 
+/**
+ * Clave de una ruta para compararla con `privateFolders`: los segmentos de
+ * `folderPathSegments` (minúsculas, sin espacios en los extremos) además en NFC, para que
+ * «Café» escrito con la tilde compuesta o descompuesta sea la misma ruta, como para el
+ * motor (`folderNameKey` de Hebra compara en NFC). Más estricto que la ruta que se
+ * enseña: solo sirve para decidir qué es privado.
+ */
+export function privacyPathKey(segments: readonly string[]): string {
+  return segments.map((segment) => segment.normalize('NFC')).join('/');
+}
+
 export class FolderIndex {
   private readonly parents = new Map<string, EffectiveParent>();
   private readonly names = new Map<string, string>();
-  /** Ruta (minúsculas, sin la raíz) → id de carpeta, para resolver `privateFolders`. */
-  private readonly idByPath = new Map<string, string>();
+  /** Ruta (`privacyPathKey`) → TODAS las carpetas vivas con esa ruta, ordenadas por id.
+   *  Más de una cuando el sync trae hermanas homónimas (dos dispositivos crean la misma
+   *  carpeta a la vez: el motor las admite, `ensureFolderNameFree` solo mira lo local);
+   *  con una sola por ruta, la última tapaba a las demás y una homónima de una carpeta
+   *  privada quedaba visible. Misma semántica que `resolveFolderPath` de Hebra, que
+   *  `node.ts` no reexporta. */
+  private readonly idsByPath = new Map<string, string[]>();
 
   private constructor() {}
 
@@ -38,9 +54,12 @@ export class FolderIndex {
     }
     for (const folder of folders) {
       if (folder.id === ROOT_FOLDER_ID) continue;
-      const segments = folderPathSegments(folder.id, index.parents, index.names);
-      index.idByPath.set(segments.join('/'), folder.id);
+      const key = privacyPathKey(folderPathSegments(folder.id, index.parents, index.names));
+      const ids = index.idsByPath.get(key);
+      if (ids) ids.push(folder.id);
+      else index.idsByPath.set(key, [folder.id]);
     }
+    for (const ids of index.idsByPath.values()) ids.sort();
     return index;
   }
 
@@ -76,10 +95,16 @@ export class FolderIndex {
     return this.names.get(folderId);
   }
 
-  /** Id de la carpeta configurada por su ruta (ya en minúsculas), o `undefined` si no
-   *  existe hoy (renombrada o borrada: R5 / `privacy_config_unresolved`). */
+  /** TODAS las carpetas con esa ruta (ya en minúsculas), por id; vacío si no existe hoy
+   *  (renombrada o borrada: R5 / `privacy_config_unresolved`). */
+  idsForPath(pathSegments: readonly string[]): readonly string[] {
+    return this.idsByPath.get(privacyPathKey(pathSegments)) ?? [];
+  }
+
+  /** La primera (por id) de las carpetas con esa ruta, para los filtros `folder?` de las
+   *  herramientas; `undefined` si no hay ninguna. */
   idForPath(pathSegments: readonly string[]): string | undefined {
-    return this.idByPath.get(pathSegments.join('/'));
+    return this.idsForPath(pathSegments)[0];
   }
 
   /** Ella y todas sus carpetas descendientes (SPEC.md §6.3: «carpeta privada o
