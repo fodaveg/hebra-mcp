@@ -429,6 +429,29 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => this.engine.blobRead(sha256));
   }
 
+  /** Si una carpeta viva sigue sucia (sin subir), para el estado de sync de crear y
+   *  renombrar (D9); `null` si no existe. SQL propio sobre `folders` de `schema.sql`:
+   *  `FolderRow` del motor no trae `dirty`. */
+  async folderDirty(id: string): Promise<boolean | null> {
+    return this.read(() => {
+      const row = this.prepared('SELECT dirty FROM folders WHERE id = ? AND deleted = 0').get(id) as
+        | { dirty: number | bigint }
+        | undefined;
+      return row === undefined ? null : Number(row.dirty) !== 0;
+    });
+  }
+
+  /** Si un blob ya está en el relé (`blobs.uploaded`), para el estado de sync de un
+   *  adjunto añadido (D9); `null` si no hay fila. */
+  async blobUploaded(sha256: string): Promise<boolean | null> {
+    return this.read(() => {
+      const row = this.prepared('SELECT uploaded FROM blobs WHERE sha256 = ?').get(sha256) as
+        | { uploaded: number | bigint }
+        | undefined;
+      return row === undefined ? null : Number(row.uploaded) !== 0;
+    });
+  }
+
   /**
    * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
    * las operaciones de nota, lo que lee el filtro de privados y el registro de
@@ -441,6 +464,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
+        // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.
+        folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
+        folderRename: (id, name) => this.engine.folderRename(id, name),
+        blobPut: (bytes, options) => this.engine.blobPut(bytes, options),
         noteMove: (id, folderId) => this.engine.noteMove(id, folderId),
         noteSetFavorite: (id, favorite) => this.engine.noteSetFavorite(id, favorite),
         noteArchive: (id) => this.engine.noteArchive(id),

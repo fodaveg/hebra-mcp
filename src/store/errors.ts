@@ -18,8 +18,15 @@
  * - `operation_id_reused`: el mismo `operationId` con otra petición.
  * - `privacy_config_unresolved`: el filtro no se puede aplicar (SPEC.md §6.3, R5).
  * - `invalid_input`: la entrada no vale (revisión ilegible, cuerpo bloqueado…).
- * Sin códigos de carpetas: crear, renombrar y mover carpetas no está en el MCP (opción A
- * de David, 28 sep 2026), porque `folder_name_taken`/`folder_cycle` revelaban privadas.
+ * Carpetas (D9, 3 oct 2026; antes, opción A: fuera del MCP porque `folder_name_taken`
+ * revelaba hermanas privadas):
+ * - `folder_unavailable`: la ruta resultante es privada o queda debajo de una privada, la
+ *   carpeta tiene una privada debajo, o el nombre choca con algo que no es visible. Uno
+ *   solo para todo, decidido desde la configuración (`./folders.ts`).
+ * - `folder_name_taken`: choca con una hermana VISIBLE (solo al renombrar).
+ * Adjuntos añadidos (D9), revalidados en el escritor aunque la herramienta ya los mirara:
+ * - `attachment_too_large`: más de 5 MiB.
+ * - `attachment_type_not_allowed`: fuera de los tipos que se pueden leer.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -30,7 +37,11 @@ export type WriteRejectionCode =
   | 'note_locked'
   | 'operation_id_reused'
   | 'privacy_config_unresolved'
-  | 'invalid_input';
+  | 'invalid_input'
+  | 'folder_unavailable'
+  | 'folder_name_taken'
+  | 'attachment_too_large'
+  | 'attachment_type_not_allowed';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -41,7 +52,11 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'note_locked',
   'operation_id_reused',
   'privacy_config_unresolved',
-  'invalid_input'
+  'invalid_input',
+  'folder_unavailable',
+  'folder_name_taken',
+  'attachment_too_large',
+  'attachment_type_not_allowed'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de

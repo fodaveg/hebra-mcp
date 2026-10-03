@@ -1,6 +1,6 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { openNodeLibraryPort } from '../../src/store/node-port';
@@ -10,10 +10,12 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  * D2 (SPEC.md §3, §5), ampliada el 28 sep 2026: el MCP edita notas y las organiza
  * (`noteMove`, favorita, archivar); ampliada otra vez el 30 sep 2026: manda notas a la
  * papelera y las saca (`noteTrash`/`noteRestore`) y lee y restaura versiones
- * (`noteVersionsList`, `noteVersionRead`, `noteVersionSnapshot`). Siguen fuera: purgar
- * (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento (`trashCounts`, contaría
- * las privadas), purgar versiones, adjuntos, renombrar etiquetas y gestionar carpetas
- * (`folder*`: opción A de David, 28 sep 2026, sus errores revelaban carpetas privadas).
+ * (`noteVersionsList`, `noteVersionRead`, `noteVersionSnapshot`). Desde D9 (3 oct 2026)
+ * crea y renombra carpetas y añade adjuntos: `folderCreate`, `folderRename` y `blobPut`
+ * solo existen en el turno de escritura y solo los llama `NoteWriter` (último test).
+ * Siguen fuera: purgar (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento
+ * (`trashCounts`, contaría las privadas), purgar versiones, recursos sueltos (`file*`),
+ * renombrar etiquetas, y mover y borrar carpetas (`folderMove`, `folderTrash`).
  * Tres comprobaciones sobre lo que el servidor puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
@@ -24,7 +26,7 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  */
 
 const FORBIDDEN =
-  'notePurge|noteClearConflict|noteVersionsPurge\\w*|folderCreate|folderRename|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|trashCounts|tagRename';
+  'notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|trashCounts|tagRename';
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
 const FORBIDDEN_IMPORT =
@@ -64,7 +66,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'trashCounts',
       'noteVersionsPurgeExpired',
       'folderTrash',
-      'filePurge'
+      'folderMove',
+      'filePurge',
+      'fileCreate'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
       expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(true);
@@ -127,25 +131,60 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
   });
 
   /**
-   * Adjuntos en SOLO LECTURA (ampliación de D2, 30 sep 2026): nada escribe adjuntos. El
-   * único `blobPut` es el de la vista de sync (`src/store/sync-port.ts`), que el motor usa
-   * para guardar lo que baja del relé; ni el puerto de las herramientas, ni la instancia,
-   * ni el turno de escritura lo tienen, y ninguna otra fuente (servidor incluido) lo llama.
+   * Carpetas y adjuntos (D9, 3 oct 2026): `folderCreate`, `folderRename` y `blobPut` solo
+   * los tiene el turno de escritura del almacén (`NodeLibraryPort.writeExclusive`) y solo
+   * los llama `NoteWriter` (`src/store/writes.ts`), que antes aplica el filtro de privados
+   * dentro del turno. `blobPut` lo tiene además la vista de sync (`src/store/sync-port.ts`),
+   * que el motor usa para guardar lo que baja del relé. Ni el puerto de las herramientas,
+   * ni la instancia, ni su `port` tienen ninguno, y ninguna otra fuente (servidor incluido)
+   * los llama. Del turno no sale nada más de blobs, recursos sueltos ni carpetas.
    */
-  it('adjuntos en solo lectura: blobPut solo en la vista de sync del motor', async () => {
-    const blobWrite = /\.\s*(blobPut|blobPutFromPath)\s*\(/;
+  it('carpetas y adjuntos (D9): folderCreate, folderRename y blobPut solo en el turno del escritor', async () => {
+    const calls: Array<[RegExp, string[]]> = [
+      [/\.\s*(folderCreate|folderRename)\s*\(/, ['src/store/node-port.ts', 'src/store/writes.ts']],
+      [
+        /\.\s*(blobPut|blobPutFromPath)\s*\(/,
+        ['src/store/node-port.ts', 'src/store/writes.ts', 'src/store/sync-port.ts']
+      ]
+    ];
     for (const file of [...sourceFiles(), ...serverFiles()]) {
-      if (relative(root, file) === join('src', 'store', 'sync-port.ts')) continue;
+      const path = relative(root, file).split(sep).join('/');
       const text = readFileSync(file, 'utf8');
-      expect(blobWrite.exec(text)?.[0] ?? null, relative(root, file)).toBeNull();
+      for (const [pattern, allowed] of calls) {
+        if (allowed.includes(path)) continue;
+        expect(pattern.exec(text)?.[0] ?? null, path).toBeNull();
+      }
     }
     const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    const dataDir = mkdtempSync(join(tmpdir(), 'hebra-mcp-surface-d9-'));
+    const instance = await LibraryInstance.open({
+      dataDir,
+      checkIntervalMs: null,
+      lock: { releaseOnExit: false }
+    });
     try {
-      expect(methodNames(port)).not.toContain('blobPut');
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['LibraryInstance', instance],
+        ['LibraryInstance.port', instance.port]
+      ] as Array<[string, object]>) {
+        const names = methodNames(value);
+        for (const name of ['folderCreate', 'folderRename', 'blobPut']) {
+          expect(names, `${label}.${name}`).not.toContain(name);
+        }
+      }
+      expect(methodNames(port.syncStorePort())).not.toContain('folderCreate');
+      expect(methodNames(port.syncStorePort())).not.toContain('folderRename');
       const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
-      expect(storeKeys.filter((key) => /^(blob|file)/.test(key))).toEqual([]);
+      expect(storeKeys.filter((key) => /^(blob|file|folder[A-Z])/.test(key)).sort()).toEqual([
+        'blobPut',
+        'folderCreate',
+        'folderRename'
+      ]);
     } finally {
       port.close();
+      await instance.close();
+      rmSync(dataDir, { recursive: true, force: true });
     }
   });
 });

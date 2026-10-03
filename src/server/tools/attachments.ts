@@ -1,9 +1,10 @@
 /**
- * Adjuntos en SOLO LECTURA (ampliación de D2, decisión de David del 30 sep 2026):
+ * Leer adjuntos (ampliación de D2, decisión de David del 30 sep 2026):
  * `hebra_list_attachments` y `hebra_read_attachment`. Nunca añaden, cambian ni borran un
- * adjunto: en todo hebra-mcp no hay ninguna llamada a `blobPut`, `file*` ni a nada que
- * escriba adjuntos salvo la caché del propio motor al bajarlos
- * (`test/store/surface.node.test.ts`).
+ * adjunto: añadir es `hebra_add_attachment` (D9, `./add-attachment.ts`), y el único
+ * `blobPut` fuera de la vista de sync del motor es el del escritor al añadir
+ * (`test/store/surface.node.test.ts`). El tope y la detección de tipo son los mismos al
+ * leer y al añadir (`../../store/attachment-content.ts`, reexportados aquí).
  *
  * Qué es un adjunto: lo que la nota adjunta con `![[sha256:H|nombre]]` (`note_blob_refs`
  * de Hebra, en el orden del cuerpo; así quedan también los de Obsidian, que el
@@ -54,93 +55,28 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { ToolContent, ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
+import {
+  ATTACHMENT_MAX_BYTES,
+  detectAttachmentType,
+  extensionOf,
+  normalizedType,
+  TEXT_TYPE_BY_EXTENSION
+} from '../../store/attachment-content';
 import type { NoteAttachmentRow } from '../../store/types';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
-/** 5 MiB descifrados por adjunto (decisión de David, 30 sep 2026). */
-export const ATTACHMENT_MAX_BYTES = 5 * 1024 * 1024;
+export {
+  ALLOWED_ATTACHMENT_TYPES,
+  ATTACHMENT_MAX_BYTES,
+  detectAttachmentType,
+  type DetectedAttachment
+} from '../../store/attachment-content';
 
 /** Tramo máximo (y por defecto) de un adjunto de TEXTO, en caracteres de `string`
  *  (unidades UTF-16): decisión de David, 30 sep 2026. */
 export const ATTACHMENT_TEXT_MAX_CHARS = 100_000;
-
-export const ALLOWED_ATTACHMENT_TYPES: readonly string[] = [
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-  'application/pdf',
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'application/json'
-];
-
-const TEXT_TYPES = new Set(['text/plain', 'text/markdown', 'text/csv', 'application/json']);
-
-/** Tipos que se escriben de otra forma y son el mismo. */
-const TYPE_ALIASES: Record<string, string> = {
-  'image/jpg': 'image/jpeg',
-  'text/x-markdown': 'text/markdown',
-  'text/md': 'text/markdown',
-  'application/csv': 'text/csv',
-  'text/json': 'application/json'
-};
-
-/** Extensión → tipo de texto, SOLO cuando el almacén no declara ningún tipo. */
-const TEXT_TYPE_BY_EXTENSION: Record<string, string> = {
-  txt: 'text/plain',
-  text: 'text/plain',
-  md: 'text/markdown',
-  markdown: 'text/markdown',
-  csv: 'text/csv',
-  json: 'application/json'
-};
-
-/** Tipo de imagen o PDF por su firma (los primeros bytes), o `null`. */
-function typeBySignature(bytes: Uint8Array): string | null {
-  const startsWith = (...prefix: number[]): boolean =>
-    bytes.length >= prefix.length && prefix.every((byte, index) => bytes[index] === byte);
-  if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
-  if (startsWith(0xff, 0xd8, 0xff)) return 'image/jpeg';
-  if (startsWith(0x47, 0x49, 0x46, 0x38)) return 'image/gif';
-  if (
-    startsWith(0x52, 0x49, 0x46, 0x46) &&
-    bytes.length >= 12 &&
-    String.fromCharCode(bytes[8]!, bytes[9]!, bytes[10]!, bytes[11]!) === 'WEBP'
-  ) {
-    return 'image/webp';
-  }
-  if (startsWith(0x25, 0x50, 0x44, 0x46, 0x2d)) return 'application/pdf';
-  return null;
-}
-
-/** `type/subtype` en minúsculas, sin parámetros (`; charset=…`) y con alias resueltos. */
-function normalizedType(raw: string | null): string | null {
-  if (!raw) return null;
-  const base = raw.split(';')[0]!.trim().toLowerCase();
-  if (!base) return null;
-  return TYPE_ALIASES[base] ?? base;
-}
-
-function extensionOf(name: string | null): string | null {
-  if (!name) return null;
-  const match = /\.([a-z0-9]+)$/i.exec(name.trim());
-  return match ? match[1]!.toLowerCase() : null;
-}
-
-/** El texto, si los bytes son UTF-8 válido sin NUL; si no, `null`. */
-function utf8Text(bytes: Uint8Array): string | null {
-  let text: string;
-  try {
-    text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);
-  } catch {
-    return null;
-  }
-  return text.includes('\u0000') ? null : text;
-}
 
 /** Tipo que se puede anunciar SIN leer los bytes (lista): el declarado o, si no hay, el de
  *  la extensión del nombre. Orientativo: lo que decide es `detectAttachmentType`. */
@@ -158,46 +94,6 @@ function listedType(declared: string | null, name: string | null): string | null
     pdf: 'application/pdf'
   };
   return byImageExtension[extension] ?? TEXT_TYPE_BY_EXTENSION[extension] ?? null;
-}
-
-export type DetectedAttachment =
-  | { allowed: true; mimeType: string; text?: string }
-  | { allowed: false; mimeType: string | null };
-
-/**
- * Tipo de un adjunto decidido por su CONTENIDO:
- * 1. Firma de imagen o PDF: ese tipo, diga lo que diga la fila o el nombre.
- * 2. Si no, texto: solo si el almacén declara uno de los tipos de texto permitidos (o no
- *    declara ninguno y la extensión del nombre es de texto) Y los bytes son UTF-8 válido.
- *    Un JSON que no se puede leer como JSON pasa como `text/plain`.
- * 3. Lo demás (un tipo declarado fuera de la lista, un binario sin firma conocida, una
- *    imagen declarada cuyos bytes no lo son), no permitido.
- */
-export function detectAttachmentType(
-  bytes: Uint8Array,
-  declared: string | null,
-  name: string | null
-): DetectedAttachment {
-  const signed = typeBySignature(bytes);
-  if (signed) return { allowed: true, mimeType: signed };
-  const type = normalizedType(declared);
-  const textType =
-    type && TEXT_TYPES.has(type)
-      ? type
-      : !type || type === 'application/octet-stream'
-        ? TEXT_TYPE_BY_EXTENSION[extensionOf(name) ?? '']
-        : undefined;
-  if (!textType) return { allowed: false, mimeType: type };
-  const text = utf8Text(bytes);
-  if (text === null) return { allowed: false, mimeType: type };
-  if (textType === 'application/json') {
-    try {
-      JSON.parse(text);
-    } catch {
-      return { allowed: true, mimeType: 'text/plain', text };
-    }
-  }
-  return { allowed: true, mimeType: textType, text };
 }
 
 /** Nombre de cada adjunto según el alias `|nombre` de `![[sha256:H|nombre]]` en el

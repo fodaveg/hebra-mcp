@@ -46,7 +46,34 @@ export class FolderIndex {
 
   /** `folderPath` para enseñar (SPEC.md §5): vacío para la raíz. */
   path(folderId: string): string {
-    return folderPathSegments(folderId, this.parents, this.names).join('/');
+    return this.segments(folderId).join('/');
+  }
+
+  /** Los segmentos de la ruta (minúsculas, sin espacios en los extremos, sin la raíz):
+   *  la forma en que se comparan con `privateFolders`. */
+  segments(folderId: string): string[] {
+    return folderPathSegments(folderId, this.parents, this.names);
+  }
+
+  /** Padre EFECTIVO de una carpeta viva (`null` para la raíz o una que no existe). */
+  parentOf(folderId: string): string | null {
+    return this.parents.get(folderId)?.parentId ?? null;
+  }
+
+  /** Hijas vivas (por padre efectivo) de `parentId`, con su nombre tal como está
+   *  guardado, ordenadas por id: para el choque de nombres de crear y renombrar (D9). */
+  children(parentId: string): Array<{ id: string; name: string }> {
+    const out: Array<{ id: string; name: string }> = [];
+    for (const [id, parent] of this.parents) {
+      if (id === ROOT_FOLDER_ID || parent.parentId !== parentId) continue;
+      out.push({ id, name: this.names.get(id) ?? '' });
+    }
+    return out.sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  }
+
+  /** Nombre guardado de una carpeta viva (`undefined` si no existe). */
+  name(folderId: string): string | undefined {
+    return this.names.get(folderId);
   }
 
   /** Id de la carpeta configurada por su ruta (ya en minúsculas), o `undefined` si no

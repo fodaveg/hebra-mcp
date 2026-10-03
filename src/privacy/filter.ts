@@ -28,6 +28,8 @@ export class PrivacyFilter {
   readonly unresolved: boolean;
   private readonly hiddenFolderIds: Set<string>;
   private readonly privateTags: Set<string>;
+  /** Las rutas de `privateFolders` tal cual están configuradas (ya en minúsculas). */
+  private readonly privateFolderPaths: readonly (readonly string[])[];
 
   private constructor(
     private readonly folders: FolderIndex,
@@ -35,6 +37,7 @@ export class PrivacyFilter {
     config: PrivacyConfig
   ) {
     this.privateTags = new Set(config.privateTags);
+    this.privateFolderPaths = config.privateFolders;
     let unresolved = false;
     const hidden = new Set<string>();
     for (const segments of config.privateFolders) {
@@ -105,6 +108,58 @@ export class PrivacyFilter {
 
   folderExists(folderId: string): boolean {
     return this.folders.has(folderId);
+  }
+
+  /**
+   * ¿Es `segments` (una ruta en minúsculas y sin espacios en los extremos, como las de
+   * `folderPathSegments`) una carpeta privada CONFIGURADA o algo debajo de una? Solo mira
+   * la configuración, nunca el almacén: es lo que decide `folder_unavailable` al crear o
+   * renombrar una carpeta (D9), con la misma respuesta exista o no esa carpeta.
+   */
+  isPrivateFolderPath(segments: readonly string[]): boolean {
+    return this.privateFolderPaths.some(
+      (path) =>
+        path.length > 0 &&
+        path.length <= segments.length &&
+        path.every((segment, index) => segments[index] === segment)
+    );
+  }
+
+  /** Segmentos de la ruta de una carpeta, para componer la ruta de una nueva. */
+  folderSegments(folderId: string): string[] {
+    return this.folders.segments(folderId);
+  }
+
+  /** Padre efectivo de una carpeta (`null` para la raíz). */
+  folderParent(folderId: string): string | null {
+    return this.folders.parentOf(folderId);
+  }
+
+  /** Nombre guardado de una carpeta. */
+  folderName(folderId: string): string | undefined {
+    return this.folders.name(folderId);
+  }
+
+  /** Hijas de una carpeta, VISIBLES u ocultas (quien llama decide qué hacer con cada
+   *  una; nunca se devuelven a la IA). */
+  folderChildren(parentId: string): Array<{ id: string; name: string; hidden: boolean }> {
+    return this.folders
+      .children(parentId)
+      .map((child) => ({ ...child, hidden: this.hiddenFolderIds.has(child.id) }));
+  }
+
+  /** Ella y todas sus descendientes. */
+  folderSubtree(folderId: string): string[] {
+    return this.folders.subtree(folderId);
+  }
+
+  /** ¿Hay alguna carpeta oculta (una privada configurada o debajo de una) en el subárbol
+   *  de `folderId`, sin contarla a ella? Renombrarla cambiaría la ruta por la que se
+   *  oculta (D9). */
+  hasHiddenFolderBelow(folderId: string): boolean {
+    return this.folders
+      .subtree(folderId)
+      .some((id) => id !== folderId && this.hiddenFolderIds.has(id));
   }
 
   /** Id de la carpeta que corresponde a una ruta escrita por la persona (`folder?` de

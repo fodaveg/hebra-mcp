@@ -57,6 +57,11 @@ import type {
 } from '../store/types';
 import {
   NoteWriter,
+  type AddAttachmentInput,
+  type AddAttachmentSaved,
+  type CreateFolderInput,
+  type FolderSaved,
+  type RenameFolderInput,
   type AppendToNoteInput,
   type AppendToNoteResult,
   type CreateNoteInput,
@@ -328,6 +333,21 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.writer.restoreVersion(input);
   }
 
+  /** Crear una carpeta (D9, `NoteWriter.createFolderLocal`). */
+  createFolderLocal(input: CreateFolderInput): Promise<LocalWrite<FolderSaved>> {
+    return this.writer.createFolderLocal(input);
+  }
+
+  /** Renombrar una carpeta (D9, `NoteWriter.renameFolderLocal`). */
+  renameFolderLocal(input: RenameFolderInput): Promise<LocalWrite<FolderSaved>> {
+    return this.writer.renameFolderLocal(input);
+  }
+
+  /** Añadir un adjunto (D9, `NoteWriter.addAttachmentLocal`); lo sube la ronda. */
+  addAttachmentLocal(input: AddAttachmentInput): Promise<LocalWrite<AddAttachmentSaved>> {
+    return this.writer.addAttachmentLocal(input);
+  }
+
   /** Trae al disco los bytes de un adjunto (`NoteWriter.fetchAttachment`) con el motor
    *  de sync de ESTE escritor; sin sync, solo dice si ya estaban. Rechaza con
    *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
@@ -411,6 +431,8 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     noteAttachments: (noteId: string): Promise<NoteAttachmentRow[]> =>
       current().noteAttachments(noteId),
     blobRead: (sha256: string): Promise<Uint8Array | null> => current().blobRead(sha256),
+    folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
+    blobUploaded: (sha256: string): Promise<boolean | null> => current().blobUploaded(sha256),
     close: (): void => current().close()
   };
 }

@@ -18,10 +18,13 @@ export type ToolErrorCode =
   | 'overlapping_edits'
   | 'note_locked'
   | 'operation_id_reused'
-  // Adjuntos en solo lectura (30 sep 2026; `src/server/tools/attachments.ts`).
+  // Adjuntos (30 sep 2026, `src/server/tools/attachments.ts`; añadir, D9 del 3 oct 2026).
   | 'attachment_too_large'
   | 'attachment_type_not_allowed'
-  | 'attachment_unavailable';
+  | 'attachment_unavailable'
+  // Carpetas (D9, 3 oct 2026; `src/store/folders.ts`).
+  | 'folder_unavailable'
+  | 'folder_name_taken';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

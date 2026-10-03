@@ -137,6 +137,11 @@ export interface HebraLibraryPort {
    *  verifica el SHA-256); `null` si no. Nunca los baja del relé: eso lo hace el escritor
    *  (`NoteWriter.fetchAttachment`). Aquí no hay ninguna escritura de adjuntos. */
   blobRead(sha256: string): Promise<Uint8Array | null>;
+  /** Estado de sync de lo que escriben las herramientas de carpetas y de adjuntos (D9):
+   *  si una carpeta viva sigue sucia, y si un blob ya subió; `null` si no existe. Solo
+   *  leen. */
+  folderDirty(id: string): Promise<boolean | null>;
+  blobUploaded(sha256: string): Promise<boolean | null>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

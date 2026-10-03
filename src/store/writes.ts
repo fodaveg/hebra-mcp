@@ -20,6 +20,10 @@
  *   papelera.
  * - `restoreVersion` (30 sep 2026): restaurar una «versión anterior» es una edición
  *   nueva, con la revisión, la idempotencia y la copia de conflicto de `editNote`.
+ * - `createFolder`/`renameFolder` (D9, 3 oct 2026): `folderCreate`/`folderRename` del
+ *   motor, con el plan de `./folders.ts` rehecho dentro del turno.
+ * - `addAttachment` (D9): `blobPut` del motor y la referencia `![[sha256:H|nombre]]` al
+ *   final del cuerpo, como `appendToNote`, con la idempotencia de `editNote`.
  *
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
@@ -32,25 +36,49 @@ import {
   type FoldersList,
   type NoteRow,
   type NoteSaveInput,
-  type NoteSaveResult
+  type NoteSaveResult,
+  type SqliteLibraryEngine
 } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { TrashFilter } from '../privacy/trash-filter';
+import {
+  ATTACHMENT_BASE64_MAX_CHARS,
+  ATTACHMENT_MAX_BYTES,
+  attachmentMarkdown,
+  detectAttachmentType,
+  validAttachmentName
+} from './attachment-content';
 import { applyEdits, type TextEdit } from './edits';
 import { writeRejected } from './errors';
+import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
 import type { NoteAttachmentRow, NoteVersion, NoteVisibilityEntry, TrashIndex } from './types';
+
+/** Tipos de carpeta y de blob del motor (`library/types.ts`): `node.ts` no los
+ *  reexporta, así que salen de la firma de `SqliteLibraryEngine`. */
+export type FolderRow = Awaited<ReturnType<SqliteLibraryEngine['folderCreate']>>;
+export type BlobPutOptions = NonNullable<Parameters<SqliteLibraryEngine['blobPut']>[1]>;
+export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
 export interface NoteWriteStore {
   noteCreate(folderId?: string | null): Promise<NoteRow>;
   noteRead(id: string): Promise<NoteRow | null>;
   noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
+  /** Carpetas (D9, 3 oct 2026): crear y renombrar, solo desde `NoteWriter` y con el plan
+   *  de `./folders.ts` rehecho en el turno. Mover y borrar carpetas (`folderMove`,
+   *  `folderTrash`) NO están, ni aquí ni en ningún sitio de hebra-mcp
+   *  (`test/store/surface.node.test.ts`). */
+  folderCreate(parentId: string, name: string): Promise<FolderRow>;
+  folderRename(id: string, name: string): Promise<FolderRow>;
+  /** Guardar los bytes de un adjunto que se añade (D9): el `blobPut` del motor (fichero y
+   *  fila de `blobs`). Solo lo llama `NoteWriter.addAttachment`, en el mismo turno en que
+   *  la nota pasa a referenciarlo. */
+  blobPut(bytes: Uint8Array, options: BlobPutOptions): Promise<BlobPutResult>;
   /** Organización de notas (D2 ampliada): los métodos del mismo nombre de
-   *  `SqliteLibraryEngine`. Las carpetas NO se gestionan desde el MCP (opción A de David,
-   *  28 sep 2026): sus errores revelarían carpetas privadas. */
+   *  `SqliteLibraryEngine`. */
   noteMove(id: string, folderId: string): Promise<NoteRow>;
   noteSetFavorite(id: string, favorite: boolean): Promise<NoteRow>;
   noteArchive(id: string): Promise<NoteRow>;
@@ -121,6 +149,20 @@ export const CREATE_BODY_MAX_LENGTH = 100_000;
 /** Límite del texto de `hebra_append_to_note` (SPEC.md §5), igual que el de arriba. */
 export const APPEND_TEXT_MAX_LENGTH = 20_000;
 
+/**
+ * Tope, en bytes, de una petición de escritura: una línea de `writer.sock`
+ * (`MAX_MESSAGE_BYTES`, `src/ipc/writer-socket.ts`) y el cuerpo de `POST /mcp`
+ * (`MAX_MCP_BODY_BYTES`, `src/http/app.ts`). Lo mayor entre:
+ * - el cuerpo de `hebra_create_note` con el peor escape JSON (un carácter de control sale
+ *   como `\uXXXX`, 6 bytes por unidad UTF-16; las sustituciones de `editNote` suman como
+ *   mucho lo mismo), y
+ * - el base64 de un adjunto de 5 MiB (`hebra_add_attachment`, D9), que JSON no escapa;
+ * más 64 KiB para el sobre (ids, nombre, `operationId`) y la configuración de privados.
+ * Desde D9 manda el adjunto: 6 990 508 + 65 536 = 7 056 044 bytes (antes, 665 536).
+ */
+export const MAX_WRITE_MESSAGE_BYTES =
+  Math.max(CREATE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) + 64 * 1024;
+
 export interface EditNoteInput {
   id: string;
   /** Sustituciones puntuales sobre el cuerpo LEÍDO (`./edits.ts`). */
@@ -153,12 +195,10 @@ export type EditNoteSaved =
  * (`"root"`, la que lista `hebra_list_folders` con ruta vacía). Desde el 30 sep 2026
  * (ampliación de D2), también mandar una nota a la papelera (`trashNote`) y sacarla
  * (`restoreNote`): cada una se deshace con la otra, desde Hebra o desde el MCP. Sin
- * adjuntos (otro lote) y sin nada irreversible: ni purga ni vaciar la papelera.
+ * nada irreversible: ni purga ni vaciar la papelera.
  *
- * Crear, renombrar y mover CARPETAS quedan fuera del MCP (opción A de David, 28 sep
- * 2026): `folder_name_taken` delataba el nombre de una hermana privada, y renombrar o
- * mover una carpeta visible con una privada dentro respondía distinto que sin ella. Las
- * carpetas se crean desde la app Hebra.
+ * Crear y renombrar CARPETAS (D9, 3 oct 2026) no son acciones de nota: van por
+ * `createFolderLocal`/`renameFolderLocal`. Mover y borrar carpetas siguen fuera del MCP.
  */
 export type OrganizeAction =
   | { action: 'moveNote'; id: string; folderId: string }
@@ -209,6 +249,52 @@ export interface RestoreVersionInput {
   privacy: PrivacyConfig;
 }
 
+/** Crear una carpeta (D9): dentro de `parentId` (`ROOT_FOLDER_ID` es la raíz). */
+export interface CreateFolderInput {
+  parentId: string;
+  /** Sin recortar: el plan (`./folders.ts`) lo valida y lo recorta. */
+  name: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy: PrivacyConfig;
+}
+
+/** Renombrar una carpeta (D9). */
+export interface RenameFolderInput {
+  id: string;
+  name: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy: PrivacyConfig;
+}
+
+/** La carpeta creada (o la visible que ya estaba) o renombrada, y si se escribió algo.
+ *  La ruta para enseñar la calcula la herramienta con SU filtro. */
+export interface FolderSaved {
+  id: string;
+  changed: boolean;
+}
+
+/** Añadir un adjunto a una nota (D9). */
+export interface AddAttachmentInput {
+  id: string;
+  /** Sin recortar: se valida con `validAttachmentName`. */
+  name: string;
+  bytes: Uint8Array;
+  /** El que declara el agente: solo decide entre los tipos de texto (`detectAttachmentType`). */
+  mimeType: string | null;
+  /** Igual que en `EditNoteInput`: idempotencia, en el mismo registro. */
+  operationId: string;
+  /** Igual que `EditNoteInput.privacy`. */
+  privacy: PrivacyConfig;
+}
+
+/** El guardado de la nota (como el de una edición: `revision` o copia de conflicto, y
+ *  `replayed`) y el adjunto añadido: su SHA-256 y la referencia que quedó en el cuerpo. */
+export interface AddAttachmentSaved {
+  note: EditNoteSaved;
+  attachmentId: string;
+  markdown: string;
+}
+
 /**
  * Resultado de una escritura que dice si de verdad escribió (`wrote`). Sin escritura (una
  * edición sin cambios, un reintento con el mismo `operationId`, una organización que ya
@@ -245,6 +331,40 @@ export const LOCKED_BODY_PREFIX = 'hebra-locked:';
 
 function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+function bytesSha256Hex(bytes: Uint8Array): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+/** Los errores del motor de Hebra que crear o renombrar una carpeta pueden dar. Un
+ *  `folder_name_taken` que se escape del plan (`./folders.ts` ya mira las hermanas)
+ *  sería una carpeta que este filtro no ve: `folder_unavailable`, nunca el del motor. */
+function folderRejection(error: unknown): unknown {
+  if (!(error instanceof LibraryError)) return error;
+  switch (error.code) {
+    case 'folder_name_taken':
+      return writeRejected('folder_unavailable');
+    case 'folder_not_found':
+      return writeRejected('not_found');
+    case 'invalid_name':
+    case 'root_folder_immutable':
+      return writeRejected('invalid_input');
+    default:
+      return error;
+  }
+}
+
+/** Igual que `editFingerprint` (comparten registro): la operación va en la huella, así
+ *  que un `operationId` de una edición no vale para añadir un adjunto. Los bytes, por su
+ *  SHA-256. */
+function addAttachmentFingerprint(
+  input: AddAttachmentInput,
+  sha256: string,
+  name: string,
+  mimeType: string
+): string {
+  return sha256Hex(JSON.stringify(['addAttachment', input.id, sha256, name, mimeType]));
 }
 
 /** Huella de la petición: el mismo `operationId` con otra petición es un error. */
@@ -690,6 +810,149 @@ export class NoteWriter {
     });
     if (outcome.wrote) this.written();
     return outcome;
+  }
+
+  /**
+   * Crea una carpeta (D9, 3 oct 2026). En UN turno de la cola, con el filtro de privados
+   * de quien pide sobre el almacén de ESTE turno, rehace el plan de `./folders.ts`
+   * (nombre, padre visible, ruta privada desde la configuración, hermanas homónimas):
+   * una hermana VISIBLE con ese nombre se devuelve tal cual (`changed: false`, sin ronda),
+   * y cualquier rechazo sale sin escribir. Solo entonces `folderCreate` del motor.
+   */
+  async createFolderLocal(input: CreateFolderInput): Promise<LocalWrite<FolderSaved>> {
+    const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FolderSaved>> => {
+      const plan = planCreateFolder(privacyInTurn(store, input.privacy), input.parentId, input.name);
+      switch (plan.kind) {
+        case 'reject':
+          throw writeRejected(plan.code);
+        case 'existing':
+          return { result: { id: plan.id, changed: false }, wrote: false };
+        case 'create':
+          try {
+            const row = await store.folderCreate(plan.parentId, plan.name);
+            return { result: { id: row.id, changed: true }, wrote: true };
+          } catch (error) {
+            throw folderRejection(error);
+          }
+      }
+    });
+    if (outcome.wrote) this.written();
+    return outcome;
+  }
+
+  /**
+   * Renombra una carpeta (D9), igual que `createFolderLocal`: plan rehecho en el turno
+   * (carpeta visible, ninguna privada debajo, ruta nueva no privada, hermanas) y después
+   * `folderRename`. El nombre que ya tiene no escribe (`changed: false`).
+   */
+  async renameFolderLocal(input: RenameFolderInput): Promise<LocalWrite<FolderSaved>> {
+    const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FolderSaved>> => {
+      const plan = planRenameFolder(privacyInTurn(store, input.privacy), input.id, input.name);
+      switch (plan.kind) {
+        case 'reject':
+          throw writeRejected(plan.code);
+        case 'unchanged':
+          return { result: { id: input.id, changed: false }, wrote: false };
+        case 'rename':
+          try {
+            await store.folderRename(plan.id, plan.name);
+            return { result: { id: plan.id, changed: true }, wrote: true };
+          } catch (error) {
+            throw folderRejection(error);
+          }
+      }
+    });
+    if (outcome.wrote) this.written();
+    return outcome;
+  }
+
+  /**
+   * Añade un adjunto al final de una nota (D9, 3 oct 2026). Antes del turno, lo que no
+   * depende del almacén, otra vez aunque la herramienta ya lo mirara (puede llegar de un
+   * lector por `writer.sock`): nombre (`invalid_input`), tamaño
+   * (`attachment_too_large`) y tipo por el contenido (`attachment_type_not_allowed`), con
+   * la misma detección que la lectura. Después, en UN turno de la cola, los pasos de
+   * `editNote` con la base de `appendToNote`:
+   * 1. Registro de idempotencia (huella propia: un `operationId` de otra operación da
+   *    `operation_id_reused`); ya terminado, se devuelve con `replayed`; a medias, el
+   *    SHA-256 del cuerpo dice si se guardó.
+   * 2. Nota visible para quien pide, viva (`not_found`) y no bloqueada (`note_locked`).
+   * 3. `blobPut` de los bytes con el tipo DETECTADO (no el declarado) y, en el mismo
+   *    turno, `noteSave` de `cuerpo + "\n\n" + ![[sha256:H|nombre]]` con la base recién
+   *    leída. El blob va antes que la nota: una nota nunca referencia un blob que no está;
+   *    si el proceso muere entre los dos, queda un blob local sin referencia, que el sync
+   *    no sube (solo sube los referenciados) y el reintento reutiliza.
+   * Un `redirected` deja la referencia en una copia de conflicto visible (`conflict_copy`).
+   * Un choque con otro dispositivo llega en la ronda, y lo anota quien la espera con
+   * `recordEditConflict`, como en una edición.
+   */
+  async addAttachmentLocal(input: AddAttachmentInput): Promise<LocalWrite<AddAttachmentSaved>> {
+    const name = validAttachmentName(input.name);
+    if (name === null || input.bytes.length === 0) throw writeRejected('invalid_input');
+    if (input.bytes.length > ATTACHMENT_MAX_BYTES) throw writeRejected('attachment_too_large');
+    const detected = detectAttachmentType(input.bytes, input.mimeType, name);
+    if (!detected.allowed) throw writeRejected('attachment_type_not_allowed');
+    const attachmentId = bytesSha256Hex(input.bytes);
+    const markdown = attachmentMarkdown(attachmentId, name);
+    const fingerprint = addAttachmentFingerprint(input, attachmentId, name, detected.mimeType);
+    const added = (note: EditNoteSaved): AddAttachmentSaved => ({ note, attachmentId, markdown });
+
+    const { result, wrote } = await this.target.writeExclusive(async (store) => {
+      const now = Date.now();
+      const log = store.operations;
+      log.purgeExpired(now);
+      const previous = log.lookup(input.operationId);
+      if (previous && previous.fingerprint !== fingerprint) {
+        throw writeRejected('operation_id_reused');
+      }
+      const filter = privacyInTurn(store, input.privacy);
+      const note = await store.noteRead(input.id);
+      if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
+        throw writeRejected('not_found');
+      }
+      const libraryId = store.libraryId();
+      const revisionOf = (row: { localSeq: number; bodySha256: string }): string =>
+        encodeRevision({
+          libraryId,
+          noteId: input.id,
+          localSeq: row.localSeq,
+          bodySha256: row.bodySha256
+        });
+
+      if (previous?.state === 'done' && isEditNoteSaved(previous.result)) {
+        return { result: added({ ...previous.result, replayed: true as const }), wrote: false };
+      }
+      if (previous?.state === 'started' && note.bodySha256 === previous.targetBodySha256) {
+        // Murió entre el guardado y `finish`: se guardó (y el blob, antes). Se completa.
+        const saved: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
+        log.finish(input.operationId, saved);
+        return { result: added({ ...saved, replayed: true as const }), wrote: false };
+      }
+
+      if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
+      const body = `${note.body}${APPEND_SEPARATOR}${markdown}`;
+      const saveInput = saveInputFor(note, body);
+      if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
+        throw writeRejected('not_found');
+      }
+      log.begin({
+        operationId: input.operationId,
+        fingerprint,
+        noteId: input.id,
+        targetBodySha256: sha256Hex(body),
+        now
+      });
+      await store.blobPut(input.bytes, { mime: detected.mimeType, expectedSha256: attachmentId });
+      const saved = await store.noteSave(saveInput);
+      const outcome: EditNoteSaved =
+        saved.outcome === 'saved'
+          ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
+          : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+      log.finish(input.operationId, outcome);
+      return { result: added(outcome), wrote: true };
+    });
+    if (wrote) this.written();
+    return { result, wrote };
   }
 
   /**
