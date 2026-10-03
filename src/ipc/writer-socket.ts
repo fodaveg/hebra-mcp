@@ -508,6 +508,25 @@ export class WriterSocketServer {
       logEvent({ event: 'writer.socket.request', outcome: 'rejected', code: error });
       socket.end(`${JSON.stringify({ id: null, ok: false, error } satisfies ResponseEnvelope)}\n`);
     };
+    // Como mucho UNA petición en vuelo por conexión: las líneas se atienden en orden y,
+    // mientras haya una en curso o en cola, la conexión deja de leer (`pause`). Así una
+    // conexión no acumula N mensajes de hasta `maxBytes` (7 MB desde D9) en memoria: lo
+    // que el cliente siga mandando espera en el búfer del socket del sistema, y lo único
+    // que puede quedar en cola son las líneas que ya venían en el mismo trozo leído.
+    const queue: RequestEnvelope[] = [];
+    let busy = false;
+    const pump = async (): Promise<void> => {
+      if (busy) return;
+      busy = true;
+      try {
+        while (queue.length > 0 && !socket.destroyed) {
+          await this.dispatch(socket, queue.shift()!, handlers);
+        }
+      } finally {
+        busy = false;
+      }
+      if (!socket.destroyed) socket.resume();
+    };
     socket.on('data', (chunk: Buffer) => {
       let start = 0;
       for (let index = chunk.indexOf(0x0a); index !== -1; index = chunk.indexOf(0x0a, start)) {
@@ -529,7 +548,7 @@ export class WriterSocketServer {
           socket.removeAllListeners('data');
           return;
         }
-        void this.dispatch(socket, envelope, handlers);
+        queue.push(envelope);
       }
       const rest = chunk.subarray(start);
       if (pendingBytes + rest.length > maxBytes) {
@@ -540,6 +559,10 @@ export class WriterSocketServer {
       if (rest.length > 0) {
         pending.push(rest);
         pendingBytes += rest.length;
+      }
+      if (queue.length > 0) {
+        socket.pause();
+        void pump();
       }
     });
   }

@@ -304,6 +304,25 @@ describe('carpetas (D9): crear y renombrar', () => {
     expect((await folderNames()).size).toBe(before + 1);
   });
 
+  it('nombres con caracteres de formato invisibles (Unicode Cf): invalid_input', async () => {
+    test = await buildTestContext(DEFAULT_PRIVACY);
+    const before = (await folderNames()).size;
+    for (const code of [0x200b, 0x202e, 0xfeff, 0x00ad, 0x2066]) {
+      const name = `Ca${String.fromCharCode(code)}rpeta`;
+      await expectCode(runCreateFolder(await fresh(), { name }), 'invalid_input');
+      await expectCode(
+        runRenameFolder(await fresh(), { folderId: test.library.folders.historial, name }),
+        'invalid_input'
+      );
+    }
+    // Un invisible delante de «Diario» tampoco esquiva la ruta privada: no llega a mirarse.
+    await expectCode(
+      runCreateFolder(await fresh(), { name: `${String.fromCharCode(0x200b)}Diario` }),
+      'invalid_input'
+    );
+    expect((await folderNames()).size).toBe(before);
+  });
+
   it('otra instancia en solo lectura sin escritor: busy_other_instance', async () => {
     test = await buildTestContext(DEFAULT_PRIVACY);
     const busy = await openBusyWriteContext(test);

@@ -177,8 +177,9 @@ export function decodeAttachmentBase64(text: string): DecodedAttachment {
 
 /** Lo que no puede ir en el nombre de un adjunto: rompería `![[sha256:H|nombre]]` (`|`,
  *  `[`, `]`), Hebra lo escapa en sus alias (`\`, `#`, `escapeAlias` de
- *  `notes/attachments.ts`), o parte la línea (controles, U+2028 y U+2029). */
-const ATTACHMENT_NAME_FORBIDDEN = /[|[\]\\#\u0000-\u001f\u007f]/;
+ *  `notes/attachments.ts`), parte la línea (controles, U+2028 y U+2029) o es un carácter
+ *  de formato invisible de Unicode (categoría Cf: U+200B, U+202E…). */
+const ATTACHMENT_NAME_FORBIDDEN = /[|[\]\\#\u0000-\u001f\u007f]|\p{Cf}/u;
 
 /** U+2028 y U+2029, separadores de línea de Unicode: fuera de la expresión regular para
  *  que ningún editor los convierta en el carácter literal, que la rompería. */

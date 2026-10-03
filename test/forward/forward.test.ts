@@ -776,6 +776,53 @@ describe('protocolo de writer.sock', () => {
     ).rejects.toMatchObject({ code: 'attachment_too_large' });
   });
 
+  it('una sola petición en vuelo por conexión: varias líneas seguidas se atienden en orden, de una en una', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const order: string[] = [];
+    const server = await WriterSocketServer.listen({
+      path,
+      handlers: {
+        ...handlers,
+        createFolder: async (input) => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+          order.push(input.name);
+          inFlight -= 1;
+          return { id: input.name, changed: true, sync: 'not_linked' };
+        }
+      }
+    });
+    servers.push(server);
+    const names = ['uno', 'dos', 'tres', 'cuatro'];
+    const lines = names
+      .map((name, index) =>
+        JSON.stringify({ id: index, op: 'createFolder', params: { parentId: 'root', name, privacy: OPEN } })
+      )
+      .join('\n');
+    const responses = await new Promise<string[]>((resolve, reject) => {
+      let out = '';
+      const socket = createConnection(path, () => socket.write(`${lines}\n`));
+      socket.setEncoding('utf8');
+      socket.on('data', (chunk: string) => {
+        out += chunk;
+        const received = out.split('\n').filter((line) => line.length > 0);
+        if (received.length === names.length) {
+          socket.destroy();
+          resolve(received);
+        }
+      });
+      socket.on('error', reject);
+      setTimeout(() => reject(new Error('sin respuesta')), 5_000).unref();
+    });
+    expect(maxInFlight).toBe(1);
+    expect(order).toEqual(names);
+    expect(responses.map((line) => (JSON.parse(line) as { id: number }).id)).toEqual([0, 1, 2, 3]);
+  });
+
   it('el límite por defecto admite el base64 de un adjunto de 5 MiB con su sobre (D9)', () => {
     const worst = JSON.stringify({
       id: 1,
@@ -790,7 +837,7 @@ describe('protocolo de writer.sock', () => {
       }
     });
     expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
-    expect(MAX_MESSAGE_BYTES).toBe(7_056_044);
+    expect(MAX_MESSAGE_BYTES).toBe(7_514_796);
   });
 
   it('el límite por defecto admite las sustituciones máximas de editNote en el peor escape JSON', () => {

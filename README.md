@@ -33,7 +33,7 @@ por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
 `https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
 su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12). Para que un adjunto de
 5 MiB quepa en el conector remoto, el borde (`deploy/mcp-hebra-pro.caddy`) admite cuerpos
-de hasta 7 MB desde D9.
+de hasta 8 MB desde D9 (la app corta en 7 514 796 bytes).
 
 ## Requisitos
 

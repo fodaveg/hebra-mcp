@@ -47,8 +47,10 @@ import { isLoopbackHostname, MCP_PATH, type HttpConfig } from './config';
  * Tope del cuerpo de `POST /mcp`, en bytes: el mismo que una línea de `writer.sock`
  * (`MAX_WRITE_MESSAGE_BYTES`). El cuerpo legítimo más grande era un `hebra_create_note`
  * con el cuerpo máximo de §5 escapado (665 536 bytes); desde D9 (3 oct 2026) es un
- * `hebra_add_attachment` con el base64 de un adjunto de 5 MiB más el sobre JSON-RPC
- * (7 056 044 bytes). La credencial se comprueba antes de leer un solo byte.
+ * `hebra_add_attachment` con el base64 de un adjunto de 5 MiB, partido en líneas de 76
+ * caracteres, más el sobre JSON-RPC: 7 514 796 bytes (6 990 508 + 512 KiB de margen). El
+ * borde (`deploy/mcp-hebra-pro.caddy`, 8MB) deja pasar algo más, así que el corte efectivo
+ * es este. La credencial se comprueba antes de leer un solo byte.
  */
 export const MAX_MCP_BODY_BYTES = MAX_WRITE_MESSAGE_BYTES;
 

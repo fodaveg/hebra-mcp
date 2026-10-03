@@ -18,13 +18,16 @@ mcp.hebra.pro {
 	# ocupar al contenedor. `serve-http` acepta hasta `MAX_MCP_BODY_BYTES`
 	# (`src/http/app.ts`) = `MAX_WRITE_MESSAGE_BYTES` (`src/store/writes.ts`):
 	# desde D9 (3 oct 2026, `hebra_add_attachment`), el base64 de un adjunto
-	# de 5 MiB más 64 KiB = 6.990.508 + 65.536 = 7.056.044 bytes (antes,
-	# 665.536 y aquí 650KB). 7MB decimales (7.000.000 bytes) queda un pelo
-	# POR DEBAJO a propósito (mismo patrón que `mcp-lumbre-pro.caddy`: el
-	# borde corta primero y el límite de la app queda como red de seguridad
-	# para quien alcance el contenedor por la red `edge` sin pasar por aquí).
+	# de 5 MiB más 512 KiB de margen (sobre y saltos de línea de un base64
+	# partido cada 76 caracteres) = 6.990.508 + 524.288 = 7.514.796 bytes
+	# (antes, 665.536 y aquí 650KB). AQUÍ, a diferencia de antes y de
+	# `mcp-lumbre-pro.caddy`, el borde queda POR ENCIMA: 8MB decimales
+	# (8.000.000 bytes). Con 7MB cortaba un adjunto legítimo partido en
+	# líneas, y un tope de borde justo por debajo del de la app obligaría a
+	# recalcularlo con cada margen. El borde sigue parando lo desmedido; el
+	# corte exacto, con 413, es el de la app.
 	request_body {
-		max_size 7MB
+		max_size 8MB
 	}
 
 	# Liveness: solo la consume el healthcheck interno del contenedor por

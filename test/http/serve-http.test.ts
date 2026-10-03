@@ -124,6 +124,34 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
     ]).toContain(tail);
   });
 
+  it('hebra_add_attachment por HTTP: un adjunto de 5 MiB en base64 partido cada 76 caracteres cabe (D9)', async () => {
+    const { test, client } = await startWithTestLibrary();
+    const bytes = Buffer.alloc(5 * 1024 * 1024, 0x61);
+    // Como lo parte un `base64` de terminal, con `\r\n`: el peor caso de saltos de línea.
+    const wrapped = bytes.toString('base64').replace(/(.{76})/g, '$1\r\n');
+    const args = {
+      id: test.library.publicNote2Id,
+      name: 'grande.txt',
+      dataBase64: wrapped,
+      operationId: 'op-http-grande'
+    };
+    const request = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'hebra_add_attachment', arguments: args }
+    });
+    // No cabía con el margen de 64 KiB de antes (7 056 044) y cabe con el actual.
+    expect(Buffer.byteLength(request)).toBeGreaterThan(7_056_044);
+    expect(Buffer.byteLength(request)).toBeLessThan(MAX_MCP_BODY_BYTES);
+    const result = (await client.callTool({ name: 'hebra_add_attachment', arguments: args })) as CallToolResult;
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(textOf(result))).toMatchObject({ outcome: 'saved', sync: 'not_linked' });
+    expect((await test.ctx.port.noteAttachments(args.id)).map((row) => row.byteLength)).toEqual([
+      bytes.length
+    ]);
+  });
+
   it('hebra_edit_note por HTTP: el mismo contrato y los mismos límites que por stdio', async () => {
     const { test, client } = await startWithTestLibrary();
     const id = test.library.publicNote2Id;

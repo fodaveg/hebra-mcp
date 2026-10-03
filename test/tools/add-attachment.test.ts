@@ -310,6 +310,107 @@ describe('hebra_add_attachment (D9)', () => {
     );
   });
 
+  it('registro a medias (started) y la nota ya cambiada después: no vuelve a añadir la referencia', async () => {
+    test = await buildTestContext();
+    const id = test.library.publicNote2Id;
+    const input = { id, name: 'captura.png', dataBase64: PNG_BASE64, operationId: 'op-medias' };
+    const first = await runAddAttachment(await fresh(), input);
+    // Como si el proceso hubiera muerto entre `noteSave` y `finish`…
+    const db = new DatabaseSync(test.sqlitePath);
+    db.prepare(
+      "UPDATE hebra_mcp_operations SET state = 'started', result = NULL WHERE operation_id = ?"
+    ).run(input.operationId);
+    db.close();
+    // …y otra escritura hubiera cambiado la nota antes del reintento (el SHA-256 del
+    // cuerpo ya no es el que se guardó).
+    await test.ctx.write!.appendToNote({ id, text: 'texto de después', privacy: test.ctx.privacyConfig });
+    const changed = await body(id);
+
+    const again = await runAddAttachment(await fresh(), input);
+    expect(again).toMatchObject({ outcome: 'saved', replayed: true, attachmentId: PNG_SHA });
+    expect(await body(id)).toBe(changed);
+    expect(changed.split(first.markdown)).toHaveLength(2);
+    // Y el registro quedó cerrado: el siguiente reintento sale del registro.
+    const third = await runAddAttachment(await fresh(), input);
+    expect(third).toMatchObject({ outcome: 'saved', replayed: true });
+    expect(await body(id)).toBe(changed);
+  });
+
+  it('nota que termina dentro de un bloque de código sin cerrar: lo cierra y la referencia cuenta como adjunto', async () => {
+    test = await buildTestContext();
+    for (const [fence, operationId] of [
+      ['```', 'op-fence-1'],
+      ['~~~~', 'op-fence-2']
+    ] as const) {
+      const created = await test.ctx.write!.createNote({
+        body: `# Con código\n\n${fence}js\nconst a = 1;`,
+        privacy: test.ctx.privacyConfig
+      });
+      const result = await runAddAttachment(await fresh(), {
+        id: created.id,
+        name: 'captura.png',
+        dataBase64: PNG_BASE64,
+        operationId
+      });
+      expect(await body(created.id)).toBe(
+        `# Con código\n\n${fence}js\nconst a = 1;\n${fence}\n\n${result.markdown}`
+      );
+      expect((await runListAttachments(await fresh(), { id: created.id })).attachments).toEqual([
+        { attachmentId: PNG_SHA, name: 'captura.png', mimeType: 'image/png', byteLength: PNG.length }
+      ]);
+    }
+    // Un bloque ya cerrado no se toca.
+    const closed = await test.ctx.write!.createNote({
+      body: '# Cerrado\n\n```\nx\n```',
+      privacy: test.ctx.privacyConfig
+    });
+    const plain = await runAddAttachment(await fresh(), {
+      id: closed.id,
+      name: 'captura.png',
+      dataBase64: PNG_BASE64,
+      operationId: 'op-fence-3'
+    });
+    expect(await body(closed.id)).toBe(`# Cerrado\n\n\`\`\`\nx\n\`\`\`\n\n${plain.markdown}`);
+  });
+
+  it('nota que termina en otra construcción sin cerrar (un comentario HTML): invalid_input, sin guardar el blob', async () => {
+    test = await buildTestContext();
+    const created = await test.ctx.write!.createNote({
+      body: '# Comentario\n\n<!--\nnota a medias',
+      privacy: test.ctx.privacyConfig
+    });
+    const before = await body(created.id);
+    await expectCode(
+      runAddAttachment(await fresh(), {
+        id: created.id,
+        name: 'captura.png',
+        dataBase64: PNG_BASE64,
+        operationId: 'op-html'
+      }),
+      'invalid_input'
+    );
+    expect(await body(created.id)).toBe(before);
+    expect(await test.ctx.port.blobRead(PNG_SHA)).toBeNull();
+  });
+
+  it('nombres con caracteres de formato invisibles (Unicode Cf): invalid_input', async () => {
+    test = await buildTestContext();
+    const id = test.library.publicNote2Id;
+    const before = await body(id);
+    for (const code of [0x200b, 0x202e, 0xfeff, 0x00ad, 0x2066]) {
+      await expectCode(
+        runAddAttachment(await fresh(), {
+          id,
+          name: `cap${String.fromCharCode(code)}tura.png`,
+          dataBase64: PNG_BASE64,
+          operationId: `op-cf-${code}`
+        }),
+        'invalid_input'
+      );
+    }
+    expect(await body(id)).toBe(before);
+  });
+
   it('otra instancia en solo lectura sin escritor: busy_other_instance', async () => {
     test = await buildTestContext();
     const busy = await openBusyWriteContext(test);

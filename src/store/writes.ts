@@ -157,11 +157,16 @@ export const APPEND_TEXT_MAX_LENGTH = 20_000;
  *   como `\uXXXX`, 6 bytes por unidad UTF-16; las sustituciones de `editNote` suman como
  *   mucho lo mismo), y
  * - el base64 de un adjunto de 5 MiB (`hebra_add_attachment`, D9), que JSON no escapa;
- * más 64 KiB para el sobre (ids, nombre, `operationId`) y la configuración de privados.
- * Desde D9 manda el adjunto: 6 990 508 + 65 536 = 7 056 044 bytes (antes, 665 536).
+ * más un margen de 512 KiB (`WRITE_MESSAGE_MARGIN_BYTES`) para el sobre (ids, nombre,
+ * `operationId`), la configuración de privados y los saltos de línea de un base64
+ * partido como lo parte un `base64` de terminal: cada 76 caracteres, 91 981 líneas en el
+ * peor caso, que en JSON son `\n` (2 bytes, 183 962) o `\r\n` (4 bytes, 367 924).
+ * Desde D9 manda el adjunto: 6 990 508 + 524 288 = 7 514 796 bytes (antes, 665 536 con
+ * un margen de 64 KiB, que no dejaba pasar ese base64 partido).
  */
+export const WRITE_MESSAGE_MARGIN_BYTES = 512 * 1024;
 export const MAX_WRITE_MESSAGE_BYTES =
-  Math.max(CREATE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) + 64 * 1024;
+  Math.max(CREATE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) + WRITE_MESSAGE_MARGIN_BYTES;
 
 export interface EditNoteInput {
   id: string;
@@ -353,6 +358,34 @@ function folderRejection(error: unknown): unknown {
     default:
       return error;
   }
+}
+
+/** Cierres de bloque de código que se prueban, en este orden, cuando el cuerpo termina
+ *  dentro de un bloque sin cerrar (``` o ~~~, de 3 a 5 marcas). */
+const FENCE_CLOSERS = ['```', '~~~', '````', '~~~~', '`````', '~~~~~'] as const;
+
+/**
+ * El cuerpo con la referencia de un adjunto al final (`cuerpo + "\n\n" + markdown`, como
+ * `appendToNote`) y sus derivados, comprobando con `deriveNote` (el mismo análisis que
+ * guarda `note_blob_refs`) que la referencia CUENTA como adjunto. Si el cuerpo termina
+ * dentro de un bloque de código sin cerrar, el texto añadido sería código y no adjunto:
+ * se cierra el bloque antes (`\n` + la marca que lo cierre) y se vuelve a comprobar. Si
+ * ninguna marca vale, `null`. (Si la nota ya referenciaba ese mismo blob en otro sitio,
+ * cuenta igual: lo que importa es que el blob quede referenciado y suba.)
+ */
+function bodyReferencing(
+  body: string,
+  markdown: string,
+  sha256: string
+): { body: string; derived: ReturnType<typeof deriveNote> } | null {
+  for (const closer of ['', ...FENCE_CLOSERS]) {
+    const candidate = closer
+      ? `${body}\n${closer}${APPEND_SEPARATOR}${markdown}`
+      : `${body}${APPEND_SEPARATOR}${markdown}`;
+    const derived = deriveNote(candidate);
+    if ((derived.blobRefs ?? []).includes(sha256)) return { body: candidate, derived };
+  }
+  return null;
 }
 
 /** Igual que `editFingerprint` (comparten registro): la operación va en la huella, así
@@ -922,16 +955,27 @@ export class NoteWriter {
       if (previous?.state === 'done' && isEditNoteSaved(previous.result)) {
         return { result: added({ ...previous.result, replayed: true as const }), wrote: false };
       }
-      if (previous?.state === 'started' && note.bodySha256 === previous.targetBodySha256) {
+      if (
+        previous?.state === 'started' &&
+        (note.bodySha256 === previous.targetBodySha256 || note.body.includes(markdown))
+      ) {
         // Murió entre el guardado y `finish`: se guardó (y el blob, antes). Se completa.
+        // No basta el SHA-256 del cuerpo: si después otra escritura (o el sync) cambió la
+        // nota, la referencia sigue ahí y volver a añadirla la duplicaría. (Si el guardado
+        // acabó en una copia de conflicto, en `started` no consta cuál: esa vía, la de un
+        // `redirected` dentro del turno, solo se da con una lápida.)
         const saved: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
         log.finish(input.operationId, saved);
         return { result: added({ ...saved, replayed: true as const }), wrote: false };
       }
 
       if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
-      const body = `${note.body}${APPEND_SEPARATOR}${markdown}`;
-      const saveInput = saveInputFor(note, body);
+      const withAttachment = bodyReferencing(note.body, markdown, attachmentId);
+      // Ni cerrando un bloque de código la referencia cuenta como adjunto (otra construcción
+      // sin cerrar se la traga): no se guarda un blob que ninguna nota referenciaría.
+      if (!withAttachment) throw writeRejected('invalid_input');
+      const { body, derived } = withAttachment;
+      const saveInput = saveInputFor(note, body, note, derived);
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }

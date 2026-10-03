@@ -404,7 +404,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Añadir un adjunto a una nota',
       description:
-        'Añade un fichero (base64) al final de una nota como `![[sha256:…|nombre]]`, igual que adjunta Hebra, y lo sube con el sync. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Una edición concurrente produce una copia de conflicto visible. Reintentar con el mismo operationId no lo añade dos veces. No cambia ni borra adjuntos.',
+        'Añade un fichero (base64) al final de una nota como `![[sha256:…|nombre]]`, igual que adjunta Hebra, y lo sube con el sync. Hasta 5 MiB y solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON (si no, attachment_too_large o attachment_type_not_allowed). Si la nota termina dentro de un bloque de código (```) sin cerrar, lo cierra antes de añadir la referencia, para que cuente como adjunto. Una edición concurrente produce una copia de conflicto visible. Reintentar con el mismo operationId no lo añade dos veces (durante 24 h). No cambia ni borra adjuntos.',
       inputSchema: addAttachmentInputShape,
       annotations: WRITE_IDEMPOTENT
     },
