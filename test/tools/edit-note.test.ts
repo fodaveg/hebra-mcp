@@ -32,6 +32,17 @@ describe('hebra_edit_note', () => {
     return runReadNote(test!.ctx, { id });
   }
 
+  /** `local_seq` de la nota en disco: sube 1 por guardado. */
+  function localSeq(id: string): number {
+    const db = new DatabaseSync(test!.sqlitePath, { readOnly: true });
+    try {
+      return (db.prepare('SELECT local_seq FROM notes WHERE id = ?').get(id) as { local_seq: number })
+        .local_seq;
+    } finally {
+      db.close();
+    }
+  }
+
   /** Cabecera de `publicNote2` (`test-library.ts`) antes de su párrafo. */
   const HEAD = '# Nota pública 2 de Lumbre\n#proyectos/lumbre\n';
 
@@ -151,16 +162,7 @@ describe('hebra_edit_note', () => {
       '\n- [ ] Uno\n- [ ] Dos\n  - [ ] Dos.a\n- [ ] Tres\n- [ ] Cuatro\n- [x] Ya hecha\n\nFin'
     );
     const before = await read(id);
-    const localSeq = (): number => {
-      const db = new DatabaseSync(test!.sqlitePath, { readOnly: true });
-      try {
-        return (db.prepare('SELECT local_seq FROM notes WHERE id = ?').get(id) as { local_seq: number })
-          .local_seq;
-      } finally {
-        db.close();
-      }
-    };
-    const seqBefore = localSeq();
+    const seqBefore = localSeq(id);
     const input = {
       id,
       edits: [
@@ -179,26 +181,46 @@ describe('hebra_edit_note', () => {
     );
     expect(result.outcome === 'saved' && result.revision).toBe(after.revision);
     // Una sola escritura: el reordenado no es un segundo guardado.
-    expect(localSeq()).toBe(seqBefore + 1);
+    expect(localSeq(id)).toBe(seqBefore + 1);
     // El registro de idempotencia guarda el SHA del cuerpo REORDENADO: reintentar no escribe.
     expect(await runEditNote(test.ctx, input)).toMatchObject({ ...result, replayed: true });
-    expect(localSeq()).toBe(seqBefore + 1);
+    expect(localSeq(id)).toBe(seqBefore + 1);
   });
 
-  it('desmarcar o editar sin marcar no mueve nada', async () => {
+  it('desmarcar deja la tarea donde la dejaría el editor: tras la última pendiente, con sus hijas', async () => {
+    // Decisión del 4 oct 2026: desmarcar también se comporta como el editor. Se cambian de
+    // arriba abajo: «Dos.b» sube al principio de SU lista (todas sus hermanas están
+    // hechas) y «Tres» sube tras «Uno», la última pendiente, por encima de «Dos» y sus hijas.
+    test = await buildTestContext();
+    const id = await withList('\n- [ ] Uno\n- [x] Dos\n  - [x] Dos.a\n  - [x] Dos.b\n- [x] Tres\n\nFin');
+    const before = await read(id);
+    const seqBefore = localSeq(id);
+    await runEditNote(test.ctx, {
+      id,
+      edits: [
+        { find: '- [x] Dos.b', replace: '- [ ] Dos.b' },
+        { find: '- [x] Tres', replace: '- [ ] Tres' }
+      ],
+      expectedRevision: before.revision,
+      operationId: opId()
+    });
+    expect((await read(id)).body).toBe(
+      `${HEAD}\n- [ ] Uno\n- [ ] Tres\n- [x] Dos\n  - [ ] Dos.b\n  - [x] Dos.a\n\nFin\n`
+    );
+    expect(localSeq(id)).toBe(seqBefore + 1);
+  });
+
+  it('editar el texto sin cambiar casillas no mueve nada', async () => {
     test = await buildTestContext();
     const id = await withList('\n- [x] Hecha\n- [ ] Pendiente\n- [x] Otra hecha');
     const before = await read(id);
     await runEditNote(test.ctx, {
       id,
-      edits: [
-        { find: '- [x] Hecha', replace: '- [ ] Hecha' },
-        { find: 'Pendiente', replace: 'Pendiente editada' }
-      ],
+      edits: [{ find: 'Pendiente', replace: 'Pendiente editada' }],
       expectedRevision: before.revision,
       operationId: opId()
     });
-    expect((await read(id)).body).toBe(`${HEAD}\n- [ ] Hecha\n- [ ] Pendiente editada\n- [x] Otra hecha\n`);
+    expect((await read(id)).body).toBe(`${HEAD}\n- [x] Hecha\n- [ ] Pendiente editada\n- [x] Otra hecha\n`);
   });
 
   it('guarda los derivados completos del cuerpo editado (tareas, etiquetas, título)', async () => {

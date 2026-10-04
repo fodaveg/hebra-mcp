@@ -193,12 +193,15 @@ Detalle de las escrituras (D2):
   - **Sustituciones**: cada `find` se busca en el cuerpo leído (no en el resultado de las
     anteriores) y tiene que aparecer exactamente una vez, contando solapes consigo mismo. Dos no
     pueden tocar el mismo tramo. Cualquier fallo rechaza todas, sin escribir.
-  - **Tareas marcadas** (David, 4 oct 2026: «el orden tiene que ser el mismo venga de donde venga
-    el cambio»): una tarea que las sustituciones pasan de `[ ]` a `[x]` sin tocar nada más de su
-    línea baja al final de su lista con sus hijas, como al marcarla en el editor de Hebra, en el
-    MISMO guardado (`moveNewlyCompletedTasks` de `node.ts`, la misma lectura de bloques que el
-    editor). Desmarcar no mueve, y las ya marcadas o movidas a propósito se quedan donde estén. El
-    MCP no tiene el ajuste por dispositivo de Hebra: mueve siempre (el defecto de Hebra).
+  - **Tareas marcadas y desmarcadas** (David, 4 oct 2026: «el orden tiene que ser el mismo venga de
+    donde venga el cambio»; desmarcar incluido por decisión del coordinador, por delegación suya):
+    una tarea que las sustituciones pasan de `[ ]` a `[x]` sin tocar nada más de su línea baja al
+    final de su lista con sus hijas, y una que pasan de `[x]` a `[ ]` sube detrás de la última
+    pendiente (al principio si todas están hechas), como en el editor de Hebra, en el MISMO
+    guardado (`reorderToggledTasks` de `node.ts`, la misma lectura de bloques que el editor). Varias
+    en una edición se colocan una a una, de arriba abajo. Las que no cambian de estado o se movieron
+    a propósito se quedan donde estén. El MCP no tiene el ajuste por dispositivo de Hebra: mueve
+    siempre (el defecto de Hebra).
   - Todo en un turno de la cola del almacén, por el escritor único (un lector la reenvía por
     `writer.sock`, op `editNote`): idempotencia, filtro de privados, nota bloqueada (`note_locked`),
     revisión, sustituciones, resultado sin etiqueta privada, guardado. Derivados completos de
