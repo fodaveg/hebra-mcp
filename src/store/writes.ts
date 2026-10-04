@@ -14,7 +14,8 @@
  *   con otra copia, y el motor lo avisa con `sync.conflict_copy` (`SyncRunner`).
  * - `editNote`: sustituciones puntuales (`./edits.ts`) sobre la versión que el agente
  *   leyó (`./revision.ts`), con el filtro de privados construido DENTRO del turno y la
- *   idempotencia de `./operations.ts`. Ver su comentario.
+ *   idempotencia de `./operations.ts`. Una tarea que las sustituciones marcan baja al final
+ *   de su lista en el mismo guardado (`moveNewlyCompletedTasks` de Hebra). Ver su comentario.
  * - `organize`: mover, favorita, archivar y, desde el 30 sep 2026, mandar a la papelera
  *   y sacar de ella (`noteTrash`/`noteRestore`, reversibles). Nunca purga ni vacía la
  *   papelera.
@@ -32,6 +33,7 @@ import { createHash } from 'node:crypto';
 import {
   deriveNote,
   LibraryError,
+  moveNewlyCompletedTasks,
   ROOT_FOLDER_ID,
   type FoldersList,
   type NoteRow,
@@ -618,14 +620,17 @@ export class NoteWriter {
       }
       const applied = applyEdits(note.body, input.edits);
       if (!applied.ok) throw writeRejected(applied.code, applied.editIndex);
-      if (applied.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
-      if (applied.body === note.body) {
+      // Las tareas que estas sustituciones marcan bajan al final de su lista, como al
+      // marcarlas en el editor de Hebra, en este mismo guardado (David, 4 oct 2026).
+      const body = moveNewlyCompletedTasks(note.body, applied.body);
+      if (body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
+      if (body === note.body) {
         // Nada que guardar: ni sube `local_seq` ni hay ronda que pedir.
         const unchanged: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
         return { result: unchanged, wrote: false };
       }
 
-      const saveInput = saveInputFor(note, applied.body, revision);
+      const saveInput = saveInputFor(note, body, revision);
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
@@ -633,7 +638,7 @@ export class NoteWriter {
         operationId: input.operationId,
         fingerprint,
         noteId: input.id,
-        targetBodySha256: sha256Hex(applied.body),
+        targetBodySha256: sha256Hex(body),
         now
       });
       const saved = await store.noteSave(saveInput);

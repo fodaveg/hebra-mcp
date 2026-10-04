@@ -32,6 +32,21 @@ describe('hebra_edit_note', () => {
     return runReadNote(test!.ctx, { id });
   }
 
+  /** Cabecera de `publicNote2` (`test-library.ts`) antes de su párrafo. */
+  const HEAD = '# Nota pública 2 de Lumbre\n#proyectos/lumbre\n';
+
+  /** Pone `list` en lugar del párrafo de `publicNote2` y devuelve su id. */
+  async function withList(list: string): Promise<string> {
+    const id = test!.library.publicNote2Id;
+    await runEditNote(test!.ctx, {
+      id,
+      edits: [{ find: 'Texto normal, sin enlaces.', replace: list }],
+      expectedRevision: (await read(id)).revision,
+      operationId: opId()
+    });
+    return id;
+  }
+
   it('leer → editar → releer devuelve el cambio y una revisión nueva', async () => {
     test = await buildTestContext();
     const id = test.library.publicNote2Id;
@@ -125,6 +140,65 @@ describe('hebra_edit_note', () => {
     await expect(
       runEditNote(test.ctx, { ...input, edits: [{ find: 'sin', replace: 'otra petición' }] })
     ).rejects.toMatchObject({ code: 'operation_id_reused' });
+  });
+
+  it('marcar 3 tareas las deja al final de su lista, como el editor de Hebra, en UN guardado', async () => {
+    // David, 4 oct 2026: «el orden tiene que ser el mismo venga de donde venga el cambio».
+    // El texto esperado es el que deja el editor marcándolas de arriba abajo (la paridad
+    // editor/función la prueba Hebra: `notes/completed-tasks-to-end.test.ts`).
+    test = await buildTestContext();
+    const id = await withList(
+      '\n- [ ] Uno\n- [ ] Dos\n  - [ ] Dos.a\n- [ ] Tres\n- [ ] Cuatro\n- [x] Ya hecha\n\nFin'
+    );
+    const before = await read(id);
+    const localSeq = (): number => {
+      const db = new DatabaseSync(test!.sqlitePath, { readOnly: true });
+      try {
+        return (db.prepare('SELECT local_seq FROM notes WHERE id = ?').get(id) as { local_seq: number })
+          .local_seq;
+      } finally {
+        db.close();
+      }
+    };
+    const seqBefore = localSeq();
+    const input = {
+      id,
+      edits: [
+        { find: '- [ ] Uno', replace: '- [x] Uno' },
+        { find: '- [ ] Dos\n', replace: '- [x] Dos\n' },
+        { find: '- [ ] Cuatro', replace: '- [x] Cuatro' }
+      ],
+      expectedRevision: before.revision,
+      operationId: opId()
+    };
+    const result = await runEditNote(test.ctx, input);
+
+    const after = await read(id);
+    expect(after.body).toBe(
+      `${HEAD}\n- [ ] Tres\n- [x] Ya hecha\n- [x] Uno\n- [x] Dos\n  - [ ] Dos.a\n- [x] Cuatro\n\nFin\n`
+    );
+    expect(result.outcome === 'saved' && result.revision).toBe(after.revision);
+    // Una sola escritura: el reordenado no es un segundo guardado.
+    expect(localSeq()).toBe(seqBefore + 1);
+    // El registro de idempotencia guarda el SHA del cuerpo REORDENADO: reintentar no escribe.
+    expect(await runEditNote(test.ctx, input)).toMatchObject({ ...result, replayed: true });
+    expect(localSeq()).toBe(seqBefore + 1);
+  });
+
+  it('desmarcar o editar sin marcar no mueve nada', async () => {
+    test = await buildTestContext();
+    const id = await withList('\n- [x] Hecha\n- [ ] Pendiente\n- [x] Otra hecha');
+    const before = await read(id);
+    await runEditNote(test.ctx, {
+      id,
+      edits: [
+        { find: '- [x] Hecha', replace: '- [ ] Hecha' },
+        { find: 'Pendiente', replace: 'Pendiente editada' }
+      ],
+      expectedRevision: before.revision,
+      operationId: opId()
+    });
+    expect((await read(id)).body).toBe(`${HEAD}\n- [ ] Hecha\n- [ ] Pendiente editada\n- [x] Otra hecha\n`);
   });
 
   it('guarda los derivados completos del cuerpo editado (tareas, etiquetas, título)', async () => {
