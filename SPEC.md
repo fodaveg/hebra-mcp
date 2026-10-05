@@ -695,12 +695,23 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
     SDK es de Express. `check:bundle` exime `debug` y `object-inspect`, cuyas referencias al DOM no se
     ejecutan en Node.
 
-### 12.2 Autenticación (D7, revisada el 28 sep 2026)
+### 12.2 Autenticación (D7, revisada el 5 oct 2026)
 
 - Hebra MCP conserva el OAuth público del SDK: issuer `https://mcp.hebra.pro`, recurso
-  `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR, callback de Claude, PKCE S256,
+  `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR para Claude y Codex, PKCE S256,
   state, códigos de un uso, access de una hora y refresh rotatorio con familia de 30 días
   absolutos. Un refresh reutilizado fuera de la ventana de gracia revoca su familia.
+- Claude conserva su callback exacto `https://claude.ai/api/mcp/auth_callback` y CIMD
+  HTTPS en `claude.ai`. Codex admite exclusivamente el CIMD oficial
+  `https://chatgpt.com/oauth/codex/client.json` y callbacks HTTP `/callback` en
+  `127.0.0.1` o `localhost`, con puerto dinámico válido, sin credenciales, query ni
+  fragmento. Solo se relaja el puerto, nunca se equiparan los dos hosts: CIMD conserva
+  los hosts admitidos publicados y DCR los solicitados. DCR devuelve clientes fijos
+  `hebra-mcp-codex-127`, `hebra-mcp-codex-localhost` o `hebra-mcp-codex-loopback`;
+  no almacena registros ilimitados. Los callbacks se validan antes de que el SDK
+  normalice URL o redirija errores; el canje del código exige la URI exacta autorizada,
+  incluido el puerto. CIMD se descarga sin redirecciones, con timeout de 5 s, límite de
+  64 KiB y caché de 5 min/16 entradas. Identificar al cliente nunca concede acceso.
 - `/authorize` reserva una solicitud y pide consentimiento a Lumbre mediante el backchannel
   `/api/integrations/hebra-mcp/requests`. Lumbre usa su login y su sesión web para mostrar
   cliente, biblioteca y alcance. La respuesta aprobada vuelve a
@@ -721,7 +732,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   de emparejado.
 - Lumbre devuelve un `accountId` opaco, nunca `users.id`. La concesión upstream no se
   acepta directamente en `/mcp`, ni el token OAuth de Hebra autentica las APIs de Lumbre.
-  Access/refresh de Claude quedan como hashes en `oauth-tokens.json` v2; el bearer de la
+  Access/refresh de ambos clientes quedan como hashes en `oauth-tokens.json` v2; el bearer de la
   concesión vive en el almacén de secretos existente. Los códigos pendientes y las
   concesiones sin familia se limpian o revocan al caducar/reiniciar. La marca de
   promoción se retira solo después de persistir la familia; si el proceso cae antes,

@@ -1,5 +1,5 @@
 /** Contrato cerrado del consentimiento Hebra MCP con Lumbre. */
-import { DCR_CLIENT_ID, isAcceptableCimdClientId } from './clients';
+import { isAcceptableOAuthClientId } from './clients';
 import { OAUTH_SCOPE } from './provider';
 
 export const LUMBRE_APP_ORIGIN = 'https://app.lumbre.pro';
@@ -42,7 +42,7 @@ function validBinding(record: Record<string, unknown>): boolean {
 
 function validGrant(record: Record<string, unknown>, resource: string): boolean {
   return validBinding(record) && typeof record.credentialId === 'string' && UUID.test(record.credentialId) &&
-    typeof record.clientId === 'string' && (record.clientId === DCR_CLIENT_ID || isAcceptableCimdClientId(record.clientId)) &&
+    typeof record.clientId === 'string' && isAcceptableOAuthClientId(record.clientId) &&
     record.resource === resource && record.scope === OAUTH_SCOPE &&
     typeof record.accountId === 'string' && HEX64.test(record.accountId) &&
     typeof record.expiresAt === 'string' && Number.isFinite(Date.parse(record.expiresAt)) &&

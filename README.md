@@ -68,11 +68,11 @@ contenedor Linux del conector remoto (`SPEC.md` §12.3), donde no hay Secret Ser
 es un fallback automático: hay que pedirlo explícitamente, y un valor que no sea `file`
 ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
 
-## Conector remoto de claude.ai (`serve-http`)
+## Conector remoto de Claude y Codex (`serve-http`)
 
 Para claude.ai (web, móvil y sesiones en la nube), hebra-mcp corre como servidor HTTP en
 un contenedor del servidor de Lumbre, en `https://mcp.hebra.pro` (`SPEC.md` §12). Claude
-se conecta mediante el OAuth público de Hebra MCP; Lumbre autentica al propietario y
+o Codex se conectan mediante el OAuth público de Hebra MCP; Lumbre autentica al propietario y
 muestra el consentimiento:
 
 ```sh
@@ -93,6 +93,12 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   pasa por el login y consentimiento de Lumbre; Claude recibe un access token de 1 h y un
   refresh rotatorio (la autorización dura hasta 30 días). La gestión de concesiones está
   en `/integrations/hebra-mcp` de Lumbre.
+- Codex usa el mismo recurso `https://mcp.hebra.pro/mcp`, su CIMD oficial
+  `https://chatgpt.com/oauth/codex/client.json` o DCR y un callback local HTTP
+  `127.0.0.1`/`localhost` en `/callback` con puerto dinámico. Lumbre exige el mismo
+  login y consentimiento; el servidor no entrega acceso por registrar al cliente.
+  El soporte local debe publicarse también en el broker de Lumbre antes de usarlo;
+  las pruebas sintéticas no acreditan el login real de Codex en producción.
 - `serve-http` siempre es el escritor único: si otro proceso tiene `writer.lock`, no
   arranca.
 

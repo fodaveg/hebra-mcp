@@ -20,7 +20,7 @@
  * token en la URL), scope `hebra:mcp`, y el 401 con `WWW-Authenticate` que incluye
  * `resource_metadata`.
  */
-import { type Express, type NextFunction, type Request, type Response } from 'express';
+import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { HttpAuth } from '../http/app';
@@ -28,7 +28,7 @@ import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
 import type { SecretStore } from '../secrets';
 import { BackchannelError, LumbreBackchannel } from './backchannel';
-import { ClaudeClientsStore } from './clients';
+import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback } from './clients';
 import { GrantSecrets } from './grants';
 import { RevocationFile } from './owner';
 import { HebraOAuthProvider, OAUTH_SCOPE } from './provider';
@@ -118,6 +118,17 @@ export async function loadOAuthHttpAuth(
   return {
     provider,
     install(app: Express) {
+      // Antes del SDK: URL() normaliza aliases y su matcher ignora userinfo/hash.
+      // También los errores de parámetros deben evitar redirects a esas URI.
+      app.use('/authorize', express.urlencoded({ extended: false }), (req: Request, res: Response, next: NextFunction) => {
+        if (req.method !== 'GET' && req.method !== 'POST') { next(); return; }
+        const redirect = (req.method === 'POST' ? req.body : req.query)?.redirect_uri;
+        if (redirect !== undefined && (typeof redirect !== 'string' ||
+          (redirect !== CLAUDE_CALLBACK && !isCodexCallback(redirect)))) {
+          res.status(400).json({ error: 'invalid_request' }); return;
+        }
+        next();
+      });
       app.get('/.well-known/oauth-protected-resource', sendMetadata(protectedResource));
       app.get('/.well-known/oauth-protected-resource/mcp', sendMetadata(protectedResource));
       app.get('/.well-known/oauth-authorization-server', sendMetadata(authorizationServer));

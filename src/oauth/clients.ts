@@ -1,7 +1,6 @@
 /**
- * Clientes OAuth que acepta el conector (SPEC.md §12.2): solo claude.ai, solo con su
- * callback `https://claude.ai/api/mcp/auth_callback` (el mismo que admite lumbre-mcp,
- * `src/oauth.ts:17`), siempre públicos (sin `client_secret`, PKCE S256 obligatorio).
+ * Clientes OAuth que acepta el conector (SPEC.md §12.2): Claude y Codex, siempre
+ * públicos (sin `client_secret`, PKCE S256 obligatorio).
  *
  * Dos formas de registrarse, porque el SDK de MCP del cliente elige según la metadata del
  * servidor de autorización:
@@ -11,24 +10,32 @@
  *    claude.ai (anuncia `client_id_metadata_document_supported` y NO anuncia
  *    `registration_endpoint`, `src/oauth.ts:808-822`), así que es el mecanismo medido. El
  *    documento se descarga sin redirecciones, con tope de tiempo y de tamaño, solo de
- *    `claude.ai`, y se cachea 5 minutos.
+ *    `claude.ai` o la URL oficial exacta de Codex, y se cachea 5 minutos.
  * 2. **DCR** (registro dinámico, RFC 7591, el `/register` del SDK): por si un cliente no
- *    usa CIMD. Todos los registros válidos son idénticos (mismo callback, público), así
- *    que se devuelve SIEMPRE el mismo `client_id` fijo y no hay nada que guardar ni que
- *    crezca. Si el registro pide un `client_secret`, se sustituye por un cliente público
+ *    usa CIMD. Los registros se reducen a clientes fijos: Claude y los tres conjuntos
+ *    de hosts loopback de Codex; no hay estado que guardar ni que crezca. Si el registro
+ *    pide un `client_secret`, se sustituye por un cliente público
  *    (RFC 7591 §3.2.1 permite al servidor reemplazar los metadatos pedidos).
  *
  * Ninguno de los dos da acceso por sí solo: la aprobación llega del consentimiento de Lumbre.
  */
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { InvalidClientMetadataError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { redirectUriMatches } from '@modelcontextprotocol/sdk/server/auth/handlers/authorize.js';
 import type { OAuthClientInformationFull } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { logEvent } from '../log/logger';
 
-/** El único callback admitido. */
+/** Callback web de Claude: coincidencia exacta, sin relajación de puerto. */
 export const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 /** `client_id` fijo de los clientes registrados por DCR. */
 export const DCR_CLIENT_ID = 'hebra-mcp-claude-ai';
+export const CODEX_CIMD_CLIENT_ID = 'https://chatgpt.com/oauth/codex/client.json';
+const CODEX_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
+const CODEX_DCR_CLIENTS: Record<string, string[]> = {
+  'hebra-mcp-codex-127': [CODEX_CALLBACKS[0]!],
+  'hebra-mcp-codex-localhost': [CODEX_CALLBACKS[1]!],
+  'hebra-mcp-codex-loopback': CODEX_CALLBACKS
+};
 
 const CIMD_HOSTNAME = 'claude.ai';
 const CIMD_TIMEOUT_MS = 5_000;
@@ -40,19 +47,40 @@ type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
 const GRANT_TYPES = ['authorization_code', 'refresh_token'];
 
-function publicClient(clientId: string, clientName: string): OAuthClientInformationFull {
+function publicClient(clientId: string, clientName: string, redirects = [CLAUDE_CALLBACK]): OAuthClientInformationFull {
   return {
     client_id: clientId,
     client_name: clientName,
-    redirect_uris: [CLAUDE_CALLBACK],
+    redirect_uris: [...redirects],
+    ...(redirects[0] !== CLAUDE_CALLBACK ? { application_type: 'native' as const } : {}),
     token_endpoint_auth_method: 'none',
     grant_types: GRANT_TYPES,
     response_types: ['code']
   };
 }
 
-/** ¿Es un `client_id` CIMD aceptable? HTTPS de claude.ai, con ruta, sin nada más. */
+/** Callback nativo sin aliases normalizados por URL(), credenciales ni sufijos. */
+export function isCodexCallback(uri: string): boolean {
+  const match = /^http:\/\/(127\.0\.0\.1|localhost)(?::([1-9][0-9]{0,4}))?\/callback$/.exec(uri);
+  return match !== null && (match[2] === undefined || Number(match[2]) <= 65535);
+}
+
+/** Codex conserva los hosts publicados/registrados; RFC 8252 solo relaja el puerto. */
+export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: string): boolean {
+  if (uri === CLAUDE_CALLBACK) return client.redirect_uris.includes(CLAUDE_CALLBACK);
+  if (client.client_id !== CODEX_CIMD_CLIENT_ID && !Object.hasOwn(CODEX_DCR_CLIENTS, client.client_id)) return false;
+  return isCodexCallback(uri) && client.redirect_uris.some((registered) =>
+    isCodexCallback(registered) && redirectUriMatches(uri, registered));
+}
+
+/** Identidades cerradas aceptadas también en las concesiones autenticadas de Lumbre. */
+export function isAcceptableOAuthClientId(clientId: string): boolean {
+  return clientId === DCR_CLIENT_ID || Object.hasOwn(CODEX_DCR_CLIENTS, clientId) || isAcceptableCimdClientId(clientId);
+}
+
+/** ¿Es un `client_id` CIMD aceptable? Claude con ruta o la URL exacta de Codex. */
 export function isAcceptableCimdClientId(clientId: string): boolean {
+  if (clientId === CODEX_CIMD_CLIENT_ID) return true;
   let url: URL;
   try {
     url = new URL(clientId);
@@ -119,6 +147,7 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
 
   async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
     if (clientId === DCR_CLIENT_ID) return publicClient(DCR_CLIENT_ID, 'Claude');
+    if (Object.hasOwn(CODEX_DCR_CLIENTS, clientId)) return publicClient(clientId, 'Codex', CODEX_DCR_CLIENTS[clientId]!);
     if (!isAcceptableCimdClientId(clientId)) return undefined;
     const cached = this.cache.get(clientId);
     if (cached && cached.expiresAt > this.now()) return cached.client;
@@ -163,30 +192,44 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
     const candidate = document as Record<string, unknown> | null;
     const redirects = candidate?.redirect_uris;
     const authMethod = candidate?.token_endpoint_auth_method;
+    const codex = clientId === CODEX_CIMD_CLIENT_ID;
     if (
       !candidate ||
       typeof candidate !== 'object' ||
       candidate.client_id !== clientId ||
       !Array.isArray(redirects) ||
-      !redirects.includes(CLAUDE_CALLBACK) ||
+      (codex ? redirects.length === 0 || !redirects.every((uri) => typeof uri === 'string' && isCodexCallback(uri))
+        : !redirects.includes(CLAUDE_CALLBACK)) ||
       (authMethod !== undefined && authMethod !== 'none')
     ) {
       logEvent({ event: 'oauth.cimd', result: 'rejected', reason: 'metadata' });
       return undefined;
     }
     logEvent({ event: 'oauth.cimd', result: 'ok' });
-    const name = typeof candidate.client_name === 'string' ? candidate.client_name.slice(0, 100) : 'Claude';
-    return publicClient(clientId, name);
+    const name = typeof candidate.client_name === 'string' ? candidate.client_name.slice(0, 100) : codex ? 'Codex' : 'Claude';
+    // La metadata no puede ampliar el callback: conservamos solo sus hosts admitidos.
+    return publicClient(clientId, name, codex
+      ? CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)))
+      : [CLAUDE_CALLBACK]);
   }
 
   async registerClient(
     client: Omit<OAuthClientInformationFull, 'client_id' | 'client_id_issued_at'>
   ): Promise<OAuthClientInformationFull> {
+    let registered = publicClient(DCR_CLIENT_ID, 'Claude');
     if (!client.redirect_uris.includes(CLAUDE_CALLBACK)) {
-      logEvent({ event: 'oauth.register', result: 'rejected' });
-      throw new InvalidClientMetadataError(`Solo se admite el callback ${CLAUDE_CALLBACK}.`);
+      const redirects = client.redirect_uris;
+      const callbacks = CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)));
+      const entry = Object.entries(CODEX_DCR_CLIENTS).find(([, values]) =>
+        values.length === callbacks.length && values.every((uri) => callbacks.includes(uri)));
+      if (redirects.length > 0 && redirects.every(isCodexCallback) && entry) {
+        registered = publicClient(entry[0], 'Codex', entry[1]);
+      } else {
+        logEvent({ event: 'oauth.register', result: 'rejected' });
+        throw new InvalidClientMetadataError('Solo se admiten los callbacks de Claude y Codex (SPEC.md §12.2).');
+      }
     }
     logEvent({ event: 'oauth.register', result: 'ok' });
-    return { ...publicClient(DCR_CLIENT_ID, 'Claude'), client_id_issued_at: Math.floor(this.now() / 1000) };
+    return { ...registered, client_id_issued_at: Math.floor(this.now() / 1000) };
   }
 }

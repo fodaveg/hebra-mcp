@@ -6,6 +6,15 @@ El cambio se desplegó el 28 sep 2026 con Hebra MCP `e36e72a` y broker Lumbre
 `dfdc34f`. El inicio OAuth público DCR + PKCE llega al consentimiento de Lumbre;
 la reconexión y QA de Claude por David siguen pendientes. Ver [RELEASE-2026-09-28.md](RELEASE-2026-09-28.md).
 
+El soporte OAuth de Codex admite su CIMD oficial exacto
+`https://chatgpt.com/oauth/codex/client.json` y DCR con los clientes fijos
+`hebra-mcp-codex-127`, `hebra-mcp-codex-localhost` y `hebra-mcp-codex-loopback`.
+Su callback es local HTTP, host `127.0.0.1` o `localhost`, ruta `/callback` y puerto
+dinámico; los demás componentes son exactos. El callback entre Lumbre y Hebra MCP
+sigue siendo `https://mcp.hebra.pro/oauth/lumbre/callback`. Publicar requiere que
+el validador del broker Lumbre acepte esas mismas identidades; las pruebas locales
+no prueban publicación, login real ni acceso a la biblioteca en producción.
+
 ## Variables y subcomandos (confirmados)
 
 Único sitio donde se explican. `Dockerfile`, `compose.yml` y

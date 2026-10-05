@@ -10,7 +10,7 @@ import { decodeRecoveryCode } from '../hebra';
 import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
 import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type Grant, sameBinding } from './backchannel';
-import { CLAUDE_CALLBACK, ClaudeClientsStore } from './clients';
+import { ClaudeClientsStore, isAllowedRedirectUri } from './clients';
 import { GrantSecrets } from './grants';
 import { RevocationFile } from './owner';
 import { TokenStore, type IssuedTokens } from './token-store';
@@ -179,7 +179,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
 
   /** Reserva cupos antes de llamar al broker para evitar ráfagas concurrentes. */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
-    if (params.redirectUri !== CLAUDE_CALLBACK) throw new InvalidRequestError('redirect_uri no admitido.');
+    // El SDK relaja puertos, pero ignora userinfo/hash: ningún error vuelve a una URI ajena.
+    if (!isAllowedRedirectUri(client, params.redirectUri)) {
+      res.status(400).json({ error: 'invalid_request' }); return;
+    }
     this.checkScopes(params.scopes);
     if (!this.sameResource(params.resource)) throw new InvalidTargetError(`El resource debe ser ${this.resource}.`);
     if (!CHALLENGE.test(params.codeChallenge)) throw new InvalidRequestError('Se requiere PKCE S256.');
