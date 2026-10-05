@@ -70,6 +70,7 @@ describe('clientes OAuth Codex', () => {
     for (const uri of ['http://localhost:1/callback', 'http://127.0.0.1:65535/callback', ...callbacks]) expect(isCodexCallback(uri)).toBe(true);
     for (const uri of ['http://127.0.0.1:54321/callback#', 'http://localhost/callback?',
       'http://user@localhost/callback', 'http://localhost:00080/callback', 'http://2130706433/callback',
-      'http://localhost./callback', 'http://[::1]/callback', 'http://localhost/call%62ack']) expect(isCodexCallback(uri)).toBe(false);
+      'http://localhost./callback', 'http://[::1]/callback', 'http://localhost/call%62ack',
+      'http://localhost/callback\n', 'http://localhost/callback\r']) expect(isCodexCallback(uri)).toBe(false);
   });
 });

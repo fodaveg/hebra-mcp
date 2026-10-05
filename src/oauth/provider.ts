@@ -386,7 +386,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
         await this.grants.unstage(hash);
       } catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); }
     };
-    if (entry.clientId !== client.client_id || (redirectUri !== undefined && redirectUri !== entry.redirectUri) ||
+    if (entry.clientId !== client.client_id || redirectUri !== entry.redirectUri ||
       verifier === undefined || !VERIFIER.test(verifier) || !equal(s256(verifier), entry.challenge) || !this.sameResource(resource)) {
       await cleanup(); return fail();
     }

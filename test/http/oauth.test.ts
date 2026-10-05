@@ -280,7 +280,8 @@ describe('consentimiento y vínculo exacto', () => {
     'http://evil.example:54321/callback', 'http://127.0.0.2:54321/callback', 'http://[::1]:54321/callback',
     'http://user@127.0.0.1:54321/callback', 'http://127.0.0.1:54321/callback#fragment',
     'http://127.0.0.1:54321/callback?extra=1', 'http://127.1:54321/callback',
-    'http://127.0.0.1:54321/else/../callback', 'https://localhost:54321/callback'
+    'http://127.0.0.1:54321/else/../callback', 'https://localhost:54321/callback',
+    'http://localhost:54321/callback\n', 'http://localhost:54321/callback\r'
   ])('Codex rechaza callback ajeno sin consentimiento ni redirección: %s', async (redirect) => {
     const result = await authorize(pkce().challenge, undefined, CODEX_CIMD_CLIENT_ID, redirect);
     expect(result.status).toBe(400);
@@ -317,6 +318,19 @@ describe('consentimiento y vínculo exacto', () => {
     const body = { client_id: CODEX_CIMD_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier };
     expect((await token({ ...body, redirect_uri: changed })).status).toBe(400);
     expect((await token({ ...body, redirect_uri: redirect })).status).toBe(400); // Un uso, también tras fallo.
+  });
+
+  it.each([DCR_CLIENT_ID, CODEX_CIMD_CLIENT_ID])('canje de %s exige redirect_uri explícita y conserva código de un uso', async (oauthClientId) => {
+    const redirect = oauthClientId === DCR_CLIENT_ID ? CLAUDE_CALLBACK : 'http://127.0.0.1:54321/callback';
+    const { verifier, challenge } = pkce();
+    expect((await authorize(challenge, undefined, oauthClientId, redirect)).status).toBe(302);
+    approved = true;
+    const returned = await callback('approved');
+    expect(returned.status).toBe(302);
+    const code = new URL(returned.headers.get('location')!).searchParams.get('code')!;
+    const body = { client_id: oauthClientId, grant_type: 'authorization_code', code, code_verifier: verifier };
+    expect((await token(body)).status).toBe(400);
+    expect((await token({ ...body, redirect_uri: redirect })).status).toBe(400);
   });
 
   it('un cliente, callback o metadata CIMD ajenos no inicia solicitud; logs sin secretos', async () => {

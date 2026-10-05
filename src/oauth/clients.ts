@@ -62,7 +62,7 @@ function publicClient(clientId: string, clientName: string, redirects = [CLAUDE_
 /** Callback nativo sin aliases normalizados por URL(), credenciales ni sufijos. */
 export function isCodexCallback(uri: string): boolean {
   const match = /^http:\/\/(127\.0\.0\.1|localhost)(?::([1-9][0-9]{0,4}))?\/callback$/.exec(uri);
-  return match !== null && (match[2] === undefined || Number(match[2]) <= 65535);
+  return match !== null && match[0] === uri && (match[2] === undefined || Number(match[2]) <= 65535);
 }
 
 /** Codex conserva los hosts publicados/registrados; RFC 8252 solo relaja el puerto. */
