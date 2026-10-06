@@ -200,7 +200,8 @@ Detalle de las escrituras (D2):
     pendiente (al principio si todas están hechas), como en el editor de Hebra, en el MISMO
     guardado (`reorderToggledTasks` de `node.ts`, la misma lectura de bloques que el editor). Varias
     en una edición se colocan una a una, de arriba abajo. Las que no cambian de estado o se movieron
-    a propósito se quedan donde estén. El MCP no tiene el ajuste por dispositivo de Hebra: mueve
+    a propósito se quedan donde estén, y también las que cambian además el texto de su línea (se
+    tratan como reescritas): para moverlas, primero la casilla y luego el texto, en dos ediciones. El MCP no tiene el ajuste por dispositivo de Hebra: mueve
     siempre (el defecto de Hebra).
   - Todo en un turno de la cola del almacén, por el escritor único (un lector la reenvía por
     `writer.sock`, op `editNote`): idempotencia, filtro de privados, nota bloqueada (`note_locked`),

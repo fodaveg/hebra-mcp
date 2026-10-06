@@ -128,7 +128,7 @@ restaure desde Hebra.
    `replayed: true` y no duplica. Para otra edición, otro UUID. El registro dura 24 h.
 5. **Para una segunda edición** usa la `revision` que devolvió la primera, o vuelve a leer.
    Marcar una tarea (`- [ ]` → `- [x]`) la baja al final de su lista con sus hijas, y
-   desmarcarla la sube detrás de la última pendiente, como en Hebra: el cuerpo guardado ya no tiene las líneas donde estaban, así que un `find` de
+   desmarcarla la sube detrás de la última pendiente, como en Hebra. Solo se mueve si la edición cambia ÚNICAMENTE su casilla: si cambia también el texto de la línea, se queda donde está (para que se mueva, primero la casilla y luego el texto, en dos ediciones). El cuerpo guardado ya no tiene las líneas donde estaban, así que un `find` de
    varias líneas de esa lista hay que sacarlo de una lectura nueva.
 6. Renombrar una nota = sustituir su `title:` del frontmatter si lo tiene (manda sobre el H1);
    si no, su línea `# H1`. Añadir o quitar una etiqueta = editar el
