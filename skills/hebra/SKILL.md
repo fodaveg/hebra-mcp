@@ -91,7 +91,7 @@ sustituciones.
 | `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
 | `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
 | `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
-| `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo, 7 días como mucho. Pagina con `nextCursor`; un cursor cuya versión ya no existe da `invalid_input`. |
+| `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo: las 5 más recientes de cada nota se conservan siempre y las demás caducan a los 7 días. Pagina con `nextCursor`; un cursor cuya versión ya no existe da `invalid_input`. |
 | `hebra_read_version` | `id`, `versionId` | El cuerpo de esa versión. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
 | `hebra_list_attachments` | `id`, `limit?` 1-200 (sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |

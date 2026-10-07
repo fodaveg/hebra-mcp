@@ -275,8 +275,13 @@ Detalle de las escrituras (D2):
 - **Versiones anteriores** (`hebra_list_versions`, `hebra_read_version`, `hebra_restore_version`;
   decisión 6 de D2): son las instantáneas **locales** del almacén de hebra-mcp (`note_versions` de
   Hebra: el cuerpo que sustituyó un guardado o un cambio bajado por el sync, una cada 5 minutos
-  como mucho, 7 días); no viajan por sync, así que no son las del Mac. No se devuelve `cause`
+  como mucho); no viajan por sync, así que no son las del Mac. No se devuelve `cause`
   (en un renombrado de etiquetas en lote nombra las etiquetas y podría nombrar una privada).
+  Caducidad: las 5 versiones más recientes de cada nota no caducan nunca y las demás caducan a
+  los 7 días. Las caducadas se retiran así: tras guardar una instantánea, solo las de esa nota;
+  las de toda la biblioteca, una vez al arrancar el escritor (`SqliteLibraryEngine.open`); los
+  lectores (`openReadOnly`) no purgan. Por eso, en un servidor que lleva días arrancado, una
+  versión caducada de una nota que nadie edita se sigue listando hasta el siguiente arranque.
   El motor no tiene una operación de restaurar: como «Restaurar» en Hebra
   (`LibraryEditor.svelte`), es `noteVersionSnapshot` (instantánea ya del cuerpo actual, para
   que lo que había se pueda recuperar) + `noteSave` normal. Va por la vía de `hebra_edit_note`:
@@ -467,7 +472,7 @@ El dispositivo acumula tres secretos:
 ### 6.4 Logs
 
 - **Qué se registra**: solo eventos cerrados en stderr, como en §11 de la spec de Hebra
-  (`sync.round`, `sync.record_error`, `sync.conflict_copy`), con ids opacos, códigos y recuentos.
+  (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy`), con ids opacos, códigos y recuentos.
 - **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas.
 - Stdout es exclusivo del protocolo MCP.
 - **Test**: un test ejecuta todas las herramientas con notas-cebo y comprueba que ningún texto de

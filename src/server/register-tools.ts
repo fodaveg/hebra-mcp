@@ -314,7 +314,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Versiones anteriores de una nota',
       description:
-        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo, de los últimos 7 días. Paginada (`limit`, `cursor`, `nextCursor`); 50 por página por defecto.',
+        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo: las 5 más recientes de cada nota se conservan siempre y las demás caducan a los 7 días. Paginada (`limit`, `cursor`, `nextCursor`); 50 por página por defecto.',
       inputSchema: listVersionsInputShape,
       annotations: READ_ONLY
     },

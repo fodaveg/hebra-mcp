@@ -4,8 +4,9 @@
  *
  * Qué versiones hay: las instantáneas LOCALES del almacén de hebra-mcp (`note_versions`
  * de Hebra, `note-versions-store.ts`): el cuerpo que un guardado o un cambio bajado por
- * el sync sustituyó, como mucho una cada 5 minutos, durante 7 días. Nunca viajan por el
- * sync, así que no son las del Mac: son las que este dispositivo ha visto.
+ * el sync sustituyó, como mucho una cada 5 minutos. Las 5 más recientes de cada nota no
+ * caducan y las demás caducan a los 7 días. Nunca viajan por el sync, así que no son las
+ * del Mac: son las que este dispositivo ha visto.
  *
  * Privacidad, sobre la nota y sobre cada versión:
  * - La nota tiene que ser visible (viva, ni oculta ni en la papelera); si no, `not_found`.
