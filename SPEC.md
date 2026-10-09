@@ -133,7 +133,7 @@ Reglas comunes:
 | `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
 | `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
 | `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
-| `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre (en minúsculas) y después por id; los de la papelera, el último en entrar primero y, a igual fecha, por id descendente (como el motor de Hebra y `hebra_list_trash`) | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
+| `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre normalizado (NFC y en minúsculas, comparado por unidades de código) y después por id; los de la papelera, el último en entrar primero y, a igual fecha, por id descendente (como el motor de Hebra y `hebra_list_trash`). La lista se recalcula en cada página: un fichero que se renombra en Hebra entre dos páginas puede salir dos veces o no salir | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
 | `hebra_trash_file` | `id` (fichero suelto visible, vivo o ya en la papelera) | `{id, trashed: true, sync, syncError?}`. Idempotente: uno que ya está en la papelera se queda como está, sin escribir. Reversible con `hebra_restore_file` o desde Hebra. Errores: `not_found` (oculto, inexistente o un id que no es de un fichero suelto, todos igual). |
 | `hebra_restore_file` | `id` (fichero suelto visible, de la papelera o vivo) | `{id, folderPath, sync, syncError?}`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente: uno vivo se queda como está, sin escribir. Errores: `not_found`, igual que `hebra_trash_file`. |
 | `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
@@ -161,7 +161,7 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento; en versiones, el id de la última versión devuelta, y en adjuntos, su `attachmentId`. Si ese elemento ya no está, el cursor da `invalid_input`.
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
-  los vivos, los primeros 200 caracteres de su nombre en minúsculas y su id; para la papelera, la
+  los vivos, los primeros 200 caracteres de su nombre en NFC y en minúsculas, y su id; para la papelera, la
   fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
   con la misma fecha) y la página siguiente empieza en el primero que va después de esa
   clave. No exige que ese fichero siga en la lista: listar, mandar a la papelera el último de la
@@ -525,7 +525,9 @@ El dispositivo acumula tres secretos:
     oculto, uno inexistente, una lápida, el id de una nota y un SHA-256 responden el mismo
     `not_found` en `hebra_trash_file` y `hebra_restore_file`, y el filtro se construye siempre,
     con las mismas consultas haya o no acierto. La salida nunca lleva el SHA-256 ni la carpeta
-    guardada.
+    guardada. Lo único que sí refleja lo oculto es `hebra_status.pendingUpload`, que cuenta las
+    filas sucias de toda la biblioteca, también las de ficheros sueltos y también las ocultas
+    (ya pasaba con las notas): es un número, sin nombres ni ids.
   - Se comprueba en la herramienta y otra vez en el escritor, dentro del turno en que escribe.
     Restaurar deja el fichero en su carpeta si sigue viva o en la raíz: con la regla (a), lo que
     se ve nunca acaba en una carpeta privada.
@@ -587,6 +589,16 @@ una edición concurrente produce una copia de conflicto. Una carpeta renombrada 
 vuelta, y una carpeta o un adjunto de más se quitan desde Hebra. Leer adjuntos (decisión 7) no
 amplía ese daño, pero su contenido es entrada a la IA igual que el cuerpo: un
 texto, un PDF o una imagen adjuntos pueden llevar instrucciones, y se tratan como datos.
+
+Los ficheros sueltos tienen un efecto que las notas no: los **dibujos** son ficheros sueltos que
+las notas incrustan por nombre (`![[Dibujo 2026-10-09 10.30.png]]`), y cualquier otro fichero suelto
+se puede incrustar igual. Mandar a la papelera uno que una nota visible incrusta rompe ese
+incrustado mientras siga allí: la nota deja de enseñarlo, sin que su cuerpo cambie. Entra en el
+daño acotado de una instrucción inyectada y es reversible con `hebra_restore_file` o desde Hebra,
+que lo deja como estaba. Lo que no es reversible es un «Vaciar papelera» que el dueño haga a mano
+en Hebra después: el MCP no purga nada, pero tampoco puede impedir que se purgue lo que él mandó a
+la papelera. No hay tope de llamadas ni se comprueba antes si alguna nota visible incrusta el
+fichero; la descripción de `hebra_trash_file` lo avisa.
 
 ## 7. Emparejado (primera vez)
 

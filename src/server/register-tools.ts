@@ -340,7 +340,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Mandar un fichero suelto a la papelera',
       description:
-        'Manda un fichero suelto (id de hebra_list_files) a la papelera de Hebra. Se puede sacar con hebra_restore_file o desde Hebra: no lo borra.',
+        'Manda un fichero suelto (id de hebra_list_files) a la papelera de Hebra. Se puede sacar con hebra_restore_file o desde Hebra: no lo borra. Un fichero que alguna nota incrusta (un dibujo, por ejemplo) deja de verse en esa nota mientras esté en la papelera.',
       inputSchema: trashFileInputShape,
       annotations: WRITE_IDEMPOTENT
     },
