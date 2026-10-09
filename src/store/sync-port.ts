@@ -13,7 +13,10 @@
  * de crear y añadir. `syncApplyPage`/`syncAck`/`libraryConnect` son mutaciones que solo
  * tienen sentido dentro de una ronda de sync; nadie más debe poder llamarlas. Ninguno
  * de los dos interfaces trae `noteMove`/`noteTrash`/`notePurge`/`folder*`/`file*`/
- * `tagRename` (`test/store/surface.node.test.ts`).
+ * `tagRename` (`test/store/surface.node.test.ts`). Los dos `file*` que D10 (9 oct 2026)
+ * permite, mandar un fichero suelto a la papelera y sacarlo, tampoco están aquí: solo en
+ * el turno de escritura (`NodeLibraryPort.writeExclusive`). Lo que esta vista sí hace con
+ * los ficheros sueltos es lo de cualquier registro: la ronda sube y baja sus filas.
  *
  * `syncLeaseAcquire` es el de `SqliteLibraryEngine` (en memoria del proceso): coordina
  * motores dentro de este proceso, no entre procesos. Entre procesos manda el bloqueo de

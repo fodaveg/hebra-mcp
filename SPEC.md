@@ -306,7 +306,10 @@ Detalle de las escrituras (D2):
     sin ronda. El motor no toca el nombre, la fecha de modificación ni la carpeta del fichero.
   - **Restaurar**: a su carpeta si sigue viva y, si se borró, a la raíz, como las notas. La ruta de
     la salida sale de un filtro recalculado después de escribir; si para entonces el fichero no
-    fuera visible, `not_found` en vez de enseñar una ruta privada.
+    fuera visible, `not_found` en vez de enseñar una ruta privada, y si la configuración de
+    privados ya no se pudiera aplicar (la ronda de después trajo el renombrado de una carpeta
+    privada), `privacy_config_unresolved` en vez de una ruta sin filtrar. En los dos casos el
+    fichero ya está restaurado.
   - **Sync**: la ronda de después sube la fila de `files` como cualquier otro registro del motor,
     y `hebra_status.pendingUpload` ya cuenta los ficheros sucios. No hay `expectedRevision` (un
     fichero no tiene revisión local): un cambio a la vez en otro dispositivo lo resuelve la tabla

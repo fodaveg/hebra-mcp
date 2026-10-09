@@ -3,13 +3,15 @@
 Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, editar por
 sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
-añadir adjuntos, y crear y renombrar carpetas; nunca purgar ni vaciar la papelera, mover
-ni borrar carpetas, ni cambiar ni borrar adjuntos; `SPEC.md` §5) a
+añadir adjuntos, crear y renombrar carpetas, y listar los ficheros sueltos y mandarlos a
+la papelera o sacarlos; nunca purgar ni vaciar la papelera, mover ni borrar carpetas,
+cambiar ni borrar adjuntos, ni crear, renombrar, mover o reemplazar un fichero suelto ni
+leer su contenido; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 3 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 24 herramientas
+Estado a 9 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 27 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
@@ -18,6 +20,10 @@ Estado a 3 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 24 herrami
   (por sustituciones).
 - Organización: `hebra_move_note`, `hebra_set_favorite` y `hebra_set_archived`.
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
+- Ficheros sueltos (D10; los recursos con carpeta propia que no cuelgan de una nota, como
+  un `.base` o un PDF): `hebra_list_files` (los vivos por nombre o, con `trashed: true`,
+  los de la papelera; limit 1-100, def. 50), `hebra_trash_file` y `hebra_restore_file`.
+  Sin purga y sin leer su contenido, crearlos, renombrarlos, moverlos ni reemplazarlos.
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
