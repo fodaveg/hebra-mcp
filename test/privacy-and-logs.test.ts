@@ -145,6 +145,7 @@ describe('filtro de privados y logs, por todas las herramientas', () => {
       test.library.files.privateFolder,
       test.library.files.referencedByHash,
       test.library.files.referencedByName,
+      test.library.files.referencedByLockedNote,
       test.library.files.trashedPrivateFolder,
       test.library.files.trashedDeletedPrivateFolder
     ]) {

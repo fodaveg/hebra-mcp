@@ -114,6 +114,7 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_trash_file', arguments: { id: library.files.privateFolder } },
     { name: 'hebra_trash_file', arguments: { id: library.files.referencedByHash } },
     { name: 'hebra_trash_file', arguments: { id: library.files.referencedByName } },
+    { name: 'hebra_trash_file', arguments: { id: library.files.referencedByLockedNote } },
     { name: 'hebra_restore_file', arguments: { id: library.files.trashedPrivateFolder } },
     { name: 'hebra_restore_file', arguments: { id: library.files.trashedDeletedPrivateFolder } },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de

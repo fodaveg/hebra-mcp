@@ -86,6 +86,11 @@ export interface TestLibrary {
   /** En `Diario/2026` (privada): un adjunto de texto con `BAIT_FOLDER` en nombre y bytes. */
   privateAttachmentNoteId: string;
   privateAttachmentSha: string;
+  /** En `Diario/2026` (privada) y BLOQUEADA: su cabecera adjunta `lockedAttachmentSha`.
+   *  Una nota bloqueada no deriva enlaces (`links` queda vacía) ni etiquetas; sus
+   *  adjuntos solo constan en `note_blob_refs`. */
+  lockedPrivateNoteId: string;
+  lockedAttachmentSha: string;
   /** Dos notas VIVAS con el mismo título, en carpetas distintas (para `ambiguous_title`). */
   duplicateTitle: string;
   duplicateNoteAId: string;
@@ -125,6 +130,10 @@ export interface TestLibrary {
     /** Oculto por REFERENCIA, por nombre: en la raíz, incrustado como `![[nombre]]` en la
      *  nota de etiqueta privada (`privateTagNoteId`). Lleva `BAIT_TAG`. */
     referencedByName: string;
+    /** Oculto por REFERENCIA desde una nota BLOQUEADA: en la raíz, con los mismos bytes
+     *  que el adjunto de la nota bloqueada privada (`lockedAttachmentSha`). La referencia
+     *  solo está en `note_blob_refs`, no en `links`. Lleva `BAIT_FOLDER`. */
+    referencedByLockedNote: string;
     /** En la papelera, de la raíz: visible, vuelve a la raíz. */
     trashed: string;
     /** En la papelera, de `Diario/2026` (privada): nunca sale. Lleva `BAIT_FOLDER`. */
@@ -152,6 +161,25 @@ export const FILE_NAMES = {
 
 /** Nombre del fichero suelto que la nota de etiqueta privada incrusta por nombre. */
 const FILE_REFERENCED_BY_NAME = `${BAIT_TAG}-dibujo.png`;
+
+/**
+ * Un cuerpo de nota BLOQUEADA con la forma que el motor acepta (el envoltorio
+ * `hebra-locked:v1:` de Hebra: una cabecera en claro con el título y los adjuntos, y el
+ * cifrado detrás). El motor solo valida la cabecera al guardar y aquí nadie lo abre, así
+ * que la clave envuelta y el cifrado son relleno del tamaño correcto.
+ */
+function lockedBody(title: string, blobRefs: string[]): string {
+  const b64url = (bytes: Uint8Array | string): string => Buffer.from(bytes).toString('base64url');
+  const header = {
+    v: 1,
+    kid: 'ab'.repeat(16),
+    kdf: { alg: 'pbkdf2-sha256', iter: 600_000, salt: b64url(new Uint8Array(16).fill(1)) },
+    wrappedKey: b64url(new Uint8Array(60).fill(2)),
+    title,
+    blobRefs
+  };
+  return `hebra-locked:v1:${b64url(JSON.stringify(header))}.${b64url(new Uint8Array(48).fill(3))}`;
+}
 
 /** Un fichero suelto con bytes propios (los de `content`), como los crea Hebra. */
 async function createFile(
@@ -415,6 +443,22 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     'dibujo de una nota privada',
     'image/png'
   );
+  // Una nota BLOQUEADA en la carpeta privada que adjunta un PDF, y un fichero suelto con
+  // esos mismos bytes en la raíz (carpeta visible). `deriveNote` de una nota bloqueada no
+  // da enlaces: la referencia solo queda en `note_blob_refs`.
+  const lockedAttachment = (
+    await engine.blobPut(new TextEncoder().encode(`${BAIT_FOLDER} contrato de una nota bloqueada\n`), {
+      mime: 'application/pdf'
+    })
+  ).sha256;
+  const lockedPrivateNote = await createNote(
+    engine,
+    diario2026.id,
+    lockedBody('Contrato bloqueado', [lockedAttachment])
+  );
+  const fileReferencedByLockedNote = (
+    await engine.fileCreate(null, `${BAIT_FOLDER}-contrato.pdf`, lockedAttachment)
+  ).id;
   const fileTrashed = await createFile(engine, null, FILE_NAMES.trashed, 'borrador tirado');
   await engine.fileTrash(fileTrashed);
   const fileTrashedPrivateFolder = await createFile(
@@ -461,6 +505,8 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     attachments: { png, text, pdf, big, zip, missing },
     privateAttachmentNoteId: privateAttachmentNote.id,
     privateAttachmentSha: privateAttachment,
+    lockedPrivateNoteId: lockedPrivateNote.id,
+    lockedAttachmentSha: lockedAttachment,
     duplicateTitle,
     duplicateNoteAId: duplicateA.id,
     duplicateNoteBId: duplicateB.id,
@@ -481,6 +527,7 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
       privateFolder: filePrivateFolder,
       referencedByHash: fileReferencedByHash,
       referencedByName: fileReferencedByName,
+      referencedByLockedNote: fileReferencedByLockedNote,
       trashed: fileTrashed,
       trashedPrivateFolder: fileTrashedPrivateFolder,
       trashedDeletedPrivateFolder: fileTrashedDeletedPrivateFolder,

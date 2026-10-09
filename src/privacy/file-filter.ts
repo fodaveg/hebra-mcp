@@ -19,9 +19,12 @@
  *
  * (b) Por referencia. Oculto si lo enlaza alguna nota oculta: una viva que
  *     `PrivacyFilter` oculta, o una de la papelera que `TrashFilter` no deja ver.
- *     «Enlaza» es lo que el motor guarda en `links` (su nombre o el SHA-256 de sus
- *     bytes); el cruce lo trae ya hecho `FilesIndex.refs`. Hace falta porque los dos
- *     mundos se solapan: el importador de Hebra crea ficheros sueltos que las notas
+ *     «Enlaza» es una de estas tres cosas: un enlace de `links` con su nombre, un
+ *     enlace de `links` con el SHA-256 de sus bytes, o una fila de `note_blob_refs` con
+ *     ese SHA-256. La tercera cubre las notas BLOQUEADAS, de las que el motor no deriva
+ *     enlaces (saldrían del texto cifrado) pero sí guarda los adjuntos. El cruce lo trae
+ *     ya hecho `FilesIndex.refs` (`NodeLibraryPort.filesIndex`). Hace falta porque los
+ *     dos mundos se solapan: el importador de Hebra crea ficheros sueltos que las notas
  *     adjuntan por `sha256:`, y los dibujos son ficheros sueltos incrustados por nombre.
  *     Sin esta parte, el adjunto de una nota privada saldría por aquí con su nombre.
  *     Coste asumido en D10: con homónimos oculta de más.

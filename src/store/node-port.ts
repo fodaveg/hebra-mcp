@@ -373,22 +373,31 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
 
   /**
    * La consulta de `filesIndex`, sin cola (también la usa `writeExclusive`). SQL propio de
-   * hebra-mcp sobre `files`, `blobs`, `links` y `notes` de `schema.sql`, como `trashRows`,
+   * hebra-mcp sobre `files`, `blobs`, `links`, `note_blob_refs` y `notes` de `schema.sql`,
+   * como `trashRows`,
    * y no `filesPage` ni `filesFindByName` del motor: esos no paginan con un cursor que
    * se pueda usar desde fuera y su aviso de que quedan más delataría una cola de ficheros
    * ocultos (D10, SPEC.md §5 y §6.3).
    * - Ficheros: todos los que no son lápida, vivos y de la papelera, con la carpeta
    *   GUARDADA y lo que su fila de `blobs` sepa (puede no haberla).
    * - Referencias: qué notas (que no sean lápida, vivas o de la papelera) enlazan cada
-   *   fichero, con la definición del motor (`backlinks` de `sqlite-engine.ts`): un enlace
-   *   `file` con su nombre exacto o un enlace `blob` con el SHA-256 de sus bytes. La ruta
-   *   del enlace (`target_path`) no se mira, así que un homónimo cuenta: de más, nunca de
-   *   menos. El hash se compara en minúsculas, que es como lo guarda `links`; el motor da
-   *   por hecho que `files` lo guarda igual, aquí no. Por ese `lower()` la rama del hash
-   *   lleva `CROSS JOIN`, que en SQLite fija el orden: manda `files` y cada fichero
-   *   sondea `links_by_target`. Sin él, el planificador recorría todos los enlaces `blob`
-   *   (uno por adjunto de cada nota) y, por cada uno, `files` entera, porque `lower()` no
-   *   deja usar `files_by_sha256` (medido con `EXPLAIN QUERY PLAN`).
+   *   fichero. Tres ramas:
+   *   1. `links` con un enlace `file` y su nombre exacto, y
+   *   2. `links` con un enlace `blob` y el SHA-256 de sus bytes: las dos, la definición
+   *      del motor (`backlinks` de `sqlite-engine.ts`);
+   *   3. `note_blob_refs` con ese SHA-256. Hace falta porque una nota BLOQUEADA no
+   *      deriva enlaces (`lockedDerived` de `derive.ts` deja `links` vacía, saldrían del
+   *      texto cifrado) y sí conserva sus adjuntos, que van en claro en la cabecera: sin
+   *      esta rama, el adjunto de una nota bloqueada y oculta no ocultaba el fichero
+   *      suelto con esos mismos bytes.
+   *   La ruta del enlace (`target_path`) no se mira, así que un homónimo cuenta: de más,
+   *   nunca de menos. El hash se compara en minúsculas, que es como lo guardan `links` y
+   *   `note_blob_refs`; el motor da por hecho que `files` lo guarda igual, aquí no. Por
+   *   ese `lower()` las dos ramas del hash llevan `CROSS JOIN`, que en SQLite fija el
+   *   orden: manda `files` y cada fichero sondea `links_by_target` o
+   *   `note_blob_refs_by_sha256`. Sin él, el planificador recorría todos los enlaces
+   *   `blob` (uno por adjunto de cada nota) y, por cada uno, `files` entera, porque
+   *   `lower()` no deja usar `files_by_sha256` (medido con `EXPLAIN QUERY PLAN`).
    * - El índice de la papelera, del mismo turno: el filtro lo necesita para saber si una
    *   nota de la papelera que enlaza un fichero se ve, y para subir por las carpetas ya
    *   borradas.
@@ -421,6 +430,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
          FROM files fl
          CROSS JOIN links l ON l.target_kind = 'blob' AND l.target = lower(fl.sha256)
          JOIN notes n ON n.id = l.src_note_id
+         WHERE fl.deleted = 0 AND n.deleted = 0
+         UNION
+         SELECT fl.id AS file_id, n.id AS note_id, n.trashed_at IS NOT NULL AS note_trashed
+         FROM files fl
+         CROSS JOIN note_blob_refs r ON r.sha256 = lower(fl.sha256)
+         JOIN notes n ON n.id = r.note_id
          WHERE fl.deleted = 0 AND n.deleted = 0`
     ).all() as Array<{ file_id: string; note_id: string; note_trashed: number | bigint }>;
     return {

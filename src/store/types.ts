@@ -93,8 +93,10 @@ export interface FileEntry {
   trashedAt: number | null;
 }
 
-/** Una nota que enlaza un fichero suelto, por su nombre o por el SHA-256 de sus bytes
- *  (`links` de Hebra). La nota no es lápida; puede estar viva o en la papelera. */
+/** Una nota que enlaza un fichero suelto: por su nombre o por el SHA-256 de sus bytes en
+ *  `links` de Hebra, o por ese SHA-256 en `note_blob_refs` (lo único que queda de los
+ *  adjuntos de una nota bloqueada). La nota no es lápida; puede estar viva o en la
+ *  papelera. */
 export interface FileNoteRef {
   fileId: string;
   noteId: string;

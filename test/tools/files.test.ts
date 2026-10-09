@@ -106,6 +106,7 @@ describe('ficheros sueltos', () => {
       files.privateFolder,
       files.referencedByHash,
       files.referencedByName,
+      files.referencedByLockedNote,
       files.trashedPrivateFolder,
       files.trashedDeletedPrivateFolder
     ];
@@ -566,6 +567,7 @@ describe('ficheros sueltos por MCP', () => {
       library.files.privateFolder,
       library.files.referencedByHash,
       library.files.referencedByName,
+      library.files.referencedByLockedNote,
       library.files.trashedPrivateFolder,
       library.files.trashedDeletedPrivateFolder,
       library.files.tombstone,
@@ -701,6 +703,53 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
       expect(index.refs.filter((ref) => ref.fileId === id)).toEqual([]);
     }
     expect(index.trash.notes.map((note) => note.id)).toContain(library.trashedNoteId);
+  });
+
+  it('una nota BLOQUEADA y oculta también oculta el fichero suelto que adjunta (solo consta en note_blob_refs)', async () => {
+    test = await buildTestContext();
+    const library = test.library;
+    const id = library.files.referencedByLockedNote;
+    // La premisa, medida en el almacén: el motor no deriva enlaces de una nota bloqueada
+    // (`links` no tiene ninguna fila suya) y sí guarda sus adjuntos en `note_blob_refs`.
+    const db = new DatabaseSync(test.sqlitePath, { readOnly: true });
+    try {
+      expect(
+        db.prepare('SELECT count(*) AS n FROM links WHERE src_note_id = ?').get(library.lockedPrivateNoteId)
+      ).toEqual({ n: 0 });
+      expect(
+        db.prepare('SELECT sha256 FROM note_blob_refs WHERE note_id = ?').all(library.lockedPrivateNoteId)
+      ).toEqual([{ sha256: library.lockedAttachmentSha }]);
+    } finally {
+      db.close();
+    }
+    expect((await test.ctx.port.noteRead(library.lockedPrivateNoteId))?.body.startsWith('hebra-locked:v1:')).toBe(
+      true
+    );
+
+    // El fichero está en la raíz, una carpeta visible: solo la referencia lo oculta.
+    const index = await test.ctx.port.filesIndex();
+    expect(index.files.find((file) => file.id === id)?.folderId).toBe('root');
+    expect(index.refs).toContainEqual({
+      fileId: id,
+      noteId: library.lockedPrivateNoteId,
+      noteTrashed: false
+    });
+
+    const ctx = await resolveToolContext(test.serverContext);
+    const listed = await runListFiles(ctx, { limit: 100 });
+    expect(listed.files.map((file) => file.id)).not.toContain(id);
+    expect(JSON.stringify(listed)).not.toContain(BAIT_FOLDER);
+    expect(await runListFiles(ctx, { name: 'contrato' })).toEqual({ files: [], nextCursor: null });
+    for (const run of [runTrashFile, runRestoreFile]) {
+      const error = await run(await resolveToolContext(test.serverContext), { id }).catch(
+        (caught: unknown) => caught
+      );
+      expect(error).toMatchObject({ code: 'not_found' });
+    }
+    const direct = await test.ctx
+      .write!.organizeFile({ action: 'trashFile', id, privacy: test.ctx.privacyConfig })
+      .catch((caught: unknown) => caught);
+    expect(direct).toMatchObject({ code: 'not_found' });
   });
 
   it('el hash se compara sin distinguir mayúsculas, y una nota de la papelera sigue contando', async () => {

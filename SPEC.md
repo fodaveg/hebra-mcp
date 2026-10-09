@@ -507,11 +507,16 @@ El dispositivo acumula tres secretos:
     tiene nombre o hay un ciclo. Lo que queda es la carpeta donde el fichero está o quedaría al
     restaurarlo (una viva y visible, o la raíz), que es la única que se enseña.
   - **(b) Por referencia**: oculto si lo enlaza alguna nota oculta, sea una viva (el filtro de
-    siempre) o una de la papelera que su filtro no deja ver. «Enlaza» es lo que el motor de Hebra
-    guarda en `links`: el nombre del fichero (`![[plano.pdf]]`, así se incrustan los dibujos) o el
-    SHA-256 de sus bytes (`![[sha256:…]]`, así adjuntan las notas importadas un fichero que
-    también es un recurso suelto). No mira la ruta del enlace, así que oculta de más con homónimos:
-    coste asumido en D10.
+    siempre) o una de la papelera que su filtro no deja ver. «Enlaza» es una de estas tres cosas,
+    todas de lo que guarda el motor de Hebra: un enlace de `links` con el nombre del fichero
+    (`![[plano.pdf]]`, así se incrustan los dibujos); un enlace de `links` con el SHA-256 de sus
+    bytes (`![[sha256:…]]`, así adjuntan las notas importadas un fichero que también es un
+    recurso suelto); o una fila de `note_blob_refs` con ese SHA-256. La tercera hace falta por las
+    notas **bloqueadas**: de ellas el motor no deriva enlaces (saldrían del texto cifrado) y
+    `links` queda vacía, pero sus adjuntos van en claro en la cabecera y constan en
+    `note_blob_refs`; sin ella, el adjunto de una nota bloqueada y oculta no ocultaba el fichero
+    suelto con esos mismos bytes (revisión de D10, 9 oct 2026). No mira la ruta del enlace, así
+    que oculta de más con homónimos: coste asumido en D10.
   - **Sin delatar nada**: `hebra_list_files` no da recuento, rellena la página solo con ficheros
     visibles y su `nextCursor` solo existe si detrás queda otro visible; el cursor lleva la clave
     de un fichero ya devuelto. `hebra_list_folders.count` sigue contando solo notas. Un fichero
