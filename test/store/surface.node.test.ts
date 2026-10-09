@@ -38,7 +38,39 @@ const FILE_ALLOWED = 'Trash\\b|Restore\\b';
 const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
 const FORBIDDEN = `notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
-const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
+
+/**
+ * Las formas de alcanzar un método por su nombre en el texto de una fuente:
+ * - la llamada `.nombre(` y la llamada opcional `.nombre?.(`;
+ * - el acceso por corchetes con una cadena, se llame o no detrás: `['nombre']`,
+ *   `["nombre"]` y con plantilla.
+ * Antes solo se miraba `.nombre(`, y `engine['filePurge'](id)` pasaba. Sigue siendo
+ * texto, no un análisis: un nombre montado a trozos o guardado en una variable no lo ve
+ * este patrón. Para eso está la otra comprobación, sobre los métodos que los objetos
+ * TIENEN.
+ */
+function reachPattern(names: string): RegExp {
+  return new RegExp(
+    `\\.\\s*(?:${names})\\s*(?:\\?\\.\\s*)?\\(|\\[\\s*['"\`](?:${names})['"\`]\\s*\\]`
+  );
+}
+
+/** Cómo quedaría en una fuente cada forma de alcanzar `name` sobre `engine`. */
+function reachForms(name: string): string[] {
+  return [
+    `engine.${name}(id)`,
+    `engine?.${name}(id)`,
+    `engine . ${name} (id)`,
+    `engine.${name}?.(id)`,
+    `engine['${name}'](id)`,
+    `engine["${name}"](id)`,
+    `engine[\`${name}\`](id)`,
+    `engine?.['${name}']?.(id)`,
+    `const call = engine[ '${name}' ];`
+  ];
+}
+
+const FORBIDDEN_CALL = reachPattern(FORBIDDEN);
 const FORBIDDEN_IMPORT =
   /from\s+['"]\$lib\/library\/(local-port|web-port|native-port|tag-rename|tags-reindex)['"]/;
 
@@ -91,7 +123,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'fileRestoreAll'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
-      expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(true);
+      for (const form of reachForms(name)) expect(FORBIDDEN_CALL.test(form), form).toBe(true);
     }
     for (const name of [
       'noteTrash',
@@ -104,7 +136,16 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'fileRestore'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(false);
-      expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(false);
+      for (const form of reachForms(name)) expect(FORBIDDEN_CALL.test(form), form).toBe(false);
+    }
+    // Lo que no es alcanzar un método no cuenta: una clave de objeto, un texto, un tipo.
+    for (const text of [
+      'filePurge: (id) => undefined,',
+      'ni `filePurge`, ni vaciar la papelera',
+      "throw new LibraryError('file_not_found')",
+      'const filePurge = 1;'
+    ]) {
+      expect(FORBIDDEN_CALL.test(text), text).toBe(false);
     }
   });
 
@@ -231,19 +272,26 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    */
   it('ficheros sueltos (D10): fileTrash y fileRestore solo en el turno del escritor, y ningún otro file* en src', async () => {
     const allowed = ['src/store/node-port.ts', 'src/store/writes.ts'];
+    // Con todas las formas de alcanzarlos (`reachPattern`), no solo `.nombre(`.
+    const otherFile = reachPattern(FORBIDDEN_FILE);
+    const engineLists = reachPattern(
+      'files(?:Page|List|TrashPage|FindByName|FindBySuffix)|trashEmpty|trashCounts'
+    );
+    const allowedFile = reachPattern('fileTrash|fileRestore');
+    for (const form of [...reachForms('fileTrash'), ...reachForms('fileRestore')]) {
+      expect(allowedFile.test(form), form).toBe(true);
+      expect(otherFile.test(form), form).toBe(false);
+    }
+    for (const form of reachForms('filesPage')) expect(engineLists.test(form), form).toBe(true);
     const files = allSourceFiles();
     expect(files.length).toBeGreaterThan(60);
     let callers = 0;
     for (const file of files) {
       const path = relative(root, file).split(sep).join('/');
       const text = readFileSync(file, 'utf8');
-      expect(new RegExp(`\\.\\s*(${FORBIDDEN_FILE})\\s*\\(`).exec(text)?.[0] ?? null, path).toBeNull();
-      expect(
-        /\.\s*(files(?:Page|List|TrashPage|FindByName|FindBySuffix)|trashEmpty|trashCounts)\s*\(/.exec(text)?.[0] ??
-          null,
-        path
-      ).toBeNull();
-      const calls = /\.\s*(fileTrash|fileRestore)\s*\(/.test(text);
+      expect(otherFile.exec(text)?.[0] ?? null, path).toBeNull();
+      expect(engineLists.exec(text)?.[0] ?? null, path).toBeNull();
+      const calls = allowedFile.test(text);
       if (calls) callers += 1;
       if (!allowed.includes(path)) expect(calls, path).toBe(false);
     }

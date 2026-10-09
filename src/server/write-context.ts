@@ -104,6 +104,14 @@ export interface SyncFields {
   syncError?: string;
 }
 
+/** Solo los campos de sync de un resultado, sin `syncError` cuando no lo hay: lo que una
+ *  herramienta copia a su salida (organización, carpetas, ficheros sueltos). */
+export function syncOf(outcome: SyncFields): SyncFields {
+  return outcome.syncError === undefined
+    ? { sync: outcome.sync }
+    : { sync: outcome.sync, syncError: outcome.syncError };
+}
+
 /** Lo que devuelve `hebra_edit_note`: el guardado y su estado de sync. */
 export type EditNoteOutcome = EditNoteSaved & SyncFields;
 

@@ -133,7 +133,7 @@ Reglas comunes:
 | `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
 | `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
 | `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
-| `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre (en minúsculas) y después por id; los de la papelera, el último en entrar primero | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
+| `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre (en minúsculas) y después por id; los de la papelera, el último en entrar primero y, a igual fecha, por id descendente (como el motor de Hebra y `hebra_list_trash`) | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
 | `hebra_trash_file` | `id` (fichero suelto visible, vivo o ya en la papelera) | `{id, trashed: true, sync, syncError?}`. Idempotente: uno que ya está en la papelera se queda como está, sin escribir. Reversible con `hebra_restore_file` o desde Hebra. Errores: `not_found` (oculto, inexistente o un id que no es de un fichero suelto, todos igual). |
 | `hebra_restore_file` | `id` (fichero suelto visible, de la papelera o vivo) | `{id, folderPath, sync, syncError?}`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente: uno vivo se queda como está, sin escribir. Errores: `not_found`, igual que `hebra_trash_file`. |
 | `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
@@ -162,7 +162,8 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
   los vivos, los primeros 200 caracteres de su nombre en minúsculas y su id; para la papelera, la
-  fecha en que entró y su id) y la página siguiente empieza en el primero que va después de esa
+  fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
+  con la misma fecha) y la página siguiente empieza en el primero que va después de esa
   clave. No exige que ese fichero siga en la lista: listar, mandar a la papelera el último de la
   página y pedir la siguiente funciona, que es el uso previsto. Un cursor de la lista de vivos no
   vale con `trashed: true`, ni al revés (`invalid_input`).
@@ -309,12 +310,13 @@ Detalle de las escrituras (D2):
     fuera visible, `not_found` en vez de enseñar una ruta privada, y si la configuración de
     privados ya no se pudiera aplicar (la ronda de después trajo el renombrado de una carpeta
     privada), `privacy_config_unresolved` en vez de una ruta sin filtrar. En los dos casos el
-    fichero ya está restaurado.
+    fichero ya está restaurado y la escritura ya está registrada en el log (§6.3).
   - **Sync**: la ronda de después sube la fila de `files` como cualquier otro registro del motor,
     y `hebra_status.pendingUpload` ya cuenta los ficheros sucios. No hay `expectedRevision` (un
     fichero no tiene revisión local): un cambio a la vez en otro dispositivo lo resuelve la tabla
     de conflictos del sync de Hebra.
-  - Logs: `file.organize` con el id (opaco), la acción y el estado de sync. Nunca el nombre.
+  - Logs: `file.organize` con el id (opaco), la acción y el estado de sync, emitido en cuanto el
+    escritor responde y antes de recalcular nada. Nunca el nombre.
 - **Versiones anteriores** (`hebra_list_versions`, `hebra_read_version`, `hebra_restore_version`;
   decisión 6 de D2): son las instantáneas **locales** del almacén de hebra-mcp (`note_versions` de
   Hebra: el cuerpo que sustituyó un guardado o un cambio bajado por el sync, una cada 5 minutos
@@ -527,6 +529,14 @@ El dispositivo acumula tres secretos:
   - Se comprueba en la herramienta y otra vez en el escritor, dentro del turno en que escribe.
     Restaurar deja el fichero en su carpeta si sigue viva o en la raíz: con la regla (a), lo que
     se ve nunca acaba en una carpeta privada.
+  - **La carrera de después de restaurar**: `hebra_restore_file` recalcula el filtro después de
+    escribir para dar la ruta, y entre medias la ronda de sync puede haber traído un cambio de
+    otro dispositivo. Si entonces el fichero ya no es visible, responde `not_found`; si la
+    configuración de privados ya no se puede aplicar, `privacy_config_unresolved`. Es la opción
+    cerrada: la respuesta es solo el código, sin ruta. La escritura no se deshace: el fichero
+    quedó restaurado y el log `file.organize` ya salió, porque se emite en cuanto el escritor
+    responde y no al final de la herramienta. Lo escrito consta siempre, aunque la respuesta sea
+    un error.
 - **Adjuntos** (decisión 7 de D2, 30 sep 2026): solo los de una nota visible (viva; oculta, en la
   papelera o inexistente, `not_found`), y solo los que ESA nota adjunta: un adjunto de una nota
   oculta pedido a través de otra nota que no lo adjunta, o un `attachmentId` que no es un SHA-256,

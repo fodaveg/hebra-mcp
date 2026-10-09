@@ -590,6 +590,65 @@ describe('ficheros sueltos por MCP', () => {
     }
   });
 
+  it('hebra_restore_file registra lo escrito aunque el filtro de después falle, y la respuesta no da ruta', async () => {
+    test = await buildTestContext();
+    const library = test.library;
+    const real = test.ctx.write!;
+    const writer = new NoteWriter(test.ctx.port as NodeLibraryPort);
+    // Lo que la ronda de después de escribir puede traer de otro dispositivo, hecho aquí
+    // por un escritor sin privados justo tras la escritura: una nota privada que incrusta
+    // el fichero (pasa a oculto) y el renombrado de la carpeta privada configurada (la
+    // configuración deja de poder aplicarse).
+    const cases: Array<{ id: string; code: string; afterWrite: () => Promise<unknown> }> = [
+      {
+        id: library.files.trashed,
+        code: 'not_found',
+        afterWrite: () =>
+          writer.createNote({
+            body: `# Privada\n\n![[${FILE_NAMES.trashed}]]\n`,
+            folderId: library.folders.diario2026,
+            privacy: NO_PRIVATE
+          })
+      },
+      {
+        id: library.files.trashedDeletedPublicFolder,
+        code: 'privacy_config_unresolved',
+        afterWrite: () =>
+          writer.renameFolderLocal({
+            id: library.folders.diario,
+            name: 'Renombrada',
+            privacy: NO_PRIVATE
+          })
+      }
+    ];
+    for (const { id, code, afterWrite } of cases) {
+      stderrSpy!.mockClear();
+      const ctx = await resolveToolContext(test.serverContext);
+      const write = {
+        ...real,
+        organizeFile: async (input: Parameters<typeof real.organizeFile>[0]) => {
+          const outcome = await real.organizeFile(input);
+          await afterWrite();
+          return outcome;
+        }
+      };
+      const error = await runRestoreFile({ ...ctx, write }, { id }).catch((caught: unknown) => caught);
+      expect(error, code).toBeInstanceOf(ToolError);
+      expect((error as ToolError).code).toBe(code);
+      // La respuesta es solo el código: ni ruta ni nada más.
+      expect((error as ToolError).extra).toBeUndefined();
+      // La escritura quedó hecha...
+      expect(rawFiles(test.sqlitePath).find((row) => row.id === id)?.trashedAt).toBeNull();
+      // ...y registrada.
+      expect(loggedLines().map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual({
+        event: 'file.organize',
+        id,
+        action: 'restoreFile',
+        sync: 'not_linked'
+      });
+    }
+  });
+
   it('los logs llevan el id, la acción y el estado de sync, nunca el nombre', async () => {
     await connect();
     const id = test!.library.files.inventario;
@@ -609,23 +668,23 @@ describe('ficheros sueltos por MCP', () => {
   });
 });
 
-describe('hebra_list_files con nombres desmedidos', () => {
-  it('un nombre larguísimo no rompe el cursor: la clave de orden se acota y el id desempata', async () => {
-    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-files-long-'));
+describe('hebra_list_files sobre una biblioteca propia', () => {
+  /**
+   * Una biblioteca montada con el motor de Hebra ANTES de abrir el puerto (hebra-mcp no
+   * crea ficheros ni borra carpetas) y un contexto sin privados sobre ella.
+   */
+  async function withOwnLibrary<T>(
+    build: (engine: SqliteLibraryEngine) => Promise<T>,
+    run: (ctx: ToolContext, built: T) => Promise<void>
+  ): Promise<void> {
+    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-files-own-'));
     const sqlitePath = join(dataDir, 'library.sqlite');
-    // El motor no pone tope al nombre de un fichero; con el nombre entero en el cursor,
-    // el de la primera página ya no cabría en los 2 048 caracteres de un cursor.
-    const long = 'ñ'.repeat(3_000);
-    const created: string[] = [];
+    let built: T;
     const { db, conn } = openNodeSqliteConn(sqlitePath);
     try {
-      const engine = await SqliteLibraryEngine.open(conn, 'test-fixture', {
-        blobs: new FsBlobStore(dataDir)
-      });
-      const blob = await engine.blobPut(new TextEncoder().encode('bytes'), { mime: 'text/plain' });
-      for (const suffix of ['-c.txt', '-a.txt', '-b.txt']) {
-        created.push((await engine.fileCreate(null, `${long}${suffix}`, blob.sha256)).id);
-      }
+      built = await build(
+        await SqliteLibraryEngine.open(conn, 'test-fixture', { blobs: new FsBlobStore(dataDir) })
+      );
     } finally {
       db.close();
     }
@@ -637,24 +696,87 @@ describe('hebra_list_files con nombres desmedidos', () => {
         privacyConfig: NO_PRIVATE,
         status: new UnlinkedStatusSource()
       };
-      const all = await runListFiles(ctx, {});
-      // Coinciden en los primeros 200 caracteres: entre ellos manda el id.
-      expect(all.files.map((file) => file.id)).toEqual([...created].sort());
-      const seen: string[] = [];
-      let cursor: string | undefined;
-      for (let page = 0; page < 10; page += 1) {
-        const result = await runListFiles(ctx, { limit: 1, ...(cursor ? { cursor } : {}) });
-        expect(result.files).toHaveLength(1);
-        seen.push(result.files[0]!.id);
-        if (result.nextCursor === null) break;
-        expect(result.nextCursor.length).toBeLessThan(2_048);
-        cursor = result.nextCursor;
-      }
-      expect(seen).toEqual(all.files.map((file) => file.id));
+      await run(ctx, built);
     } finally {
       port.close();
       await rm(dataDir, { recursive: true, force: true });
     }
+  }
+
+  /** Las páginas de una en una, hasta el final. */
+  async function oneByOne(
+    ctx: ToolContext,
+    input: { trashed?: boolean },
+    eachCursor: (cursor: string) => void = () => undefined
+  ): Promise<string[]> {
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 20; page += 1) {
+      const result = await runListFiles(ctx, { ...input, limit: 1, ...(cursor ? { cursor } : {}) });
+      expect(result.files).toHaveLength(1);
+      seen.push(result.files[0]!.id);
+      if (result.nextCursor === null) break;
+      eachCursor(result.nextCursor);
+      cursor = result.nextCursor;
+    }
+    return seen;
+  }
+
+  it('un nombre larguísimo no rompe el cursor: la clave de orden se acota y el id desempata', async () => {
+    // El motor no pone tope al nombre de un fichero; con el nombre entero en el cursor,
+    // el de la primera página ya no cabría en los 2 048 caracteres de un cursor.
+    const long = 'ñ'.repeat(3_000);
+    await withOwnLibrary(
+      async (engine) => {
+        const blob = await engine.blobPut(new TextEncoder().encode('bytes'), { mime: 'text/plain' });
+        const created: string[] = [];
+        for (const suffix of ['-c.txt', '-a.txt', '-b.txt']) {
+          created.push((await engine.fileCreate(null, `${long}${suffix}`, blob.sha256)).id);
+        }
+        return created;
+      },
+      async (ctx, created) => {
+        const all = await runListFiles(ctx, {});
+        // Coinciden en los primeros 200 caracteres: entre ellos manda el id.
+        expect(all.files.map((file) => file.id)).toEqual([...created].sort());
+        const seen = await oneByOne(ctx, {}, (cursor) => expect(cursor.length).toBeLessThan(2_048));
+        expect(seen).toEqual(all.files.map((file) => file.id));
+      }
+    );
+  });
+
+  it('en la papelera, a igual fecha desempata el id DESCENDENTE, como el motor y hebra_list_trash', async () => {
+    await withOwnLibrary(
+      async (engine) => {
+        const blob = await engine.blobPut(new TextEncoder().encode('bytes'), { mime: 'text/plain' });
+        // Borrar una carpeta manda a la papelera todos sus ficheros con la MISMA fecha.
+        const folder = await engine.folderCreate(null, 'Para borrar');
+        const together: string[] = [];
+        for (const name of ['uno.txt', 'dos.txt', 'tres.txt', 'cuatro.txt']) {
+          together.push((await engine.fileCreate(folder.id, name, blob.sha256)).id);
+        }
+        const apart = (await engine.fileCreate(null, 'aparte.txt', blob.sha256)).id;
+        await engine.folderTrash(folder.id);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await engine.fileTrash(apart);
+        // El orden del motor (`ORDER BY trashed_at DESC, id DESC`), leído de él.
+        const engineOrder = engine.filesTrashPage(null, 50).items.map((item) => item.id);
+        return { together, apart, engineOrder };
+      },
+      async (ctx, { together, apart, engineOrder }) => {
+        const listed = await runListFiles(ctx, { trashed: true });
+        const ids = listed.files.map((file) => file.id);
+        // Los cuatro de la carpeta comparten fecha: entre ellos, id descendente.
+        const dates = new Set(
+          listed.files.filter((file) => together.includes(file.id)).map((file) => file.trashedAt)
+        );
+        expect(dates.size).toBe(1);
+        expect(ids).toEqual([apart, ...[...together].sort().reverse()]);
+        expect(ids).toEqual(engineOrder);
+        // Y el cursor recorre ese mismo orden sin saltarse ni repetir ninguno.
+        expect(await oneByOne(ctx, { trashed: true })).toEqual(ids);
+      }
+    );
   });
 });
 

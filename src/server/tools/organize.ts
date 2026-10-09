@@ -34,7 +34,7 @@ import { TrashFilter } from '../../privacy/trash-filter';
 import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
-import type { OrganizeOutcome, SyncFields } from '../write-context';
+import { syncOf, type OrganizeOutcome, type SyncFields } from '../write-context';
 import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
@@ -44,12 +44,6 @@ export type NoteOrganizeOutput = {
   favorite: boolean;
   archived: boolean;
 } & SyncFields;
-
-function syncOf(outcome: SyncFields): SyncFields {
-  return outcome.syncError === undefined
-    ? { sync: outcome.sync }
-    : { sync: outcome.sync, syncError: outcome.syncError };
-}
 
 /** Viva y visible, o en la papelera y visible para el filtro de la papelera. */
 async function requireVisibleLiveOrTrashed(ctx: ToolContext, id: string): Promise<void> {

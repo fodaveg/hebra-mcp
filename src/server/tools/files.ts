@@ -24,7 +24,8 @@
  * menos otro VISIBLE. La salida nunca lleva el SHA-256 de los bytes ni la carpeta
  * guardada: solo la carpeta donde el fichero está o quedaría al restaurarlo.
  *
- * Logs (§6.4): `file.organize` con el id (opaco), la acción y el estado de sync. Nunca el
+ * Logs (§6.4): `file.organize` con el id (opaco), la acción y el estado de sync, en cuanto
+ * el escritor responde (también si la herramienta acaba después en error). Nunca el
  * nombre.
  */
 import { logEvent } from '../../log/logger';
@@ -34,7 +35,7 @@ import type { OrganizeFileAction } from '../../store/writes';
 import type { ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, sliceAfterKey, unwrapCursor, wrapCursor } from '../pagination';
-import type { FileOutcome, SyncFields } from '../write-context';
+import { syncOf, type FileOutcome, type SyncFields } from '../write-context';
 import { mapWriteError } from './write-errors';
 
 export interface ListedFile {
@@ -68,8 +69,10 @@ function nameKey(name: string): string {
 
 /**
  * Clave de orden de un fichero, que es también lo que lleva el cursor:
- * - vivos (`n`): los primeros caracteres del nombre en minúsculas y el id;
- * - papelera (`t`): la fecha en que entró (la más reciente primero) y el id.
+ * - vivos (`n`): los primeros caracteres del nombre en minúsculas y el id, ascendentes;
+ * - papelera (`t`): la fecha en que entró y el id, los dos descendentes (la más reciente
+ *   primero; `folderTrash` de Hebra manda varios con la MISMA fecha, y entre ellos manda
+ *   el id).
  * El primer elemento distingue las dos listas, para que un cursor de una no valga en la
  * otra.
  */
@@ -91,7 +94,9 @@ function compareSortKeys(left: FileSortKey, right: FileSortKey): number {
     return compareText(left[1], right[1]) || compareText(left[2], right[2]);
   }
   if (left[0] === 't' && right[0] === 't') {
-    return right[1] - left[1] || compareText(left[2], right[2]);
+    // Los dos términos en descendente, como el motor (`ORDER BY trashed_at DESC, id DESC`
+    // de `filesTrashPage`) y como `hebra_list_trash`.
+    return right[1] - left[1] || compareText(right[2], left[2]);
   }
   // Nunca se mezclan: una lista es de vivos o de la papelera.
   return compareText(left[0], right[0]);
@@ -192,26 +197,28 @@ export async function runListFiles(
   };
 }
 
-function syncOf(outcome: SyncFields): SyncFields {
-  return outcome.syncError === undefined
-    ? { sync: outcome.sync }
-    : { sync: outcome.sync, syncError: outcome.syncError };
-}
-
 /**
- * Paso 1 de la cabecera y la escritura. El filtro se construye siempre, sin atajos: un
- * id de un fichero visible, uno oculto y uno que no existe hacen las mismas consultas, y
- * los dos últimos salen por la misma línea.
+ * Paso 1 de la cabecera, la escritura y su log. El filtro se construye siempre, sin
+ * atajos: un id de un fichero visible, uno oculto y uno que no existe hacen las mismas
+ * consultas, y los dos últimos salen por la misma línea.
+ *
+ * `file.organize` se emite AQUÍ, en cuanto el escritor responde, y no al final de la
+ * herramienta: al restaurar todavía queda recalcular el filtro, que puede acabar en error
+ * (`privacy_config_unresolved` o `not_found`) con el fichero ya restaurado. Lo escrito
+ * queda registrado aunque la respuesta sea un error.
  */
 async function organizeFile(ctx: ToolContext, action: OrganizeFileAction): Promise<FileOutcome> {
   const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
   if (!filter.isVisible(action.id)) throw new ToolError('not_found');
   if (!ctx.write) throw new ToolError('invalid_input');
+  let outcome: FileOutcome;
   try {
-    return await ctx.write.organizeFile({ ...action, privacy: ctx.privacyConfig });
+    outcome = await ctx.write.organizeFile({ ...action, privacy: ctx.privacyConfig });
   } catch (error) {
     throw mapWriteError(error);
   }
+  logEvent({ event: 'file.organize', id: outcome.id, action: action.action, sync: outcome.sync });
+  return outcome;
 }
 
 export type FileTrashOutput = { id: string; trashed: true } & SyncFields;
@@ -224,7 +231,6 @@ export async function runTrashFile(
   input: { id: string }
 ): Promise<FileTrashOutput> {
   const outcome = await organizeFile(ctx, { action: 'trashFile', id: input.id });
-  logEvent({ event: 'file.organize', id: outcome.id, action: 'trashFile', sync: outcome.sync });
   return { id: outcome.id, trashed: true, ...syncOf(outcome) };
 }
 
@@ -234,7 +240,9 @@ export type FileRestoreOutput = { id: string; folderPath: string } & SyncFields;
  *  viva o a la raíz (como Hebra). Idempotente: uno vivo y visible se queda como está. La
  *  ruta de la salida sale de los filtros de DESPUÉS de escribir (paso 3 de la cabecera);
  *  si para entonces la configuración de privados no se pudiera aplicar, cerrado ante la
- *  duda: `privacy_config_unresolved` en vez de una ruta sin filtrar. */
+ *  duda: `privacy_config_unresolved` en vez de una ruta sin filtrar, y `not_found` si el
+ *  fichero pasó a oculto. En los dos casos la escritura ya está hecha y registrada
+ *  (`file.organize`, en `organizeFile`); la respuesta no da ruta. */
 export async function runRestoreFile(
   ctx: ToolContext,
   input: { id: string }
@@ -244,6 +252,5 @@ export async function runRestoreFile(
   if (after.unresolved) throw new ToolError('privacy_config_unresolved');
   const meta = (await FileFilter.build(ctx.port, after, ctx.privacyConfig)).visibleMeta(outcome.id);
   if (!meta) throw new ToolError('not_found');
-  logEvent({ event: 'file.organize', id: outcome.id, action: 'restoreFile', sync: outcome.sync });
   return { id: outcome.id, folderPath: after.folderPath(meta.folderId), ...syncOf(outcome) };
 }

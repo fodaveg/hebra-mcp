@@ -28,17 +28,11 @@ import { PrivacyFilter } from '../../privacy/filter';
 import { planCreateFolder, planRenameFolder } from '../../store/folders';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
-import type { FolderOutcome, SyncFields } from '../write-context';
+import { syncOf, type FolderOutcome, type SyncFields } from '../write-context';
 import { mapWriteError } from './write-errors';
 
 export type CreateFolderOutput = { id: string; path: string; created: boolean } & SyncFields;
 export type RenameFolderOutput = { id: string; path: string; renamed: boolean } & SyncFields;
-
-function syncOf(outcome: SyncFields): SyncFields {
-  return outcome.syncError === undefined
-    ? { sync: outcome.sync }
-    : { sync: outcome.sync, syncError: outcome.syncError };
-}
 
 /** La ruta de la carpeta con el filtro de DESPUÉS de escribir (paso 3 de la cabecera). */
 async function visiblePathAfter(ctx: ToolContext, id: string): Promise<string> {
