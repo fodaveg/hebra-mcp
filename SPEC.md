@@ -8,13 +8,14 @@ Hechos de Hebra medidos en `~/code/hebra` en `cf883cb9` (26 sep 2026), solo lect
 Dar a Claude (Claude Code y Claude Desktop) acceso a la biblioteca de notas de Hebra mediante un
 servidor MCP que **lee** la biblioteca y **crea, edita y organiza** contenido sin riesgo de perder
 texto (D2, ampliada el 28 sep 2026 y, con la papelera y las versiones anteriores, el 30 sep 2026;
-D9, crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026).
+D9, crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026; D10, listar los ficheros sueltos
+y mandarlos a la papelera, el 9 oct 2026).
 
 ## 2. Aceptación de v1
 
 1. David vincula `hebra-mcp` a su biblioteca desde el flujo de aprobación de Hebra
    (Ajustes > Sincronización) y el proceso descarga la biblioteca completa.
-2. Desde Claude Code, las veinticuatro herramientas de §5 responden con el esquema de §5.
+2. Desde Claude Code, las veintisiete herramientas de §5 responden con el esquema de §5.
 3. Una nota creada o ampliada desde Claude aparece en Hebra (Mac e iPhone) tras un ciclo de sync.
 4. Si Claude añade texto a una nota que David está editando a la vez, aparece una copia de
    conflicto visible en Hebra y ningún texto se pierde.
@@ -25,12 +26,12 @@ D9, crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026).
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep–3 oct 2026, cerradas)
+## 3. Decisiones de David (26 sep–9 oct 2026, cerradas)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
 | D1 | **Dispositivo propio**: proceso Node que se vincula a la biblioteca como un dispositivo más por el flujo de aprobación, con su propia SQLite y el MISMO motor de sync de Hebra. Transporte MCP: **stdio** primero; conector remoto más adelante (D6). | El sync va cifrado de punta a punta: el relé de `app.lumbre.pro` no puede leer notas. Descartados: leer la SQLite del contenedor del Mac y un MCP en el servidor de Lumbre (este último, revocado por D6). |
-| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Ampliada el 28 sep 2026** («me parecen ok tus decisiones del mcp. adelante con ellas»): 1) el MCP puede modificar notas existentes; 2) por **sustituciones puntuales** `{find, replace}` sobre la revisión leída, nunca reescribiendo el cuerpo entero (renombrar = editar el H1); 3) primer lote = edición + organización (mover nota, favorita, archivar/desarchivar; las carpetas, ver 5); papelera y versiones entraron el 30 sep (ver 6), y los adjuntos, en solo lectura, también (ver 7), y **nunca** purga nada irreversible; 4) nunca mueve una nota a una carpeta privada ni le pone una etiqueta privada, por ninguna vía: se rechaza sin escribir y con el mismo error que un destino inexistente; 5) **opción A** (28 sep 2026): crear, renombrar y mover carpetas quedan **fuera** del MCP, porque sus errores revelarían carpetas privadas (`folder_name_taken` delataba una hermana privada; renombrar o mover una carpeta con una privada dentro respondía distinto); las carpetas se crean desde la app Hebra, y el MCP solo mueve notas a carpetas que ya existen (**sustituido en parte por D9**, 3 oct 2026: crear y renombrar carpetas visibles sí, con un error único decidido desde la configuración; mover y borrar carpetas siguen fuera); 6) **papelera y versiones** (30 sep 2026, «acepto tus recomendaciones»): el MCP manda una nota visible a la papelera, la saca y lista la papelera, pero **nunca** purga, vacía la papelera ni borra nada de forma irreversible; en la papelera rige el mismo filtro (una nota de carpeta privada o subcarpeta, también si la carpeta ya se borró, o con etiqueta privada o descendiente no aparece, y mandarla o sacarla responde `not_found`, igual que una inexistente), y restaurar nunca deja una nota en una carpeta que el cliente no ve. Lista y lee las versiones anteriores de una nota visible, y restaurar una versión es una **edición nueva** con el mismo control de concurrencia que `hebra_edit_note` (revisión leída; choque = copia de conflicto visible); una versión cuyo cuerpo lleva una etiqueta privada no se devuelve ni se restaura (misma respuesta que una inexistente, regla 4). Las demás herramientas siguen sin devolver notas de la papelera; 7) **adjuntos en solo lectura** (30 sep 2026, tercer lote de D2; **sustituido en parte por D9**, 3 oct 2026: añadir un adjunto a una nota visible sí; borrar y cambiar adjuntos siguen fuera): el MCP lista y lee los adjuntos de una nota visible y **nunca** añade, borra ni modifica ninguno; una nota oculta o un adjunto de una nota oculta responde `not_found`, igual que uno inexistente; como mucho **5 MiB** descifrados por adjunto (si no, `attachment_too_large` con el tamaño, sin bajar más de lo necesario cuando el tamaño se sabe antes); solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON, decidido por el contenido y el descriptor del motor, no solo por la extensión (si no, `attachment_type_not_allowed`); las imágenes salen como contenido `image`, el texto como texto y el PDF como recurso embebido, nunca con rutas locales, URLs de blob ni URLs permanentes. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra) y ya permitía editar (`noteSave` con `expectedLocalSeq`/`baseBodySha256`). |
+| D2 | **v1 = leer y crear**: listar, buscar (FTS), leer notas, etiquetas, carpetas, enlaces y backlinks; crear nota nueva y añadir texto al final de una existente. **Ampliada el 28 sep 2026** («me parecen ok tus decisiones del mcp. adelante con ellas»): 1) el MCP puede modificar notas existentes; 2) por **sustituciones puntuales** `{find, replace}` sobre la revisión leída, nunca reescribiendo el cuerpo entero (renombrar = editar el H1); 3) primer lote = edición + organización (mover nota, favorita, archivar/desarchivar; las carpetas, ver 5); papelera y versiones entraron el 30 sep (ver 6), y los adjuntos, en solo lectura, también (ver 7), y **nunca** purga nada irreversible; 4) nunca mueve una nota a una carpeta privada ni le pone una etiqueta privada, por ninguna vía: se rechaza sin escribir y con el mismo error que un destino inexistente; 5) **opción A** (28 sep 2026): crear, renombrar y mover carpetas quedan **fuera** del MCP, porque sus errores revelarían carpetas privadas (`folder_name_taken` delataba una hermana privada; renombrar o mover una carpeta con una privada dentro respondía distinto); las carpetas se crean desde la app Hebra, y el MCP solo mueve notas a carpetas que ya existen (**sustituido en parte por D9**, 3 oct 2026: crear y renombrar carpetas visibles sí, con un error único decidido desde la configuración; mover y borrar carpetas siguen fuera); 6) **papelera y versiones** (30 sep 2026, «acepto tus recomendaciones»; **ampliada por D10**, 9 oct 2026: también los ficheros sueltos van a la papelera y salen de ella, con su propia regla de privacidad): el MCP manda una nota visible a la papelera, la saca y lista la papelera, pero **nunca** purga, vacía la papelera ni borra nada de forma irreversible; en la papelera rige el mismo filtro (una nota de carpeta privada o subcarpeta, también si la carpeta ya se borró, o con etiqueta privada o descendiente no aparece, y mandarla o sacarla responde `not_found`, igual que una inexistente), y restaurar nunca deja una nota en una carpeta que el cliente no ve. Lista y lee las versiones anteriores de una nota visible, y restaurar una versión es una **edición nueva** con el mismo control de concurrencia que `hebra_edit_note` (revisión leída; choque = copia de conflicto visible); una versión cuyo cuerpo lleva una etiqueta privada no se devuelve ni se restaura (misma respuesta que una inexistente, regla 4). Las demás herramientas siguen sin devolver notas de la papelera; 7) **adjuntos en solo lectura** (30 sep 2026, tercer lote de D2; **sustituido en parte por D9**, 3 oct 2026: añadir un adjunto a una nota visible sí; borrar y cambiar adjuntos siguen fuera): el MCP lista y lee los adjuntos de una nota visible y **nunca** añade, borra ni modifica ninguno; una nota oculta o un adjunto de una nota oculta responde `not_found`, igual que uno inexistente; como mucho **5 MiB** descifrados por adjunto (si no, `attachment_too_large` con el tamaño, sin bajar más de lo necesario cuando el tamaño se sabe antes); solo PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON, decidido por el contenido y el descriptor del motor, no solo por la extensión (si no, `attachment_type_not_allowed`); las imágenes salen como contenido `image`, el texto como texto y el PDF como recurso embebido, nunca con rutas locales, URLs de blob ni URLs permanentes. Un choque con una edición produce una copia de conflicto visible, como en Bear. | El motor ya hace la copia de conflicto (§7 de la spec de Hebra) y ya permitía editar (`noteSave` con `expectedLocalSeq`/`baseBodySha256`). |
 | D3 | **Ve toda la biblioteca salvo** carpetas o etiquetas marcadas como privadas en la configuración del MCP. El filtro vive en el MCP y se aplica antes de devolver nada a la IA. | |
 | D4 | **Cuándo** (revisada el 26 sep 2026): **BEAR-22 queda cerrada** por decisión de David (la biblioteca actual es de prueba y la va a reimportar desde Obsidian). Se hacen **todos los lotes ya**, en orden L0 → L1 → L2 (en cuanto Lumbre despliegue L2a) → L3 → L4. Objetivo: que David use Hebra en serio con el MCP cuanto antes. | La versión anterior esperaba a BEAR-22 para todo lo que cambiara el sync o el vínculo en Hebra. |
 | D5 | **Repo**: hebra-mcp es público y consume Hebra (privado, sin licencia) por submódulo fijado a un SHA, sin versionar código de Hebra. | Descartados: hacer hebra-mcp privado y publicar el núcleo de Hebra con licencia. |
@@ -38,12 +39,13 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D7 | **Autenticación del conector remoto** (revisada el 28 sep 2026): conservar el OAuth público de Hebra MCP y usar login y consentimiento de Lumbre para aprobar la biblioteca ya emparejada. | Sustituye la decisión del 26 sep de usar un secreto del dueño. El login no entrega la clave de biblioteca ni reasocia otra biblioteca. |
 | D8 | **Mejoras de paginación y adjuntos** (2 oct 2026): 1) caché de introspección de 30 s (por familia de token); 2) paginación de versiones (limit 1-200, def. 50) y adjuntos (limit 1-200 opcional); 3) lectura de adjuntos de texto por tramos (offset, maxChars 1–100 000, def. 100 000, con totalChars, truncated y nextOffset). Riesgo aceptado: la ventana de 30 s vale para toda revocación hecha en Lumbre (concesión, biblioteca o dispositivo Blob V2), y con Lumbre caído una entrada vigente sigue dando acceso hasta 30 s. El refresh nunca usa la caché. | Medidas de escala y usabilidad. |
 | D9 | **Carpetas y adjuntos** (3 oct 2026, «te autorizo a hacer todo lo que te pida hebra», a petición de la sesión de Hebra, que necesita replicar la estructura de carpetas de Obsidian y subir capturas PNG de audits). Sustituye en parte los puntos 5 y 7 de D2: 1) el MCP **crea y renombra carpetas** visibles (`hebra_create_folder`, `hebra_rename_folder`); **mover y borrar carpetas siguen fuera**; 2) la privacidad de una carpeta se decide **con la configuración, antes de mirar el motor**: una ruta resultante que es una carpeta privada configurada (o queda debajo de una), renombrar una carpeta que tiene una privada configurada debajo, o cualquier choque de nombre con algo no visible responden el mismo `folder_unavailable`, exista o no esa carpeta; `folder_name_taken` solo sale con una hermana VISIBLE; crear es idempotente (una visible con ese nombre bajo ese padre se devuelve con `created: false`) y renombrar al nombre que ya tiene no escribe; 3) el MCP **añade un adjunto** a una nota visible (`hebra_add_attachment`), con los MISMOS tipos y el mismo tope de 5 MiB que la lectura (decisión 7), guardado con `blobPut` del motor y referenciado al final del cuerpo como `![[sha256:H\|nombre]]` por la vía de `hebra_append_to_note` (copia de conflicto si choca) con la idempotencia de `hebra_edit_note` (`operationId`); sube al relé con la ronda de sync (Blob V2), así que nunca queda un blob sin una nota que lo referencie; **borrar y cambiar adjuntos siguen fuera**. | La opción A sacaba las carpetas del MCP porque sus errores revelaban carpetas privadas; con un error único decidido desde la configuración ya no las revelan. |
+| D10 | **Ficheros sueltos** (9 oct 2026, «adelante con las tres»; antes, por la sesión de Hebra de Fedora, que necesitaba mandar ficheros sueltos a la papelera: «pidele a la sesión en el mac de hebra-mcp que lo haga»). Amplía la decisión 6 de D2 a los ficheros sueltos de la biblioteca (la tabla `files` de Hebra: un `.base`, un PDF que no cuelga de una nota): 1) el MCP **lista** los ficheros sueltos (`hebra_list_files`), **manda uno a la papelera** (`hebra_trash_file`) y **lo saca** (`hebra_restore_file`); 2) **nunca purga** un fichero ni lo borra de forma irreversible, y **leer su contenido, crearlo, renombrarlo, moverlo o reemplazarlo siguen fuera**; 3) privacidad (decisión técnica del orquestador, que aplica a los ficheros las reglas 4 y 6 de D2 y cierra ante la duda): un fichero está oculto **(a)** si su carpeta es privada o subcarpeta, también si la carpeta ya se borró (se sube por las lápidas como en la papelera de notas), o **(b)** si lo enlaza alguna nota oculta, viva o de la papelera, por su nombre o por el SHA-256 de sus bytes; la regla es la misma para los vivos y para los de la papelera, se aplica en la herramienta y otra vez en el escritor, y un fichero oculto responde `not_found`, igual que uno inexistente; restaurar nunca deja un fichero en una carpeta que el cliente no ve; 4) sin `operationId`: mandar y sacar son idempotentes por estado, como `hebra_trash_note`. | Los ficheros sueltos estaban fuera de v1 (§10, «Después de v1»). Coste asumido de la regla (b): oculta de más con homónimos (un fichero visible que se llama igual que otro enlazado desde una nota oculta tampoco sale). |
 
 ## 4. Arquitectura
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 24 herramientas + filtro de privados
+                                        ├─ servidor MCP: 27 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -106,6 +108,9 @@ Lo que **no** sirve tal cual y resuelve hebra-mcp sin tocar Hebra:
 Reglas comunes:
 - Las notas en la papelera nunca se devuelven, salvo por las herramientas de la papelera
   (`hebra_list_trash`, `hebra_trash_note`, `hebra_restore_note`), con su propio filtro (§6.3).
+- Los ficheros sueltos (D10) solo salen por sus tres herramientas (`hebra_list_files`,
+  `hebra_trash_file`, `hebra_restore_file`), con su propio filtro (§6.3). Ninguna devuelve su
+  contenido, su SHA-256 ni un recuento.
 - `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` (el id de la nota original) solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
 - Toda salida pasa por el filtro de privados (§6.3).
 - Los identificadores son los `id` de nota del almacén.
@@ -128,6 +133,9 @@ Reglas comunes:
 | `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
 | `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
 | `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
+| `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre (en minúsculas) y después por id; los de la papelera, el último en entrar primero | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
+| `hebra_trash_file` | `id` (fichero suelto visible, vivo o ya en la papelera) | `{id, trashed: true, sync, syncError?}`. Idempotente: uno que ya está en la papelera se queda como está, sin escribir. Reversible con `hebra_restore_file` o desde Hebra. Errores: `not_found` (oculto, inexistente o un id que no es de un fichero suelto, todos igual). |
+| `hebra_restore_file` | `id` (fichero suelto visible, de la papelera o vivo) | `{id, folderPath, sync, syncError?}`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente: uno vivo se queda como está, sin escribir. Errores: `not_found`, igual que `hebra_trash_file`. |
 | `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
 | `hebra_read_version` | `id`, `versionId` | `{id, versionId, createdAt, byteLength, body}`. |
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` (≤ 200) | igual que `hebra_edit_note`, con los mismos errores salvo los de las sustituciones. |
@@ -138,24 +146,31 @@ Reglas comunes:
 | `hebra_add_attachment` | `id`, `name` (1–255 caracteres tras recortar; sin `\|`, `[`, `]`, `\`, `#`, saltos de línea, caracteres de control ni de formato invisibles, Cf), `dataBase64` (base64 estándar; se ignoran espacios y saltos de línea), `mimeType?` (decide entre los tipos de texto, como en la lectura), `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", attachmentId, markdown, revision?, copyId?, replayed?, sync, syncError?}`. `attachmentId`: el SHA-256 de los bytes; `markdown`: la referencia añadida, `![[sha256:<attachmentId>\|<name>]]`. Errores: `not_found`, `note_locked`, `attachment_too_large` (`byteLength`, `maxBytes`), `attachment_type_not_allowed` (`mimeType?`), `operation_id_reused`, `invalid_input`. |
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
 
-Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9):
-- Las 24 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`.
-- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`).
+Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9; 9 oct 2026, D10):
+- Las 27 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`.
+- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`).
 - **Escritura con consecuencias** (`destructiveHint: false`, `idempotentHint: false`): `hebra_create_note` y `hebra_append_to_note` (las escrituras iniciales, no idempotentes sin `operationId`).
 - Todas `openWorldHint: false`.
 
 Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
 - **Paginación común** (`src/server/pagination.ts`): `hebra_search`, `hebra_list_notes`, `hebra_links`,
-  `hebra_list_tags`, `hebra_list_folders`, `hebra_list_trash`, `hebra_list_versions` y `hebra_list_attachments` aceptan `limit` y `cursor` y devuelven `nextCursor`, que es
-  `null` al final. Los valores por defecto son búsqueda 20, notas 50, papelera 50, versiones 50, adjuntos todo si no hay `limit`; etiquetas, carpetas y
+  `hebra_list_tags`, `hebra_list_folders`, `hebra_list_trash`, `hebra_list_files`, `hebra_list_versions` y `hebra_list_attachments` aceptan `limit` y `cursor` y devuelven `nextCursor`, que es
+  `null` al final. Los valores por defecto son búsqueda 20, notas 50, papelera 50, ficheros sueltos 50, versiones 50, adjuntos todo si no hay `limit`; etiquetas, carpetas y
   enlaces, todo si no hay `limit`. El cursor es opaco y lleva un prefijo por herramienta: el de una
   no vale en otra (`invalid_input`). En las listas de notas es la clave del último resultado
   devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento; en versiones, el id de la última versión devuelta, y en adjuntos, su `attachmentId`. Si ese elemento ya no está, el cursor da `invalid_input`.
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
+- **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
+  los vivos, los primeros 200 caracteres de su nombre en minúsculas y su id; para la papelera, la
+  fecha en que entró y su id) y la página siguiente empieza en el primero que va después de esa
+  clave. No exige que ese fichero siga en la lista: listar, mandar a la papelera el último de la
+  página y pedir la siguiente funciona, que es el uso previsto. Un cursor de la lista de vivos no
+  vale con `trashed: true`, ni al revés (`invalid_input`).
 - **Las ocultas no se notan** (§6.3): una página se rellena hasta `limit` solo con notas visibles;
   `nextCursor` existe solo si hay otra nota VISIBLE detrás (se mira una por delante), así que ni el
   tamaño de la página ni la presencia del cursor dependen de cuántas notas privadas hay ni de dónde
-  están. El cursor lleva la clave de una nota ya devuelta, nunca la de una oculta.
+  están. El cursor lleva la clave de una nota ya devuelta, nunca la de una oculta. Lo mismo vale
+  para los ficheros sueltos de `hebra_list_files`.
 - **`hebra_links`**: `limit` vale para `outgoing` y para `backlinks` a la vez y hay UN `cursor` para las
   dos listas; `nextCursor` existe si a alguna le queda algo, y la que ya terminó sale vacía en las
   páginas siguientes.
@@ -166,12 +181,13 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listVersions`, `listAttachments`), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000); `notAllowed` lista lo que no hace (purgar o vaciar la
-  papelera, mover o borrar carpetas, y cambiar o borrar adjuntos);
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listVersions`, `listAttachments`), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000); `notAllowed` lista lo que no hace (purgar o vaciar la
+  papelera, mover o borrar carpetas, cambiar o borrar adjuntos, y purgar, crear, renombrar, mover,
+  reemplazar o leer el contenido de un fichero suelto, D10);
   `privacyConfigured` es solo un booleano: ni nombres de carpetas o etiquetas privadas ni contenido.
 
 Detalle de las escrituras (D2):
-- **Escrituras que no escriben nada** (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota ya tiene) no piden ni esperan ronda de sync, y responden `sync` según la fila: `not_linked` sin sync; `uploaded` si la nota no está sucia; `pending` si lo está (la sube la siguiente ronda periódica). Organizar a un estado que la nota ya tiene no la marca sucia ni sube su `local_seq`.
+- **Escrituras que no escriben nada** (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota ya tiene, mandar a la papelera un fichero suelto que ya está en ella o sacar uno que ya está vivo) no piden ni esperan ronda de sync, y responden `sync` según la fila: `not_linked` sin sync; `uploaded` si la nota no está sucia; `pending` si lo está (la sube la siguiente ronda periódica). Organizar a un estado que la nota ya tiene no la marca sucia ni sube su `local_seq`, y lo mismo un fichero suelto.
 - `hebra_create_note` usa `noteCreate(folderId)` y después `noteSave` con los derivados de
   `deriveNote(body)` (`types.ts:445-447`, `NoteSaveInput` en `types.ts:104`). El cuerpo tiene un
   límite de 100 000 caracteres.
@@ -251,16 +267,16 @@ Detalle de las escrituras (D2):
   `privacy_config_unresolved` va antes que todo, como en las demás escrituras: si fuera al revés, una
   configuración rota delataría qué rutas tiene configuradas.
 - **Privacidad de las escrituras** (decisión 4): toda escritura (crear, añadir, editar, organizar,
-  papelera, restaurar una versión, crear y renombrar carpetas y añadir un adjunto) lleva la configuración de privados de quien la pide (también
+  papelera, restaurar una versión, crear y renombrar carpetas, añadir un adjunto y mandar a la papelera o sacar un fichero suelto) lleva la configuración de privados de quien la pide (también
   la del lector por `writer.sock`, que la exige) y el escritor la aplica dentro del turno en que
   escribe y sobre el resultado: origen visible, destino visible, cuerpo resultante sin etiquetas
   privadas ni descendientes. Lo que no, `not_found`, igual que una nota o carpeta inexistente
   (§6.3 «Escrituras»): una nota con etiqueta privada ya no se crea ni se amplía (antes,
   `hidden: true`).
-- **Estado de sync** (edición, organización, papelera, restaurar una versión, carpetas y añadir un
-  adjunto): se espera la
+- **Estado de sync** (edición, organización, papelera, restaurar una versión, carpetas, añadir un
+  adjunto y ficheros sueltos): se espera la
   ronda como mucho 10 s y `sync` dice `uploaded` (ronda `ok` y fila ya limpia; en un adjunto,
-  además, el blob ya subido), `pending` (guardado; sin ronda a tiempo o aún sucio),
+  además, el blob ya subido; en un fichero suelto, su fila de `files`), `pending` (guardado; sin ronda a tiempo o aún sucio),
   `error` (ronda con otro código: `syncError`, p. ej. `offline`, `revoked`) o `not_linked` (sin
   emparejar). Una copia de conflicto de la ronda para esa nota da `conflict_copy` con `copyId`, sin
   reintento automático.
@@ -272,6 +288,30 @@ Detalle de las escrituras (D2):
   lápida, igual que en Hebra). La lista sale de `notesPage({kind: 'trash'})`; se rellena hasta
   `limit` con notas visibles y mira una de más para que `nextCursor` no delate una cola de notas
   ocultas.
+- **Ficheros sueltos** (`hebra_list_files`, `hebra_trash_file`, `hebra_restore_file`; D10, 9 oct
+  2026): los recursos de la tabla `files` de Hebra, que tienen carpeta propia y no cuelgan de una
+  nota (un `.base`, un PDF suelto). Leer su contenido, crearlos, renombrarlos, moverlos,
+  reemplazarlos y purgarlos siguen fuera: no hay herramienta, ni el socket acepta esas acciones.
+  - **Lista**: sale de un índice propio en SQL (`filesIndex` del puerto: los ficheros que no son
+    lápida, con el tamaño y el tipo de su fila de `blobs` si la hay, y qué notas los enlazan), no de
+    `filesPage` ni `filesFindByName` del motor, cuyo aviso de que quedan más delataría una cola de
+    ficheros ocultos. Se filtra y se ordena en memoria, y se pagina con el cursor de clave de orden
+    de arriba. `folder` privado o inexistente da lista vacía en los dos casos, como en
+    `hebra_list_notes`.
+  - **Mandar y sacar**: `fileTrash`/`fileRestore` del motor, en un turno de la cola del escritor
+    único (op `organizeFile` de `writer.sock`, acciones `trashFile`/`restoreFile`), con la
+    configuración de privados de quien pide y el filtro rehecho dentro del turno. Son idempotentes
+    por estado y no llevan `operationId`: uno que ya está en el estado pedido se devuelve tal cual,
+    sin llamar al motor (que subiría su `local_seq` y lo dejaría sucio sin nada nuevo que subir) y
+    sin ronda. El motor no toca el nombre, la fecha de modificación ni la carpeta del fichero.
+  - **Restaurar**: a su carpeta si sigue viva y, si se borró, a la raíz, como las notas. La ruta de
+    la salida sale de un filtro recalculado después de escribir; si para entonces el fichero no
+    fuera visible, `not_found` en vez de enseñar una ruta privada.
+  - **Sync**: la ronda de después sube la fila de `files` como cualquier otro registro del motor,
+    y `hebra_status.pendingUpload` ya cuenta los ficheros sucios. No hay `expectedRevision` (un
+    fichero no tiene revisión local): un cambio a la vez en otro dispositivo lo resuelve la tabla
+    de conflictos del sync de Hebra.
+  - Logs: `file.organize` con el id (opaco), la acción y el estado de sync. Nunca el nombre.
 - **Versiones anteriores** (`hebra_list_versions`, `hebra_read_version`, `hebra_restore_version`;
   decisión 6 de D2): son las instantáneas **locales** del almacén de hebra-mcp (`note_versions` de
   Hebra: el cuerpo que sustituyó un guardado o un cambio bajado por el sync, una cada 5 minutos
@@ -330,7 +370,9 @@ Detalle de las escrituras (D2):
   - **Qué es un adjunto**: lo que la nota adjunta con `![[sha256:H|nombre]]` (`note_blob_refs` de
     Hebra, en el orden del cuerpo). Así quedan también los de Obsidian: el importador de Hebra
     reescribe sus enlaces a `sha256:` (`library/import.ts`). Los recursos sueltos (`files`,
-    `![[plano.pdf]]` por nombre, con carpeta propia) no entran en este lote.
+    `![[plano.pdf]]` por nombre, con carpeta propia) no son adjuntos y estas dos herramientas no
+    los devuelven. Desde D10 (9 oct 2026) tienen las suyas, que los listan y los mandan a la
+    papelera; su contenido sigue sin leerse.
   - **Bytes**: si no están en el disco, los baja el **escritor** con `readBlob` del motor de sync
     (Blob V2: `getObject` del relé, descifrado, SHA-256 verificado y `blobPut` en su almacén de
     adjuntos, la única caché). Un lector se lo pide por `writer.sock` (op `fetchAttachment`,
@@ -351,12 +393,15 @@ Detalle de las escrituras (D2):
   - Una nota bloqueada da `note_locked` (sus adjuntos van cifrados con ella).
   - **Lectura de adjuntos de texto por tramos** (decisión 2b, 2 oct 2026): para texto plano, Markdown, CSV y JSON, `hebra_read_attachment` acepta `offset?` (carácter por el que empezar, def. 0) y `maxChars?` (1–100 000, def. 100 000). La respuesta lleva `totalChars`, `truncated` y `nextOffset` (`null` al final). Para leer el resto, repetir con `offset = nextOffset`. Imágenes y PDF no cambian: siempre íntegros, aunque `offset` y `maxChars` se validan igual (fuera de rango, `invalid_input`).
 - No se exponen `notePurge`, `trashEmpty`, `trashCounts` (contaría las privadas),
-  `noteVersionsPurgeExpired`, `folderMove`, `folderTrash`, `file*` ni `tagRename`: el servidor ni
+  `noteVersionsPurgeExpired`, `folderMove`, `folderTrash`, `tagRename` ni ningún `file*` del motor
+  salvo los dos de D10 (`filePurge`, `fileCreate`, `fileRename`, `fileMove` y `fileReplace` siguen
+  fuera, y también `filesPage` y las búsquedas de ficheros del motor): el servidor ni
   siquiera las importa en su capa de herramientas (`test/store/surface.node.test.ts`).
   `folderCreate`, `folderRename` y `blobPut` (D9) solo están en el turno de escritura del almacén
   (`NodeLibraryPort.writeExclusive`) y solo los llama `NoteWriter` (`src/store/writes.ts`); `blobPut`
-  está además en la vista de sync, para que el motor guarde lo que baja. Ni el puerto de las
-  herramientas ni la instancia los tienen.
+  está además en la vista de sync, para que el motor guarde lo que baja. `fileTrash` y
+  `fileRestore` (D10) están igual: solo en el turno de escritura y solo para `NoteWriter`. Ni el
+  puerto de las herramientas ni la instancia tienen ninguno.
 - Los nombres exactos de los métodos del almacén para búsqueda, etiquetas y enlaces se fijan en L0
   leyendo `sqlite-engine.ts` y `graph-store.ts` en el SHA fijado.
 
@@ -419,8 +464,8 @@ El dispositivo acumula tres secretos:
     etiquetas privadas o solo presentes en notas ocultas tampoco.
   - `outgoing` de `hebra_links`: un enlace a una nota oculta sale como `ref` sin resolver.
   - `backlinks`: omiten las notas ocultas.
-- **Escrituras** (crear, añadir, editar, organizar, papelera, restaurar una versión, carpetas y
-  adjuntos): no pueden
+- **Escrituras** (crear, añadir, editar, organizar, papelera, restaurar una versión, carpetas,
+  adjuntos y ficheros sueltos): no pueden
   apuntar a una carpeta privada ni a una nota oculta, ni dejar una nota en una carpeta privada o con una etiqueta privada (o
   descendiente); responden `not_found` sin escribir, igual que un destino inexistente (decisión 4 de
   David, 28 sep 2026). Se comprueba en la herramienta y otra vez en el escritor, dentro del turno en
@@ -449,11 +494,37 @@ El dispositivo acumula tres secretos:
   `not_found`, igual que una inexistente. Restaurar deja la nota en su carpeta si sigue viva o en
   la raíz: con esta regla, lo que se ve en la papelera nunca acaba en una carpeta privada al
   restaurarlo. Se comprueba en la herramienta y otra vez en el escritor, dentro del turno.
+- **Ficheros sueltos** (D10, 9 oct 2026; `src/privacy/file-filter.ts`): un fichero no tiene
+  etiquetas, así que se oculta por su carpeta y por las notas que lo enlazan. La regla es la misma
+  para los vivos y para los de la papelera:
+  - **(a) Por carpeta**: se parte de la carpeta guardada en el fichero y se aplica la regla de la
+    papelera de notas. Si esa carpeta está viva y es privada (o subcarpeta), oculto. Si ya se borró,
+    se sube por las lápidas hasta una carpeta viva o la raíz: oculto si esa carpeta viva es privada
+    o si alguna ruta intermedia es una ruta privada configurada, y también si falta una fila, no
+    tiene nombre o hay un ciclo. Lo que queda es la carpeta donde el fichero está o quedaría al
+    restaurarlo (una viva y visible, o la raíz), que es la única que se enseña.
+  - **(b) Por referencia**: oculto si lo enlaza alguna nota oculta, sea una viva (el filtro de
+    siempre) o una de la papelera que su filtro no deja ver. «Enlaza» es lo que el motor de Hebra
+    guarda en `links`: el nombre del fichero (`![[plano.pdf]]`, así se incrustan los dibujos) o el
+    SHA-256 de sus bytes (`![[sha256:…]]`, así adjuntan las notas importadas un fichero que
+    también es un recurso suelto). No mira la ruta del enlace, así que oculta de más con homónimos:
+    coste asumido en D10.
+  - **Sin delatar nada**: `hebra_list_files` no da recuento, rellena la página solo con ficheros
+    visibles y su `nextCursor` solo existe si detrás queda otro visible; el cursor lleva la clave
+    de un fichero ya devuelto. `hebra_list_folders.count` sigue contando solo notas. Un fichero
+    oculto, uno inexistente, una lápida, el id de una nota y un SHA-256 responden el mismo
+    `not_found` en `hebra_trash_file` y `hebra_restore_file`, y el filtro se construye siempre,
+    con las mismas consultas haya o no acierto. La salida nunca lleva el SHA-256 ni la carpeta
+    guardada.
+  - Se comprueba en la herramienta y otra vez en el escritor, dentro del turno en que escribe.
+    Restaurar deja el fichero en su carpeta si sigue viva o en la raíz: con la regla (a), lo que
+    se ve nunca acaba en una carpeta privada.
 - **Adjuntos** (decisión 7 de D2, 30 sep 2026): solo los de una nota visible (viva; oculta, en la
   papelera o inexistente, `not_found`), y solo los que ESA nota adjunta: un adjunto de una nota
   oculta pedido a través de otra nota que no lo adjunta, o un `attachmentId` que no es un SHA-256,
   responde `not_found`, igual que uno inexistente. El nombre sale del cuerpo de la nota visible,
-  nunca de un recurso (`files`) que podría estar en una carpeta privada. Lo comprueba la
+  nunca de un recurso (`files`) que podría estar en una carpeta privada (los ficheros sueltos
+  solo salen por sus herramientas, con la regla de arriba). Lo comprueba la
   herramienta y, si hay que bajar los bytes, otra vez el escritor dentro del turno, con la
   configuración de quien pide. Los bytes de una LECTURA nunca viajan por `writer.sock` y nunca
   salen rutas locales ni URLs. Añadir un adjunto (D9) solo vale sobre una nota visible, viva y no
@@ -485,11 +556,14 @@ por D2 (ampliada el 28 y el 30 sep 2026): sin borrar, purgar ni vaciar la papele
 llevar nada a una carpeta o etiqueta privada, lo peor que puede hacer una instrucción inyectada es
 crear notas, añadir texto, sustituir fragmentos de una nota visible o restaurarle una versión
 anterior, mover (a carpetas que ya existen), archivar y marcar notas visibles, **mandar notas
-visibles a la papelera** (o sacar de ella notas visibles), crear y renombrar carpetas visibles y
-añadir adjuntos a notas visibles (D9). Las carpetas no se mueven ni se borran, y ningún adjunto se
-cambia ni se borra. Todo queda
+visibles a la papelera** (o sacar de ella notas visibles), crear y renombrar carpetas visibles,
+añadir adjuntos a notas visibles (D9) y **mandar ficheros sueltos visibles a la papelera** (o
+sacarlos de ella, D10). Las carpetas no se mueven ni se borran, ningún adjunto se
+cambia ni se borra, y de un fichero suelto no se lee el contenido ni se crea, renombra, mueve,
+reemplaza o purga ninguno. Todo queda
 visible en Hebra y es revertible, allí y desde el MCP: una nota mandada a la papelera se saca con
-`hebra_restore_note` o desde Hebra (nada la purga), y las «Versiones anteriores» guardan el cuerpo
+`hebra_restore_note` o desde Hebra (nada la purga), un fichero suelto se saca con
+`hebra_restore_file` o desde Hebra, y las «Versiones anteriores» guardan el cuerpo
 previo a una edición o a una restauración (en Hebra, las del dispositivo; en el MCP, las suyas);
 una edición concurrente produce una copia de conflicto. Una carpeta renombrada se renombra de
 vuelta, y una carpeta o un adjunto de más se quitan desde Hebra. Leer adjuntos (decisión 7) no
@@ -573,11 +647,14 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     `sync`), `createFolder {parentId, name, privacy}` y `renameFolder {id, name, privacy}` (D9:
     `{id, changed}` y el estado de sync, ronda ya esperada), `addAttachment {id, name, dataBase64,
     mimeType, operationId, privacy}` (D9: el resultado de `hebra_add_attachment` con la ronda ya
-    esperada; los bytes van del lector al escritor, nunca de vuelta), `fetchAttachment {noteId,
+    esperada; los bytes van del lector al escritor, nunca de vuelta), `organizeFile {action, id,
+    privacy}` (D10: `action` es `trashFile` o `restoreFile` y ninguna otra, tampoco de purga;
+    responde `{id, folderId, trashed}` y el estado de sync, ronda ya esperada; es una op propia y
+    no una acción de `organize`, que solo admite acciones de nota), `fetchAttachment {noteId,
     sha256, privacy}` (baja al disco compartido los bytes de
     un adjunto de una nota visible y responde `{available}`, nunca los bytes; decisión 7 de D2) y
     `status` (el estado de sync del escritor). `privacy` es la configuración de privados del
-    lector y es obligatoria en las ocho escrituras y en `fetchAttachment`: sin ella,
+    lector y es obligatoria en las nueve escrituras y en `fetchAttachment`: sin ella,
     `invalid_request`.
     Errores con código cerrado, nunca con el mensaje; los rechazos de una sustitución llevan su
     índice (`edit`). Una línea de más de `MAX_MESSAGE_BYTES` se rechaza sin leerla entera: lo mayor
@@ -589,9 +666,10 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     conexión tiene como mucho UNA petición en vuelo: las líneas se atienden en orden y, mientras
     hay una en curso, la conexión deja de leer, para que no acumule varios mensajes de ese tamaño.
   - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note`, las tres de
-    organización de notas, las dos de la papelera, `hebra_restore_version`, las dos de carpetas y
-    `hebra_add_attachment` al escritor (las
-    lecturas de la papelera y de las versiones las sirve él mismo), y le pide que baje los bytes de
+    organización de notas, las dos de la papelera, `hebra_restore_version`, las dos de carpetas,
+    `hebra_add_attachment` y las dos de ficheros sueltos (`hebra_trash_file`,
+    `hebra_restore_file`) al escritor (las
+    lecturas de la papelera, de las versiones y de los ficheros sueltos las sirve él mismo), y le pide que baje los bytes de
     un adjunto que no esté en el disco (`hebra_read_attachment`), que después lee él. El filtro de privados y los
     límites se aplican en la herramienta del lector, **antes** de reenviar y con su configuración, y el escritor vuelve a aplicar esa misma
     configuración (la recibe en `privacy`) dentro del turno en que escribe: no la conoce ni la
@@ -614,7 +692,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 - **Ritmo de sync**:
   - Al arrancar: una ronda, y las lecturas esperan como mucho 10 s a que termine.
   - Después, una ronda cada 30 s mientras el proceso vive.
-  - Una ronda justo después de cada escritura. Excepción (§5): una escritura que no cambia nada (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota ya tiene) no pide ronda.
+  - Una ronda justo después de cada escritura. Excepción (§5): una escritura que no cambia nada (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota o el fichero suelto ya tiene) no pide ronda.
   - En reposo, cada ronda es 1 petición HTTP y 0 escrituras (A6 de Hebra).
 - **Adjuntos** (decisión 7 de D2 y D9): los bytes se bajan bajo demanda, al
   pedir `hebra_read_attachment` un adjunto que no esté en el disco, por `readBlob` del motor en el
@@ -657,7 +735,7 @@ Lumbre.
 | **L5** Plataforma propia del dispositivo (opcional) | `agent` en el relé, en Ajustes y en `conflictDevice` para que Hebra diga «Claude». La implementó la sesión de Hebra (`035db7e6`) y el relé, la de Lumbre; hebra-mcp cambió la plataforma que declara (`LINK_PLATFORM` y `deviceLabel`). | ✅ cerrado el 26 sep 2026 | Hebra la muestra; P3 cerrada. `LINK_PLATFORM = 'agent'`, `deviceLabel = 'Claude'` en `serve`/`pair`/`node-port.ts`, con los 68 casos compartidos, `tsc` y `npm test` en verde. |
 | **L6** Punto de entrada estable de Hebra (P1) | Hebra exporta `node.ts` o una subruta de `exports` con motor, almacén, transporte, vínculo y derivados; esquema sin `?raw`. La implementa la sesión de Hebra; hebra-mcp cambia su empaquetado para usarlo. | 🔴 sesión de Hebra, en curso desde el 26 sep 2026 | hebra-mcp compila sin alias `$lib` ni plugin de `?raw`, y los casos compartidos siguen en verde. |
 | **C1-C6** Conector remoto | Conector remoto de claude.ai en el servidor de Lumbre (D6, D7). Detalle y criterios en §12.8. | C1-C5 con login Lumbre se desplegaron el 28 sep 2026 (Hebra MCP `e36e72a`, broker Lumbre `dfdc34f`); el inicio OAuth público DCR + PKCE llegó al consentimiento. C6 sigue pendiente de QA de David desde Claude. | §12.7. |
-| **Después de v1** | Cambiar o borrar adjuntos, recursos sueltos (`files`), mover o borrar carpetas, más escrituras. | Fuera de v1 (leer adjuntos entró el 30 sep 2026, decisión 7 de D2; crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026, D9) | Nueva decisión de David. |
+| **Después de v1** | Cambiar o borrar adjuntos; leer el contenido de un fichero suelto (`files`), crearlo, renombrarlo, moverlo, reemplazarlo o purgarlo; mover o borrar carpetas; más escrituras. | Fuera de v1 (leer adjuntos entró el 30 sep 2026, decisión 7 de D2; crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026, D9; listar los ficheros sueltos y mandarlos a la papelera, el 9 oct 2026, D10) | Nueva decisión de David. |
 
 ## 11. Pendiente
 
@@ -823,9 +901,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.7 Aceptación
 
-1. Desde claude.ai web, móvil y una sesión en la nube, las veinticuatro herramientas de §5
-   responden; lo creado, añadido, editado, organizado, mandado a la papelera o restaurado, las
-   carpetas creadas o renombradas y los adjuntos añadidos aparecen en Hebra.
+1. Desde claude.ai web, móvil y una sesión en la nube, las veintisiete herramientas de §5
+   responden; lo creado, añadido, editado, organizado, mandado a la papelera o restaurado (notas y
+   ficheros sueltos), las carpetas creadas o renombradas y los adjuntos añadidos aparecen en Hebra.
 2. Las notas privadas no llegan por ninguna herramienta.
 3. `grep` de las notas-cebo en `docker logs` y en el log de Caddy da 0.
 4. `/mcp` sin token responde 401 y `oauth-revoke-all` corta el acceso.
