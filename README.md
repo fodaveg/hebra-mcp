@@ -11,7 +11,7 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 9 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 27 herramientas
+Estado a 9 de octubre de 2026 (versión 0.3.0): el servidor MCP tiene 27 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
@@ -24,6 +24,7 @@ Estado a 9 de octubre de 2026 (versión 0.2.0): el servidor MCP tiene 27 herrami
   un `.base` o un PDF): `hebra_list_files` (los vivos por nombre o, con `trashed: true`,
   los de la papelera; limit 1-100, def. 50), `hebra_trash_file` y `hebra_restore_file`.
   Sin purga y sin leer su contenido, crearlos, renombrarlos, moverlos ni reemplazarlos.
+  La versión 0.3.0 o posterior trae las tres de ficheros sueltos (D10).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`

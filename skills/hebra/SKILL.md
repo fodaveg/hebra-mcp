@@ -46,8 +46,8 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
   `hebra_trash_file` y `hebra_restore_file`), el conector tiene la lista antigua: se
   reconecta con `/mcp`.
   `hebra_status` dice la versión del servidor en `capabilities.server.version` (0.2.0 o
-  posterior trae las tres de D9) y la lista de herramientas en `capabilities.tools`, que
-  es la forma segura de saber si están las de ficheros sueltos.
+  posterior trae las tres de D9; 0.3.0 o posterior trae las tres de ficheros sueltos, D10)
+  y la lista de herramientas en `capabilities.tools`.
 - Ante un resultado raro (lista vacía, nota que debería existir), `hebra_status` primero:
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
   el sync, no la búsqueda.
