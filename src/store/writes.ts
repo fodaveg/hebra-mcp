@@ -61,7 +61,7 @@ import {
 import {
   applyEdits,
   editProof,
-  WRITE_PROOF_TAIL_CHARS,
+  proofTail,
   type AppliedEdit,
   type TextEdit
 } from './edits';
@@ -70,6 +70,7 @@ import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
 import {
+  capHeading,
   insertAtEnd,
   insertIntoSection,
   lineAt,
@@ -680,10 +681,10 @@ export class NoteWriter {
       const savedBody = row?.body ?? insertion.body;
       const appended: AppendedProof = {
         chars: input.text.length,
-        tail: savedBody.slice(insertion.start, insertion.end).slice(-WRITE_PROOF_TAIL_CHARS),
+        tail: proofTail(savedBody.slice(insertion.start, insertion.end)),
         line: lineAt(savedBody, insertion.start)
       };
-      if (sectionTitle !== undefined) appended.heading = sectionTitle;
+      if (sectionTitle !== undefined) appended.heading = capHeading(sectionTitle);
       return {
         id: input.id,
         outcome: 'saved',

@@ -39,7 +39,8 @@ import {
 } from '../../src/server/forward';
 import { localWriteContext } from '../../src/server/serve';
 import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
-import { isBusyOtherInstance } from '../../src/store/errors';
+import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
+import { mapWriteError } from '../../src/server/tools/write-errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
 import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { LibraryInstance } from '../../src/sync/library-instance';
@@ -323,6 +324,64 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).not.toContain(BAIT_TEXT);
     expect(stderrText()).not.toContain('"heading":"');
     expect(stderrText()).toContain('"event":"write.forward","op":"appendToNote","outcome":"forwarded"');
+  });
+
+  it('50 títulos repetidos de 6 000 caracteres: ambiguous_heading llega con candidatos de 200 como mucho (D11)', async () => {
+    const { writer, client } = await pair();
+    // Seis mil caracteres que se normalizan a 'T T' (espacios colapsados): el cliente puede
+    // pedirlo con un `heading` corto, pero el título guardado es largo.
+    const long = `T${' '.repeat(5_998)}T`;
+    const short = 'T T';
+    const body = Array.from({ length: 50 }, () => `## ${long}\ntexto\n`).join('\n');
+    const created = await writer.createNote({ body, privacy: OPEN });
+    const result = await call(client, 'hebra_append_to_note', { id: created.id, text: 'x', heading: short });
+    expect(result.isError).toBe(true);
+    expect(result.value.error).toBe('ambiguous_heading');
+    const candidates = result.value.candidates as Array<{ heading: string; occurrence: number }>;
+    expect(candidates).toHaveLength(50);
+    for (const candidate of candidates) {
+      expect(candidate.heading.length).toBeLessThanOrEqual(200);
+      expect(candidate.heading).toBe(long.slice(0, 200));
+    }
+    // Con una aparición, el título de `appended.heading` también viaja cortado.
+    const saved = await call(client, 'hebra_append_to_note', {
+      id: created.id,
+      text: 'x',
+      heading: short,
+      headingOccurrence: 2
+    });
+    expect((saved.value.appended as { heading: string }).heading).toBe(long.slice(0, 200));
+    // La lectura directa no cruza el socket: `section.heading` sale entero.
+    const read = await call(client, 'hebra_read_note', { id: created.id, heading: short, headingOccurrence: 1 });
+    expect((read.value.section as { heading: string }).heading).toBe(long);
+  });
+
+  it('candidates solo se adjunta a ambiguous_heading: con otro código se descartan (D11)', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, 'fake.sock');
+    const fake = createServer((socket) => {
+      socket.once('data', (chunk) => {
+        const request = JSON.parse(String(chunk)) as { id: number };
+        socket.write(
+          `${JSON.stringify({
+            id: request.id,
+            ok: false,
+            error: 'not_found',
+            candidates: [{ heading: 'X', level: 1, line: 1, occurrence: 1 }]
+          })}\n`
+        );
+      });
+    });
+    servers.push(fake);
+    await new Promise<void>((resolve) => fake.listen(path, resolve));
+    const error = (await requestWriter(path, 'appendToNote', { id: 'n', text: 'x', privacy: OPEN }, 2_000).catch(
+      (caught: unknown) => caught
+    )) as { code: string; candidates?: unknown };
+    expect(error.code).toBe('not_found');
+    expect(error.candidates).toBeUndefined();
+    expect(mapWriteError(error).extra).toBeUndefined();
+    // Y `mapWriteError` también lo descarta si le llega pegado a otro código.
+    expect(mapWriteError(new StoreError('not_found', undefined, [{ heading: 'X', level: 1, line: 1, occurrence: 1 }])).extra).toBeUndefined();
   });
 
   it('hebra_edit_note desde un lector trae applied y totalChars del cuerpo guardado (D11)', async () => {

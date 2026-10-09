@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  capHeading,
   insertAtEnd,
   insertIntoSection,
   lineAt,
@@ -71,6 +72,27 @@ describe('parseHeadings (D11)', () => {
     expect(titles('# A\n````\n```\n# no\n~~~~\n# no\n````\n## B\n')).toEqual(['A', 'B']);
     // Un cercado de ~~~ no lo cierra ```.
     expect(titles('~~~\n```\n# no\n~~~\n# sí\n')).toEqual(['sí']);
+  });
+
+  it('cercado dentro de una lista: el cierre sangrado no abre otro (revisión)', () => {
+    const body = '# A\n- ```\n  # x\n  cmd\n  ```\n\n# B\nz\n';
+    expect(titles(body)).toEqual(['A', 'B']);
+    const [a] = parseHeadings(body);
+    expect(sectionText(body, a!)).toBe('# A\n- ```\n  # x\n  cmd\n  ```\n\n');
+  });
+
+  it('lista numerada, con . y con )', () => {
+    expect(titles('# A\n1. ```\n   # x\n   ```\n# B\n')).toEqual(['A', 'B']);
+    expect(titles('# A\n2) ~~~\n   # x\n   ~~~\n# B\n')).toEqual(['A', 'B']);
+  });
+
+  it('cita: > ``` con > # x dentro', () => {
+    expect(titles('# A\n> ```\n> # x\n> ```\n# B\n')).toEqual(['A', 'B']);
+  });
+
+  it('cercado anidado en lista con cierre sangrado 4 y 6 espacios', () => {
+    expect(titles('# A\n- ```\n    # x\n    ```\n# B\n')).toEqual(['A', 'B']);
+    expect(titles('# A\n- ```\n      # x\n      ```\n# B\n')).toEqual(['A', 'B']);
   });
 
   it('un cierre con texto detrás no cierra', () => {
@@ -227,5 +249,14 @@ describe('insertAtEnd', () => {
     const result = insertAtEnd('hola', 'mundo', '\n\n');
     expect(result.body).toBe('hola\n\nmundo');
     expect(result.body.slice(result.start, result.end)).toBe('mundo');
+  });
+});
+
+describe('capHeading', () => {
+  it('corta a 200 sin partir un par suplente ni añadir puntos suspensivos', () => {
+    expect(capHeading('abc')).toBe('abc');
+    expect(capHeading('a'.repeat(300))).toBe('a'.repeat(200));
+    const cut = `${'a'.repeat(199)}😀resto`;
+    expect(capHeading(cut)).toBe('a'.repeat(199));
   });
 });

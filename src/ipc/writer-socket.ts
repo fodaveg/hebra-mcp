@@ -82,7 +82,7 @@ import type {
 } from '../server/write-context';
 import { decodeAttachmentBase64 } from '../store/attachment-content';
 import { editsWithinLimits, type TextEdit } from '../store/edits';
-import type { SectionRef } from '../store/sections';
+import { HEADING_PROOF_MAX_CHARS, type SectionRef } from '../store/sections';
 import {
   busyOtherInstance,
   isBusyOtherInstance,
@@ -750,7 +750,9 @@ function remoteError(
 ): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
-  if (isWriteRejectionCode(code)) return new StoreError(code, edit, candidates);
+  if (isWriteRejectionCode(code)) {
+    return new StoreError(code, edit, code === 'ambiguous_heading' ? candidates : undefined);
+  }
   return new WriterRemoteError(code);
 }
 
@@ -773,6 +775,7 @@ function sectionRefsOf(value: unknown): SectionRef[] | undefined {
     if (
       isPlainObject(entry) &&
       typeof entry.heading === 'string' &&
+      entry.heading.length <= HEADING_PROOF_MAX_CHARS &&
       Number.isSafeInteger(entry.level) &&
       Number.isSafeInteger(entry.line) &&
       Number.isSafeInteger(entry.occurrence)

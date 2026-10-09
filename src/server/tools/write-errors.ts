@@ -26,7 +26,7 @@ export function mapWriteError(error: unknown): ToolError {
   if (error instanceof ToolError) return error;
   if (isBusyOtherInstance(error)) return new ToolError('busy_other_instance');
   if (error instanceof StoreError && isWriteRejectionCode(error.code)) {
-    if (error.candidates !== undefined) {
+    if (error.code === 'ambiguous_heading' && error.candidates !== undefined) {
       return new ToolError(error.code, { candidates: error.candidates });
     }
     return error.editIndex === undefined

@@ -288,6 +288,24 @@ describe('notas por apartados (D11)', () => {
       expect(await bodyOf(id)).toBe('# A\n```\n# B\n```\n\nn\n\n# C\nx\n');
     });
 
+    it('cercado dentro de una lista: heading B escribe bajo B (revisión)', async () => {
+      const { id, ctx } = await create('# A\n- ```\n  # x\n  cmd\n  ```\n\n# B\nz\n');
+      await runAppendToNote(ctx, { id, text: 'nuevo', heading: 'B' });
+      expect(await bodyOf(id)).toBe('# A\n- ```\n  # x\n  cmd\n  ```\n\n# B\nz\n\nnuevo\n');
+      expect((await rejection(runAppendToNote(ctx, { id, text: 'n', heading: 'x' }))).code).toBe(
+        'heading_not_found'
+      );
+    });
+
+    it('tail no empieza a mitad de un par suplente', async () => {
+      const { id, ctx } = await create('# A\nuno\n');
+      // 'a' + emoji (2 unidades) + 199 'b' = 202: el corte de 200 cae dentro del emoji.
+      const text = `a😀${'b'.repeat(199)}`;
+      const result = await runAppendToNote(ctx, { id, text, heading: 'A' });
+      expect(result.appended?.tail).toBe('b'.repeat(199));
+      expect(result.appended?.chars).toBe(202);
+    });
+
     it('con el frontmatter, lo anterior no cambia', async () => {
       const { id, ctx } = await create('---\ntitle: T\n---\n# A\nuno\n');
       await runAppendToNote(ctx, { id, text: 'nuevo', heading: 'A' });
@@ -402,6 +420,17 @@ describe('notas por apartados (D11)', () => {
           { chars: 0, tail: '' }
         ]
       });
+    });
+
+    it('applied.tail no empieza a mitad de un par suplente', async () => {
+      const { id, ctx } = await create('# T\nalfa\n');
+      const result = await runEditNote(ctx, {
+        id,
+        edits: [{ find: 'alfa', replace: `a😀${'b'.repeat(199)}` }],
+        expectedRevision: (await runReadNote(ctx, { id })).revision,
+        operationId: opId()
+      });
+      expect(result).toMatchObject({ applied: [{ chars: 202, tail: 'b'.repeat(199) }] });
     });
 
     it('una edición que no cambia nada devuelve applied igual', async () => {

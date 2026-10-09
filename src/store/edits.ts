@@ -87,6 +87,14 @@ export function applyEdits(body: string, edits: readonly TextEdit[]): ApplyEdits
   return { ok: true, body: result + body.slice(cursor), placed };
 }
 
+/** Los últimos `WRITE_PROOF_TAIL_CHARS` caracteres de `text`, sin empezar a mitad de un par
+ *  suplente (si el primer código es un suplente bajo, se quita). */
+export function proofTail(text: string): string {
+  const tail = text.slice(-WRITE_PROOF_TAIL_CHARS);
+  const first = tail.charCodeAt(0);
+  return first >= 0xdc00 && first <= 0xdfff ? tail.slice(1) : tail;
+}
+
 /** Prueba de una sustitución guardada (D11): el tamaño de su `replace` y sus últimos
  *  `WRITE_PROOF_TAIL_CHARS` caracteres leídos del cuerpo guardado; o `moved: true` si el
  *  reordenado de tareas la desplazó y ya no se puede ubicar. */
@@ -114,7 +122,7 @@ export function editProof(
   appliedBody: string,
   savedBody: string
 ): AppliedEdit[] {
-  const tailOf = (text: string): string => text.slice(-WRITE_PROOF_TAIL_CHARS);
+  const tailOf = proofTail;
   return edits.map((edit, index) => {
     const chars = edit.replace.length;
     if (chars === 0) return { chars: 0, tail: '' };

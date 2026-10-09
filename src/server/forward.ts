@@ -46,6 +46,7 @@ import {
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from '../status/status-source';
 import { busyOtherInstance } from '../store/errors';
+import { HEADING_PROOF_MAX_CHARS } from '../store/sections';
 import { EDITS_MAX_COUNT, WRITE_PROOF_TAIL_CHARS, type AppliedEdit } from '../store/edits';
 import type {
   AddAttachmentInput,
@@ -264,7 +265,9 @@ function asAppendResult(value: unknown, id: string): AppendToNoteResult {
         line: asCount(appended.line)
       };
       if (appended.heading !== undefined) {
-        if (typeof appended.heading !== 'string') throw new Error('writer_protocol');
+        if (typeof appended.heading !== 'string' || appended.heading.length > HEADING_PROOF_MAX_CHARS) {
+          throw new Error('writer_protocol');
+        }
         proof.heading = appended.heading;
       }
       saved.appended = proof;

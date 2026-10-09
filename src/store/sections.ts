@@ -61,8 +61,36 @@ function headingTitle(raw: string): string {
 }
 
 const ATX = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$/;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+const FENCE_OPEN = /^(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^(`{3,}|~{3,})[ \t]*$/;
+const LIST_MARKER = /^(?:[-+*]|[0-9]{1,9}[.)])[ \t]/;
+
+/**
+ * Quita del principio de una línea espacios, tabuladores, marcadores de cita `>` y, con
+ * `lists`, marcadores de lista (`-`, `+`, `*`, `1.`, `1)` con su espacio). Se peca de
+ * detectar cercados de más y nunca de menos: un encabezado real no visto da
+ * `heading_not_found` (seguro); uno falso escribiría donde no es.
+ */
+function stripContainers(text: string, lists: boolean): string {
+  let rest = text;
+  for (;;) {
+    const trimmed = rest.replace(/^[ \t]+/, '');
+    if (trimmed.startsWith('>')) rest = trimmed.slice(1);
+    else if (lists && LIST_MARKER.test(trimmed)) rest = trimmed.replace(LIST_MARKER, '');
+    else return trimmed;
+  }
+}
+
+/** Tope del título que viaja por el socket y en la prueba de lo guardado. */
+export const HEADING_PROOF_MAX_CHARS = 200;
+
+/** Corta un título a `HEADING_PROOF_MAX_CHARS` sin partir un par suplente ni añadir `…`. */
+export function capHeading(title: string): string {
+  if (title.length <= HEADING_PROOF_MAX_CHARS) return title;
+  const last = title.charCodeAt(HEADING_PROOF_MAX_CHARS - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? HEADING_PROOF_MAX_CHARS - 1 : HEADING_PROOF_MAX_CHARS;
+  return title.slice(0, end);
+}
 
 interface Line {
   from: number;
@@ -103,11 +131,11 @@ export function parseHeadings(body: string): HeadingInfo[] {
   for (let index = frontmatterEnd(lines); index < lines.length; index += 1) {
     const line = lines[index]!;
     if (fence) {
-      const close = FENCE_CLOSE.exec(line.text);
+      const close = FENCE_CLOSE.exec(stripContainers(line.text, false));
       if (close && close[1]![0] === fence.char && close[1]!.length >= fence.length) fence = null;
       continue;
     }
-    const open = FENCE_OPEN.exec(line.text);
+    const open = FENCE_OPEN.exec(stripContainers(line.text, true));
     // Un cercado de acentos graves no admite acentos graves en su información.
     if (open && !(open[1]![0] === '`' && open[2]!.includes('`'))) {
       fence = { char: open[1]![0]!, length: open[1]!.length };
@@ -151,9 +179,9 @@ export type HeadingSelection =
   | { ok: false; code: 'heading_not_found' }
   | { ok: false; code: 'ambiguous_heading'; candidates: SectionRef[] };
 
-export function sectionRef(section: HeadingInfo): SectionRef {
+export function sectionRef(section: HeadingInfo, capped = false): SectionRef {
   return {
-    heading: section.heading,
+    heading: capped ? capHeading(section.heading) : section.heading,
     level: section.level,
     line: section.line,
     occurrence: section.occurrence
@@ -181,7 +209,7 @@ export function selectSection(
     return {
       ok: false,
       code: 'ambiguous_heading',
-      candidates: matches.slice(0, HEADING_CANDIDATES_MAX).map(sectionRef)
+      candidates: matches.slice(0, HEADING_CANDIDATES_MAX).map((entry) => sectionRef(entry, true))
     };
   }
   return { ok: true, section: matches[0]! };
