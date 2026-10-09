@@ -11,7 +11,7 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 9 de octubre de 2026 (versión 0.3.0): el servidor MCP tiene 28 herramientas
+Estado a 9 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 28 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
