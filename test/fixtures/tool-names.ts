@@ -36,7 +36,9 @@ export const TOOL_NAMES: readonly string[] = [
   // Ficheros sueltos (D10, 9 oct 2026).
   'hebra_list_files',
   'hebra_trash_file',
-  'hebra_restore_file'
+  'hebra_restore_file',
+  // Notas por apartados (D11, 9 oct 2026).
+  'hebra_note_outline'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */

@@ -8,6 +8,11 @@
  * es la clave `(updatedAt, id)` del último resultado devuelto, envuelta (`pagination.ts`):
  * reanuda exactamente tras él.
  *
+ * `heading` (D11): el título del apartado más interno que contiene el fragmento del
+ * `snippet` (`headingOfSnippet`, `../../store/sections.ts`), o `null`. Se lee el cuerpo
+ * (`noteRead`) solo de los resultados visibles que se devuelven y solo si `heading` está
+ * entre los campos pedidos; nunca el de una nota oculta ni el de una bloqueada.
+ *
  * Carpeta: el ámbito del motor compara la carpeta GUARDADA de la nota con la carpeta pedida
  * (o con su subárbol efectivo) y trata como raíz las notas cuya carpeta es lápida o
  * desconocida, igual que la carpeta efectiva con la que filtraba esta herramienta. Con
@@ -26,6 +31,8 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
+import { headingOfSnippet } from '../../store/sections';
+import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
 
 export interface SearchResult {
@@ -34,6 +41,8 @@ export interface SearchResult {
   folderPath: string;
   tags: string[];
   snippet: string;
+  /** El apartado más interno que contiene el fragmento de `snippet` (D11), o `null`. */
+  heading: string | null;
   updatedAt: string;
   isConflictCopy: boolean;
 }
@@ -106,15 +115,27 @@ export async function runSearch(
         folderPath: ctx.privacy.folderPath(meta.folderId),
         tags: meta.tags,
         snippet: hit.snippet,
+        heading: null,
         updatedAt: new Date(hit.updatedAt).toISOString(),
         isConflictCopy: hit.conflict
       };
-      return pickFields(result, input.fields);
+      return result;
     },
     cursorAfter: (hit) => encodeCursor([hit.updatedAt], hit.id)
   });
+
+  // El cuerpo solo se lee de los resultados VISIBLES que se devuelven (`accept` ya
+  // descartó los ocultos) y solo si `heading` está entre los campos pedidos (D11).
+  const wantsHeading = input.fields === undefined || input.fields.includes('heading');
+  if (wantsHeading) {
+    for (const result of page.items) {
+      const note = await ctx.port.noteRead(result.id);
+      if (!note || note.body.startsWith(LOCKED_BODY_PREFIX)) continue;
+      result.heading = headingOfSnippet(note.body, result.snippet);
+    }
+  }
   return {
-    results: page.items,
+    results: page.items.map((result) => pickFields(result, input.fields)),
     nextCursor: page.lastCursor === null ? null : wrapCursor('s1', page.lastCursor)
   };
 }

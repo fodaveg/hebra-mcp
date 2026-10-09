@@ -12,6 +12,11 @@ import {
   type TestLibrary
 } from './test-library';
 
+/** El texto que `hebra_append_to_note` añade a una nota VISIBLE en las llamadas-cebo. Desde
+ *  D11 la respuesta lo devuelve como `appended.tail` (la prueba de lo guardado), así que
+ *  puede salir en la salida; en los logs, nunca (SPEC.md §6.4). */
+export const BAIT_APPEND_TEXT = 'CEBO_TEXTO_AÑADIDO_5d1c';
+
 export interface BaitCall {
   name: string;
   arguments?: Record<string, unknown>;
@@ -25,16 +30,28 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId } },
     { name: 'hebra_read_note', arguments: { id: library.privateTagNoteId } },
     { name: 'hebra_read_note', arguments: { title: 'Nota oculta de carpeta' } },
+    // Apartados (D11): las notas ocultas responden `not_found` también con `heading` y en
+    // el esquema; el cebo como título de apartado no sale en ninguna salida ni log.
+    { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId, heading: BAIT_FOLDER } },
+    { name: 'hebra_read_note', arguments: { id: library.privateTagNoteId, heading: BAIT_TAG } },
+    { name: 'hebra_note_outline', arguments: { id: library.privateFolderNoteId } },
+    { name: 'hebra_note_outline', arguments: { id: library.privateTagNoteId } },
+    { name: 'hebra_note_outline', arguments: { title: 'Nota oculta de carpeta' } },
+    {
+      name: 'hebra_append_to_note',
+      arguments: { id: library.privateFolderNoteId, text: BAIT_TAG, heading: BAIT_FOLDER }
+    },
     { name: 'hebra_list_tags', arguments: {} },
     { name: 'hebra_list_folders', arguments: {} },
     { name: 'hebra_links', arguments: { id: library.publicNoteId } },
     { name: 'hebra_status', arguments: {} },
-    // Las dos de escritura (L3b): el cebo va en `body`/`text`, que nunca se hace eco en la
-    // salida (`{id, title, folderPath}` / `{id, outcome, copyId?}`) ni en el log.
+    // Las dos de escritura (L3b): el cebo va en `body`/`text`, que nunca se hace eco en el
+    // log. En la salida de `hebra_append_to_note` sí: desde D11 trae el final del texto
+    // guardado (`appended.tail`), que es del propio cliente; el cebo de privados no.
     { name: 'hebra_create_note', arguments: { body: `# Nota nueva\n${BAIT_FOLDER}\n${BAIT_TAG}\n` } },
     {
       name: 'hebra_append_to_note',
-      arguments: { id: library.publicNoteId, text: `${BAIT_FOLDER} ${BAIT_TAG}` }
+      arguments: { id: library.publicNoteId, text: BAIT_APPEND_TEXT }
     },
     // Edición (D2 ampliada): el cebo en `find` de una nota oculta (`not_found`) y en
     // `replace` de una pública con una revisión que no vale (`invalid_input`). Ninguna

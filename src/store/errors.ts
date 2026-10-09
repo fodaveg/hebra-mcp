@@ -4,6 +4,8 @@
  * la capa de herramientas lo traduzca sin mirar texto libre.
  */
 
+import type { SectionRef } from './sections';
+
 /**
  * Por qué una escritura de la edición o la organización (D2 ampliada, 28 sep 2026) se
  * rechazó SIN escribir nada. Viajan tal cual por `writer.sock` (`src/ipc/`) y la capa de
@@ -27,6 +29,10 @@
  * Adjuntos añadidos (D9), revalidados en el escritor aunque la herramienta ya los mirara:
  * - `attachment_too_large`: más de 5 MiB.
  * - `attachment_type_not_allowed`: fuera de los tipos que se pueden leer.
+ * Apartados (D11, 9 oct 2026), al añadir a un apartado (`src/store/sections.ts`):
+ * - `heading_not_found`: ningún apartado con ese título (o esa aparición).
+ * - `ambiguous_heading`: varios con ese título y sin `headingOccurrence`; el error lleva
+ *   los candidatos (`candidates`).
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -41,7 +47,9 @@ export type WriteRejectionCode =
   | 'folder_unavailable'
   | 'folder_name_taken'
   | 'attachment_too_large'
-  | 'attachment_type_not_allowed';
+  | 'attachment_type_not_allowed'
+  | 'heading_not_found'
+  | 'ambiguous_heading';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -56,7 +64,9 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'folder_unavailable',
   'folder_name_taken',
   'attachment_too_large',
-  'attachment_type_not_allowed'
+  'attachment_type_not_allowed',
+  'heading_not_found',
+  'ambiguous_heading'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de
@@ -68,7 +78,10 @@ export class StoreError extends Error {
     readonly code: StoreErrorCode,
     /** Índice de la sustitución que falló (`no_match`, `ambiguous_match`,
      *  `overlapping_edits`): un número, nunca el texto buscado. */
-    readonly editIndex?: number
+    readonly editIndex?: number,
+    /** Candidatos de `ambiguous_heading` (D11): títulos y posiciones de los apartados,
+     *  ya acotados; nunca texto de la nota. */
+    readonly candidates?: readonly SectionRef[]
   ) {
     super(code);
     this.name = 'StoreError';
@@ -95,4 +108,12 @@ export function isWriteRejectionCode(code: unknown): code is WriteRejectionCode 
 /** Rechazo de una escritura de edición u organización, sin haber escrito nada. */
 export function writeRejected(code: WriteRejectionCode, editIndex?: number): StoreError {
   return new StoreError(code, editIndex);
+}
+
+/** `heading_not_found` o `ambiguous_heading` (D11) sin haber escrito nada. */
+export function headingRejected(
+  code: 'heading_not_found' | 'ambiguous_heading',
+  candidates?: readonly SectionRef[]
+): StoreError {
+  return new StoreError(code, undefined, candidates);
 }

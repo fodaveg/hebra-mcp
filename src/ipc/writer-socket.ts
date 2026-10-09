@@ -13,8 +13,10 @@
  * `privacy`, la configuración de privados del LECTOR, que el escritor aplica dentro del
  * turno de la escritura (D2 ampliada, 28 sep 2026); sin ella, `invalid_request`:
  * - `createNote` `{body, folderId, privacy}` → `{id, title, folderId}`.
- * - `appendToNote` `{id, text, privacy}` → `{id, outcome, copyId?}`, ya con la ronda de
- *   sync esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
+ * - `appendToNote` `{id, text, heading?, headingOccurrence?, privacy}` →
+ *   `{id, outcome, copyId?, revision?, totalChars?, appended?}`, ya con la ronda de sync
+ *   esperada en el escritor (como `hebra_append_to_note` con `awaitRound`). Con `heading`
+ *   (D11) el apartado se resuelve en el escritor, dentro del turno.
  * - `status` `{}` → el estado de sync del escritor, sin `writer` ni `linked`.
  * - `editNote` `{id, edits, expectedRevision, operationId, privacy}` → el resultado
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
@@ -42,8 +44,9 @@
  *   propia y no una acción de `organize`, que solo admite acciones de nota. Ninguna otra
  *   acción de ficheros existe (purgar, crear, renombrar, mover, reemplazar): una acción
  *   desconocida es `invalid_request`.
- * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
- * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
+ * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?, candidates?}` con
+ * un código cerrado (`WriterSocketErrorCode`), en los rechazos de una sustitución su
+ * índice y, en `ambiguous_heading` (D11), los candidatos (títulos y posiciones).
  * Nunca viaja el mensaje de una excepción.
  *
  * Seguridad:
@@ -79,6 +82,7 @@ import type {
 } from '../server/write-context';
 import { decodeAttachmentBase64 } from '../store/attachment-content';
 import { editsWithinLimits, type TextEdit } from '../store/edits';
+import type { SectionRef } from '../store/sections';
 import {
   busyOtherInstance,
   isBusyOtherInstance,
@@ -124,11 +128,16 @@ export const MAX_MESSAGE_BYTES = MAX_WRITE_MESSAGE_BYTES;
  *  esto solo corta lo desmedido antes de mirarlo. */
 const MAX_NAME_INPUT_LENGTH = 1024;
 
+/** Longitud máxima del título de un apartado (D11) que llega por el socket. */
+const HEADING_MAX_LENGTH = 1024;
+
 /** Longitud máxima del `mimeType` declarado de un adjunto. */
 const MAX_MIME_LENGTH = 255;
 
-/** Una respuesta nunca lleva cuerpos: basta con mucho menos. */
-const MAX_RESPONSE_BYTES = 64 * 1024;
+/** Una respuesta nunca lleva cuerpos, pero desde D11 lleva la prueba de lo guardado: hasta
+ *  50 `tail` de 200 caracteres, que con el peor escape JSON (6 bytes por unidad) pasan de
+ *  64 KiB. */
+const MAX_RESPONSE_BYTES = 256 * 1024;
 
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
@@ -217,7 +226,13 @@ interface RequestEnvelope {
 
 type ResponseEnvelope =
   | { id: number | string | null; ok: true; result: unknown }
-  | { id: number | string | null; ok: false; error: WriterSocketErrorCode; edit?: number };
+  | {
+      id: number | string | null;
+      ok: false;
+      error: WriterSocketErrorCode;
+      edit?: number;
+      candidates?: readonly SectionRef[];
+    };
 
 class InvalidRequest extends Error {
   constructor() {
@@ -256,11 +271,25 @@ function createInputOf(params: Record<string, unknown>): CreateNoteInput {
 }
 
 function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
-  const { id, text } = params;
+  const { id, text, heading, headingOccurrence } = params;
   if (!isId(id) || typeof text !== 'string' || text.length > APPEND_TEXT_MAX_LENGTH) {
     throw new InvalidRequest();
   }
-  return { id, text, privacy: privacyOf(params.privacy) };
+  const privacy = privacyOf(params.privacy);
+  if (heading === undefined) {
+    if (headingOccurrence !== undefined) throw new InvalidRequest();
+    return { id, text, privacy };
+  }
+  if (typeof heading !== 'string' || heading.length > HEADING_MAX_LENGTH) throw new InvalidRequest();
+  if (headingOccurrence === undefined) return { id, text, heading, privacy };
+  if (
+    typeof headingOccurrence !== 'number' ||
+    !Number.isSafeInteger(headingOccurrence) ||
+    headingOccurrence < 1
+  ) {
+    throw new InvalidRequest();
+  }
+  return { id, text, heading, headingOccurrence, privacy };
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -427,6 +456,11 @@ function errorCodeOf(error: unknown): WriterSocketErrorCode {
 /** Índice de la sustitución que falló, si el rechazo lo trae. */
 function editIndexOf(error: unknown): number | undefined {
   return error instanceof StoreError ? error.editIndex : undefined;
+}
+
+/** Candidatos de `ambiguous_heading`, si el rechazo los trae. */
+function candidatesOf(error: unknown): readonly SectionRef[] | undefined {
+  return error instanceof StoreError ? error.candidates : undefined;
 }
 
 function errnoOf(error: unknown): string {
@@ -643,10 +677,10 @@ export class WriterSocketServer {
     } catch (error) {
       const code = errorCodeOf(error);
       const edit = editIndexOf(error);
-      response =
-        edit === undefined
-          ? { id: envelope.id, ok: false, error: code }
-          : { id: envelope.id, ok: false, error: code, edit };
+      const candidates = candidatesOf(error);
+      response = { id: envelope.id, ok: false, error: code };
+      if (edit !== undefined) response.edit = edit;
+      if (candidates !== undefined) response.candidates = candidates;
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'error', code });
     }
     if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(response)}\n`);
@@ -709,10 +743,14 @@ export class WriterRemoteError extends Error {
 
 /** Traduce el código remoto al mismo error que habría lanzado una escritura local, para
  *  que `mapWriteError` (`src/server/tools/write-errors.ts`) no distinga el camino. */
-function remoteError(code: WriterSocketErrorCode, edit?: number): Error {
+function remoteError(
+  code: WriterSocketErrorCode,
+  edit?: number,
+  candidates?: readonly SectionRef[]
+): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
-  if (isWriteRejectionCode(code)) return new StoreError(code, edit);
+  if (isWriteRejectionCode(code)) return new StoreError(code, edit, candidates);
   return new WriterRemoteError(code);
 }
 
@@ -725,6 +763,30 @@ const KNOWN_ERROR_CODES = new Set<WriterSocketErrorCode>([
   'internal',
   ...WRITE_REJECTION_CODES
 ]);
+
+/** Candidatos que llegan del escritor, validados (no se fía de su forma); los que no
+ *  casan se descartan. */
+function sectionRefsOf(value: unknown): SectionRef[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const refs: SectionRef[] = [];
+  for (const entry of value.slice(0, 50)) {
+    if (
+      isPlainObject(entry) &&
+      typeof entry.heading === 'string' &&
+      Number.isSafeInteger(entry.level) &&
+      Number.isSafeInteger(entry.line) &&
+      Number.isSafeInteger(entry.occurrence)
+    ) {
+      refs.push({
+        heading: entry.heading,
+        level: entry.level as number,
+        line: entry.line as number,
+        occurrence: entry.occurrence as number
+      });
+    }
+  }
+  return refs;
+}
 
 let nextRequestId = 1;
 
@@ -801,7 +863,13 @@ export function requestWriter(
         typeof response.edit === 'number' && Number.isSafeInteger(response.edit) && response.edit >= 0
           ? response.edit
           : undefined;
-      finish({ error: remoteError(KNOWN_ERROR_CODES.has(code) ? code : 'internal', edit) });
+      finish({
+        error: remoteError(
+          KNOWN_ERROR_CODES.has(code) ? code : 'internal',
+          edit,
+          sectionRefsOf(response.candidates)
+        )
+      });
     });
   });
 }

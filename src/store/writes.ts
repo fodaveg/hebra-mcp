@@ -6,7 +6,8 @@
  * - `createNote`: `noteCreate(folderId)` + `noteSave` con los derivados de
  *   `deriveNote(body)`, en UN turno de la cola del almacén (`writeExclusive`): una ronda
  *   de sync no puede colarse entre los dos pasos y subir la nota vacía.
- * - `appendToNote`: `noteRead` → `body + "\n\n" + text` → `noteSave` con
+ * - `appendToNote`: `noteRead` → `body + "\n\n" + text` (o, con `heading` (D11), al final
+ *   de ese apartado: `./sections.ts`) → `noteSave` con
  *   `expectedLocalSeq` y `baseBodySha256` de lo leído. Si el almacén responde
  *   `redirected` (la nota cambió o es una lápida), el texto quedó en una copia de
  *   conflicto visible: `conflict_copy` con su id. Si el choque llega después, con la
@@ -57,11 +58,25 @@ import {
   detectAttachmentType,
   validAttachmentName
 } from './attachment-content';
-import { applyEdits, type TextEdit } from './edits';
-import { writeRejected } from './errors';
+import {
+  applyEdits,
+  editProof,
+  WRITE_PROOF_TAIL_CHARS,
+  type AppliedEdit,
+  type TextEdit
+} from './edits';
+import { headingRejected, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
+import {
+  insertAtEnd,
+  insertIntoSection,
+  lineAt,
+  parseHeadings,
+  selectSection,
+  type Insertion
+} from './sections';
 import type {
   FilesIndex,
   NoteAttachmentRow,
@@ -155,12 +170,38 @@ export interface CreateNoteResult {
 export interface AppendToNoteInput {
   id: string;
   text: string;
+  /** Título de un apartado (D11): el texto va al FINAL de ese apartado, subapartados
+   *  incluidos. Se resuelve dentro del turno, sobre el cuerpo de ese momento. */
+  heading?: string;
+  /** Aparición (1-based) entre los apartados con ese título; solo con `heading`. */
+  headingOccurrence?: number;
   /** Igual que `EditNoteInput.privacy`. */
   privacy: PrivacyConfig;
 }
 
+/** Prueba de lo que `hebra_append_to_note` guardó (D11), leída del cuerpo GUARDADO. */
+export interface AppendedProof {
+  /** Tamaño del texto insertado. */
+  chars: number;
+  /** Sus últimos `WRITE_PROOF_TAIL_CHARS` caracteres, como quedaron en la nota. */
+  tail: string;
+  /** Línea (1-based) donde empieza el texto insertado. */
+  line: number;
+  /** Título del apartado, solo si se pidió. */
+  heading?: string;
+}
+
+/** `revision`, `totalChars` y `appended` los trae todo `saved` de esta versión; son
+ *  opcionales en el tipo porque un escritor de una versión anterior (otra sesión) no los
+ *  manda. Con `conflict_copy` no hay prueba: el texto fue a la copia. */
 export type AppendToNoteResult =
-  | { id: string; outcome: 'saved' }
+  | {
+      id: string;
+      outcome: 'saved';
+      revision?: string;
+      totalChars?: number;
+      appended?: AppendedProof;
+    }
   | { id: string; outcome: 'conflict_copy'; copyId: string };
 
 /** Separador entre el cuerpo existente y lo añadido (SPEC.md §5). */
@@ -216,7 +257,18 @@ export interface EditNoteInput {
  *  la ronda, `src/server/write-context.ts`). `replayed`: devuelto del registro de
  *  idempotencia, sin volver a escribir. */
 export type EditNoteSaved =
-  | { id: string; outcome: 'saved'; revision: string; replayed?: true }
+  | {
+      id: string;
+      outcome: 'saved';
+      revision: string;
+      /** Prueba de lo guardado (D11): tamaño del cuerpo guardado y una entrada por
+       *  sustitución. Ausentes en restaurar una versión, en añadir un adjunto, en una
+       *  entrada anterior a D11 del registro de idempotencia y en un reintento
+       *  recuperado del estado `started` (`applied`). */
+      totalChars?: number;
+      applied?: AppliedEdit[];
+      replayed?: true;
+    }
   | { id: string; outcome: 'conflict_copy'; copyId: string; replayed?: true };
 
 /**
@@ -596,14 +648,54 @@ export class NoteWriter {
       if (!note || note.trashedAt !== null) throw new LibraryError('note_not_found');
       if (filter.isHiddenNote(note.id)) throw writeRejected('not_found');
       if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
-      const saveInput = saveInputFor(note, `${note.body}${APPEND_SEPARATOR}${input.text}`);
+      let insertion: Insertion;
+      let sectionTitle: string | undefined;
+      if (input.heading === undefined) {
+        insertion = insertAtEnd(note.body, input.text, APPEND_SEPARATOR);
+      } else {
+        // El apartado se resuelve AQUÍ, sobre el cuerpo de este turno: el que leyó el
+        // agente pudo cambiar, y un apartado que ya no está no se adivina (D11).
+        const picked = selectSection(
+          parseHeadings(note.body),
+          input.heading,
+          input.headingOccurrence
+        );
+        if (!picked.ok) {
+          throw headingRejected(picked.code, picked.code === 'ambiguous_heading' ? picked.candidates : undefined);
+        }
+        sectionTitle = picked.section.heading;
+        insertion = insertIntoSection(note.body, picked.section, input.text);
+      }
+      const saveInput = saveInputFor(note, insertion.body);
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
       const saved = await store.noteSave(saveInput);
-      return saved.outcome === 'saved'
-        ? ({ id: input.id, outcome: 'saved' } as const)
-        : ({ id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo } as const);
+      if (saved.outcome !== 'saved') {
+        return { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo } as const;
+      }
+      // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este mismo turno), no de
+      // la entrada: si el almacén cambiara algo, se vería aquí.
+      const row = await store.noteRead(input.id);
+      const savedBody = row?.body ?? insertion.body;
+      const appended: AppendedProof = {
+        chars: input.text.length,
+        tail: savedBody.slice(insertion.start, insertion.end).slice(-WRITE_PROOF_TAIL_CHARS),
+        line: lineAt(savedBody, insertion.start)
+      };
+      if (sectionTitle !== undefined) appended.heading = sectionTitle;
+      return {
+        id: input.id,
+        outcome: 'saved',
+        revision: encodeRevision({
+          libraryId: store.libraryId(),
+          noteId: input.id,
+          localSeq: saved.localSeq,
+          bodySha256: saved.bodySha256
+        }),
+        totalChars: savedBody.length,
+        appended
+      } as const;
     });
     this.written();
     return result;
@@ -663,8 +755,14 @@ export class NoteWriter {
         return { result: { ...previous.result, replayed: true as const }, wrote: false };
       }
       if (previous?.state === 'started' && note.bodySha256 === previous.targetBodySha256) {
-        // Murió entre el guardado y `finish`: se guardó. Se completa el registro.
-        const saved: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
+        // Murió entre el guardado y `finish`: se guardó. Se completa el registro. Sin
+        // `applied`: no se sabe dónde quedó cada sustitución (D11).
+        const saved: EditNoteSaved = {
+          id: input.id,
+          outcome: 'saved',
+          revision: revisionOf(note),
+          totalChars: note.body.length
+        };
         log.finish(input.operationId, saved);
         return { result: { ...saved, replayed: true as const }, wrote: false };
       }
@@ -683,7 +781,13 @@ export class NoteWriter {
       if (body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
       if (body === note.body) {
         // Nada que guardar: ni sube `local_seq` ni hay ronda que pedir.
-        const unchanged: EditNoteSaved = { id: input.id, outcome: 'saved', revision: revisionOf(note) };
+        const unchanged: EditNoteSaved = {
+          id: input.id,
+          outcome: 'saved',
+          revision: revisionOf(note),
+          totalChars: note.body.length,
+          applied: editProof(input.edits, applied.placed, applied.body, note.body)
+        };
         return { result: unchanged, wrote: false };
       }
 
@@ -699,10 +803,22 @@ export class NoteWriter {
         now
       });
       const saved = await store.noteSave(saveInput);
-      const outcome: EditNoteSaved =
-        saved.outcome === 'saved'
-          ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
-          : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+      let outcome: EditNoteSaved;
+      if (saved.outcome === 'saved') {
+        // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este turno), no de las
+        // sustituciones pedidas (D11).
+        const row = await store.noteRead(input.id);
+        const savedBody = row?.body ?? body;
+        outcome = {
+          id: input.id,
+          outcome: 'saved',
+          revision: revisionOf(saved),
+          totalChars: savedBody.length,
+          applied: editProof(input.edits, applied.placed, applied.body, savedBody)
+        };
+      } else {
+        outcome = { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+      }
       log.finish(input.operationId, outcome);
       return { result: outcome, wrote: true };
     });

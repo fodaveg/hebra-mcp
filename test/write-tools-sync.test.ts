@@ -136,7 +136,7 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
       name: 'hebra_append_to_note',
       arguments: { id, text: 'texto añadido por Claude' }
     })) as CallToolResult;
-    expect(JSON.parse(textOf(result))).toEqual({ id, outcome: 'saved' });
+    expect(JSON.parse(textOf(result))).toMatchObject({ id, outcome: 'saved' });
 
     await mcp.runner.requestRound();
     await app.sync.runRound();
@@ -172,6 +172,8 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
     };
     expect(parsed.outcome).toBe('conflict_copy');
     expect(typeof parsed.copyId).toBe('string');
+    // D11: con una copia de conflicto no hay prueba de lo guardado (el texto fue a la copia).
+    expect(Object.keys(parsed).sort()).toEqual(['copyId', 'id', 'outcome']);
 
     // Converge del todo y comprueba los dos textos en los DOS almacenes.
     await app.sync.runRound();
@@ -479,6 +481,9 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
     expect(parsed.outcome).toBe('conflict_copy');
     expect(typeof parsed.copyId).toBe('string');
     expect(parsed.revision).toBeUndefined();
+    // D11: sin prueba de lo guardado con una copia de conflicto.
+    expect(parsed).not.toHaveProperty('totalChars');
+    expect(parsed).not.toHaveProperty('applied');
 
     // Reintentar con el mismo operationId devuelve la misma copia, sin escribir otra vez.
     const again = JSON.parse(

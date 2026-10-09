@@ -46,8 +46,10 @@ import {
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from '../status/status-source';
 import { busyOtherInstance } from '../store/errors';
+import { EDITS_MAX_COUNT, WRITE_PROOF_TAIL_CHARS, type AppliedEdit } from '../store/edits';
 import type {
   AddAttachmentInput,
+  AppendedProof,
   AppendToNoteInput,
   AppendToNoteResult,
   CreateFolderInput,
@@ -146,13 +148,45 @@ function asOrganizeOutcome(value: unknown): OrganizeOutcome {
   throw new Error('writer_protocol');
 }
 
-/** Valida el `EditNoteOutcome` que devuelve el escritor (no se fía de su forma). */
+/** Un tamaño que viene del escritor: entero no negativo. */
+function asCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error('writer_protocol');
+  }
+  return value;
+}
+
+/** Un `tail` de la prueba de lo guardado: texto de a lo sumo `WRITE_PROOF_TAIL_CHARS`. */
+function asTail(value: unknown): string {
+  if (typeof value !== 'string' || value.length > WRITE_PROOF_TAIL_CHARS) {
+    throw new Error('writer_protocol');
+  }
+  return value;
+}
+
+/** Valida `applied` de una edición guardada (D11). */
+function asApplied(value: unknown): AppliedEdit[] {
+  if (!Array.isArray(value) || value.length > EDITS_MAX_COUNT) throw new Error('writer_protocol');
+  return value.map((entry): AppliedEdit => {
+    if (!isRecord(entry)) throw new Error('writer_protocol');
+    const chars = asCount(entry.chars);
+    if (entry.moved === true) return { chars, moved: true };
+    return { chars, tail: asTail(entry.tail) };
+  });
+}
+
+/** Valida el `EditNoteOutcome` que devuelve el escritor (no se fía de su forma). La
+ *  prueba de lo guardado (`totalChars`, `applied`) es opcional: un escritor de una
+ *  versión anterior no la manda. */
 function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
   if (!isRecord(value)) throw new Error('writer_protocol');
   const sync = syncFieldsFrom(value);
   const replayed = value.replayed === true ? { replayed: true as const } : {};
   if (value.outcome === 'saved' && typeof value.revision === 'string') {
-    return { id, outcome: 'saved', revision: value.revision, ...replayed, ...sync };
+    const proof: { totalChars?: number; applied?: AppliedEdit[] } = {};
+    if (value.totalChars !== undefined) proof.totalChars = asCount(value.totalChars);
+    if (value.applied !== undefined) proof.applied = asApplied(value.applied);
+    return { id, outcome: 'saved', revision: value.revision, ...proof, ...replayed, ...sync };
   }
   if (value.outcome === 'conflict_copy' && typeof value.copyId === 'string') {
     return { id, outcome: 'conflict_copy', copyId: value.copyId, ...replayed, ...sync };
@@ -214,7 +248,29 @@ function asCreateResult(value: unknown): CreateNoteResult {
 }
 
 function asAppendResult(value: unknown, id: string): AppendToNoteResult {
-  if (isRecord(value) && value.outcome === 'saved') return { id, outcome: 'saved' };
+  if (isRecord(value) && value.outcome === 'saved') {
+    const saved: AppendToNoteResult & { outcome: 'saved' } = { id, outcome: 'saved' };
+    if (value.revision !== undefined) {
+      if (typeof value.revision !== 'string') throw new Error('writer_protocol');
+      saved.revision = value.revision;
+    }
+    if (value.totalChars !== undefined) saved.totalChars = asCount(value.totalChars);
+    if (value.appended !== undefined) {
+      const appended = value.appended;
+      if (!isRecord(appended)) throw new Error('writer_protocol');
+      const proof: AppendedProof = {
+        chars: asCount(appended.chars),
+        tail: asTail(appended.tail),
+        line: asCount(appended.line)
+      };
+      if (appended.heading !== undefined) {
+        if (typeof appended.heading !== 'string') throw new Error('writer_protocol');
+        proof.heading = appended.heading;
+      }
+      saved.appended = proof;
+    }
+    return saved;
+  }
   if (isRecord(value) && value.outcome === 'conflict_copy' && typeof value.copyId === 'string') {
     return { id, outcome: 'conflict_copy', copyId: value.copyId };
   }
@@ -297,7 +353,15 @@ export function buildRoutedWriteContext(
     appendToNote: (input: AppendToNoteInput) =>
       routed(
         'appendToNote',
-        { id: input.id, text: input.text, privacy: input.privacy },
+        {
+          id: input.id,
+          text: input.text,
+          ...(input.heading !== undefined ? { heading: input.heading } : {}),
+          ...(input.headingOccurrence !== undefined
+            ? { headingOccurrence: input.headingOccurrence }
+            : {}),
+          privacy: input.privacy
+        },
         (value) => asAppendResult(value, input.id),
         () => local.appendToNote(input)
       ),

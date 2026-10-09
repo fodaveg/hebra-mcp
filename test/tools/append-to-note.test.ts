@@ -19,9 +19,16 @@ describe('hebra_append_to_note', () => {
       id: test.library.publicNote2Id,
       text: 'Más texto.'
     });
-    expect(result).toEqual({ id: test.library.publicNote2Id, outcome: 'saved' });
     const after = await test.ctx.port.noteRead(test.library.publicNote2Id);
     expect(after?.body).toBe(`${before?.body}${APPEND_SEPARATOR}Más texto.`);
+    // D11: la prueba de lo guardado sale del cuerpo guardado.
+    expect(result).toEqual({
+      id: test.library.publicNote2Id,
+      outcome: 'saved',
+      revision: expect.stringMatching(/^r1\./),
+      totalChars: after!.body.length,
+      appended: { chars: 10, tail: 'Más texto.', line: (before!.body.match(/\n/g)?.length ?? 0) + 3 }
+    });
   });
 
   it('texto por encima de 20 000 caracteres: invalid_input, sin tocar la nota', async () => {
@@ -98,13 +105,13 @@ describe('hebra_append_to_note', () => {
     expect((await test.ctx.port.noteRead(created.id))?.body).toBe(locked);
   });
 
-  it('sin etiqueta privada: la salida es solo {id, outcome}', async () => {
+  it('sin etiqueta privada: ni hidden ni copyId; la prueba de lo guardado (D11)', async () => {
     test = await buildTestContext();
     const result = await runAppendToNote(test.ctx, {
       id: test.library.publicNote2Id,
       text: 'texto normal'
     });
-    expect(result).toEqual({ id: test.library.publicNote2Id, outcome: 'saved' });
+    expect(Object.keys(result).sort()).toEqual(['appended', 'id', 'outcome', 'revision', 'totalChars']);
   });
 
   it('otra instancia tiene el bloqueo: busy_other_instance', async () => {

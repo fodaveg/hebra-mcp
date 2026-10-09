@@ -1,8 +1,9 @@
 /**
- * Registro de las 27 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 28 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
- * mandarlos a la papelera y sacarlos. Todas pasan por `runTool`:
+ * mandarlos a la papelera y sacarlos, y desde D11 (9 oct 2026), el esquema de una nota
+ * (`hebra_note_outline`) y leer o añadir por apartados. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
@@ -31,6 +32,7 @@ import {
   listTrashInputShape,
   listVersionsInputShape,
   moveNoteInputShape,
+  noteOutlineInputShape,
   readAttachmentInputShape,
   readNoteInputShape,
   readVersionInputShape,
@@ -62,6 +64,7 @@ import {
   runSetFavorite,
   runTrashNote
 } from './tools/organize';
+import { runNoteOutline } from './tools/note-outline';
 import { runReadNote } from './tools/read-note';
 import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
@@ -93,7 +96,8 @@ function countOf(result: unknown): number | undefined {
     'folders',
     'files',
     'versions',
-    'attachments'
+    'attachments',
+    'sections'
   ] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
@@ -139,7 +143,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_search',
     {
       title: 'Buscar notas',
-      description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      description: 'Busca en la biblioteca de Hebra por texto (FTS5), con filtro opcional de carpeta o etiqueta. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos. Cada resultado trae `heading`, el apartado más interno del fragmento (sirve como `heading` de hebra_read_note).',
       inputSchema: searchInputShape,
       annotations: READ_ONLY
     },
@@ -162,11 +166,23 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer una nota',
       description:
-        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla.',
+        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla. Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; `revision` sigue siendo la de la nota entera.',
       inputSchema: readNoteInputShape,
       annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_read_note', (toolCtx) => runReadNote(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_note_outline',
+    {
+      title: 'Esquema de una nota',
+      description:
+        'Esquema de una nota por id o por título exacto, sin su cuerpo: sus apartados (encabezados `#`) con nivel, línea y tamaño. Sirve para elegir `heading` en hebra_read_note o hebra_append_to_note. `occurrence` sale solo en los títulos repetidos. Paginada (`limit`, `cursor`, `nextCursor`); `maxLevel` deja solo los encabezados de ese nivel o menor.',
+      inputSchema: noteOutlineInputShape,
+      annotations: READ_ONLY
+    },
+    async (input) => runTool(ctx, 'hebra_note_outline', (toolCtx) => runNoteOutline(toolCtx, input))
   );
 
   server.registerTool(
@@ -231,7 +247,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Añadir texto a una nota',
       description:
-        'Añade texto al final de una nota existente. Una edición concurrente produce una copia de conflicto visible, sin perder texto.',
+        'Añade texto al final de una nota existente o, con `heading`, al final de ese apartado (subapartados incluidos). Si el título se repite, `headingOccurrence`. Al guardar devuelve `revision`, `totalChars` y `appended` (tamaño, final del texto y línea, leídos de la nota guardada). Una edición concurrente produce una copia de conflicto visible, sin perder texto (sin esa prueba).',
       inputSchema: appendToNoteInputShape,
       annotations: WRITE_NON_IDEMPOTENT
     },
@@ -244,7 +260,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Editar una nota',
       description:
-        'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su `title:` del frontmatter si lo tiene; si no, su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Marcar una tarea (`- [ ]` → `- [x]`) la baja al final de su lista y desmarcarla la sube tras la última pendiente, como en Hebra, pero solo si la edición cambia ÚNICAMENTE su casilla: si cambia también el texto de la línea, se trata como reescrita y se queda donde está. Para que se mueva, hazlo en dos ediciones: primero la casilla y luego el texto. Reintentar con el mismo operationId no repite la edición.',
+        'Edita una nota por sustituciones puntuales {find, replace} sobre la versión leída con hebra_read_note (expectedRevision). Cada find tiene que aparecer exactamente una vez en ese cuerpo; si alguno falla, no se escribe nada. Renombrar una nota es editar su `title:` del frontmatter si lo tiene; si no, su H1. Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Marcar una tarea (`- [ ]` → `- [x]`) la baja al final de su lista y desmarcarla la sube tras la última pendiente, como en Hebra, pero solo si la edición cambia ÚNICAMENTE su casilla: si cambia también el texto de la línea, se trata como reescrita y se queda donde está. Para que se mueva, hazlo en dos ediciones: primero la casilla y luego el texto. Reintentar con el mismo operationId no repite la edición. Al guardar devuelve `totalChars` y `applied` (tamaño y final de cada sustitución, leídos de la nota guardada); con una copia de conflicto no hay prueba.',
       inputSchema: editNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },

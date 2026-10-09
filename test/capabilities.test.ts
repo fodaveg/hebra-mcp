@@ -76,6 +76,9 @@ describe('capacidades', () => {
     expect(capabilities.limits.folderNameChars).toBe(255);
     expect(capabilities.limits.listVersions).toEqual({ default: 50, max: 200 });
     expect(capabilities.limits.listAttachments).toEqual({ max: 200 });
+    // D11 (9 oct 2026): esquema de una nota y prueba de lo guardado.
+    expect(capabilities.limits.noteOutline).toEqual({ default: 200, max: 500 });
+    expect(capabilities.limits.writeProofTailChars).toBe(200);
     expect(capabilities.tools).toEqual(
       expect.arrayContaining([
         'hebra_list_attachments',
@@ -85,9 +88,16 @@ describe('capacidades', () => {
         'hebra_rename_folder',
         'hebra_list_files',
         'hebra_trash_file',
-        'hebra_restore_file'
+        'hebra_restore_file',
+        'hebra_note_outline'
       ])
     );
+  });
+
+  it('las `instructions` explican cómo leer y escribir por apartados (D11)', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_note_outline');
+    expect(SERVER_INSTRUCTIONS).toContain('`heading`');
+    expect(SERVER_INSTRUCTIONS).toContain('appended.tail');
   });
 
   it('las `instructions` nombran las tres de ficheros sueltos y lo que sigue fuera (D10)', () => {

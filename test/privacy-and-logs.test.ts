@@ -14,7 +14,7 @@ import { registerTools } from '../src/server/register-tools';
 import type { ServerContext } from '../src/server/context';
 import { buildTestContext, UNRESOLVED_PRIVACY_CONFIG, type TestContext } from './fixtures/test-context';
 import { BAIT_ATTACHMENT, BAIT_FOLDER, BAIT_TAG, FILE_NAMES } from './fixtures/test-library';
-import { baitCalls } from './fixtures/bait-calls';
+import { BAIT_APPEND_TEXT, baitCalls } from './fixtures/bait-calls';
 
 const TOOL_NAMES = [
   'hebra_search',
@@ -39,7 +39,8 @@ const TOOL_NAMES = [
   'hebra_add_attachment',
   'hebra_list_files',
   'hebra_trash_file',
-  'hebra_restore_file'
+  'hebra_restore_file',
+  'hebra_note_outline'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -67,7 +68,9 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
   },
   // Ficheros sueltos (D10, 9 oct 2026); `hebra_list_files` no necesita argumentos.
   hebra_trash_file: { id: 'lo-que-sea' },
-  hebra_restore_file: { id: 'lo-que-sea' }
+  hebra_restore_file: { id: 'lo-que-sea' },
+  // Apartados (D11).
+  hebra_note_outline: { id: 'lo-que-sea' }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
@@ -121,10 +124,14 @@ describe('filtro de privados y logs, por todas las herramientas', () => {
     const allOutput = texts.join('\n');
     expect(allOutput).not.toContain(BAIT_FOLDER);
     expect(allOutput).not.toContain(BAIT_TAG);
+    // D11: la prueba de lo guardado devuelve el final del texto añadido (del propio
+    // cliente), pero ni eso ni el título de un apartado llegan al log.
+    expect(allOutput).toContain(BAIT_APPEND_TEXT);
 
     const loggedLines = (stderrSpy!.mock.calls as unknown as [string][]).map(([line]) => line).join('\n');
     expect(loggedLines).not.toContain(BAIT_FOLDER);
     expect(loggedLines).not.toContain(BAIT_TAG);
+    expect(loggedLines).not.toContain(BAIT_APPEND_TEXT);
     // Nunca un título, ni siquiera el de una nota PÚBLICA: los logs no llevan contenido.
     expect(loggedLines).not.toContain(test.library.publicNoteTitle);
     // Ni el argumento de una llamada (SPEC.md §6.4: «ni argumentos de herramientas»).

@@ -272,6 +272,94 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"editNote","outcome":"forwarded"');
   });
 
+  it('hebra_append_to_note con heading desde un lector: el apartado se resuelve en el escritor, con su prueba (D11)', async () => {
+    const { writer, client } = await pair();
+    const body = '# Decisiones\n\n## Uno\ntexto uno\n\n## Dos\ntexto dos\n\n## Dos\notro\n';
+    const created = await writer.createNote({ body, privacy: OPEN });
+
+    const saved = await call(client, 'hebra_append_to_note', {
+      id: created.id,
+      text: BAIT_TEXT,
+      heading: 'uno'
+    });
+    expect(saved.isError).toBe(false);
+    const stored = (await writer.port.noteRead(created.id))!.body;
+    expect(stored).toBe(body.replace('texto uno\n\n## Dos', `texto uno\n\n${BAIT_TEXT}\n\n## Dos`));
+    expect(saved.value).toMatchObject({
+      id: created.id,
+      outcome: 'saved',
+      totalChars: stored.length,
+      appended: { chars: BAIT_TEXT.length, tail: BAIT_TEXT, line: 6, heading: 'Uno' }
+    });
+    expect(typeof saved.value.revision).toBe('string');
+
+    // Los dos errores nuevos cruzan el socket (el segundo, con sus candidatos) y no escriben.
+    const missing = await call(client, 'hebra_append_to_note', { id: created.id, text: 'x', heading: 'Nada' });
+    expect(missing).toEqual({ isError: true, value: { error: 'heading_not_found' } });
+    const ambiguous = await call(client, 'hebra_append_to_note', { id: created.id, text: 'x', heading: 'Dos' });
+    expect(ambiguous).toEqual({
+      isError: true,
+      value: {
+        error: 'ambiguous_heading',
+        candidates: [
+          { heading: 'Dos', level: 2, line: 8, occurrence: 1 },
+          { heading: 'Dos', level: 2, line: 11, occurrence: 2 }
+        ]
+      }
+    });
+    expect((await writer.port.noteRead(created.id))!.body).toBe(stored);
+
+    // `headingOccurrence` cruza también el socket.
+    const second = await call(client, 'hebra_append_to_note', {
+      id: created.id,
+      text: 'final',
+      heading: 'Dos',
+      headingOccurrence: 2
+    });
+    expect(second.value).toMatchObject({ outcome: 'saved', appended: { tail: 'final', heading: 'Dos' } });
+    expect((await writer.port.noteRead(created.id))!.body.endsWith('## Dos\notro\n\nfinal\n')).toBe(true);
+
+    // Ni el título del apartado ni el texto llegan al log.
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).not.toContain('"heading":"');
+    expect(stderrText()).toContain('"event":"write.forward","op":"appendToNote","outcome":"forwarded"');
+  });
+
+  it('hebra_edit_note desde un lector trae applied y totalChars del cuerpo guardado (D11)', async () => {
+    const { writer, client } = await pair();
+    const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres', privacy: OPEN });
+    const read = await call(client, 'hebra_read_note', { id: created.id });
+    const result = await call(client, 'hebra_edit_note', {
+      id: created.id,
+      edits: [
+        { find: 'dos', replace: 'DOS' },
+        { find: 'uno', replace: '' }
+      ],
+      expectedRevision: read.value.revision,
+      operationId: 'op-fwd-proof'
+    });
+    const stored = (await writer.port.noteRead(created.id))!.body;
+    expect(result.value).toMatchObject({
+      outcome: 'saved',
+      totalChars: stored.length,
+      applied: [
+        { chars: 3, tail: 'DOS' },
+        { chars: 0, tail: '' }
+      ]
+    });
+    // El reintento por el socket devuelve la misma prueba del registro.
+    const again = await call(client, 'hebra_edit_note', {
+      id: created.id,
+      edits: [
+        { find: 'dos', replace: 'DOS' },
+        { find: 'uno', replace: '' }
+      ],
+      expectedRevision: read.value.revision,
+      operationId: 'op-fwd-proof'
+    });
+    expect(again.value).toMatchObject({ replayed: true, applied: [{ chars: 3, tail: 'DOS' }, { chars: 0, tail: '' }] });
+  });
+
   it('organización desde un lector: la hace el escritor, con la privacidad del lector', async () => {
     const { relay, writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Organizada\n\ntexto', privacy: OPEN });

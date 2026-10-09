@@ -162,7 +162,7 @@ describe('reenvío de escrituras entre procesos serve reales (SPEC.md §8)', () 
     }
 
     const appended = await call(reader, 'hebra_append_to_note', { id, text: BAIT_TEXT });
-    expect(appended.value).toEqual({ id, outcome: 'saved' });
+    expect(appended.value).toMatchObject({ id, outcome: 'saved' });
     for (const session of [writer, reader]) {
       expect((await call(session, 'hebra_read_note', { id })).value.body).toBe(
         `${body}\n\n${BAIT_TEXT}`
@@ -191,7 +191,7 @@ describe('reenvío de escrituras entre procesos serve reales (SPEC.md §8)', () 
 
     // Sin escritor ni socket: el lector toma el relevo en la siguiente escritura.
     const again = await call(reader, 'hebra_append_to_note', { id, text: 'tras el cierre' });
-    expect(again.value).toEqual({ id, outcome: 'saved' });
+    expect(again.value).toMatchObject({ id, outcome: 'saved' });
     expect(lockPid(dataDir)).toBe(reader.pid);
     expect(events(reader, 'write.forward').at(-1)).toMatchObject({
       op: 'appendToNote',

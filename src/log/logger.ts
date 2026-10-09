@@ -24,7 +24,10 @@ export type ToolErrorCode =
   | 'attachment_unavailable'
   // Carpetas (D9, 3 oct 2026; `src/store/folders.ts`).
   | 'folder_unavailable'
-  | 'folder_name_taken';
+  | 'folder_name_taken'
+  // Apartados (D11, 9 oct 2026; `src/store/sections.ts`).
+  | 'heading_not_found'
+  | 'ambiguous_heading';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

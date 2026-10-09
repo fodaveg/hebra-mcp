@@ -11,7 +11,19 @@ describe('applyEdits', () => {
       { find: '# Título', replace: '# Nuevo título' },
       { find: 'dos', replace: 'DOS' }
     ]);
-    expect(result).toEqual({ ok: true, body: '# Nuevo título\n\nuno DOS tres' });
+    expect(result).toMatchObject({ ok: true, body: '# Nuevo título\n\nuno DOS tres' });
+  });
+
+  it('dice dónde quedó cada replace en el cuerpo nuevo, en el orden de edits (D11)', () => {
+    const result = applyEdits('# Título\n\nuno dos tres', [
+      { find: 'dos', replace: 'DOSDOS' },
+      { find: '# Título', replace: '# Nuevo título' }
+    ]);
+    if (!result.ok) throw new Error('rechazada');
+    expect(result.placed.map(({ editIndex, start, end }) => [editIndex, result.body.slice(start, end)])).toEqual([
+      [0, 'DOSDOS'],
+      [1, '# Nuevo título']
+    ]);
   });
 
   it('busca en el cuerpo LEÍDO: una sustitución no casa con lo que otra insertó', () => {
@@ -19,7 +31,7 @@ describe('applyEdits', () => {
       { find: 'a', replace: 'b' },
       { find: 'b', replace: 'c' }
     ]);
-    expect(result).toEqual({ ok: true, body: 'b c' });
+    expect(result).toMatchObject({ ok: true, body: 'b c' });
   });
 
   it('find ausente: no_match con el índice de la sustitución', () => {

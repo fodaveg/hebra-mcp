@@ -104,7 +104,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
       text: 'AÑADIDO POR CLAUDE',
       privacy: NO_PRIVATE
     });
-    expect(appended).toEqual({ id, outcome: 'saved' });
+    expect(appended).toMatchObject({ id, outcome: 'saved' });
     expect((await mcp.port.noteRead(id))?.body).toBe(
       '# Compartida\n\ntexto base\n\nAÑADIDO POR CLAUDE'
     );

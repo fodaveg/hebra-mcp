@@ -18,8 +18,17 @@ export interface TextEdit {
   replace: string;
 }
 
+/** Dónde quedó el `replace` de la sustitución `editIndex` en el cuerpo resultante
+ *  (`start` incluido, `end` excluido), en el orden de `edits`. Lo usa la prueba de lo
+ *  guardado de `hebra_edit_note` (D11). */
+export interface PlacedEdit {
+  editIndex: number;
+  start: number;
+  end: number;
+}
+
 export type ApplyEditsResult =
-  | { ok: true; body: string }
+  | { ok: true; body: string; placed: PlacedEdit[] }
   | { ok: false; code: 'no_match' | 'ambiguous_match' | 'overlapping_edits'; editIndex: number };
 
 /** Máximo de sustituciones por llamada (lo comprueban la herramienta y el socket). */
@@ -67,11 +76,60 @@ export function applyEdits(body: string, edits: readonly TextEdit[]): ApplyEdits
   }
   let result = '';
   let cursor = 0;
+  const placed: PlacedEdit[] = [];
   for (const span of ordered) {
-    result += body.slice(cursor, span.start) + span.replace;
+    result += body.slice(cursor, span.start);
+    placed.push({ editIndex: span.editIndex, start: result.length, end: result.length + span.replace.length });
+    result += span.replace;
     cursor = span.end;
   }
-  return { ok: true, body: result + body.slice(cursor) };
+  placed.sort((a, b) => a.editIndex - b.editIndex);
+  return { ok: true, body: result + body.slice(cursor), placed };
+}
+
+/** Prueba de una sustitución guardada (D11): el tamaño de su `replace` y sus últimos
+ *  `WRITE_PROOF_TAIL_CHARS` caracteres leídos del cuerpo guardado; o `moved: true` si el
+ *  reordenado de tareas la desplazó y ya no se puede ubicar. */
+export interface AppliedEdit {
+  chars: number;
+  tail?: string;
+  moved?: true;
+}
+
+/** Caracteres finales que devuelve la prueba de lo guardado (SPEC.md §5, D11):
+ *  `appended.tail` y `applied[].tail`. Se expone en `capabilities.limits.writeProofTailChars`. */
+export const WRITE_PROOF_TAIL_CHARS = 200;
+
+/**
+ * La prueba de cada sustitución sobre el cuerpo GUARDADO (`savedBody`). `placed` y
+ * `appliedBody` son los de `applyEdits` (antes del reordenado de tareas). Si el cuerpo
+ * guardado es el aplicado, o su prefijo hasta la sustitución no cambió, el `replace`
+ * está donde `applyEdits` lo puso y de ahí sale el `tail`. Si el reordenado movió líneas,
+ * se lee de la única aparición del `replace` en el cuerpo guardado; si no hay una sola,
+ * `moved: true`. Un `replace` vacío es `{chars: 0, tail: ""}`.
+ */
+export function editProof(
+  edits: readonly TextEdit[],
+  placed: readonly PlacedEdit[],
+  appliedBody: string,
+  savedBody: string
+): AppliedEdit[] {
+  const tailOf = (text: string): string => text.slice(-WRITE_PROOF_TAIL_CHARS);
+  return edits.map((edit, index) => {
+    const chars = edit.replace.length;
+    if (chars === 0) return { chars: 0, tail: '' };
+    const position = placed.find((entry) => entry.editIndex === index)!;
+    const inPlace =
+      savedBody.slice(position.start, position.end) === edit.replace &&
+      (savedBody === appliedBody ||
+        savedBody.startsWith(appliedBody.slice(0, position.start)));
+    if (inPlace) return { chars, tail: tailOf(savedBody.slice(position.start, position.end)) };
+    const first = savedBody.indexOf(edit.replace);
+    if (first !== -1 && savedBody.indexOf(edit.replace, first + 1) === -1) {
+      return { chars, tail: tailOf(savedBody.slice(first, first + chars)) };
+    }
+    return { chars, moved: true as const };
+  });
 }
 
 /** `true` si `edits` respeta los límites de tamaño de arriba. */

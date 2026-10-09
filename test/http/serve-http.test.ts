@@ -23,7 +23,7 @@ import { APPEND_SEPARATOR } from '../../src/store/writes';
 import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { BAIT_FOLDER, BAIT_TAG } from '../fixtures/test-library';
-import { baitCalls } from '../fixtures/bait-calls';
+import { BAIT_APPEND_TEXT, baitCalls } from '../fixtures/bait-calls';
 import { TOOL_NAMES } from '../fixtures/tool-names';
 import {
   connectHttpClient,
@@ -94,6 +94,7 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
     const logged = stderrText();
     expect(logged).not.toContain(BAIT_FOLDER);
     expect(logged).not.toContain(BAIT_TAG);
+    expect(logged).not.toContain(BAIT_APPEND_TEXT);
     expect(logged).not.toContain(test.library.publicNoteTitle);
     expect(logged).not.toContain(test.library.privateFolderNoteId);
     expect(logged).not.toContain(TOKEN);
@@ -112,8 +113,8 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
       client.callTool({ name: 'hebra_append_to_note', arguments: { id, text: 'Primero.' } }),
       client.callTool({ name: 'hebra_append_to_note', arguments: { id, text: 'Segundo.' } })
     ]);
-    expect(JSON.parse(textOf(first as CallToolResult))).toEqual({ id, outcome: 'saved' });
-    expect(JSON.parse(textOf(second as CallToolResult))).toEqual({ id, outcome: 'saved' });
+    expect(JSON.parse(textOf(first as CallToolResult))).toMatchObject({ id, outcome: 'saved' });
+    expect(JSON.parse(textOf(second as CallToolResult))).toMatchObject({ id, outcome: 'saved' });
     const after = await test.ctx.port.noteRead(id);
     const body = after?.body ?? '';
     expect(body.startsWith(before?.body ?? '')).toBe(true);

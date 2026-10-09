@@ -1,5 +1,5 @@
 /**
- * `annotations` MCP de las 27 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * `annotations` MCP de las 28 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
  * 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
@@ -28,6 +28,7 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_search: READ,
   hebra_list_notes: READ,
   hebra_read_note: READ,
+  hebra_note_outline: READ,
   hebra_list_tags: READ,
   hebra_list_folders: READ,
   hebra_links: READ,

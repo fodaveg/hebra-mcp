@@ -5,7 +5,8 @@
  *   único) → `ToolError('busy_other_instance')`.
  * - `StoreError` de un rechazo de la edición o la organización (`WriteRejectionCode`,
  *   `src/store/errors.ts`) → el mismo código, con `{edit}` (índice de la sustitución)
- *   cuando lo trae. Nunca el texto buscado.
+ *   cuando lo trae, o con `{candidates}` (títulos y posiciones de los apartados) en
+ *   `ambiguous_heading` (D11). Nunca el texto buscado.
  * - `LibraryError` de Hebra con `note_not_found` o `folder_not_found` → `not_found`,
  *   igual que una nota o carpeta oculta por privacidad (SPEC.md §6.3: «igual que una
  *   inexistente»). El `file_not_found` de un fichero suelto (D10) no llega hasta aquí:
@@ -25,6 +26,9 @@ export function mapWriteError(error: unknown): ToolError {
   if (error instanceof ToolError) return error;
   if (isBusyOtherInstance(error)) return new ToolError('busy_other_instance');
   if (error instanceof StoreError && isWriteRejectionCode(error.code)) {
+    if (error.candidates !== undefined) {
+      return new ToolError(error.code, { candidates: error.candidates });
+    }
     return error.editIndex === undefined
       ? new ToolError(error.code)
       : new ToolError(error.code, { edit: error.editIndex });

@@ -19,6 +19,7 @@ export const SEARCH_FIELDS = [
   'folderPath',
   'tags',
   'snippet',
+  'heading',
   'updatedAt',
   'isConflictCopy'
 ] as const;
@@ -64,9 +65,40 @@ export const listNotesInputShape = {
     .describe('Solo estos campos de cada nota (`id` siempre). Ausente: todos.')
 };
 
+/** Apartado de una nota (D11). Sin `.min()`/`.max()`: los límites los aplica la herramienta
+ *  con `invalid_input`, sin eco de la entrada. `headingOccurrence` sin `heading` es
+ *  `invalid_input`. */
+const headingField = z
+  .string()
+  .optional()
+  .describe('Título de un apartado (de hebra_note_outline). Con él, solo ese apartado.');
+const headingOccurrenceField = z
+  .number()
+  .int()
+  .min(1)
+  .optional()
+  .describe('Si el título se repite, cuál (`occurrence` de hebra_note_outline). Solo con `heading`.');
+
 export const readNoteInputShape = {
   id: z.string().optional(),
-  title: z.string().optional()
+  title: z.string().optional(),
+  heading: headingField,
+  headingOccurrence: headingOccurrenceField
+};
+
+/** `hebra_note_outline` (D11): como `hebra_read_note` para elegir la nota. */
+export const noteOutlineInputShape = {
+  id: z.string().optional(),
+  title: z.string().optional(),
+  maxLevel: z
+    .number()
+    .int()
+    .min(1)
+    .max(6)
+    .optional()
+    .describe('Solo los encabezados de este nivel (1-6) o menor.'),
+  limit: z.number().int().min(1).max(500).optional(),
+  cursor: cursorField
 };
 
 /** `limit` y `cursor` valen para `outgoing` y `backlinks` a la vez; `nextCursor` existe
@@ -99,7 +131,12 @@ export const createNoteInputShape = {
 /** Sin `.max()`: el límite de `text` lo aplica `append-to-note.ts`. */
 export const appendToNoteInputShape = {
   id: z.string(),
-  text: z.string()
+  text: z.string(),
+  heading: z
+    .string()
+    .optional()
+    .describe('Título de un apartado (de hebra_note_outline): el texto va al final de ese apartado, subapartados incluidos. Sin él, al final de la nota.'),
+  headingOccurrence: headingOccurrenceField
 };
 
 /** Sin `.min()`/`.max()`: número de sustituciones, tamaños y `operationId` los aplica
