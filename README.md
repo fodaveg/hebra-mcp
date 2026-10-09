@@ -1,7 +1,7 @@
 # hebra-mcp
 
-Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, editar por
-sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
+Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, leer y añadir
+por apartados, editar por sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
 añadir adjuntos, crear y renombrar carpetas, y listar los ficheros sueltos y mandarlos a
 la papelera o sacarlos; nunca purgar ni vaciar la papelera, mover ni borrar carpetas,
@@ -11,13 +11,24 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 9 de octubre de 2026 (versión 0.3.0): el servidor MCP tiene 27 herramientas
+Estado a 9 de octubre de 2026 (versión 0.3.0): el servidor MCP tiene 28 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
   `hebra_list_folders`, `hebra_links` y `hebra_status`.
 - Creación y edición: `hebra_create_note`, `hebra_append_to_note` y `hebra_edit_note`
   (por sustituciones).
+- Notas por apartados (D11): `hebra_note_outline` da el esquema de una nota (apartados,
+  niveles, líneas y tamaños, sin cuerpo; limit 1-500, def. 200); `hebra_read_note` con
+  `heading` lee solo un apartado (subapartados incluidos) y `hebra_append_to_note` con
+  `heading` añade al final de uno; si el título se repite, `headingOccurrence`.
+  `hebra_search` devuelve `heading`, el apartado del fragmento. Registrar una decisión en
+  un apartado son dos llamadas pequeñas (esquema y añadir), sin pasar la nota entera por
+  el contexto. Las escrituras devuelven la prueba de lo guardado, leída de la nota
+  guardada: `revision`, `totalChars` y el final del texto (`appended.tail` en
+  `hebra_append_to_note`, `applied` en `hebra_edit_note`); con una copia de conflicto no
+  hay prueba. Un apartado es un encabezado `#` hasta el siguiente de su nivel o menor; los
+  encabezados Setext (`===`, `---`) no cuentan.
 - Organización: `hebra_move_note`, `hebra_set_favorite` y `hebra_set_archived`.
 - Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
 - Ficheros sueltos (D10; los recursos con carpeta propia que no cuelgan de una nota, como

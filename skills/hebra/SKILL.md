@@ -3,15 +3,16 @@ name: hebra
 description: >-
   Consulta y escribe en la biblioteca de notas de Hebra (app de notas Markdown
   local-first con sync cifrado) mediante el MCP `hebra` (hebra-mcp): buscar, listar, leer notas, etiquetas,
-  carpetas y enlaces; crear notas, añadir texto al final, editar partes de una nota por
+  carpetas y enlaces; crear notas, ver el esquema de una nota larga y leerla o añadirle
+  texto por apartados, añadir texto al final, editar partes de una nota por
   sustituciones exactas, moverla a una carpeta existente, marcarla favorita, archivarla,
   mandarla a la papelera o sacarla, ver o restaurar sus versiones anteriores, ver sus
   adjuntos (imágenes, PDF, texto) y añadirle uno, crear y renombrar carpetas, y listar
   los ficheros sueltos de la biblioteca (un .base, un PDF que no cuelga de una nota) y
   mandarlos a la papelera o sacarlos.
   Usar cuando el usuario nombra Hebra o sus notas de Hebra: «busca en Hebra», «qué tengo en
-  mis notas sobre X», «apúntalo en Hebra», «crea una nota en Hebra», «añade esto a la
-  nota Y», «corrige/cambia X en la nota Z», «mueve la nota a la carpeta W», «archiva la
+  mis notas sobre X», «apúntalo en Hebra», «registra esta decisión en la nota Y», «crea
+  una nota en Hebra», «añade esto a la nota Y», «corrige/cambia X en la nota Z», «mueve la nota a la carpeta W», «archiva la
   nota», «tira la nota a la papelera», «recupera la versión de ayer», «qué pone en el PDF
   de la nota X», «crea la carpeta W», «renombra la carpeta W», «adjunta esta captura a la
   nota X», «qué ficheros sueltos hay en Hebra», «tira ese fichero a la papelera».
@@ -40,13 +41,14 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 27 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 28 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las tres de ficheros sueltos, `hebra_list_files`,
-  `hebra_trash_file` y `hebra_restore_file`), el conector tiene la lista antigua: se
-  reconecta con `/mcp`.
+  `hebra_trash_file` y `hebra_restore_file`, o sin `hebra_note_outline`), el conector
+  tiene la lista antigua: se reconecta con `/mcp`.
   `hebra_status` dice la versión del servidor en `capabilities.server.version` (0.2.0 o
-  posterior trae las tres de D9; 0.3.0 o posterior trae las tres de ficheros sueltos, D10)
+  posterior trae las tres de D9; 0.3.0 o posterior trae las tres de ficheros sueltos, D10;
+  0.4.0 o posterior trae el esquema y los apartados, D11)
   y la lista de herramientas en `capabilities.tools`.
 - Ante un resultado raro (lista vacía, nota que debería existir), `hebra_status` primero:
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
@@ -66,9 +68,9 @@ reemplazarlos y borrarlos para siempre se hace **desde la app Hebra**.
 
 | Puede | No puede (no hay tool) |
 |---|---|
-| Buscar, listar, leer, ver etiquetas, carpetas, enlaces y backlinks | Reescribir el cuerpo entero de una nota |
+| Buscar, listar, leer (la nota entera o un apartado), ver el esquema de una nota, etiquetas, carpetas, enlaces y backlinks | Reescribir el cuerpo entero de una nota |
 | Crear una nota nueva (en una carpeta existente o en la raíz) | Borrar para siempre (purgar) ni vaciar la papelera |
-| Añadir texto al FINAL de una nota | Mover o borrar carpetas |
+| Añadir texto al FINAL de una nota o de un apartado | Mover o borrar carpetas |
 | Editar partes de una nota con `{find, replace}` (renombrar = editar el `title:` del frontmatter si lo tiene, si no el `# H1`; etiquetar = editar el texto) | Cambiar, sustituir o borrar un adjunto |
 | Mover una nota a una carpeta que ya existe | Renombrar una etiqueta en toda la biblioteca |
 | Marcar o quitar favorita; archivar o desarchivar | Editar una nota bloqueada (`note_locked`); sí se puede organizar |
@@ -83,19 +85,20 @@ Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo
 que la mueva o la borre en la app, el texto listo para que lo pegue, o una edición por
 sustituciones.
 
-## Herramientas (27)
+## Herramientas (28)
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, updatedAt, isConflictCopy}], nextCursor}`. Ignora tildes. Pagina con `nextCursor`. |
+| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading`: el apartado más interno del fragmento (o `null`); vale tal cual como `heading` de `hebra_read_note`. Ignora tildes. Pagina con `nextCursor`. |
 | `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
-| `hebra_read_note` | `id` **o** `title` (exactamente uno) | Cuerpo íntegro y **`revision`** (la necesita la edición). Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles. |
+| `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?` | Cuerpo íntegro y **`revision`** (la necesita la edición). Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
+| `hebra_note_outline` | `id` **o** `title`, `maxLevel?` 1-6, `limit?` 1-500 (200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`, sin cuerpo. `chars` = lo que devolvería la lectura de ese apartado. `occurrence` solo sale en los títulos repetidos: es el `headingOccurrence` que hay que pasar. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
 | `hebra_links` | `id`, `limit?` 1-200, `cursor?` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. Pagina con `nextCursor`. |
 | `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El título es el `title:` del frontmatter si lo hay y, si no, el primer `# H1` del cuerpo. |
-| `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres) | Añade `\n\n` + texto al final. `outcome: saved \| conflict_copy`. |
-| `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `sync`, `replayed`. |
+| `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. |
+| `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `totalChars`, `applied`, `sync`, `replayed`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
 | `hebra_set_favorite` | `id`, `favorite` (bool) | Idempotente. Misma salida que mover. |
 | `hebra_set_archived` | `id`, `archived` (bool) | Idempotente. Misma salida que mover. |
@@ -120,6 +123,34 @@ Fuera de las tres de la papelera, nunca devuelve notas de la papelera. `isConfli
 Un fichero suelto no es un adjunto: los adjuntos de una nota (`![[sha256:…]]`) se ven con `hebra_list_attachments` y se leen con `hebra_read_attachment`; los ficheros sueltos solo salen por `hebra_list_files`, y su contenido no se lee desde aquí. Para «tira a la papelera los PDF sueltos de la carpeta X»: `hebra_list_files` con `folder` (y `name: ".pdf"`) y `hebra_trash_file` de cada uno; se puede seguir paginando con el `nextCursor` recibido mientras los mandas a la papelera.
 
 Para paginar: pasa el `nextCursor` recibido en la siguiente llamada. `null` es el final.
+
+## Notas largas: por apartados
+
+Una nota de decisiones o de seguimiento puede tener decenas de miles de caracteres. No la
+traigas entera para tocar un apartado.
+
+- **Registrar una decisión (o añadir algo) en un apartado**, dos llamadas pequeñas:
+  1. `hebra_note_outline` con el `id` (o el `title`): los apartados con su `heading`, `level`
+     y `chars`. Elige el apartado; si su título sale con `occurrence`, se repite y tienes que
+     pasarlo como `headingOccurrence`.
+  2. `hebra_append_to_note` con `id`, `text`, `heading` (y `headingOccurrence`). El texto va
+     al final de ese apartado, subapartados incluidos, con una línea en blanco de separación.
+- **Comprobar que entró entero**: con la respuesta de esa misma llamada, sin `hebra_search`
+  ni releer la nota. `appended.tail` son los últimos 200 caracteres del texto tal como
+  quedaron en la nota guardada, `appended.chars` su tamaño y `totalChars` el de la nota
+  entera. Si `tail` no termina como termina lo que enviaste, algo falló: dilo. En
+  `hebra_edit_note`, lo mismo con `applied` (una entrada por sustitución; `moved: true`
+  si el reordenado de tareas la desplazó). Con `outcome: conflict_copy` no hay prueba: el
+  texto fue a la copia.
+- **Leer solo un apartado**: `hebra_read_note` con `heading` (y `headingOccurrence`). Para
+  editarlo con `hebra_edit_note`, la `revision` que devuelve vale.
+- **Encontrar el apartado de algo**: `hebra_search` trae `heading` en cada resultado.
+- Un apartado es un encabezado `#` y todo hasta el siguiente de su nivel o menor. Los
+  encabezados dentro del frontmatter o de un bloque de código no cuentan, ni los
+  subrayados con `===` o `---`. Un título que no existe da `heading_not_found`; uno repetido
+  sin `headingOccurrence`, `ambiguous_heading` con los candidatos. Nunca se adivina.
+- Si la nota no tiene el apartado, no lo inventes con `hebra_append_to_note`: añade al
+  final de la nota (sin `heading`) o crea el encabezado en el texto que añades.
 
 Para «recupera cómo estaba la nota»: `hebra_list_versions` → `hebra_read_version` para
 enseñarle la que elija → `hebra_read_note` (por la `revision`) → `hebra_restore_version`
@@ -154,7 +185,8 @@ restaure desde Hebra.
 
 1. **Buscar antes de crear.** Si ya hay una nota del tema, decide según lo que pidió:
    «apúntalo en la nota de X» es un append; «corrige X» es una edición; «crea una nota» es
-   una nota nueva. No dupliques notas por no haber buscado.
+   una nota nueva. No dupliques notas por no haber buscado. Si la nota es larga y el
+   encargo es de un apartado, usa el esquema (`hebra_note_outline`) y `heading`.
 2. **Toda escritura sobre una nota va por `id`**, obtenido de una búsqueda o de
    `hebra_read_note`. Con `ambiguous_title`, elige por carpeta si el encargo lo deja claro;
    si no, enseña los candidatos y pregunta.
@@ -207,6 +239,8 @@ título) ni especules sobre qué hay oculto.
 | `no_match` | Un `find` no aparece en el cuerpo leído (`edit` = su índice) | Cópialo exacto del cuerpo; no lo reescribas de memoria. |
 | `ambiguous_match` | Un `find` aparece más de una vez (`edit` = su índice) | Amplíalo con texto vecino hasta que sea único. |
 | `overlapping_edits` | Dos sustituciones tocan el mismo tramo (`edit` = índice) | Fúndelas en una. |
+| `heading_not_found` | Ningún apartado con ese título (o esa aparición) | `hebra_note_outline` y copia el título exacto; si no está, añade al final o crea el encabezado. |
+| `ambiguous_heading` | Varios apartados con ese título (`candidates`: `heading`, `level`, `line`, `occurrence`) | Elige uno y pasa su `occurrence` como `headingOccurrence`. |
 | `note_locked` | La nota está bloqueada en Hebra | No se edita desde aquí; díselo. Moverla, favorita y archivar sí funcionan. |
 | `operation_id_reused` | Ese `operationId` ya se usó con otra petición | Genera un UUID nuevo. |
 | `privacy_config_unresolved` | Una carpeta privada de la configuración ya no existe | Todo el MCP queda cerrado hasta que el usuario la corrija en el `config.json` del servidor. |
