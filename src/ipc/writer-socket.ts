@@ -36,6 +36,12 @@
  *   `AddAttachmentOutcome`, con la ronda ya esperada. Los bytes van en base64 del lector
  *   al escritor, nunca de vuelta, y el escritor los decodifica con la misma regla
  *   estricta que la herramienta.
+ * - `organizeFile` `{action, id, privacy}` (D10, 9 oct 2026) → `FileOutcome`
+ *   (`{id, folderId, trashed, sync, syncError?}`), con la ronda ya esperada: mandar un
+ *   fichero suelto a la papelera (`trashFile`) o sacarlo (`restoreFile`). Es una op
+ *   propia y no una acción de `organize`, que solo admite acciones de nota. Ninguna otra
+ *   acción de ficheros existe (purgar, crear, renombrar, mover, reemplazar): una acción
+ *   desconocida es `invalid_request`.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?}` con un código
  * cerrado (`WriterSocketErrorCode`) y, en los rechazos de una sustitución, su índice.
  * Nunca viaja el mensaje de una excepción.
@@ -67,6 +73,7 @@ import type { PrivacyConfig } from '../privacy/config';
 import type {
   AddAttachmentOutcome,
   EditNoteOutcome,
+  FileOutcome,
   FolderOutcome,
   OrganizeOutcome
 } from '../server/write-context';
@@ -95,6 +102,7 @@ import {
   type CreateNoteResult,
   type EditNoteInput,
   type FetchAttachmentInput,
+  type OrganizeFileInput,
   type OrganizeInput,
   type RenameFolderInput,
   type RestoreVersionInput
@@ -135,6 +143,7 @@ export type WriterSocketOp =
   | 'createFolder'
   | 'renameFolder'
   | 'addAttachment'
+  | 'organizeFile'
   | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
@@ -147,6 +156,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'createFolder',
   'renameFolder',
   'addAttachment',
+  'organizeFile',
   'status'
 ]);
 
@@ -193,6 +203,9 @@ export interface WriterSocketHandlers {
   renameFolder(input: RenameFolderInput): Promise<FolderOutcome>;
   /** Añade un adjunto (D9), espera la ronda y devuelve el estado de sync. */
   addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome>;
+  /** Manda un fichero suelto a la papelera o lo saca (D10), espera la ronda y devuelve el
+   *  estado de sync. */
+  organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -378,6 +391,21 @@ function organizeInputOf(params: Record<string, unknown>): OrganizeInput {
       return { action: 'setArchived', id, archived: params.archived, privacy };
     case 'trashNote':
     case 'restoreNote':
+      if (!isId(id)) throw new InvalidRequest();
+      return { action: params.action, id, privacy };
+    default:
+      throw new InvalidRequest();
+  }
+}
+
+/** `organizeFile` (D10): solo `trashFile` y `restoreFile`. Cualquier otra acción (de
+ *  purga, de nota, de carpeta) es `invalid_request`, y sin `privacy` también. */
+function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput {
+  const privacy = privacyOf(params.privacy);
+  const { id } = params;
+  switch (params.action) {
+    case 'trashFile':
+    case 'restoreFile':
       if (!isId(id)) throw new InvalidRequest();
       return { action: params.action, id, privacy };
     default:
@@ -602,6 +630,9 @@ export class WriterSocketServer {
           break;
         case 'addAttachment':
           result = await handlers.addAttachment(addAttachmentInputOf(envelope.params));
+          break;
+        case 'organizeFile':
+          result = await handlers.organizeFile(organizeFileInputOf(envelope.params));
           break;
         case 'status':
           result = await handlers.status();

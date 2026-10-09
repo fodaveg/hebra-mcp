@@ -48,6 +48,7 @@ import { logEvent } from '../log/logger';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
+  FilesIndex,
   HebraLibraryPort,
   NoteAttachmentRow,
   NoteVersion,
@@ -60,7 +61,9 @@ import {
   type AddAttachmentInput,
   type AddAttachmentSaved,
   type CreateFolderInput,
+  type FileSaved,
   type FolderSaved,
+  type OrganizeFileInput,
   type RenameFolderInput,
   type AppendToNoteInput,
   type AppendToNoteResult,
@@ -348,6 +351,12 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.writer.addAttachmentLocal(input);
   }
 
+  /** Mandar un fichero suelto a la papelera o sacarlo (D10,
+   *  `NoteWriter.organizeFileLocal`). */
+  organizeFileLocal(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>> {
+    return this.writer.organizeFileLocal(input);
+  }
+
   /** Trae al disco los bytes de un adjunto (`NoteWriter.fetchAttachment`) con el motor
    *  de sync de ESTE escritor; sin sync, solo dice si ya estaban. Rechaza con
    *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
@@ -420,6 +429,7 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       current().notesByExactTitle(title),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
+    filesIndex: (): Promise<FilesIndex> => current().filesIndex(),
     noteVersionsList: (noteId: string): Promise<NoteVersionsList> =>
       current().noteVersionsList(noteId),
     noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>
@@ -433,6 +443,7 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     blobRead: (sha256: string): Promise<Uint8Array | null> => current().blobRead(sha256),
     folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     blobUploaded: (sha256: string): Promise<boolean | null> => current().blobUploaded(sha256),
+    looseFileDirty: (id: string): Promise<boolean | null> => current().looseFileDirty(id),
     close: (): void => current().close()
   };
 }

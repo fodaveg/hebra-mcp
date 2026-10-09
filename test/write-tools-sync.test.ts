@@ -58,9 +58,11 @@ function ctxFor(mcp: McpDevice): ServerContext {
     createFolder: (input) => mcp.writer.createFolderLocal(input),
     renameFolder: (input) => mcp.writer.renameFolderLocal(input),
     addAttachment: (input) => mcp.writer.addAttachmentLocal(input),
+    organizeFile: (input) => mcp.writer.organizeFileLocal(input),
     noteRead: (id) => mcp.port.noteRead(id),
     folderDirty: (id) => mcp.port.folderDirty(id),
     blobUploaded: (sha256) => mcp.port.blobUploaded(sha256),
+    looseFileDirty: (id) => mcp.port.looseFileDirty(id),
     onConflictCopy: (listener) => mcp.runner.onConflictCopy(listener),
     isLinked: () => true,
     requestRound: () => mcp.runner.requestRound()
@@ -269,6 +271,68 @@ describe('escrituras (L3b) contra el sync real: la nota creada y el texto añadi
     const seen = await app.port.noteRead(id);
     expect(seen?.trashedAt).toBeNull();
     expect(seen?.body).toBe('# Para la papelera\n\ntexto');
+  });
+
+  it('ficheros sueltos (D10): mandar uno a la papelera y sacarlo cruza al otro dispositivo en los dos sentidos', async () => {
+    const relay = new InMemoryLibraryRelay();
+    mcp = await mcpDevice(relay, { blobs: true });
+    app = await appDevice(relay, 'Mac', { blobs: true });
+
+    // El fichero nace en el otro dispositivo y baja: hebra-mcp no crea ficheros.
+    const blob = await app.engine.blobPut(new TextEncoder().encode('bytes del plano'), {
+      mime: 'application/pdf'
+    });
+    const file = await app.engine.fileCreate(null, 'plano.pdf', blob.sha256);
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+
+    ({ client, server } = await connectClient(ctxFor(mcp)));
+    const call = async (name: string, args: Record<string, unknown>) =>
+      JSON.parse(textOf((await client!.callTool({ name, arguments: args })) as CallToolResult)) as Record<
+        string,
+        unknown
+      >;
+    const listed = (await call('hebra_list_files', {})).files as Array<Record<string, unknown>>;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({ id: file.id, name: 'plano.pdf', folderPath: '', trashedAt: null });
+
+    expect(await call('hebra_trash_file', { id: file.id })).toEqual({
+      id: file.id,
+      trashed: true,
+      sync: 'uploaded'
+    });
+    await app.sync.runRound();
+    const inAppTrash = app.engine.filesTrashPage(null, 10).items;
+    expect(inAppTrash.map((item) => item.id)).toEqual([file.id]);
+    expect(inAppTrash[0]?.trashedAt).not.toBeNull();
+    // Repetirlo no escribe ni pide ronda: la fila ya está limpia.
+    expect(await call('hebra_trash_file', { id: file.id })).toEqual({
+      id: file.id,
+      trashed: true,
+      sync: 'uploaded'
+    });
+
+    expect(await call('hebra_restore_file', { id: file.id })).toEqual({
+      id: file.id,
+      folderPath: '',
+      sync: 'uploaded'
+    });
+    await app.sync.runRound();
+    expect(app.engine.filesTrashPage(null, 10).items).toEqual([]);
+    const live = app.engine.filesPage('root').items.find((item) => item.id === file.id);
+    // Ni el nombre ni la carpeta cambian al ir y volver.
+    expect(live).toMatchObject({ name: 'plano.pdf', folderId: 'root', trashedAt: null });
+
+    // Y al revés: lo manda a la papelera el otro dispositivo y hebra-mcp lo ve allí.
+    await app.engine.fileTrash(file.id);
+    await app.sync.runRound();
+    await mcp.runner.requestRound();
+    expect((await call('hebra_list_files', {})).files).toEqual([]);
+    const trashed = (await call('hebra_list_files', { trashed: true })).files as Array<
+      Record<string, unknown>
+    >;
+    expect(trashed.map((entry) => entry.id)).toEqual([file.id]);
+    expect(trashed[0]?.trashedAt).not.toBeNull();
   });
 
   it('hebra_restore_version con edición a la vez en otro dispositivo: conflict_copy, sin perder texto', async () => {

@@ -22,7 +22,9 @@ import type {
   CreateNoteResult,
   EditNoteInput,
   EditNoteSaved,
+  FileSaved,
   FolderSaved,
+  OrganizeFileInput,
   OrganizeInput,
   OrganizeSaved,
   RenameFolderInput,
@@ -52,12 +54,17 @@ export interface WriteContextSources {
   renameFolder(input: RenameFolderInput): Promise<LocalWrite<FolderSaved>>;
   /** Añadir un adjunto en local (`NoteWriter.addAttachmentLocal`, D9), sin esperar ronda. */
   addAttachment(input: AddAttachmentInput): Promise<LocalWrite<AddAttachmentSaved>>;
+  /** Mandar un fichero suelto a la papelera o sacarlo en local
+   *  (`NoteWriter.organizeFileLocal`, D10), sin esperar ronda. */
+  organizeFile(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
-  /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`) y para un blob
-   *  (`HebraLibraryPort.blobUploaded`). */
+  /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
+   *  (`HebraLibraryPort.blobUploaded`) y para un fichero suelto
+   *  (`HebraLibraryPort.looseFileDirty`). */
   folderDirty(id: string): Promise<boolean | null>;
   blobUploaded(sha256: string): Promise<boolean | null>;
+  looseFileDirty(id: string): Promise<boolean | null>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Si esta instancia tiene sync (está emparejada). Solo se consulta cuando una escritura
@@ -106,6 +113,9 @@ export type OrganizeOutcome = OrganizeSaved & SyncFields;
 /** Crear o renombrar una carpeta (D9), antes de poner la ruta. */
 export type FolderOutcome = FolderSaved & SyncFields;
 
+/** Mandar un fichero suelto a la papelera o sacarlo (D10), antes de poner la ruta. */
+export type FileOutcome = FileSaved & SyncFields;
+
 /** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
  *  estado de sync (`uploaded` exige además el blob ya subido). */
 export type AddAttachmentOutcome = EditNoteOutcome & { attachmentId: string; markdown: string };
@@ -138,6 +148,10 @@ export interface WriteContext {
   /** Añadir un adjunto (D9): como `editNote` (ronda, estado de sync, copia de conflicto
    *  de la ronda anotada en el registro), con el adjunto en la salida. */
   addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome>;
+  /** Mandar un fichero suelto a la papelera o sacarlo (D10): escribe, espera la ronda y
+   *  devuelve el estado de sync, como `organize`. Si ya estaba en ese estado, no escribe
+   *  ni pide ronda. En un lector, todo ocurre en el escritor (`./forward.ts`). */
+  organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
@@ -250,6 +264,15 @@ export function buildWriteContext(
     }
   }
 
+  /** Si un fichero suelto sigue sin subir; `null` si no se sabe. */
+  async function fileDirtyOf(id: string): Promise<boolean | null> {
+    try {
+      return await sources.looseFileDirty(id);
+    } catch {
+      return null;
+    }
+  }
+
   /** Un adjunto añadido está subido cuando la nota (o su copia) ya no está sucia Y el blob
    *  ya está en el relé; `null` si alguna de las dos cosas no se sabe. */
   function attachmentDirtyOf(sha256: string): (id: string) => Promise<boolean | null> {
@@ -323,6 +346,14 @@ export function buildWriteContext(
     return { ...saved, ...syncFieldsOf(wait, await folderDirtyOf(saved.id)) };
   }
 
+  /** Ficheros sueltos (D10): como `folderWrite`, con la fila de `files`. */
+  async function fileWrite(local: Promise<LocalWrite<FileSaved>>): Promise<FileOutcome> {
+    const { result: saved, wrote } = await local;
+    if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id, fileDirtyOf)) };
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...saved, ...syncFieldsOf(wait, await fileDirtyOf(saved.id)) };
+  }
+
   return {
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
@@ -336,6 +367,7 @@ export function buildWriteContext(
     }),
     createFolder: (input: CreateFolderInput) => folderWrite(sources.createFolder(input)),
     renameFolder: (input: RenameFolderInput) => folderWrite(sources.renameFolder(input)),
+    organizeFile: (input: OrganizeFileInput) => fileWrite(sources.organizeFile(input)),
     async addAttachment(input: AddAttachmentInput): Promise<AddAttachmentOutcome> {
       // El adjunto (hash y referencia) sale del guardado; el resto, como una edición.
       let added: AddAttachmentSaved | undefined;

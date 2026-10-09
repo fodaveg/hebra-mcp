@@ -6,6 +6,10 @@
  * sobre ellas. Una nota de la papelera oculta responde igual que una inexistente
  * (`not_found`), y la lista no dice cuántas se saltó.
  *
+ * La parte de las carpetas (`restoreFolderOf`) la usa también el filtro de los ficheros
+ * sueltos (D10, 9 oct 2026; `./file-filter.ts`), que parte de la carpeta guardada del
+ * fichero igual que aquí se parte de la de la nota.
+ *
  * Oculta, como en §6.3, si tiene una etiqueta privada (o descendiente) o si su carpeta
  * es privada (o subcarpeta). Lo nuevo es la carpeta: `folderTrash` de Hebra deja la
  * carpeta como LÁPIDA (con su nombre y su padre) y manda sus notas a la papelera sin
@@ -89,8 +93,10 @@ export class TrashFilter {
   }
 
   /** Carpeta en la que quedaría al restaurarla, o `undefined` si su carpeta (viva o
-   *  lápida) es privada o no se puede saber. */
-  private restoreFolderOf(folderId: string): string | undefined {
+   *  lápida) es privada o no se puede saber. `folderId` es la carpeta GUARDADA, de una
+   *  nota de la papelera o de un fichero suelto (`FileFilter`): el resultado es siempre
+   *  una carpeta viva y visible o la raíz. */
+  restoreFolderOf(folderId: string): string | undefined {
     if (folderId === ROOT_FOLDER_ID) return ROOT_FOLDER_ID;
     if (this.live.folderExists(folderId)) {
       return this.live.isFolderHidden(folderId) ? undefined : folderId;

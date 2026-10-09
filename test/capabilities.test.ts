@@ -58,13 +58,17 @@ describe('capacidades', () => {
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);
     // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover
-    // o borrar carpetas y cambiar o borrar adjuntos, no.
+    // o borrar carpetas y cambiar o borrar adjuntos, no. D10 (9 oct 2026): listar los
+    // ficheros sueltos y mandarlos a la papelera sí; purgarlos, crearlos, renombrarlos,
+    // moverlos, reemplazarlos o leer su contenido, no.
     expect(capabilities.notAllowed).toEqual([
       'purge_notes_or_empty_trash_or_irreversible_delete',
       'folder_move_or_delete',
-      'attachment_change_or_delete'
+      'attachment_change_or_delete',
+      'file_purge_create_rename_move_replace_or_read_content'
     ]);
     expect(capabilities.limits.listTrash).toEqual({ default: 50, max: 100 });
+    expect(capabilities.limits.listFiles).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
     expect(capabilities.limits.attachmentTextChars).toBe(100_000);
     expect(capabilities.limits.addAttachmentBytes).toBe(5 * 1024 * 1024);
@@ -78,8 +82,21 @@ describe('capacidades', () => {
         'hebra_read_attachment',
         'hebra_add_attachment',
         'hebra_create_folder',
-        'hebra_rename_folder'
+        'hebra_rename_folder',
+        'hebra_list_files',
+        'hebra_trash_file',
+        'hebra_restore_file'
       ])
+    );
+  });
+
+  it('las `instructions` nombran las tres de ficheros sueltos y lo que sigue fuera (D10)', () => {
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_list_files');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_trash_file');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_restore_file');
+    expect(SERVER_INSTRUCTIONS).toContain('No se lee su contenido');
+    expect(SERVER_INSTRUCTIONS).toContain(
+      'ni purgar, crear, renombrar, mover o reemplazar ficheros sueltos'
     );
   });
 

@@ -1,13 +1,15 @@
 /**
- * Registro de las 24 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
- * organización, papelera, versiones, adjuntos y, desde D9 (3 oct 2026), crear y renombrar
- * carpetas y añadir adjuntos. Todas pasan por `runTool`:
+ * Registro de las 27 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
+ * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
+ * mandarlos a la papelera y sacarlos. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, mueve ni borra carpetas, ni cambia ni borra
- * adjuntos. Cada una lleva sus `annotations` MCP.
+ * adjuntos, ni purga, crea, renombra, mueve o reemplaza un fichero suelto, ni lee su
+ * contenido. Cada una lleva sus `annotations` MCP.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -22,6 +24,7 @@ import {
   editNoteInputShape,
   linksInputShape,
   listAttachmentsInputShape,
+  listFilesInputShape,
   listFoldersInputShape,
   listNotesInputShape,
   listTagsInputShape,
@@ -31,11 +34,13 @@ import {
   readAttachmentInputShape,
   readNoteInputShape,
   readVersionInputShape,
+  restoreFileInputShape,
   restoreNoteInputShape,
   restoreVersionInputShape,
   searchInputShape,
   setArchivedInputShape,
   setFavoriteInputShape,
+  trashFileInputShape,
   trashNoteInputShape
 } from './schemas';
 import { runAddAttachment } from './tools/add-attachment';
@@ -44,6 +49,7 @@ import { runCreateFolder, runRenameFolder } from './tools/folders';
 import { runListAttachments, runReadAttachment } from './tools/attachments';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
+import { runListFiles, runRestoreFile, runTrashFile } from './tools/files';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
@@ -80,7 +86,15 @@ const WRITE_NON_IDEMPOTENT = {
 function countOf(result: unknown): number | undefined {
   if (!result || typeof result !== 'object') return undefined;
   const record = result as Record<string, unknown>;
-  for (const key of ['results', 'notes', 'tags', 'folders', 'versions', 'attachments'] as const) {
+  for (const key of [
+    'results',
+    'notes',
+    'tags',
+    'folders',
+    'files',
+    'versions',
+    'attachments'
+  ] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
   }
@@ -307,6 +321,43 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       annotations: READ_ONLY
     },
     async (input) => runTool(ctx, 'hebra_list_trash', (toolCtx) => runListTrash(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_files',
+    {
+      title: 'Listar ficheros sueltos',
+      description:
+        'Lista los ficheros sueltos de la biblioteca (los que tienen carpeta propia y no son adjuntos de una nota: un .base, un PDF), por nombre. Con `trashed: true`, los de la papelera, el último en entrar primero, con la carpeta a la que volverían. Filtros opcionales: `folder` (con `subfolders`) y `name` (parte del nombre). No devuelve su contenido. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: listFilesInputShape,
+      annotations: READ_ONLY
+    },
+    async (input) => runTool(ctx, 'hebra_list_files', (toolCtx) => runListFiles(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_trash_file',
+    {
+      title: 'Mandar un fichero suelto a la papelera',
+      description:
+        'Manda un fichero suelto (id de hebra_list_files) a la papelera de Hebra. Se puede sacar con hebra_restore_file o desde Hebra: no lo borra.',
+      inputSchema: trashFileInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) => runTool(ctx, 'hebra_trash_file', (toolCtx) => runTrashFile(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_restore_file',
+    {
+      title: 'Sacar un fichero suelto de la papelera',
+      description:
+        'Saca un fichero suelto de la papelera, a su carpeta si sigue existiendo o, si no, a la raíz.',
+      inputSchema: restoreFileInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_restore_file', (toolCtx) => runRestoreFile(toolCtx, input))
   );
 
   server.registerTool(

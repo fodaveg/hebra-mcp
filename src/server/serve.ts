@@ -87,9 +87,11 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     createFolder: (input) => instance.createFolderLocal(input),
     renameFolder: (input) => instance.renameFolderLocal(input),
     addAttachment: (input) => instance.addAttachmentLocal(input),
+    organizeFile: (input) => instance.organizeFileLocal(input),
     noteRead: (id) => instance.port.noteRead(id),
     folderDirty: (id) => instance.port.folderDirty(id),
     blobUploaded: (sha256) => instance.port.blobUploaded(sha256),
+    looseFileDirty: (id) => instance.port.looseFileDirty(id),
     isLinked: () => instance.syncRunner !== null,
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
     requestRound: () => {

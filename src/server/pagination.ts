@@ -12,6 +12,10 @@
  * - SOBRE UNA LISTA CALCULADA (`slicePage`): etiquetas, carpetas y enlaces salientes, que
  *   ya salen filtrados y en memoria. El cursor lleva la clave del último elemento (o su
  *   posición, cuando no hay clave única).
+ * - SOBRE UNA LISTA CALCULADA Y ORDENADA, POR CLAVE DE ORDEN (`sliceAfterKey`): los
+ *   ficheros sueltos (D10). Como la anterior, pero el cursor lleva la clave de ORDEN del
+ *   último elemento y la página siguiente empieza en el primero que va después: no hace
+ *   falta que ese elemento siga en la lista.
  *
  * El contenido del cursor es un detalle interno, envuelto con un prefijo por herramienta
  * para que un cursor de una no se acepte en otra (`invalid_input`).
@@ -27,6 +31,7 @@ export const LIMITS = {
   listTags: { default: null, max: 500 },
   listFolders: { default: null, max: 500 },
   listTrash: { default: 50, max: 100 },
+  listFiles: { default: 50, max: 100 },
   listVersions: { default: 50, max: 200 },
   listAttachments: { default: null, max: 200 }
 } as const;
@@ -41,7 +46,8 @@ export function storePageSize(want: number): number {
   return Math.min(Math.max(want, 1), STORE_PAGE_MAX);
 }
 
-export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1';
+/** `fl1` es el de `hebra_list_files` (D10); `f1`, el de las carpetas. */
+export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1' | 'fl1';
 
 const CURSOR_MAX_LENGTH = 2_048;
 
@@ -137,6 +143,39 @@ export function slicePage<T>(
   const last = end - 1;
   const payload = options.keyOf ? options.keyOf(all[last]!) : String(end);
   return { items, nextCursor: wrapCursor(kind, payload) };
+}
+
+/**
+ * Página de una lista ya calculada en memoria y ORDENADA según `compare`, con un cursor
+ * POSICIONAL por clave de orden: `after` es la clave del último elemento de la página
+ * anterior (`null` en la primera) y la página empieza en el primer elemento cuya clave va
+ * estrictamente después. A diferencia de `slicePage` con `keyOf`, no exige que el
+ * elemento del cursor siga en la lista: si entre dos páginas se quita (mandar a la
+ * papelera el último fichero listado), la siguiente continúa donde tocaba en vez de dar
+ * `invalid_input`. `lastKey` es la clave del último elemento DEVUELTO, o `null` si no
+ * queda ninguno detrás: quien llama lo envuelve como `nextCursor`. `all` ya viene
+ * filtrado, así que ni el tamaño de la página ni la presencia del cursor dependen de lo
+ * que se ocultó.
+ */
+export function sliceAfterKey<T, K>(
+  all: readonly T[],
+  options: {
+    limit: number;
+    after: K | null;
+    keyOf(item: T): K;
+    compare(left: K, right: K): number;
+  }
+): { items: T[]; lastKey: K | null } {
+  let start = 0;
+  if (options.after !== null) {
+    const after = options.after;
+    start = all.findIndex((item) => options.compare(options.keyOf(item), after) > 0);
+    if (start < 0) start = all.length;
+  }
+  const end = Math.min(start + options.limit, all.length);
+  const items = all.slice(start, end);
+  if (end >= all.length) return { items, lastKey: null };
+  return { items, lastKey: options.keyOf(all[end - 1]!) };
 }
 
 /** `fields`: deja `id` y los campos pedidos, en el orden de la salida normal. Sin

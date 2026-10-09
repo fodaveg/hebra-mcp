@@ -4,7 +4,10 @@
  * `LocalLibraryPort` (`library/local-port` de Hebra): ese puerto implementa el
  * `LibraryStorePort` completo (`tagRename`, `noteMove`, `folder*`, `file*`…), y D2
  * (SPEC.md §3) prohíbe que nada de eso sea alcanzable desde las herramientas. Este puerto
- * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite.
+ * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite. De los ficheros
+ * sueltos (D10, 9 oct 2026) solo tiene una LECTURA propia (`filesIndex`); mandarlos a la
+ * papelera y sacarlos (`fileTrash`/`fileRestore` del motor) solo existe dentro del turno
+ * de escritura.
  *
  * Del mismo almacén salen tres vistas, todas por la MISMA cola (`SerialQueue`, ver su
  * cabecera) para que una ronda de sync y una escritura nunca se crucen en la conexión:
@@ -13,7 +16,8 @@
  *   que necesita `LibrarySyncEngine`; solo lo usa `src/sync/runner.ts`.
  * - `NoteWriteStore` (`writeExclusive()`): noteCreate/noteRead/noteSave en UN turno de
  *   la cola, para `./writes.ts` (crear = crear + guardar sin que una ronda se cuele en
- *   medio y suba una nota vacía).
+ *   medio y suba una nota vacía). También lo demás que escribe `NoteWriter`: organizar,
+ *   papelera, carpetas, adjuntos y, desde D10, la papelera de los ficheros sueltos.
  *
  * Solo lectura (SPEC.md §8, escritor único): con `mode: 'readOnly'` la SQLite se abre
  * con `readOnly: true` y toda escritura rechaza con `busy_other_instance`
@@ -53,6 +57,7 @@ import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
+  FilesIndex,
   HebraLibraryPort,
   NoteAttachmentRow,
   NoteVersion,
@@ -362,6 +367,81 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     };
   }
 
+  async filesIndex(): Promise<FilesIndex> {
+    return this.read(() => this.filesRows());
+  }
+
+  /**
+   * La consulta de `filesIndex`, sin cola (también la usa `writeExclusive`). SQL propio de
+   * hebra-mcp sobre `files`, `blobs`, `links` y `notes` de `schema.sql`, como `trashRows`,
+   * y no `filesPage` ni `filesFindByName` del motor: esos no paginan con un cursor que
+   * se pueda usar desde fuera y su aviso de que quedan más delataría una cola de ficheros
+   * ocultos (D10, SPEC.md §5 y §6.3).
+   * - Ficheros: todos los que no son lápida, vivos y de la papelera, con la carpeta
+   *   GUARDADA y lo que su fila de `blobs` sepa (puede no haberla).
+   * - Referencias: qué notas (que no sean lápida, vivas o de la papelera) enlazan cada
+   *   fichero, con la definición del motor (`backlinks` de `sqlite-engine.ts`): un enlace
+   *   `file` con su nombre exacto o un enlace `blob` con el SHA-256 de sus bytes. La ruta
+   *   del enlace (`target_path`) no se mira, así que un homónimo cuenta: de más, nunca de
+   *   menos. El hash se compara en minúsculas, que es como lo guarda `links`; el motor da
+   *   por hecho que `files` lo guarda igual, aquí no. Por ese `lower()` la rama del hash
+   *   lleva `CROSS JOIN`, que en SQLite fija el orden: manda `files` y cada fichero
+   *   sondea `links_by_target`. Sin él, el planificador recorría todos los enlaces `blob`
+   *   (uno por adjunto de cada nota) y, por cada uno, `files` entera, porque `lower()` no
+   *   deja usar `files_by_sha256` (medido con `EXPLAIN QUERY PLAN`).
+   * - El índice de la papelera, del mismo turno: el filtro lo necesita para saber si una
+   *   nota de la papelera que enlaza un fichero se ve, y para subir por las carpetas ya
+   *   borradas.
+   */
+  private filesRows(): FilesIndex {
+    const files = this.prepared(
+        `SELECT fl.id AS id, fl.folder_id AS folder_id, fl.name AS name,
+                coalesce(fl.updated_at, fl.created_at, 0) AS updated_at,
+                fl.trashed_at AS trashed_at, b.byte_length AS byte_length, b.mime AS mime
+         FROM files fl
+         LEFT JOIN blobs b ON b.sha256 = fl.sha256
+         WHERE fl.deleted = 0`
+    ).all() as Array<{
+      id: string;
+      folder_id: string;
+      name: string;
+      updated_at: number | bigint;
+      trashed_at: number | bigint | null;
+      byte_length: number | bigint | null;
+      mime: string | null;
+    }>;
+    const refs = this.prepared(
+        `SELECT fl.id AS file_id, n.id AS note_id, n.trashed_at IS NOT NULL AS note_trashed
+         FROM files fl
+         JOIN links l ON l.target_kind = 'file' AND l.target = fl.name
+         JOIN notes n ON n.id = l.src_note_id
+         WHERE fl.deleted = 0 AND n.deleted = 0
+         UNION
+         SELECT fl.id AS file_id, n.id AS note_id, n.trashed_at IS NOT NULL AS note_trashed
+         FROM files fl
+         CROSS JOIN links l ON l.target_kind = 'blob' AND l.target = lower(fl.sha256)
+         JOIN notes n ON n.id = l.src_note_id
+         WHERE fl.deleted = 0 AND n.deleted = 0`
+    ).all() as Array<{ file_id: string; note_id: string; note_trashed: number | bigint }>;
+    return {
+      files: files.map((row) => ({
+        id: String(row.id),
+        folderId: String(row.folder_id),
+        name: String(row.name),
+        byteLength: row.byte_length === null ? null : Number(row.byte_length),
+        mime: row.mime ?? null,
+        updatedAt: Number(row.updated_at),
+        trashedAt: row.trashed_at === null ? null : Number(row.trashed_at)
+      })),
+      refs: refs.map((row) => ({
+        fileId: String(row.file_id),
+        noteId: String(row.note_id),
+        noteTrashed: Number(row.note_trashed) !== 0
+      })),
+      trash: this.trashRows()
+    };
+  }
+
   async noteVersionsList(noteId: string): Promise<NoteVersionsList> {
     return this.read(() => this.engine.noteVersionsList(noteId));
   }
@@ -452,6 +532,18 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     });
   }
 
+  /** Si un fichero suelto sigue sucio (sin subir), para el estado de sync de mandarlo a
+   *  la papelera o sacarlo (D10); `null` si no existe o es una lápida. SQL propio sobre
+   *  `files` de `schema.sql`, como `folderDirty`. */
+  async looseFileDirty(id: string): Promise<boolean | null> {
+    return this.read(() => {
+      const row = this.prepared('SELECT dirty FROM files WHERE id = ? AND deleted = 0').get(id) as
+        | { dirty: number | bigint }
+        | undefined;
+      return row === undefined ? null : Number(row.dirty) !== 0;
+    });
+  }
+
   /**
    * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
    * las operaciones de nota, lo que lee el filtro de privados y el registro de
@@ -468,6 +560,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
         blobPut: (bytes, options) => this.engine.blobPut(bytes, options),
+        // D10: mandar un fichero suelto a la papelera y sacarlo, igual: solo aquí. Ningún
+        // otro `file*` del motor (purgar, crear, renombrar, mover, reemplazar) está.
+        fileTrash: (id) => this.engine.fileTrash(id),
+        fileRestore: (id) => this.engine.fileRestore(id),
         noteMove: (id, folderId) => this.engine.noteMove(id, folderId),
         noteSetFavorite: (id, favorite) => this.engine.noteSetFavorite(id, favorite),
         noteArchive: (id) => this.engine.noteArchive(id),
@@ -482,6 +578,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => this.visibilityRows(),
         trashIndex: () => this.trashRows(),
+        filesIndex: () => this.filesRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db))
       })

@@ -1,5 +1,6 @@
 /**
- * `annotations` MCP de las 24 herramientas (C3 del audit; D9 del 3 oct 2026): cada una
+ * `annotations` MCP de las 27 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -32,6 +33,7 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_links: READ,
   hebra_status: READ,
   hebra_list_trash: READ,
+  hebra_list_files: READ,
   hebra_list_versions: READ,
   hebra_read_version: READ,
   hebra_list_attachments: READ,
@@ -48,6 +50,9 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_create_folder: WRITE_IDEMPOTENT,
   hebra_rename_folder: WRITE_IDEMPOTENT,
   hebra_add_attachment: WRITE_IDEMPOTENT,
+  // D10: mandar a la papelera un fichero que ya está en ella, o sacar uno vivo, no escribe.
+  hebra_trash_file: WRITE_IDEMPOTENT,
+  hebra_restore_file: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

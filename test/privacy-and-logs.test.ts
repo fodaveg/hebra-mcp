@@ -13,7 +13,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from '../src/server/register-tools';
 import type { ServerContext } from '../src/server/context';
 import { buildTestContext, UNRESOLVED_PRIVACY_CONFIG, type TestContext } from './fixtures/test-context';
-import { BAIT_ATTACHMENT, BAIT_FOLDER, BAIT_TAG } from './fixtures/test-library';
+import { BAIT_ATTACHMENT, BAIT_FOLDER, BAIT_TAG, FILE_NAMES } from './fixtures/test-library';
 import { baitCalls } from './fixtures/bait-calls';
 
 const TOOL_NAMES = [
@@ -36,7 +36,10 @@ const TOOL_NAMES = [
   'hebra_read_attachment',
   'hebra_create_folder',
   'hebra_rename_folder',
-  'hebra_add_attachment'
+  'hebra_add_attachment',
+  'hebra_list_files',
+  'hebra_trash_file',
+  'hebra_restore_file'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -61,7 +64,10 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
     dataBase64: 'YQ==',
     mimeType: 'text/plain',
     operationId: 'op'
-  }
+  },
+  // Ficheros sueltos (D10, 9 oct 2026); `hebra_list_files` no necesita argumentos.
+  hebra_trash_file: { id: 'lo-que-sea' },
+  hebra_restore_file: { id: 'lo-que-sea' }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
@@ -128,6 +134,22 @@ describe('filtro de privados y logs, por todas las herramientas', () => {
     expect(allOutput).toContain(BAIT_ATTACHMENT);
     expect(loggedLines).not.toContain(BAIT_ATTACHMENT);
     expect(loggedLines).not.toContain(test.library.attachments.text);
+    // Ficheros sueltos (D10): los visibles salen en la salida, y de ninguno, visible u
+    // oculto, sale el nombre ni el id pedido en los logs.
+    expect(allOutput).toContain(FILE_NAMES.inventario);
+    for (const name of Object.values(FILE_NAMES)) expect(loggedLines).not.toContain(name);
+    for (const id of Object.values(test.library.files)) {
+      expect(loggedLines).not.toContain(id);
+    }
+    for (const id of [
+      test.library.files.privateFolder,
+      test.library.files.referencedByHash,
+      test.library.files.referencedByName,
+      test.library.files.trashedPrivateFolder,
+      test.library.files.trashedDeletedPrivateFolder
+    ]) {
+      expect(allOutput).not.toContain(id);
+    }
   });
 
   it('un log de cada llamada es un JSON con tool/ok, sin más campos de contenido', async () => {

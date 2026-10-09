@@ -58,9 +58,11 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
     createFolder: (input) => writer.createFolderLocal(input),
     renameFolder: (input) => writer.renameFolderLocal(input),
     addAttachment: (input) => writer.addAttachmentLocal(input),
+    organizeFile: (input) => writer.organizeFileLocal(input),
     noteRead: (id) => port.noteRead(id),
     folderDirty: (id) => port.folderDirty(id),
     blobUploaded: (sha256) => port.blobUploaded(sha256),
+    looseFileDirty: (id) => port.looseFileDirty(id),
     onConflictCopy: () => () => {},
     isLinked: () => false,
     requestRound: () => Promise.resolve(null)

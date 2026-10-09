@@ -101,6 +101,21 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       name: 'hebra_read_attachment',
       arguments: { id: library.attachmentsNoteId, attachmentId: library.attachments.text }
     },
+    // Ficheros sueltos (D10, 9 oct 2026): la lista de vivos y la de la papelera tienen
+    // cebos en el NOMBRE de ficheros ocultos por carpeta, por una carpeta privada ya
+    // borrada y por referencia desde una nota oculta; buscarlos por el cebo o listar la
+    // carpeta privada no los saca, y mandarlos a la papelera o sacarlos es `not_found`.
+    { name: 'hebra_list_files', arguments: { limit: 100 } },
+    { name: 'hebra_list_files', arguments: { name: BAIT_FOLDER } },
+    { name: 'hebra_list_files', arguments: { name: BAIT_TAG } },
+    { name: 'hebra_list_files', arguments: { folder: 'Diario/2026', subfolders: true } },
+    { name: 'hebra_list_files', arguments: { trashed: true, limit: 100 } },
+    { name: 'hebra_list_files', arguments: { trashed: true, name: BAIT_FOLDER } },
+    { name: 'hebra_trash_file', arguments: { id: library.files.privateFolder } },
+    { name: 'hebra_trash_file', arguments: { id: library.files.referencedByHash } },
+    { name: 'hebra_trash_file', arguments: { id: library.files.referencedByName } },
+    { name: 'hebra_restore_file', arguments: { id: library.files.trashedPrivateFolder } },
+    { name: 'hebra_restore_file', arguments: { id: library.files.trashedDeletedPrivateFolder } },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en

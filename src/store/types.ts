@@ -4,10 +4,12 @@
  * organización (D2 ampliada, 28 sep 2026) y la papelera y las versiones (ampliación del
  * 30 sep 2026) NO están aquí: van por un turno exclusivo de la cola (`writeExclusive`,
  * `./writes.ts`), con el filtro de privados dentro del turno. Aquí solo están sus
- * LECTURAS (`trashIndex`, `noteVersionsList`, `noteVersionRead`). A propósito NO es
- * `LibraryStorePort` (`library/types` de Hebra): ese interfaz obliga a implementar
- * `tagRename`/`notePurge`/`trashEmpty`/`file*`, que hebra-mcp nunca expone
- * (`test/store/surface.node.test.ts`).
+ * LECTURAS (`trashIndex`, `noteVersionsList`, `noteVersionRead`). Lo mismo los ficheros
+ * sueltos (D10, 9 oct 2026): aquí solo se LEEN (`filesIndex`), y mandarlos a la papelera
+ * o sacarlos va por el turno exclusivo. A propósito NO es `LibraryStorePort`
+ * (`library/types` de Hebra): ese interfaz obliga a implementar
+ * `tagRename`/`notePurge`/`trashEmpty` y todos los `file*` (purgar, crear, renombrar,
+ * mover, reemplazar), que hebra-mcp nunca expone (`test/store/surface.node.test.ts`).
  */
 import type {
   FoldersList,
@@ -70,6 +72,44 @@ export interface TrashIndex {
   folders: FolderRowFact[];
 }
 
+/**
+ * Un fichero suelto de la biblioteca (D10, 9 oct 2026): una fila de `files` que no es
+ * lápida, viva o en la papelera. `folderId` es la carpeta GUARDADA (`files.folder_id`),
+ * no la efectiva: el filtro (`src/privacy/file-filter.ts`) sube por las filas de carpeta
+ * si ya es una lápida, como con las notas de la papelera. No lleva el SHA-256 de sus
+ * bytes: ninguna salida lo enseña, y el cruce con las notas que lo enlazan ya viene hecho
+ * en `FilesIndex.refs`.
+ */
+export interface FileEntry {
+  id: string;
+  folderId: string;
+  name: string;
+  /** Tamaño y tipo de su fila de `blobs`; `null` si no hay fila. */
+  byteLength: number | null;
+  mime: string | null;
+  /** Epoch ms (`files.updated_at`; si falta, `created_at`). */
+  updatedAt: number;
+  /** Epoch ms, o `null` si está vivo. */
+  trashedAt: number | null;
+}
+
+/** Una nota que enlaza un fichero suelto, por su nombre o por el SHA-256 de sus bytes
+ *  (`links` de Hebra). La nota no es lápida; puede estar viva o en la papelera. */
+export interface FileNoteRef {
+  fileId: string;
+  noteId: string;
+  noteTrashed: boolean;
+}
+
+/** Lo que el filtro de los ficheros sueltos lee del almacén, de una vez y en un solo
+ *  turno de la cola: los ficheros, las notas que los enlazan y lo que necesita el filtro
+ *  de la papelera para juzgar esas notas y las carpetas ya borradas. */
+export interface FilesIndex {
+  files: FileEntry[];
+  refs: FileNoteRef[];
+  trash: TrashIndex;
+}
+
 /** Un adjunto de una nota (`note_blob_refs`, lo que Hebra escribe como
  *  `![[sha256:H|nombre]]`), con lo que el almacén sepa de sus bytes SIN leerlos
  *  (`blobs`): tamaño y tipo si hay fila (un recurso recibido por sync la trae aunque sus
@@ -120,6 +160,11 @@ export interface HebraLibraryPort {
    *  en un solo turno de la cola: para `hebra_list_trash` y `hebra_restore_note`
    *  (ampliación de D2 del 30 sep 2026). */
   trashIndex(): Promise<TrashIndex>;
+  /** Ficheros sueltos (vivos y de la papelera, sin lápidas), las notas que los enlazan y
+   *  el índice de la papelera, en un solo turno de la cola: para `hebra_list_files`,
+   *  `hebra_trash_file` y `hebra_restore_file` (D10). Sin filtro: lo aplica
+   *  `FileFilter`. */
+  filesIndex(): Promise<FilesIndex>;
   /** «Versiones anteriores» LOCALES de una nota (`noteVersionsList` del motor), de la
    *  más reciente a la más antigua, sin cuerpo. Sin filtro: lo aplica la herramienta. */
   noteVersionsList(noteId: string): Promise<NoteVersionsList>;
@@ -142,6 +187,10 @@ export interface HebraLibraryPort {
    *  leen. */
   folderDirty(id: string): Promise<boolean | null>;
   blobUploaded(sha256: string): Promise<boolean | null>;
+  /** Lo mismo para un fichero suelto (D10): si su fila sigue sucia; `null` si no existe o
+   *  es una lápida. Solo lee. No se llama `fileDirty` para que ningún método del puerto
+   *  case con los `file*` del motor (`test/store/surface.node.test.ts`). */
+  looseFileDirty(id: string): Promise<boolean | null>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

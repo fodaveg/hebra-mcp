@@ -8,6 +8,7 @@ import {
   effectiveLimit,
   fillPage,
   pickFields,
+  sliceAfterKey,
   slicePage,
   STORE_PAGE_MAX,
   storePageSize,
@@ -145,6 +146,36 @@ describe('slicePage', () => {
     const first = slicePage(all, 'l1', { limit: 3 });
     const second = slicePage(all, 'l1', { limit: 3, cursor: first.nextCursor! });
     expect(second).toEqual({ items: ['d', 'e'], nextCursor: null });
+  });
+});
+
+describe('sliceAfterKey (cursor posicional por clave de orden, D10)', () => {
+  const sorted = ['b', 'd', 'f', 'h'];
+  const page = (limit: number, after: string | null, list = sorted) =>
+    sliceAfterKey(list, {
+      limit,
+      after,
+      keyOf: (item) => item,
+      compare: (left, right) => (left < right ? -1 : left > right ? 1 : 0)
+    });
+
+  it('recorre la lista y la última clave es null solo cuando no queda nada detrás', () => {
+    expect(page(2, null)).toEqual({ items: ['b', 'd'], lastKey: 'd' });
+    expect(page(2, 'd')).toEqual({ items: ['f', 'h'], lastKey: null });
+    expect(page(3, null)).toEqual({ items: ['b', 'd', 'f'], lastKey: 'f' });
+    expect(page(4, null)).toEqual({ items: sorted, lastKey: null });
+    expect(page(Infinity, null)).toEqual({ items: sorted, lastKey: null });
+  });
+
+  it('una clave que ya no está en la lista no es un error: sigue por donde tocaba', () => {
+    // `d` se quitó entre dos páginas (el fichero se fue a la papelera).
+    expect(page(2, 'd', ['b', 'f', 'h'])).toEqual({ items: ['f', 'h'], lastKey: null });
+    // Una clave entre dos elementos, antes del primero o después del último.
+    expect(page(1, 'e')).toEqual({ items: ['f'], lastKey: 'f' });
+    expect(page(1, 'a')).toEqual({ items: ['b'], lastKey: 'b' });
+    expect(page(2, 'z')).toEqual({ items: [], lastKey: null });
+    expect(page(2, 'h')).toEqual({ items: [], lastKey: null });
+    expect(page(2, null, [])).toEqual({ items: [], lastKey: null });
   });
 });
 

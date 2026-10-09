@@ -26,6 +26,10 @@
  *   motor, con el plan de `./folders.ts` rehecho dentro del turno.
  * - `addAttachment` (D9): `blobPut` del motor y la referencia `![[sha256:H|nombre]]` al
  *   final del cuerpo, como `appendToNote`, con la idempotencia de `editNote`.
+ * - `organizeFileLocal` (D10, 9 oct 2026): mandar un fichero suelto a la papelera y
+ *   sacarlo (`fileTrash`/`fileRestore` del motor, reversibles), con el filtro de los
+ *   ficheros (`../privacy/file-filter.ts`) dentro del turno. Nunca lo purga, ni lo crea,
+ *   renombra, mueve o reemplaza, ni lee su contenido.
  *
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
@@ -43,6 +47,7 @@ import {
   type SqliteLibraryEngine
 } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
+import { FileFilter } from '../privacy/file-filter';
 import { PrivacyFilter } from '../privacy/filter';
 import { TrashFilter } from '../privacy/trash-filter';
 import {
@@ -57,11 +62,18 @@ import { writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
-import type { NoteAttachmentRow, NoteVersion, NoteVisibilityEntry, TrashIndex } from './types';
+import type {
+  FilesIndex,
+  NoteAttachmentRow,
+  NoteVersion,
+  NoteVisibilityEntry,
+  TrashIndex
+} from './types';
 
-/** Tipos de carpeta y de blob del motor (`library/types.ts`): `node.ts` no los
- *  reexporta, así que salen de la firma de `SqliteLibraryEngine`. */
+/** Tipos de carpeta, de fichero suelto y de blob del motor (`library/types.ts`):
+ *  `node.ts` no los reexporta, así que salen de la firma de `SqliteLibraryEngine`. */
 export type FolderRow = Awaited<ReturnType<SqliteLibraryEngine['folderCreate']>>;
+export type FileRow = Awaited<ReturnType<SqliteLibraryEngine['fileTrash']>>;
 export type BlobPutOptions = NonNullable<Parameters<SqliteLibraryEngine['blobPut']>[1]>;
 export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
 
@@ -80,6 +92,14 @@ export interface NoteWriteStore {
    *  fila de `blobs`). Solo lo llama `NoteWriter.addAttachment`, en el mismo turno en que
    *  la nota pasa a referenciarlo. */
   blobPut(bytes: Uint8Array, options: BlobPutOptions): Promise<BlobPutResult>;
+  /** Ficheros sueltos (D10, 9 oct 2026): mandar a la papelera y sacar, los métodos del
+   *  mismo nombre del motor, reversibles. Solo los llama `NoteWriter.organizeFileLocal`,
+   *  que corta antes si el fichero ya está en ese estado: el motor los marca sucios y
+   *  sube su `local_seq` SIEMPRE, también al repetir. Purgar, crear, renombrar, mover y
+   *  reemplazar un fichero NO están, ni aquí ni en ningún sitio de hebra-mcp
+   *  (`test/store/surface.node.test.ts`). */
+  fileTrash(id: string): Promise<FileRow>;
+  fileRestore(id: string): Promise<FileRow>;
   /** Organización de notas (D2 ampliada): los métodos del mismo nombre de
    *  `SqliteLibraryEngine`. */
   noteMove(id: string, folderId: string): Promise<NoteRow>;
@@ -102,6 +122,8 @@ export interface NoteWriteStore {
   notesVisibilityIndex(): NoteVisibilityEntry[];
   /** Lo que lee el filtro de la papelera (`src/privacy/trash-filter.ts`). */
   trashIndex(): TrashIndex;
+  /** Lo que lee el filtro de los ficheros sueltos (`src/privacy/file-filter.ts`). */
+  filesIndex(): FilesIndex;
   /** Adjuntos de una nota (`note_blob_refs`), para `fetchAttachment`. */
   noteAttachments(noteId: string): NoteAttachmentRow[];
   /** Registro de idempotencia de `editNote`. */
@@ -231,6 +253,31 @@ export interface OrganizeSaved {
 }
 
 /**
+ * Ficheros sueltos (D10, 9 oct 2026): mandar uno a la papelera (`trashFile`) y sacarlo
+ * (`restoreFile`), por id. Cada una se deshace con la otra, desde Hebra o desde el MCP, y
+ * las dos son idempotentes por estado (sin `operationId`). No hay más acciones: ni
+ * purgar, ni crear, renombrar, mover o reemplazar. No son acciones de `OrganizeAction`,
+ * que es solo de notas.
+ */
+export type OrganizeFileAction =
+  | { action: 'trashFile'; id: string }
+  | { action: 'restoreFile'; id: string };
+
+export type OrganizeFileActionName = OrganizeFileAction['action'];
+
+/** Igual que `EditNoteInput.privacy`: la configuración de quien pide. */
+export type OrganizeFileInput = OrganizeFileAction & { privacy: PrivacyConfig };
+
+/** Lo que queda tras mandar o sacar un fichero suelto. `folderId` es la carpeta donde
+ *  está o quedaría según el filtro del turno (viva y visible, o la raíz), nunca la
+ *  guardada. La ruta para enseñar la calcula la herramienta con SU filtro. */
+export interface FileSaved {
+  id: string;
+  folderId: string;
+  trashed: boolean;
+}
+
+/**
  * Traer al disco los bytes de un adjunto (adjuntos en solo lectura, ampliación de D2 del
  * 30 sep 2026). No devuelve los bytes: los lee quien pide, del almacén compartido, con
  * su propio filtro. Lo hace el escritor porque bajar un blob escribe (`blobPut` del
@@ -318,6 +365,15 @@ export interface LocalWrite<T> {
 function organizeRejection(error: unknown): unknown {
   if (!(error instanceof LibraryError)) return error;
   if (error.code === 'note_not_found' || error.code === 'folder_not_found') {
+    return writeRejected('not_found');
+  }
+  return error;
+}
+
+/** El error del motor que mandar o sacar un fichero suelto puede dar: el fichero dejó de
+ *  existir (o es una lápida). `not_found`, como uno oculto. */
+function organizeFileRejection(error: unknown): unknown {
+  if (error instanceof LibraryError && error.code === 'file_not_found') {
     return writeRejected('not_found');
   }
   return error;
@@ -845,6 +901,51 @@ export class NoteWriter {
         }
       } catch (error) {
         throw organizeRejection(error);
+      }
+    });
+    if (outcome.wrote) this.written();
+    return outcome;
+  }
+
+  /**
+   * Manda un fichero suelto a la papelera o lo saca (D10, 9 oct 2026), en UN turno de la
+   * cola del almacén y diciendo si escribió (`LocalWrite`):
+   * 1. El filtro de privados de quien pide y el de los ficheros (`FileFilter`), los dos
+   *    sobre el almacén de ESTE turno. Se construyen siempre, exista o no el fichero: las
+   *    mismas lecturas para un acierto y para un fallo.
+   * 2. El fichero tiene que ser visible, vivo o en la papelera. Oculto (por su carpeta o
+   *    porque lo enlaza una nota oculta), inexistente, lápida o un id que no es de un
+   *    fichero suelto, `not_found`, todos igual.
+   * 3. Si ya está en el estado pedido se devuelve tal cual, SIN llamar al motor:
+   *    `fileTrash` y `fileRestore` marcan la fila sucia y suben su `local_seq` siempre,
+   *    así que repetirlas la ensuciaría sin nada nuevo que subir. Tampoco hay ronda.
+   * 4. `fileTrash` o `fileRestore` del motor. Restaurar no cambia la carpeta guardada:
+   *    el fichero queda en la que el filtro ya comprobó (la suya si sigue viva; si no,
+   *    la raíz), que nunca es una privada.
+   */
+  async organizeFileLocal(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>> {
+    const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FileSaved>> => {
+      const live = privacyInTurn(store, input.privacy);
+      const files = FileFilter.fromSnapshot(live, store.filesIndex(), input.privacy);
+      const file = files.visibleMeta(input.id);
+      if (!file) throw writeRejected('not_found');
+
+      const wantTrashed = input.action === 'trashFile';
+      const saved = (trashed: boolean): FileSaved => ({
+        id: file.id,
+        folderId: file.folderId,
+        trashed
+      });
+      if ((file.trashedAt !== null) === wantTrashed) {
+        return { result: saved(wantTrashed), wrote: false };
+      }
+      try {
+        const row = wantTrashed
+          ? await store.fileTrash(file.id)
+          : await store.fileRestore(file.id);
+        return { result: saved(row.trashedAt !== null), wrote: true };
+      } catch (error) {
+        throw organizeFileRejection(error);
       }
     });
     if (outcome.wrote) this.written();

@@ -376,6 +376,64 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"restoreVersion","outcome":"forwarded"');
   });
 
+  it('ficheros sueltos desde un lector (D10): los manda y los saca el escritor, con la privacidad del lector', async () => {
+    const { relay, writer, reader, client } = await pair({ blobs: true });
+    // El fichero nace en otro dispositivo y baja al escritor: hebra-mcp no crea ficheros.
+    const app = await appDevice(relay, 'Mac', { blobs: true });
+    const blob = await app.engine.blobPut(new TextEncoder().encode('bytes del plano'), {
+      mime: 'application/pdf'
+    });
+    const file = await app.engine.fileCreate(null, 'plano-reenviado.pdf', blob.sha256);
+    await app.sync.runRound();
+    await writer.syncRunner!.requestRound();
+
+    // La lista la sirve el propio lector, de la SQLite compartida.
+    const listed = (await call(client, 'hebra_list_files')).value.files as Array<{ id: string }>;
+    expect(listed.map((entry) => entry.id)).toEqual([file.id]);
+
+    expect((await call(client, 'hebra_trash_file', { id: file.id })).value).toEqual({
+      id: file.id,
+      trashed: true,
+      sync: 'uploaded'
+    });
+    await app.sync.runRound();
+    expect(app.engine.filesTrashPage(null, 10).items.map((item) => item.id)).toEqual([file.id]);
+    const trashed = (await call(client, 'hebra_list_files', { trashed: true })).value.files as Array<{
+      id: string;
+    }>;
+    expect(trashed.map((entry) => entry.id)).toEqual([file.id]);
+
+    expect((await call(client, 'hebra_restore_file', { id: file.id })).value).toEqual({
+      id: file.id,
+      folderPath: '',
+      sync: 'uploaded'
+    });
+    await app.sync.runRound();
+    expect(app.engine.filesTrashPage(null, 10).items).toEqual([]);
+
+    // La configuración del LECTOR viaja con la petición y el escritor la aplica dentro del
+    // turno: con una carpeta configurada que no existe, cerrado ante la duda, sin escribir.
+    const routedWrite = buildRoutedWriteContext(reader, localWriteContext(reader));
+    const direct = await routedWrite
+      .organizeFile({
+        action: 'trashFile',
+        id: file.id,
+        privacy: { privateFolders: [['no-existe']], privateTags: [] }
+      })
+      .catch((error: unknown) => error);
+    expect(direct).toMatchObject({ code: 'privacy_config_unresolved' });
+    // Y un id que no es de un fichero, `not_found`, también por el socket.
+    const missing = await routedWrite
+      .organizeFile({ action: 'trashFile', id: 'no-existe', privacy: OPEN })
+      .catch((error: unknown) => error);
+    expect(missing).toMatchObject({ code: 'not_found' });
+    expect((await writer.port.filesIndex()).files.map((entry) => entry.trashedAt)).toEqual([null]);
+
+    expect(stderrText()).toContain('"event":"write.forward","op":"organizeFile","outcome":"forwarded"');
+    expect(stderrText()).toContain('"event":"write.forward","op":"organizeFile","outcome":"remote_error"');
+    expect(stderrText()).not.toContain('plano-reenviado');
+  });
+
   it('adjunto desde un lector: el escritor lo baja al disco compartido y el lector lo lee de ahí', async () => {
     const { relay, writer, client } = await pair({ blobs: true });
     const app = await appDevice(relay, 'Mac', { blobs: true });
@@ -524,6 +582,12 @@ describe('protocolo de writer.sock', () => {
       revision: 'r1.x',
       attachmentId: 'a'.repeat(64),
       markdown: `![[sha256:${'a'.repeat(64)}|${input.name}]]`,
+      sync: 'not_linked'
+    }),
+    organizeFile: async (input) => ({
+      id: input.id,
+      folderId: 'root',
+      trashed: input.action === 'trashFile',
       sync: 'not_linked'
     }),
     status: async () => ({
@@ -697,6 +761,62 @@ describe('protocolo de writer.sock', () => {
       await expect(requestWriter(path, 'restoreVersion', params, 2_000)).rejects.toMatchObject({
         code: 'invalid_request'
       });
+    }
+  });
+
+  it('organizeFile por el socket (D10): solo mandar y sacar, privacidad obligatoria y sin purga', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const privacy = { privateFolders: [['diario']], privateTags: ['secreto'] };
+    for (const action of ['trashFile', 'restoreFile']) {
+      expect(
+        await requestWriter(path, 'organizeFile', { action, id: 'f1', privacy }, 2_000)
+      ).toEqual({ id: 'f1', folderId: 'root', trashed: action === 'trashFile', sync: 'not_linked' });
+      // Sin la privacidad del lector, nada: el escritor no supone la suya.
+      await expect(
+        requestWriter(path, 'organizeFile', { action, id: 'f1' }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(
+        requestWriter(path, 'organizeFile', { action, id: '', privacy }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      await expect(
+        requestWriter(path, 'organizeFile', { action, id: 7, privacy }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+      // Y no son acciones de `organize`, que solo admite las de nota.
+      await expect(
+        requestWriter(path, 'organize', { action, id: 'f1', privacy }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    // Ninguna otra acción de ficheros existe en el protocolo: ni purgar o vaciar la
+    // papelera, ni crear, renombrar, mover o reemplazar, ni las de nota por esta op.
+    for (const action of [
+      'purgeFile',
+      'filePurge',
+      'emptyTrash',
+      'trashEmpty',
+      'deleteFile',
+      'createFile',
+      'fileCreate',
+      'renameFile',
+      'fileRename',
+      'moveFile',
+      'fileMove',
+      'replaceFile',
+      'fileReplace',
+      'readFile',
+      'trashNote',
+      'restoreNote'
+    ]) {
+      await expect(
+        requestWriter(path, 'organizeFile', { action, id: 'f1', name: 'x', folderId: 'root', privacy }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    // Ni como operación propia del socket.
+    for (const op of ['purgeFile', 'filePurge', 'trashFile', 'restoreFile', 'createFile', 'moveFile']) {
+      expect(
+        JSON.parse(await raw(path, `${JSON.stringify({ id: 1, op, params: { id: 'f1', privacy } })}\n`))
+      ).toEqual({ id: null, ok: false, error: 'invalid_request' });
     }
   });
 
@@ -947,9 +1067,14 @@ describe('lector: qué hace cuando el escritor no responde', () => {
         },
         wrote: true
       }),
+      organizeFile: async (input) => ({
+        result: { id: input.id, folderId: 'root', trashed: input.action === 'trashFile' },
+        wrote: true
+      }),
       noteRead: async () => null,
       folderDirty: async () => null,
       blobUploaded: async () => null,
+      looseFileDirty: async () => null,
       onConflictCopy: () => () => undefined,
       isLinked: () => false,
       requestRound: async () => null
@@ -1043,6 +1168,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           throw new Error('x');
         },
         addAttachment: async () => {
+          throw new Error('x');
+        },
+        organizeFile: async () => {
           throw new Error('x');
         },
         status: async () => {

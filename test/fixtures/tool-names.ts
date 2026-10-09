@@ -32,7 +32,11 @@ export const TOOL_NAMES: readonly string[] = [
   // Carpetas y adjuntos (D9, 3 oct 2026).
   'hebra_create_folder',
   'hebra_rename_folder',
-  'hebra_add_attachment'
+  'hebra_add_attachment',
+  // Ficheros sueltos (D10, 9 oct 2026).
+  'hebra_list_files',
+  'hebra_trash_file',
+  'hebra_restore_file'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
@@ -50,4 +54,18 @@ export const REMOVED_FOLDER_TOOLS: readonly string[] = [
   'hebra_trash_folder',
   'hebra_delete_attachment',
   'hebra_replace_attachment'
+];
+
+/** Lo que sigue fuera del MCP tras D10 (9 oct 2026, que trajo listar los ficheros sueltos
+ *  y mandarlos a la papelera): purgarlos, vaciar su papelera, crearlos, renombrarlos,
+ *  moverlos, reemplazarlos y leer su contenido. Ningún transporte las lista. */
+export const FORBIDDEN_FILE_TOOLS: readonly string[] = [
+  'hebra_purge_file',
+  'hebra_delete_file',
+  'hebra_empty_file_trash',
+  'hebra_create_file',
+  'hebra_rename_file',
+  'hebra_move_file',
+  'hebra_replace_file',
+  'hebra_read_file'
 ];

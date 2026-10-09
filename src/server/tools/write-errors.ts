@@ -6,9 +6,11 @@
  * - `StoreError` de un rechazo de la edición o la organización (`WriteRejectionCode`,
  *   `src/store/errors.ts`) → el mismo código, con `{edit}` (índice de la sustitución)
  *   cuando lo trae. Nunca el texto buscado.
- * - `LibraryError` de Hebra con `note_not_found` o `folder_not_found` → `not_found`,
- *   igual que una nota o carpeta oculta por privacidad (SPEC.md §6.3: «igual que una
- *   inexistente»).
+ * - `LibraryError` de Hebra con `note_not_found`, `folder_not_found` o `file_not_found`
+ *   (D10: un fichero suelto que dejó de existir) → `not_found`, igual que una nota,
+ *   carpeta o fichero oculto por privacidad (SPEC.md §6.3: «igual que una inexistente»).
+ *   Sin el tercero, un fichero inexistente saldría como `invalid_input` y se distinguiría
+ *   de uno oculto.
  * El resto (cualquier otro código o excepción) → `invalid_input`, como el catch-all de
  * `../register-tools.ts`.
  */
@@ -16,7 +18,7 @@ import { LibraryError } from '../../hebra';
 import { isBusyOtherInstance, isWriteRejectionCode, StoreError } from '../../store/errors';
 import { ToolError } from '../errors';
 
-const NOT_FOUND_LIBRARY_CODES = new Set(['note_not_found', 'folder_not_found']);
+const NOT_FOUND_LIBRARY_CODES = new Set(['note_not_found', 'folder_not_found', 'file_not_found']);
 
 export function mapWriteError(error: unknown): ToolError {
   if (error instanceof ToolError) return error;

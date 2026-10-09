@@ -193,6 +193,35 @@ export const listTrashInputShape = {
   limit: z.number().int().min(1).max(100).optional()
 };
 
+/** Ficheros sueltos (D10, 9 oct 2026): listar, mandar a la papelera y sacar, por id. Nada
+ *  de purgar, crear, renombrar, mover, reemplazar ni leer su contenido. Sin
+ *  `.min()`/`.max()` en `name`: su longitud (1–255) la aplica `files.ts` con
+ *  `invalid_input`, sin eco de la entrada. */
+export const listFilesInputShape = {
+  folder: z.string().optional()
+    .describe('Ruta de carpeta, como `path` de hebra_list_folders.'),
+  /** Igual que en `hebra_list_notes`: con `folder`, incluye su subárbol. */
+  subfolders: z.boolean().optional(),
+  name: z
+    .string()
+    .optional()
+    .describe('Solo los ficheros cuyo nombre contiene este texto, sin distinguir mayúsculas (1 a 255 caracteres).'),
+  trashed: z
+    .boolean()
+    .optional()
+    .describe('`true`: los ficheros de la papelera, el último en entrar primero. Ausente o `false`: los vivos, por nombre.'),
+  limit: z.number().int().min(1).max(100).optional(),
+  cursor: cursorField
+};
+
+export const trashFileInputShape = {
+  id: z.string().describe('Id de un fichero de hebra_list_files.')
+};
+
+export const restoreFileInputShape = {
+  id: z.string().describe('Id de un fichero de hebra_list_files con `trashed: true`.')
+};
+
 /** Versiones anteriores (ampliación de D2, 30 sep 2026). */
 const VERSION_ID = z.number().int().min(1).describe('versionId de hebra_list_versions.');
 

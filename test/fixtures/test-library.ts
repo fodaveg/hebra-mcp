@@ -106,6 +106,63 @@ export interface TestLibrary {
     historial: string;
     adjuntos: string;
   };
+  /**
+   * Ficheros sueltos (D10, 9 oct 2026): filas de `files` creadas con el motor (`blobPut`
+   * + `fileCreate`, y `fileTrash` o `folderTrash` para los de la papelera). Los ocultos
+   * llevan un cebo en el NOMBRE.
+   */
+  files: {
+    /** Visibles y vivos: `Acta.pdf` e `Inventario.base` en la raíz, `plano.pdf` en
+     *  `Proyectos/Lumbre`. Por nombre quedan en ese orden. */
+    acta: string;
+    inventario: string;
+    plano: string;
+    /** Oculto por CARPETA: en `Diario/2026`; su nombre (con `BAIT_FOLDER`) ordena el último. */
+    privateFolder: string;
+    /** Oculto por REFERENCIA, por hash: en la raíz (carpeta visible), con los mismos bytes
+     *  que el adjunto de la nota privada (`privateAttachmentSha`). Lleva `BAIT_FOLDER`. */
+    referencedByHash: string;
+    /** Oculto por REFERENCIA, por nombre: en la raíz, incrustado como `![[nombre]]` en la
+     *  nota de etiqueta privada (`privateTagNoteId`). Lleva `BAIT_TAG`. */
+    referencedByName: string;
+    /** En la papelera, de la raíz: visible, vuelve a la raíz. */
+    trashed: string;
+    /** En la papelera, de `Diario/2026` (privada): nunca sale. Lleva `BAIT_FOLDER`. */
+    trashedPrivateFolder: string;
+    /** En la papelera porque se borró su carpeta, `Diario/Viejo` (privada, ahora lápida):
+     *  nunca sale. Lleva `BAIT_FOLDER`. */
+    trashedDeletedPrivateFolder: string;
+    /** En la papelera porque se borró su carpeta, `Proyectos/Antiguo` (pública, ahora
+     *  lápida): sale y vuelve a la raíz al restaurarlo. */
+    trashedDeletedPublicFolder: string;
+    /** Una LÁPIDA (purgado desde Hebra, `filePurge`), que estaba en la raíz: para el MCP
+     *  no existe. Lleva `BAIT_FOLDER`. */
+    tombstone: string;
+  };
+}
+
+/** Nombres de los ficheros sueltos visibles del fixture. */
+export const FILE_NAMES = {
+  acta: 'Acta.pdf',
+  inventario: 'Inventario.base',
+  plano: 'plano.pdf',
+  trashed: 'Borrador tirado.pdf',
+  trashedDeletedPublicFolder: 'Informe antiguo.pdf'
+} as const;
+
+/** Nombre del fichero suelto que la nota de etiqueta privada incrusta por nombre. */
+const FILE_REFERENCED_BY_NAME = `${BAIT_TAG}-dibujo.png`;
+
+/** Un fichero suelto con bytes propios (los de `content`), como los crea Hebra. */
+async function createFile(
+  engine: SqliteLibraryEngine,
+  folderId: string | null,
+  name: string,
+  content: string,
+  mime = 'application/pdf'
+): Promise<string> {
+  const blob = await engine.blobPut(new TextEncoder().encode(content), { mime });
+  return (await engine.fileCreate(folderId, name, blob.sha256)).id;
 }
 
 async function createNote(
@@ -182,7 +239,9 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
   const privateTagNote = await createNote(
     engine,
     null,
-    `# Nota oculta por etiqueta\n#secreto/personal\n${BAIT_TAG}: contenido que nunca debe salir.\n`
+    `# Nota oculta por etiqueta\n#secreto/personal\n${BAIT_TAG}: contenido que nunca debe salir.\n` +
+      // Incrusta por nombre un fichero suelto de la raíz (D10): queda oculto por referencia.
+      `\n![[${FILE_REFERENCED_BY_NAME}]]\n`
   );
   const linkingNote = await createNote(
     engine,
@@ -219,12 +278,25 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     diarioViejo.id,
     `# Diario viejo\n${BAIT_FOLDER}: su carpeta privada se borró.\n`
   );
+  // Antes de `folderTrash`, que manda a la papelera también los ficheros de la carpeta.
+  const fileTrashedDeletedPrivateFolder = await createFile(
+    engine,
+    diarioViejo.id,
+    `${BAIT_FOLDER}-viejo.pdf`,
+    'fichero de una carpeta privada borrada'
+  );
   await engine.folderTrash(diarioViejo.id);
   const antiguo = await engine.folderCreate(proyectos.id, 'Antiguo');
   const trashedDeletedPublicFolderNote = await createNote(
     engine,
     antiguo.id,
     '# Nota de carpeta borrada\nSu carpeta pública se borró.\n'
+  );
+  const fileTrashedDeletedPublicFolder = await createFile(
+    engine,
+    antiguo.id,
+    FILE_NAMES.trashedDeletedPublicFolder,
+    'fichero de una carpeta pública borrada'
   );
   await engine.folderTrash(antiguo.id);
 
@@ -314,6 +386,54 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
     `# Diario con adjunto\n\n![[sha256:${privateAttachment}|${BAIT_FOLDER}.txt]]\n`
   );
 
+  // Ficheros sueltos (D10, 9 oct 2026). Los de las carpetas borradas ya se crearon arriba,
+  // antes de `folderTrash`.
+  const fileActa = await createFile(engine, null, FILE_NAMES.acta, 'acta de la reunión');
+  const fileInventario = await createFile(
+    engine,
+    null,
+    FILE_NAMES.inventario,
+    'views:\n  - type: table\n',
+    'application/yaml'
+  );
+  const filePlano = await createFile(engine, lumbre.id, FILE_NAMES.plano, 'plano de la obra');
+  const filePrivateFolder = await createFile(
+    engine,
+    diario2026.id,
+    `zz-${BAIT_FOLDER}.base`,
+    'base del diario'
+  );
+  // Mismos bytes que el adjunto de la nota privada: el importador de Hebra deja así un
+  // fichero suelto que una nota adjunta por `sha256:`.
+  const fileReferencedByHash = (
+    await engine.fileCreate(null, `${BAIT_FOLDER}-importado.txt`, privateAttachment)
+  ).id;
+  const fileReferencedByName = await createFile(
+    engine,
+    null,
+    FILE_REFERENCED_BY_NAME,
+    'dibujo de una nota privada',
+    'image/png'
+  );
+  const fileTrashed = await createFile(engine, null, FILE_NAMES.trashed, 'borrador tirado');
+  await engine.fileTrash(fileTrashed);
+  const fileTrashedPrivateFolder = await createFile(
+    engine,
+    diario2026.id,
+    `${BAIT_FOLDER}-tirado.pdf`,
+    'fichero privado tirado'
+  );
+  await engine.fileTrash(fileTrashedPrivateFolder);
+  // Purgarlo solo se puede desde Hebra (aquí, con su motor): el MCP no tiene esa vía.
+  const fileTombstone = await createFile(
+    engine,
+    null,
+    `${BAIT_FOLDER}-purgado.pdf`,
+    'fichero purgado desde Hebra'
+  );
+  await engine.fileTrash(fileTombstone);
+  await engine.filePurge(fileTombstone);
+
   const versionedNoteVersionId = onlyVersion(versionedNote.id);
   const formerlyPrivateVersionId = onlyVersion(formerlyPrivate.id);
 
@@ -353,6 +473,19 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
       diario2026: diario2026.id,
       historial: historial.id,
       adjuntos: adjuntos.id
+    },
+    files: {
+      acta: fileActa,
+      inventario: fileInventario,
+      plano: filePlano,
+      privateFolder: filePrivateFolder,
+      referencedByHash: fileReferencedByHash,
+      referencedByName: fileReferencedByName,
+      trashed: fileTrashed,
+      trashedPrivateFolder: fileTrashedPrivateFolder,
+      trashedDeletedPrivateFolder: fileTrashedDeletedPrivateFolder,
+      trashedDeletedPublicFolder: fileTrashedDeletedPublicFolder,
+      tombstone: fileTombstone
     }
   };
 }

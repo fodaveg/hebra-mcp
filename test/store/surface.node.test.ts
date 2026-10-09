@@ -12,10 +12,13 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  * papelera y las saca (`noteTrash`/`noteRestore`) y lee y restaura versiones
  * (`noteVersionsList`, `noteVersionRead`, `noteVersionSnapshot`). Desde D9 (3 oct 2026)
  * crea y renombra carpetas y añade adjuntos: `folderCreate`, `folderRename` y `blobPut`
- * solo existen en el turno de escritura y solo los llama `NoteWriter` (último test).
+ * solo existen en el turno de escritura y solo los llama `NoteWriter` (penúltimo test).
+ * Desde D10 (9 oct 2026) manda ficheros sueltos a la papelera y los saca: `fileTrash` y
+ * `fileRestore`, con la misma regla (último test).
  * Siguen fuera: purgar (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento
- * (`trashCounts`, contaría las privadas), purgar versiones, recursos sueltos (`file*`),
- * renombrar etiquetas, y mover y borrar carpetas (`folderMove`, `folderTrash`).
+ * (`trashCounts`, contaría las privadas), purgar versiones, todo lo demás de los recursos
+ * sueltos (`file*`: purgar, crear, renombrar, mover, reemplazar), renombrar etiquetas, y
+ * mover y borrar carpetas (`folderMove`, `folderTrash`).
  * Tres comprobaciones sobre lo que el servidor puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
@@ -25,8 +28,15 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  *    implementan (`local-port`, `web-port`, `native-port`, `tag-rename`, `tags-reindex`).
  */
 
-const FORBIDDEN =
-  'notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|file[A-Z]\\w*|trashEmpty|trashCounts|tagRename';
+/**
+ * `file[A-Z]…` sigue cerrado por defecto: cualquier método de recursos sueltos del motor,
+ * de hoy o de mañana, está prohibido salvo los dos que D10 permite, `fileTrash` y
+ * `fileRestore`, nombrados uno a uno (`\b` para que `fileTrashEmpty` o `fileRestoreAll`
+ * NO pasen). Que esos dos solo salgan del turno del escritor lo comprueba el último test.
+ */
+const FILE_ALLOWED = 'Trash\\b|Restore\\b';
+const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
+const FORBIDDEN = `notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 const FORBIDDEN_CALL = new RegExp(`\\.\\s*(${FORBIDDEN})\\s*\\(`);
 const FORBIDDEN_IMPORT =
@@ -68,7 +78,17 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'folderTrash',
       'folderMove',
       'filePurge',
-      'fileCreate'
+      'fileCreate',
+      'fileRename',
+      'fileMove',
+      'fileReplace',
+      // Cerrado por defecto: ni un `file*` que no exista hoy, ni uno que solo EMPIECE
+      // como los dos permitidos.
+      'fileDirty',
+      'fileAlgoNuevo',
+      'fileTrashEmpty',
+      'fileTrashed',
+      'fileRestoreAll'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
       expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(true);
@@ -78,9 +98,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'noteRestore',
       'noteVersionsList',
       'noteVersionRead',
-      'noteVersionSnapshot'
+      'noteVersionSnapshot',
+      // D10: los dos únicos `file*` que pasan.
+      'fileTrash',
+      'fileRestore'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(false);
+      expect(FORBIDDEN_CALL.test(`engine.${name}(id)`), name).toBe(false);
     }
   });
 
@@ -176,8 +200,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       expect(methodNames(port.syncStorePort())).not.toContain('folderCreate');
       expect(methodNames(port.syncStorePort())).not.toContain('folderRename');
       const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      // De ficheros sueltos (D10), lo del test de abajo: `fileRestore`, `fileTrash` y la
+      // lectura `filesIndex`.
       expect(storeKeys.filter((key) => /^(blob|file|folder[A-Z])/.test(key)).sort()).toEqual([
         'blobPut',
+        'fileRestore',
+        'fileTrash',
+        'filesIndex',
         'folderCreate',
         'folderRename'
       ]);
@@ -187,7 +216,81 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       rmSync(dataDir, { recursive: true, force: true });
     }
   });
+
+  /**
+   * Ficheros sueltos (D10, 9 oct 2026): `fileTrash` y `fileRestore` solo los tiene el
+   * turno de escritura del almacén (`NodeLibraryPort.writeExclusive`) y solo los llama
+   * `NoteWriter` (`src/store/writes.ts`), que antes aplica el filtro de los ficheros
+   * dentro del turno. Ni el puerto de las herramientas, ni su vista de sync, ni la
+   * instancia, ni su `port` tienen ninguno, y ninguna otra fuente los llama. En TODO
+   * `src` (también `src/server` y `src/privacy`, que las comprobaciones de arriba no
+   * recorren) no hay ninguna llamada a otro `file*` del motor: ni purgar, ni crear,
+   * renombrar, mover o reemplazar. Tampoco a sus listas de ficheros (`filesPage`,
+   * `filesFindByName`…), cuyo aviso de que quedan más delataría los ocultos: la lista
+   * sale de `filesIndex`, propia. Del turno no sale nada más de ficheros.
+   */
+  it('ficheros sueltos (D10): fileTrash y fileRestore solo en el turno del escritor, y ningún otro file* en src', async () => {
+    const allowed = ['src/store/node-port.ts', 'src/store/writes.ts'];
+    const files = allSourceFiles();
+    expect(files.length).toBeGreaterThan(60);
+    let callers = 0;
+    for (const file of files) {
+      const path = relative(root, file).split(sep).join('/');
+      const text = readFileSync(file, 'utf8');
+      expect(new RegExp(`\\.\\s*(${FORBIDDEN_FILE})\\s*\\(`).exec(text)?.[0] ?? null, path).toBeNull();
+      expect(
+        /\.\s*(files(?:Page|List|TrashPage|FindByName|FindBySuffix)|trashEmpty|trashCounts)\s*\(/.exec(text)?.[0] ??
+          null,
+        path
+      ).toBeNull();
+      const calls = /\.\s*(fileTrash|fileRestore)\s*\(/.test(text);
+      if (calls) callers += 1;
+      if (!allowed.includes(path)) expect(calls, path).toBe(false);
+    }
+    // Las dos fuentes permitidas los llaman de verdad (si no, este test no mediría nada).
+    expect(callers).toBe(allowed.length);
+
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    const dataDir = mkdtempSync(join(tmpdir(), 'hebra-mcp-surface-d10-'));
+    const instance = await LibraryInstance.open({
+      dataDir,
+      checkIntervalMs: null,
+      lock: { releaseOnExit: false }
+    });
+    try {
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['SyncStorePort', port.syncStorePort()],
+        ['LibraryInstance', instance],
+        ['LibraryInstance.port', instance.port]
+      ] as Array<[string, object]>) {
+        // Ni los dos permitidos ni ningún otro: fuera del turno, ningún método `file*`.
+        expect(methodNames(value).filter((name) => /^file[A-Z]/.test(name)), label).toEqual([]);
+      }
+      const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      expect(storeKeys.filter((key) => /^file/.test(key)).sort()).toEqual([
+        'fileRestore',
+        'fileTrash',
+        'filesIndex'
+      ]);
+    } finally {
+      port.close();
+      await instance.close();
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  });
 });
+
+/** Todas las fuentes de `src`, recorriendo sus carpetas. */
+function allSourceFiles(dir = join(root, 'src')): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...allSourceFiles(path));
+    else if (entry.name.endsWith('.ts')) out.push(path);
+  }
+  return out;
+}
 
 /** Todo `src/server` (herramientas incluidas), que no está en `SURFACE_DIRS`. */
 function serverFiles(): string[] {

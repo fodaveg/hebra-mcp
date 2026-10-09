@@ -6,8 +6,9 @@
  * Lado del lector, `buildRoutedWriteContext`: un `WriteContext` que
  * - en el escritor, escribe en local, como siempre;
  * - en un lector, reenvía `createNote`, `appendToNote`, `editNote`, `organize` (que
- *   incluye mandar a la papelera y sacar de ella), `restoreVersion` y, desde D9 (3 oct
- *   2026), `createFolder`, `renameFolder` y `addAttachment` al escritor. Todas
+ *   incluye mandar a la papelera y sacar de ella), `restoreVersion`, desde D9 (3 oct
+ *   2026), `createFolder`, `renameFolder` y `addAttachment`, y desde D10 (9 oct 2026),
+ *   `organizeFile` (la papelera de los ficheros sueltos) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -54,6 +55,7 @@ import type {
   CreateNoteResult,
   EditNoteInput,
   FetchAttachmentInput,
+  OrganizeFileInput,
   OrganizeInput,
   RenameFolderInput,
   RestoreVersionInput
@@ -64,6 +66,7 @@ import {
   appendAndAwaitRound,
   type AddAttachmentOutcome,
   type EditNoteOutcome,
+  type FileOutcome,
   type FolderOutcome,
   type OrganizeOutcome,
   type SyncFields,
@@ -85,6 +88,7 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   renameFolder: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Hasta 7 MB de petición, el `blobPut` (con `fsync`) y la ronda.
   addAttachment: AWAIT_ROUND_TIMEOUT_MS + 30_000,
+  organizeFile: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   status: 5_000
 };
 
@@ -162,6 +166,24 @@ function asFolderOutcome(value: unknown): FolderOutcome {
     throw new Error('writer_protocol');
   }
   return { id: value.id, changed: value.changed, ...syncFieldsFrom(value) };
+}
+
+/** Valida el `FileOutcome` que devuelve el escritor (D10). */
+function asFileOutcome(value: unknown): FileOutcome {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== 'string' ||
+    typeof value.folderId !== 'string' ||
+    typeof value.trashed !== 'boolean'
+  ) {
+    throw new Error('writer_protocol');
+  }
+  return {
+    id: value.id,
+    folderId: value.folderId,
+    trashed: value.trashed,
+    ...syncFieldsFrom(value)
+  };
 }
 
 /** Valida el `AddAttachmentOutcome` que devuelve el escritor (D9): el de una edición más
@@ -362,6 +384,15 @@ export function buildRoutedWriteContext(
         (value) => asAttachmentOutcome(value, input.id),
         () => local.addAttachment(input)
       ),
+    // Ficheros sueltos (D10): como `organize`, todo en el escritor y con la privacidad de
+    // ESTE lector. Solo viajan la acción y el id.
+    organizeFile: (input: OrganizeFileInput) =>
+      routed(
+        'organizeFile',
+        { action: input.action, id: input.id, privacy: input.privacy },
+        asFileOutcome,
+        () => local.organizeFile(input)
+      ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
@@ -382,6 +413,7 @@ export function writerSocketHandlers(
     createFolder: (input) => local.createFolder(input),
     renameFolder: (input) => local.renameFolder(input),
     addAttachment: (input) => local.addAttachment(input),
+    organizeFile: (input) => local.organizeFile(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();
       return sync;
