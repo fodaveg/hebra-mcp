@@ -83,7 +83,47 @@ export const readNoteInputShape = {
   id: z.string().optional(),
   title: z.string().optional(),
   heading: headingField,
-  headingOccurrence: headingOccurrenceField
+  headingOccurrence: headingOccurrenceField,
+  /** D13: un tramo de líneas; no se combina con `heading` (`invalid_input`). */
+  lines: z
+    .object({
+      from: z.number().int().min(1).describe('Primera línea (1-based), como `line` de hebra_grep.'),
+      to: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe('Última línea, incluida. Ausente o más allá del tope: hasta el tope de líneas por lectura.')
+    })
+    .optional()
+    .describe('Solo esas líneas de la nota (numeración de la nota entera). No con `heading`.')
+};
+
+/**
+ * `hebra_grep` (D13). Sin `.min()`/`.max()` en `pattern`: los límites los aplica la
+ * herramienta con `invalid_input`, sin eco de la entrada (como `heading`).
+ */
+export const grepInputShape = {
+  pattern: z
+    .string()
+    .describe('Texto literal o, con `regex: true`, expresión regular de JavaScript (bandera `u`). Por líneas: nada casa a través de un salto de línea.'),
+  regex: z.boolean().optional().describe('`pattern` es una expresión regular. Def. `false` (literal).'),
+  caseSensitive: z
+    .boolean()
+    .optional()
+    .describe('Distinguir mayúsculas. Def. `false`. Las tildes cuentan siempre.'),
+  folder: z.string().optional().describe('Ruta de carpeta, como `path` de hebra_list_folders.'),
+  subfolders: z.boolean().optional(),
+  tag: z.string().optional(),
+  contextLines: z
+    .number()
+    .int()
+    .min(0)
+    .max(5)
+    .optional()
+    .describe('Líneas de contexto antes y después de cada coincidencia (0-5). Def. 0.'),
+  limit: z.number().int().min(1).max(100).optional(),
+  cursor: cursorField
 };
 
 /** `hebra_note_outline` (D11): como `hebra_read_note` para elegir la nota. */

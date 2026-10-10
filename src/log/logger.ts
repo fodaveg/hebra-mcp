@@ -27,7 +27,10 @@ export type ToolErrorCode =
   | 'folder_name_taken'
   // Apartados (D11, 9 oct 2026; `src/store/sections.ts`).
   | 'heading_not_found'
-  | 'ambiguous_heading';
+  | 'ambiguous_heading'
+  // `hebra_grep` (D13, 10 oct 2026): una expresión regular que no termina ni una nota
+  // dentro del tope de tiempo.
+  | 'pattern_too_slow';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

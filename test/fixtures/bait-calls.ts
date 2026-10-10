@@ -26,6 +26,13 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
   return [
     { name: 'hebra_search', arguments: { query: BAIT_FOLDER } },
     { name: 'hebra_search', arguments: { query: BAIT_TAG } },
+    // D13: el cebo como literal y como expresión regular, con contexto; antes de que
+    // `hebra_create_note` (más abajo) cree una nota VISIBLE con el texto de los cebos.
+    { name: 'hebra_grep', arguments: { pattern: BAIT_FOLDER, contextLines: 5 } },
+    { name: 'hebra_grep', arguments: { pattern: `${BAIT_TAG}|${BAIT_FOLDER}`, regex: true } },
+    { name: 'hebra_grep', arguments: { pattern: 'CEBO', folder: 'Diario', subfolders: true } },
+    { name: 'hebra_grep', arguments: { pattern: 'CEBO', tag: 'secreto/personal' } },
+    { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId, lines: { from: 1 } } },
     { name: 'hebra_list_notes', arguments: { limit: 100 } },
     { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId } },
     { name: 'hebra_read_note', arguments: { id: library.privateTagNoteId } },

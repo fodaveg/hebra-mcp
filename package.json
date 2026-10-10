@@ -22,6 +22,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --maxWorkers=1",
+    "perf:grep": "vitest run --config vitest.perf.config.ts --maxWorkers=1",
     "check:bundle": "npm run build && node scripts/check-bundle.mjs",
     "check:no-hebra-code": "node scripts/check-no-hebra-code.mjs",
     "check": "npm run typecheck && npm run check:no-hebra-code && npm run test && npm run check:bundle"

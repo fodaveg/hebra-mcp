@@ -322,6 +322,22 @@ export function headingOfSnippet(body: string, snippet: string): string | null {
   return found ? found.heading : null;
 }
 
+/**
+ * El apartado MÁS INTERNO que contiene la línea `line` (1-based) de una nota cuyos
+ * encabezados son `headings` (`parseHeadings`), o `null` si cae antes del primero (D13,
+ * `hebra_grep`). Es el del último encabezado que empieza en esa línea o antes: entre él y
+ * la línea no hay otro, así que su apartado llega al menos hasta ella (la misma regla que
+ * `headingOfSnippet`). Una línea de encabezado es de su propio apartado.
+ */
+export function headingAtLine(headings: readonly HeadingInfo[], line: number): HeadingInfo | null {
+  let found: HeadingInfo | null = null;
+  for (const heading of headings) {
+    if (heading.line > line) break;
+    found = heading;
+  }
+  return found;
+}
+
 function locateSnippet(body: string, snippet: string): number | null {
   const pieces = snippet
     .split(new RegExp(`[${SNIPPET_MARK_START}${SNIPPET_MARK_END}…]`, 'u'))

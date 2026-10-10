@@ -1,9 +1,10 @@
 /**
- * Registro de las 28 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 29 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
- * mandarlos a la papelera y sacarlos, y desde D11 (9 oct 2026), el esquema de una nota
- * (`hebra_note_outline`) y leer o añadir por apartados. Todas pasan por `runTool`:
+ * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
+ * (`hebra_note_outline`) y leer o añadir por apartados, y desde D13 (10 oct 2026),
+ * `hebra_grep` y leer por líneas. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
@@ -23,6 +24,7 @@ import {
   createNoteInputShape,
   renameFolderInputShape,
   editNoteInputShape,
+  grepInputShape,
   linksInputShape,
   listAttachmentsInputShape,
   listFilesInputShape,
@@ -52,6 +54,7 @@ import { runListAttachments, runReadAttachment } from './tools/attachments';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
 import { runListFiles, runRestoreFile, runTrashFile } from './tools/files';
+import { runGrep } from './tools/grep';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
@@ -97,7 +100,8 @@ function countOf(result: unknown): number | undefined {
     'files',
     'versions',
     'attachments',
-    'sections'
+    'sections',
+    'matches'
   ] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
@@ -151,6 +155,18 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
   );
 
   server.registerTool(
+    'hebra_grep',
+    {
+      title: 'Buscar texto exacto línea a línea',
+      description:
+        'Busca un texto literal (o, con `regex: true`, una expresión regular de JavaScript) línea a línea en el cuerpo de las notas, como grep: cada coincidencia trae la nota, el número de línea, la línea, `heading` (su apartado) y, con `contextLines`, las líneas de alrededor. Para encontrar una cadena exacta, un patrón o todas sus apariciones; para buscar por palabras, hebra_search. Paginada (`limit`, `cursor`, `nextCursor`); si se agota el tiempo o el tamaño, `cutoff` y un `nextCursor` para seguir. Las líneas sirven para hebra_read_note con `lines`.',
+      inputSchema: grepInputShape,
+      annotations: READ_ONLY
+    },
+    async (input) => runTool(ctx, 'hebra_grep', (toolCtx) => runGrep(toolCtx, input))
+  );
+
+  server.registerTool(
     'hebra_list_notes',
     {
       title: 'Listar notas',
@@ -166,7 +182,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer una nota',
       description:
-        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla. Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; `revision` sigue siendo la de la nota entera.',
+        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla. Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; con `lines: {from, to}`, solo esas líneas (las de hebra_grep), con `totalLines`. `revision` sigue siendo la de la nota entera. `heading` y `lines` no van juntos.',
       inputSchema: readNoteInputShape,
       annotations: READ_ONLY
     },

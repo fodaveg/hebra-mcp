@@ -41,15 +41,16 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 28 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 29 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las tres de ficheros sueltos, `hebra_list_files`,
-  `hebra_trash_file` y `hebra_restore_file`, o sin `hebra_note_outline`), el conector
+  `hebra_trash_file` y `hebra_restore_file`, o sin `hebra_note_outline` o `hebra_grep`), el conector
   tiene la lista antigua: se reconecta con `/mcp`.
   `hebra_status` dice la versión del servidor en `capabilities.server.version` (0.2.0 o
   posterior trae las tres de D9; 0.3.0 o posterior trae las tres de ficheros sueltos, D10;
   0.4.0 o posterior trae el esquema y los apartados, D11)
-  y la lista de herramientas en `capabilities.tools`.
+  y la lista de herramientas en `capabilities.tools` (con `hebra_grep`, D13: `hebra_grep` y
+  `lines` en `hebra_read_note`).
 - Ante un resultado raro (lista vacía, nota que debería existir), `hebra_status` primero:
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
   el sync, no la búsqueda.
@@ -85,13 +86,14 @@ Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo
 que la mueva o la borre en la app, el texto listo para que lo pegue, o una edición por
 sustituciones.
 
-## Herramientas (28)
+## Herramientas (29)
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
 | `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading`: el apartado más interno del fragmento (o `null`); vale tal cual como `heading` de `hebra_read_note`. Ignora tildes. Pagina con `nextCursor`. |
+| `hebra_grep` | `pattern` (literal; con `regex: true`, expresión regular de JavaScript), `caseSensitive?` (def. `false`), `folder?`, `subfolders?`, `tag?`, `contextLines?` 0-5, `limit` 1-100 (20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, before?, after?, heading}], nextCursor, cutoff}`, una por línea que casa. Las tildes cuentan. `cutoff: "time"` o `"size"`: se paró antes, sigue con `nextCursor`. `pattern_too_slow`: simplifica la expresión. `line` vale para `lines` de `hebra_read_note`. Sin recuentos. |
 | `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
-| `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?` | Cuerpo íntegro y **`revision`** (la necesita la edición). Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
+| `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?`, `lines?: {from, to?}` (no con `heading`) | Cuerpo íntegro y **`revision`** (la necesita la edición). Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; con `lines`, solo esas líneas (hasta 2 000) y salen `lines`, `totalLines` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
 | `hebra_note_outline` | `id` **o** `title`, `maxLevel?` 1-6, `limit?` 1-500 (200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`, sin cuerpo. `chars` = lo que devolvería la lectura de ese apartado. `occurrence` solo sale en los títulos repetidos: es el `headingOccurrence` que hay que pasar. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
@@ -151,6 +153,11 @@ traigas entera para tocar un apartado.
 - **Leer solo un apartado**: `hebra_read_note` con `heading` (y `headingOccurrence`). Para
   editarlo con `hebra_edit_note`, la `revision` que devuelve vale.
 - **Encontrar el apartado de algo**: `hebra_search` trae `heading` en cada resultado.
+- **`hebra_grep` o `hebra_search`**: `hebra_grep` para una cadena exacta (un id, una ruta,
+  una cita, `TODO:`), un patrón o todas las apariciones con su línea; `hebra_search` para
+  buscar por palabras (ignora tildes y encuentra por prefijo). Después, `hebra_read_note`
+  con `lines` (unas líneas alrededor de la `line` encontrada) o con `heading` (el apartado
+  que da `heading`), sin traer la nota entera.
 - Un apartado es un encabezado `#` y todo hasta el siguiente de su nivel o menor. Los
   encabezados dentro del frontmatter o de un bloque de código no cuentan, ni los
   subrayados con `===` o `---`. Un título que no existe da `heading_not_found`; uno repetido

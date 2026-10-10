@@ -168,7 +168,7 @@ const FILE_REFERENCED_BY_NAME = `${BAIT_TAG}-dibujo.png`;
  * cifrado detrás). El motor solo valida la cabecera al guardar y aquí nadie lo abre, así
  * que la clave envuelta y el cifrado son relleno del tamaño correcto.
  */
-function lockedBody(title: string, blobRefs: string[]): string {
+export function lockedBody(title: string, blobRefs: string[]): string {
   const b64url = (bytes: Uint8Array | string): string => Buffer.from(bytes).toString('base64url');
   const header = {
     v: 1,
@@ -193,7 +193,7 @@ async function createFile(
   return (await engine.fileCreate(folderId, name, blob.sha256)).id;
 }
 
-async function createNote(
+export async function createNote(
   engine: SqliteLibraryEngine,
   folderId: string | null,
   body: string

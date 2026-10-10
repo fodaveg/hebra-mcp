@@ -68,5 +68,35 @@ describe('hebra-mcp serve (proceso real, protocolo MCP por stdio)', () => {
       (block) => block.type === 'text'
     )?.text;
     expect(text && JSON.parse(text)).toMatchObject({ linked: false });
+
+    // D13: `hebra_grep` desde el bundle, también con expresión regular (el hilo recibe el
+    // código de `scanBody` ya empaquetado) y la lectura por líneas de lo que encuentra.
+    const textOf = (output: unknown): unknown =>
+      JSON.parse(
+        ((output as { content: Array<{ type: string; text?: string }> }).content.find(
+          (block) => block.type === 'text'
+        )?.text) ?? 'null'
+      );
+    const created = textOf(
+      await client.callTool({
+        name: 'hebra_create_note',
+        arguments: { body: '# Prueba\n\n## Despensa\nlínea con garbanzos\n' }
+      })
+    ) as { id: string };
+    for (const args of [{ pattern: 'GARBANZOS' }, { pattern: 'garban\\w+$', regex: true }]) {
+      const found = textOf(await client.callTool({ name: 'hebra_grep', arguments: args })) as {
+        matches: Array<{ id: string; line: number; heading: string }>;
+      };
+      expect(found.matches.map((match) => [match.id, match.line, match.heading])).toEqual([
+        [created.id, 4, 'Despensa']
+      ]);
+    }
+    const lines = textOf(
+      await client.callTool({
+        name: 'hebra_read_note',
+        arguments: { id: created.id, lines: { from: 4, to: 4 } }
+      })
+    ) as { body: string; totalLines: number };
+    expect(lines).toMatchObject({ body: 'línea con garbanzos\n', totalLines: 4 });
   }, 20_000);
 });

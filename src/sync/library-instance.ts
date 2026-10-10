@@ -55,6 +55,7 @@ import {
   type TrashConflictCopiesResult
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
+import type { GrepNoteRow } from '../store/grep-sql';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
   FilesIndex,
@@ -570,6 +571,11 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     blobUploaded: (sha256: string): Promise<boolean | null> => current().blobUploaded(sha256),
     looseFileDirty: (id: string): Promise<boolean | null> => current().looseFileDirty(id),
+    grepNotes: (): Promise<GrepNoteRow[]> => current().grepNotes(),
+    grepCandidates: (match: string, rowids: readonly number[]): Promise<Set<number> | null> =>
+      current().grepCandidates(match, rowids),
+    grepBodies: (rowids: readonly number[]): Promise<Map<number, string>> =>
+      current().grepBodies(rowids),
     close: (): void => current().close()
   };
 }
