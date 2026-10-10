@@ -11,7 +11,7 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 29 herramientas
+Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 30 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -27,6 +27,15 @@ Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 29 herram
   2026): con él, reintentar tras perder la respuesta (un despliegue, `busy_other_instance`)
   no vuelve a añadir el texto y devuelve lo guardado con `replayed: true`, durante 24 h;
   sin él, cada llamada añade.
+- Sustitución en lote (D14): `hebra_replace_in_notes` cambia un texto o un patrón (con las
+  reglas de `hebra_grep`) en hasta 200 notas, siempre en dos pasos. `mode: "simulate"` no
+  escribe nada: devuelve un `planId` y, por nota, las coincidencias y las líneas antes y
+  después, para revisarlo. `mode: "apply"` con ese `planId` y un `operationId` aplica
+  exactamente lo simulado, con una versión anterior forzada de cada nota; una nota que
+  cambió entre medias deja una copia de conflicto. El informe dice qué entró, qué chocó y
+  qué no se tocó, y repetir con el mismo `operationId` no duplica nada y completa lo
+  pendiente. `mode: "undo"` deshace el lote entero durante 7 días (no toca lo que se cambió
+  después). Ninguna nota privada entra en el plan ni en los recuentos.
 - Notas por apartados (D11): `hebra_note_outline` da el esquema de una nota (apartados,
   niveles, líneas y tamaños, sin cuerpo; limit 1-500, def. 200); `hebra_read_note` con
   `heading` lee solo un apartado (subapartados incluidos) y `hebra_append_to_note` con
@@ -223,5 +232,8 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 - `src/workdir/`, `src/store/body-writes.ts` — ficheros de trabajo (`checkout`, `apply`,
   `undo`, `status`, `diff`; `SPEC.md` §13): nombres, diff propio, la carpeta `.hebra-d` y
   la única escritura de cuerpo entero de hebra-mcp, solo en esta vía local.
+- `src/store/replace*.ts`, `src/server/tools/replace-in-notes.ts` — `hebra_replace_in_notes`
+  (D14): la sustitución línea a línea, su hilo con plazo, los planes en `library.sqlite` y
+  simular, aplicar y deshacer en el escritor.
 - `scripts/build.mjs`, `scripts/check-bundle.mjs`, `scripts/check-no-hebra-code.mjs` —
   build y los dos checks que corre `npm run check` junto con `typecheck` y `test`.

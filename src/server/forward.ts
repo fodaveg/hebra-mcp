@@ -7,8 +7,9 @@
  * - en el escritor, escribe en local, como siempre;
  * - en un lector, reenvía `createNote`, `appendToNote`, `editNote`, `organize` (que
  *   incluye mandar a la papelera y sacar de ella), `restoreVersion`, desde D9 (3 oct
- *   2026), `createFolder`, `renameFolder` y `addAttachment`, y desde D10 (9 oct 2026),
- *   `organizeFile` (la papelera de los ficheros sueltos) al escritor. Todas
+ *   2026), `createFolder`, `renameFolder` y `addAttachment`, desde D10 (9 oct 2026),
+ *   `organizeFile` (la papelera de los ficheros sueltos), y desde D14 (10 oct 2026),
+ *   `replaceInNotes` en todos sus modos (los planes viven en el escritor) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -56,6 +57,18 @@ import type {
   TrashConflictCopiesResult
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
+import {
+  REPLACE_APPLY_BUDGET_MS,
+  type ReplaceApplyReport,
+  type ReplacePlanNoteView,
+  type ReplacePlanView,
+  type ReplaceReportNote,
+  type ReplaceRequest,
+  type ReplaceSkipped,
+  type ReplaceUndoNote,
+  type ReplaceUndoReport
+} from '../store/replace-batch';
+import type { ReplaceChange } from '../store/replace';
 import { HEADING_PROOF_MAX_CHARS } from '../store/sections';
 import { EDITS_MAX_COUNT, WRITE_PROOF_TAIL_CHARS, type AppliedEdit } from '../store/edits';
 import type {
@@ -82,6 +95,7 @@ import {
   type FileOutcome,
   type FolderOutcome,
   type OrganizeOutcome,
+  type ReplaceOutcome,
   type SyncFields,
   type SyncState,
   type WriteContext
@@ -102,6 +116,9 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // Hasta 7 MB de petición, el `blobPut` (con `fsync`) y la ronda.
   addAttachment: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   organizeFile: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  // `hebra_replace_in_notes` (D14): aplicar tiene un plazo de 20 s y espera una ronda al
+  // final; la simulación, un hueco para su hilo y 2 s de recorrido.
+  replaceInNotes: REPLACE_APPLY_BUDGET_MS + AWAIT_ROUND_TIMEOUT_MS + 30_000,
   // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
   replaceBody: 15_000,
   trashConflictCopies: 15_000,
@@ -261,6 +278,152 @@ function asAttachmentOutcome(value: unknown, id: string): AddAttachmentOutcome {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** Validación de lo que devuelve el escritor para `hebra_replace_in_notes` (D14): se
+ *  reconstruye campo a campo, sin dejar pasar nada que no sea del contrato. */
+function asString(value: unknown): string {
+  if (typeof value !== 'string') throw new Error('writer_protocol');
+  return value;
+}
+
+function asNullableString(value: unknown): string | null {
+  return value === null ? null : asString(value);
+}
+
+function oneOfValues<T extends string>(value: unknown, allowed: readonly T[]): T {
+  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+    throw new Error('writer_protocol');
+  }
+  return value as T;
+}
+
+function asArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error('writer_protocol');
+  return value;
+}
+
+function asRecordValue(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error('writer_protocol');
+  return value;
+}
+
+function asChange(value: unknown): ReplaceChange {
+  const record = asRecordValue(value);
+  return {
+    line: asCount(record.line),
+    column: asCount(record.column),
+    before: asString(record.before),
+    after: asString(record.after)
+  };
+}
+
+function asPlanNote(value: unknown): ReplacePlanNoteView {
+  const record = asRecordValue(value);
+  if (typeof record.isConflictCopy !== 'boolean') throw new Error('writer_protocol');
+  return {
+    id: asString(record.id),
+    title: asString(record.title),
+    isConflictCopy: record.isConflictCopy,
+    matches: asCount(record.matches),
+    changes: asArray(record.changes).map(asChange)
+  };
+}
+
+/** Prueba de lo guardado de una nota del informe (opcional). */
+function proofFieldsFrom(record: Record<string, unknown>): {
+  revision?: string;
+  totalChars?: number;
+  bodySha256?: string;
+} {
+  const proof: { revision?: string; totalChars?: number; bodySha256?: string } = {};
+  if (record.revision !== undefined) proof.revision = asString(record.revision);
+  if (record.totalChars !== undefined) proof.totalChars = asCount(record.totalChars);
+  if (record.bodySha256 !== undefined) proof.bodySha256 = asString(record.bodySha256);
+  return proof;
+}
+
+function asReplaceOutcome(value: unknown): ReplaceOutcome {
+  const record = asRecordValue(value);
+  switch (record.mode) {
+    case 'simulate':
+    case 'preview': {
+      const view: ReplacePlanView = {
+        mode: record.mode,
+        planId: asNullableString(record.planId),
+        expiresAt: asNullableString(record.expiresAt),
+        notes: asArray(record.notes).map(asPlanNote),
+        nextCursor: asNullableString(record.nextCursor)
+      };
+      if (record.planNotes !== undefined) view.planNotes = asCount(record.planNotes);
+      if (record.planMatches !== undefined) view.planMatches = asCount(record.planMatches);
+      if (record.cutoff !== undefined) {
+        view.cutoff = record.cutoff === null ? null : oneOfValues(record.cutoff, ['maxNotes', 'time', 'size'] as const);
+      }
+      if (record.continueAfter !== undefined) view.continueAfter = asNullableString(record.continueAfter);
+      if (record.skipped !== undefined) {
+        view.skipped = asArray(record.skipped).map((entry): ReplaceSkipped => {
+          const skipped = asRecordValue(entry);
+          return {
+            id: asString(skipped.id),
+            title: asString(skipped.title),
+            reason: oneOfValues(skipped.reason, ['too_large', 'too_slow'] as const)
+          };
+        });
+      }
+      return view;
+    }
+    case 'apply': {
+      if (typeof record.complete !== 'boolean') throw new Error('writer_protocol');
+      const report: ReplaceApplyReport & SyncFields = {
+        mode: 'apply',
+        planId: asString(record.planId),
+        complete: record.complete,
+        notes: asArray(record.notes).map((entry): ReplaceReportNote => {
+          const note = asRecordValue(entry);
+          const out: ReplaceReportNote = {
+            id: asString(note.id),
+            title: asString(note.title),
+            outcome: oneOfValues(note.outcome, [
+              'applied',
+              'already',
+              'conflict_copy',
+              'locked',
+              'pending'
+            ] as const),
+            ...proofFieldsFrom(note)
+          };
+          if (note.copyId !== undefined) out.copyId = asString(note.copyId);
+          return out;
+        }),
+        ...syncFieldsFrom(record)
+      };
+      if (record.replayed === true) report.replayed = true;
+      return report;
+    }
+    case 'undo': {
+      const report: ReplaceUndoReport & SyncFields = {
+        mode: 'undo',
+        planId: asString(record.planId),
+        notes: asArray(record.notes).map((entry): ReplaceUndoNote => {
+          const note = asRecordValue(entry);
+          const out: ReplaceUndoNote = { id: asString(note.id), title: asString(note.title), ...proofFieldsFrom(note) };
+          if (note.outcome !== undefined) {
+            out.outcome = oneOfValues(note.outcome, ['restored', 'already', 'changed', 'locked'] as const);
+          }
+          if (note.copyId !== undefined) out.copyId = asString(note.copyId);
+          if (note.copyOutcome !== undefined) {
+            out.copyOutcome = oneOfValues(note.copyOutcome, ['trashed', 'already', 'changed'] as const);
+          }
+          return out;
+        }),
+        ...syncFieldsFrom(record)
+      };
+      return report;
+    }
+    default:
+      throw new Error('writer_protocol');
+  }
 }
 
 function asCreateResult(value: unknown): CreateNoteResult {
@@ -524,6 +687,21 @@ export function buildRoutedWriteContext(
         asFileOutcome,
         () => local.organizeFile(input)
       ),
+    // `hebra_replace_in_notes` (D14): todo en el escritor, que guarda los planes y tiene el
+    // hilo de la simulación; viaja la petición entera con la privacidad de ESTE lector. Si
+    // la conexión se corta tras enviar `apply`, no se repite: el agente reintenta con el
+    // mismo `operationId` y el escritor sigue donde se quedó.
+    ...(local.replaceInNotes
+      ? {
+          replaceInNotes: (request: ReplaceRequest) =>
+            routed(
+              'replaceInNotes',
+              request as unknown as Record<string, unknown>,
+              asReplaceOutcome,
+              () => local.replaceInNotes!(request)
+            )
+        }
+      : {}),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
     // relevo, esta instancia ya es el escritor y lo anota en local.
@@ -561,8 +739,14 @@ export function writerSocketHandlers(
         syncRound: () => local.awaitRound(AWAIT_ROUND_TIMEOUT_MS)
       }
     : {};
+  // `hebra_replace_in_notes` (D14): en el turno de ESTE escritor, con la privacidad del
+  // lector; aplicar y deshacer esperan aquí su ronda.
+  const replace = local.replaceInNotes
+    ? { replaceInNotes: (request: ReplaceRequest) => local.replaceInNotes!(request) }
+    : {};
   return {
     ...workdir,
+    ...replace,
     createNote: (input) => local.createNote(input),
     // Devuelve el `operationId` que atendió: así el lector sabe que este escritor lo
     // entiende (uno anterior lo ignoraría sin decirlo).

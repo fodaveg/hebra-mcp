@@ -2,8 +2,10 @@
  * Las escrituras de los ficheros de trabajo (SPEC.md §13, «D», 10 oct 2026), dentro de un
  * turno exclusivo del escritor, como las de `./writes.ts`. Son la ÚNICA vía de hebra-mcp
  * que reescribe el cuerpo entero de una nota: la excepción a D2 que decidió David para la
- * vía LOCAL (`hebra-mcp apply` y `undo`). Ninguna herramienta MCP las llama, ni por stdio
- * ni en el conector remoto: las herramientas siguen editando por sustituciones.
+ * vía LOCAL (`hebra-mcp apply` y `undo`). Ninguna herramienta MCP manda un cuerpo entero.
+ * Desde D14 (10 oct 2026), `hebra_replace_in_notes` reutiliza este mismo turno
+ * (`./replace-batch.ts`) para escribir el cuerpo que salió de SUS sustituciones simuladas
+ * (el escritor lo calculó y lo guardó en el plan; el agente no lo manda), y para deshacerlo.
  *
  * El motivo de D2 (que nadie machaque a ciegas lo que no vio) se cubre igual:
  * - comprobación de base del motor: `noteSave` con `expectedLocalSeq` y `baseBodySha256`

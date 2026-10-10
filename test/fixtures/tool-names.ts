@@ -40,7 +40,9 @@ export const TOOL_NAMES: readonly string[] = [
   // Notas por apartados (D11, 9 oct 2026).
   'hebra_note_outline',
   // Búsqueda línea a línea (D13, 10 oct 2026).
-  'hebra_grep'
+  'hebra_grep',
+  // Sustitución en lote (D14, 10 oct 2026).
+  'hebra_replace_in_notes'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */

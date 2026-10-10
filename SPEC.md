@@ -10,13 +10,14 @@ servidor MCP que **lee** la biblioteca y **crea, edita y organiza** contenido si
 texto (D2, ampliada el 28 sep 2026 y, con la papelera y las versiones anteriores, el 30 sep 2026;
 D9, crear y renombrar carpetas y añadir adjuntos, el 3 oct 2026; D10, listar los ficheros sueltos
 y mandarlos a la papelera, el 9 oct 2026; D11, leer y escribir una nota por apartados, el 9 oct 2026;
-D13, buscar texto exacto línea a línea y leer una nota por líneas, el 10 oct 2026).
+D13, buscar texto exacto línea a línea y leer una nota por líneas, el 10 oct 2026; D14,
+sustituir en un lote de notas con simulación previa y vuelta atrás, el 10 oct 2026).
 
 ## 2. Aceptación de v1
 
 1. David vincula `hebra-mcp` a su biblioteca desde el flujo de aprobación de Hebra
    (Ajustes > Sincronización) y el proceso descarga la biblioteca completa.
-2. Desde Claude Code, las veintinueve herramientas de §5 responden con el esquema de §5.
+2. Desde Claude Code, las treinta herramientas de §5 responden con el esquema de §5.
 3. Una nota creada o ampliada desde Claude aparece en Hebra (Mac e iPhone) tras un ciclo de sync.
 4. Si Claude añade texto a una nota que David está editando a la vez, aparece una copia de
    conflicto visible en Hebra y ningún texto se pierde.
@@ -27,7 +28,7 @@ D13, buscar texto exacto línea a línea y leer una nota por líneas, el 10 oct 
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep–10 oct 2026, cerradas; D12, ficheros de trabajo, y D13, `hebra_grep` y lectura por líneas, el 10 oct 2026)
+## 3. Decisiones de David (26 sep–10 oct 2026, cerradas; D12, ficheros de trabajo, D13, `hebra_grep` y lectura por líneas, y D14, `hebra_replace_in_notes`, el 10 oct 2026)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
@@ -42,14 +43,15 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D9 | **Carpetas y adjuntos** (3 oct 2026, «te autorizo a hacer todo lo que te pida hebra», a petición de la sesión de Hebra, que necesita replicar la estructura de carpetas de Obsidian y subir capturas PNG de audits). Sustituye en parte los puntos 5 y 7 de D2: 1) el MCP **crea y renombra carpetas** visibles (`hebra_create_folder`, `hebra_rename_folder`); **mover y borrar carpetas siguen fuera**; 2) la privacidad de una carpeta se decide **con la configuración, antes de mirar el motor**: una ruta resultante que es una carpeta privada configurada (o queda debajo de una), renombrar una carpeta que tiene una privada configurada debajo, o cualquier choque de nombre con algo no visible responden el mismo `folder_unavailable`, exista o no esa carpeta; `folder_name_taken` solo sale con una hermana VISIBLE; crear es idempotente (una visible con ese nombre bajo ese padre se devuelve con `created: false`) y renombrar al nombre que ya tiene no escribe; 3) el MCP **añade un adjunto** a una nota visible (`hebra_add_attachment`), con los MISMOS tipos y el mismo tope de 5 MiB que la lectura (decisión 7), guardado con `blobPut` del motor y referenciado al final del cuerpo como `![[sha256:H\|nombre]]` por la vía de `hebra_append_to_note` (copia de conflicto si choca) con la idempotencia de `hebra_edit_note` (`operationId`); sube al relé con la ronda de sync (Blob V2), así que nunca queda un blob sin una nota que lo referencie; **borrar y cambiar adjuntos siguen fuera**. | La opción A sacaba las carpetas del MCP porque sus errores revelaban carpetas privadas; con un error único decidido desde la configuración ya no las revelan. |
 | D10 | **Ficheros sueltos** (9 oct 2026, «adelante con las tres»; antes, por la sesión de Hebra de Fedora, que necesitaba mandar ficheros sueltos a la papelera: «pidele a la sesión en el mac de hebra-mcp que lo haga»). Amplía la decisión 6 de D2 a los ficheros sueltos de la biblioteca (la tabla `files` de Hebra: un `.base`, un PDF que no cuelga de una nota): 1) el MCP **lista** los ficheros sueltos (`hebra_list_files`), **manda uno a la papelera** (`hebra_trash_file`) y **lo saca** (`hebra_restore_file`); 2) **nunca purga** un fichero ni lo borra de forma irreversible, y **leer su contenido, crearlo, renombrarlo, moverlo o reemplazarlo siguen fuera**; 3) privacidad (decisión técnica del orquestador, que aplica a los ficheros las reglas 4 y 6 de D2 y cierra ante la duda): un fichero está oculto **(a)** si su carpeta es privada o subcarpeta, también si la carpeta ya se borró (se sube por las lápidas como en la papelera de notas), o **(b)** si lo enlaza alguna nota oculta, viva o de la papelera, por su nombre o por el SHA-256 de sus bytes; la regla es la misma para los vivos y para los de la papelera, se aplica en la herramienta y otra vez en el escritor, y un fichero oculto responde `not_found`, igual que uno inexistente; restaurar nunca deja un fichero en una carpeta que el cliente no ve; 4) sin `operationId`: mandar y sacar son idempotentes por estado, como `hebra_trash_note`. | Los ficheros sueltos estaban fuera de v1 (§10, «Después de v1»). Coste asumido de la regla (b): oculta de más con homónimos (un fichero visible que se llama igual que otro enlazado desde una nota oculta tampoco sale). |
 | D11 | **Notas por apartados** (9 oct 2026; alcance de David en la tarea de Lumbre «hebra-mcp: leer y escribir una nota por apartados, sin traer la nota entera», con la orden «haz […] y sube»; el diseño, de Claude). Motivo: una nota de decisiones real ocupa 43 700 bytes y 8 apartados, y registrar una decisión costaba tres llamadas con la nota entera en el contexto (leerla, `hebra_edit_note` y un `hebra_search` para comprobar que el texto entró, porque la escritura respondía «saved» sin prueba). Criterio: registrar una decisión en un apartado con DOS llamadas pequeñas (esquema de la nota y añadir al apartado), sin que el cuerpo entero pase por el contexto del cliente y con la respuesta de la escritura como prueba de lo guardado. 1) **Apartado** = un encabezado ATX y todo lo que sigue hasta el siguiente de nivel igual o menor o el final (subapartados incluidos); no cuentan las líneas del frontmatter inicial ni de los bloques de código cercados, y los encabezados Setext (subrayados con `===` o `---`) **no** son apartados (límite deliberado: menos falsos positivos al escribir). Títulos comparados como `normalizedHeading` de Hebra (NFKC, recortados, espacios colapsados, minúsculas); el analizador es código propio de hebra-mcp (`src/store/sections.ts`), no importa el de Hebra. 2) `hebra_read_note` y `hebra_append_to_note` aceptan `heading?` y `headingOccurrence?`; la herramienta nueva `hebra_note_outline` da el esquema (títulos, niveles, líneas y tamaños, sin cuerpo). 3) Un título ambiguo no se adivina: `ambiguous_heading` con los candidatos, y se elige con `headingOccurrence`. 4) Las escrituras devuelven **prueba de lo guardado** leída del cuerpo guardado, no un eco de la entrada (`appended`, `applied`, `totalChars`, `revision`). 5) `hebra_search` devuelve el apartado más interno del fragmento (`heading`). 6) Privacidad sin cambios: ninguna regla nueva; una nota oculta responde `not_found` también con `heading`, y ningún título de apartado ni texto de nota entra en un log. 7) **Ampliada el 10 oct 2026** (decidido por delegación de David, con la ampliación de D2 del mismo día): con `operationId`, el reintento de `hebra_append_to_note` devuelve la prueba de lo guardado anotada en el registro (la de la primera vez) con `replayed: true`, sin volver a escribir; si el registro se quedó a medias (`started`) y el cuerpo es el que se iba a guardar, `revision` y `totalChars` del cuerpo actual, sin `appended` (no consta dónde quedó el texto). | Descartado: partir la nota en varias o reservar marcadores de apartado (cambiaría el contenido del usuario). Descartado: Setext y apartados por HTML o negritas (ambiguos y fáciles de escribir sin querer). Coste asumido: una nota con dos apartados del mismo título obliga a elegir por `headingOccurrence`. |
-| D12 | **Ficheros de trabajo con vuelta** (10 oct 2026, decidido por David; tarea D de Lumbre c4f2fd52, sobre la sonda de la opción D del audit `2026-10-10-sqlite-o-markdown.md` de Hebra): `hebra-mcp checkout`, `apply` y `undo`, más `status` y `diff` de consulta, como subórdenes LOCALES del mismo dispositivo emparejado que `serve` (§13). 1) SQLite sigue mandando: los `.md` son una copia de trabajo y vuelven solo con `apply`. 2) **Excepción a D2 solo en esta vía local**: `apply` y `undo` reescriben el cuerpo entero comprobando la base (`baseBodySha256` del motor; en la rama de conflicto, con un `expectedLocalSeq` que nunca coincide, §13.4), con instantánea forzada antes y el cuerpo base guardado por lote. Las herramientas MCP, por stdio y en el conector remoto, siguen por sustituciones y no ganan ninguna escritura nueva. 3) D3 se aplica: lo privado no sale en `checkout` ni se puede devolver una nota que lo sea o lo pasaría a ser. | Coste para un agente local igual al de editar ficheros sueltos (AC7 de la sonda, ronda 2: 0,95× en tokens) sin cambiar quién manda. Descartado para la vía local: traducir el diff a sustituciones como la vía remota (frágil al mover apartados, y una reescritura grande serían varias llamadas sin atomicidad por nota). |
+| D12 | **Ficheros de trabajo con vuelta** (10 oct 2026, decidido por David; tarea D de Lumbre c4f2fd52, sobre la sonda de la opción D del audit `2026-10-10-sqlite-o-markdown.md` de Hebra): `hebra-mcp checkout`, `apply` y `undo`, más `status` y `diff` de consulta, como subórdenes LOCALES del mismo dispositivo emparejado que `serve` (§13). 1) SQLite sigue mandando: los `.md` son una copia de trabajo y vuelven solo con `apply`. 2) **Excepción a D2 solo en esta vía local**: `apply` y `undo` reescriben el cuerpo entero comprobando la base (`baseBodySha256` del motor; en la rama de conflicto, con un `expectedLocalSeq` que nunca coincide, §13.4), con instantánea forzada antes y el cuerpo base guardado por lote. Las herramientas MCP, por stdio y en el conector remoto, siguen por sustituciones y no ganan ninguna escritura nueva (D14, el mismo día, añade `hebra_replace_in_notes`: sustituciones en lote que simula y calcula el escritor, aplicadas con el turno de `replaceBody`; el agente nunca manda un cuerpo entero). 3) D3 se aplica: lo privado no sale en `checkout` ni se puede devolver una nota que lo sea o lo pasaría a ser. | Coste para un agente local igual al de editar ficheros sueltos (AC7 de la sonda, ronda 2: 0,95× en tokens) sin cambiar quién manda. Descartado para la vía local: traducir el diff a sustituciones como la vía remota (frágil al mover apartados, y una reescritura grande serían varias llamadas sin atomicidad por nota). |
 | D13 | **`hebra_grep` y lectura por líneas** (10 oct 2026, decidido por David; tarea F1 de Lumbre 0cc70688, la fase F1 del plan del audit `2026-10-10-sqlite-o-markdown.md` de Hebra). **Reabre el descarte de D11**, que solo dejaba leer una parte de una nota por apartados. Motivo: buscar un texto exacto o un patrón en toda la biblioteca y leer solo lo que rodea cada coincidencia, sin traer notas enteras al contexto (una nota de 1 MB son unos 290 000 tokens y la biblioteca, millones: el grep se hace donde están los datos). Aceptación: grep sobre unos 20 MB en el servidor por debajo de 1 s, y una nota privada nunca sale en resultados ni en recuentos. 1) `hebra_grep` (§5): literal o expresión regular de JavaScript, línea a línea, sobre el cuerpo de las notas visibles; por coincidencia, la nota, el número de línea, la columna, la línea (recortada a un tope), las líneas de contexto pedidas y `heading` (el apartado más interno, con el analizador de D11); filtros de carpeta (con subcarpetas), etiqueta y mayúsculas; paginación con cursor; topes de resultados, de tiempo y de tamaño, con un corte explícito (`cutoff`) y un cursor para seguir. 2) `hebra_read_note` acepta `lines: {from, to?}` con la numeración de la nota entera, la de `hebra_grep` y `hebra_note_outline`; con `heading`, `invalid_input`. 3) D3 sin reglas nuevas, y además sin delatar nada por los números: solo se lee el cuerpo de las notas visibles y sin bloquear, y ninguna salida lleva un recuento, ni el plazo ni el corte dependen de las ocultas (§6.3). 4) Expresiones regulares en un hilo aparte que se mata al agotarse el plazo; si no termina ni una nota, `pattern_too_slow`. 5) Prefiltro con el índice de subcadena de Hebra (H5, §8) cuando el patrón tiene un trozo literal obligatorio de tres caracteres o más y el índice está completo; se comprueba siempre sobre el cuerpo. Medido (10 oct 2026, este Mac, `npm run perf:grep`): 4 064 notas y 20 976 723 caracteres de cuerpo, la peor de tres llamadas por consulta entre 8 y 118 ms en dos pasadas, con índice y sin él (§5). | Descartado: restringir la sintaxis de las expresiones regulares (no hay una regla que aparte las catastróficas sin rechazar expresiones normales) y el motor lineal de V8 (experimental y con una bandera de todo el proceso). Descartado: líneas relativas al apartado con `heading` (no casarían con las de `hebra_grep` ni con `line` de `hebra_note_outline`). Coste asumido: el plazo puede cortar una página aunque queden coincidencias (con `cutoff` y cursor), y una nota editada entre dos páginas puede repetir o saltarse líneas. |
+| D14 | **`hebra_replace_in_notes`, sustitución en lote** (10 oct 2026, decidido por David; tarea F3 de Lumbre db978cf0, la fase F3 del plan del audit `2026-10-10-sqlite-o-markdown.md` de Hebra; el diseño, de Claude, dentro de lo que fijó la tarea). **Amplía D2** (sustituciones puntuales, nota a nota) a un lote, para los agentes remotos: T1 y T3 del audit en 2-3 llamadas. Aceptación de la tarea: reintentar no duplica; un choque deja copia de conflicto; ninguna nota privada entra en el plan, en los recuentos ni en el informe (D3); AC5 (un corte a mitad no duplica nada, el informe dice qué entró y repetir completa lo pendiente) y AC6 (el cuerpo base de cada nota devuelta se conserva y un lote entero se puede deshacer, sin depender de las versiones automáticas, que van de 5 en 5 minutos). 1) **Una herramienta con `mode`**: `simulate` (obligatorio: no escribe ninguna nota, guarda un plan y devuelve `planId` y lo que cambiaría), `preview` (más páginas del plan), `apply` (`planId` + `operationId`: aplica SOLO lo simulado) y `undo` (`planId`). 2) **Patrón**: el de `hebra_grep` (D13), con sus reglas, topes y plegado; el reemplazo, literal o, con expresión regular, `$1`…`$99`, `$<nombre>`, `$&` y `$$`, y nada más (un `$` que no sea de esos es `invalid_input`). Las tareas que el reemplazo marca o desmarca se colocan como en el editor (`reorderToggledTasks`, decisión del 4 oct 2026). 3) **El plan vive en el escritor**, en dos tablas propias de `library.sqlite` (como el registro de operaciones): por nota, el SHA-256 del cuerpo base y del resultante y el cuerpo resultante ENTERO; aplicar escribe ese cuerpo y nunca vuelve a ejecutar la expresión. Ligado a la biblioteca y a la configuración de privados con que se simuló (con otra, `plan_not_found`). Se aplica la primera hora (`plan_expired`); sin aplicar, se borra a las 24 h. 4) **Aplicar**, nota a nota en su turno del escritor (el turno de `replaceBody` de D12: es la vía que escribe el cuerpo entero, pero el cuerpo es el que calculó el escritor al simular, nunca uno que mande el agente): privacidad con la fila de ese momento (oculta, borrada o en la papelera: no se toca ni se nombra); «ya estaba» (el cuerpo ya es el resultante: no escribe, y es lo que hace repetible un corte); base (se guarda el cuerpo base en el plan, instantánea forzada `noteVersionSnapshot` y guardado); cambió (copia de conflicto con el resultado, como `hebra_edit_note`, y una sola aunque se reintente). Un `operationId` por plan, en el registro compartido. 5) **Deshacer**, durante 7 días desde que se aplicó: vuelve a la base lo que sigue como lo dejó el lote (con instantánea antes), no toca lo cambiado después y lo lista, y manda a la papelera las copias de conflicto del lote que siguen igual. Sin confirmación explícita: la vuelta atrás caduca sola. 6) **Topes**: 200 notas por plan, 5 000 000 de caracteres de cuerpos resultantes por plan, 1 000 000 por nota, 2 s de recorrido en la simulación (como el grep), 100 000 caracteres por página y 20 s por llamada a `apply`. Un plan con corte SÍ es aplicable, pero solo lo simulado: `continueAfter` sigue el ámbito en otra simulación. 7) **Privacidad**: el plan solo mira notas visibles y sin bloquear, y no cuenta nada de las demás; una nota cuyo resultado tendría una etiqueta privada (regla 4 de D2) no entra en el plan, sin decir por qué, como una que no existe. | Descartado: dos herramientas (simular y aplicar por separado), que no aportan nada que no dé `mode` y duplican el contrato. Descartado: guardar el plan en memoria (rompía AC5 tras un reinicio o un relevo del escritor) y volver a ejecutar la expresión al aplicar (podría no dar lo simulado, y otra vez el riesgo de una expresión que cuelga, ahora dentro de un turno de escritura). Descartado: «cambiada, no se toca» como respuesta a un choque (la tarea pide copia de conflicto). Descartado: rechazar el plan entero si el resultado lleva una etiqueta privada (delataría la etiqueta igual y además bloquearía las notas visibles). Coste asumido: los cuerpos resultantes y los base se guardan en claro en `library.sqlite` hasta que caducan, como el resto de la biblioteca local. |
 
 ## 4. Arquitectura
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 29 herramientas + filtro de privados
+                                        ├─ servidor MCP: 30 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -133,6 +135,7 @@ Reglas comunes:
 | `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra; si existe, el `title:` del frontmatter manda sobre el H1), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?` y `headingOccurrence?` (D11: con `heading`, el texto va al FINAL de ese apartado, subapartados incluidos; sin él, al final de la nota, como siempre), `operationId?` (≤ 200; opcional, 10 oct 2026, ampliación de D2 y D11) | `{id, outcome: "saved" \| "conflict_copy", copyId?, revision?, totalChars?, appended?: {chars, tail, line, heading?}, replayed?}`. Con `saved`, prueba de lo guardado leída del cuerpo guardado: `revision` (la nueva, válida como `expectedRevision`), `totalChars` (tamaño del cuerpo guardado) y `appended`: `chars` (tamaño del texto insertado), `tail` (sus últimos 200 caracteres como quedaron en la nota), `line` (línea, 1-based, donde empieza) y `heading` (el título del apartado, solo si se pidió). Con `conflict_copy` no hay prueba: el texto fue a la copia. Con `operationId`, un reintento con la misma petición (mismo `id`, `text`, `heading` y `headingOccurrence`) devuelve lo anotado en el registro con `replayed: true` y sin volver a escribir ni esperar ronda (una copia de conflicto de la ronda, también anotada); recuperado del estado `started`, sin `appended`. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates`), `operation_id_reused` (mismo `operationId` con otra petición o de otra herramienta), y los de siempre (`not_found`, `note_locked`; `invalid_input` con un `operationId` vacío o de más de 200). |
 | `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; `find` no vacío; `find` + `replace` de todas ≤ 100 000 caracteres), `expectedRevision`, `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", revision?, totalChars?, applied?: [{chars, tail?, moved?}], copyId?, replayed?, sync, syncError?}`. Con `saved` (D11), prueba de lo guardado: `totalChars` (tamaño del cuerpo guardado) y `applied`, una entrada por sustitución en el orden de `edits`: `chars` (tamaño de su `replace`) y `tail` (sus últimos 200 caracteres leídos del cuerpo guardado); `moved: true` en lugar de `tail` si el reordenado de tareas desplazó la línea y el `replace` ya no está donde le tocaba. Un `replace` vacío da `{chars: 0, tail: ""}`. Con `conflict_copy`, sin prueba. Un reintento (`replayed`) devuelve lo que se guardó en el registro; una entrada anterior a D11 o recuperada del estado `started` no trae `applied`. Errores: `revision_conflict`, `no_match` / `ambiguous_match` / `overlapping_edits` (con `edit`: índice), `note_locked`, `operation_id_reused`, `not_found`. |
+| `hebra_replace_in_notes` (D14) | `mode` y los campos de ese modo (cualquier otro, o uno que falte, `invalid_input`). `simulate`: `pattern` y `regex?`/`caseSensitive?` (como `hebra_grep`), `replacement` (≤ 10 000; con `regex`, `$1`…`$99`, `$<nombre>`, `$&` y `$$`), ámbito `folder?`/`subfolders?`/`tag?` (como `hebra_grep`) e `ids?` (≤ 200), `maxNotes?` (1-200, def. 200), `limit?` (1-200, def. 50), `after?` (`continueAfter` de otra simulación). `preview`: `planId`, `cursor`, `limit?`. `apply`: `planId`, `operationId` (≤ 200). `undo`: `planId` | `simulate`/`preview`: `{mode, planId, expiresAt, notes: [{id, title, isConflictCopy, matches, changes: [{line, column, before, after}]}], nextCursor}` y, solo en `simulate`, `planNotes`, `planMatches` (de todo el plan), `cutoff` (`maxNotes`, `time`, `size` o `null`), `continueAfter` (o `null`) y `skipped?: [{id, title, reason: "too_large" \| "too_slow"}]`. `planId` `null` si no cambiaría ninguna nota. `changes`: las 3 primeras líneas que cambian, con la línea del cuerpo base, la columna de la primera diferencia y el texto antes y después (300 caracteres alrededor de esa columna). `apply`: `{mode, planId, complete, replayed?, notes: [{id, title, outcome: "applied" \| "already" \| "conflict_copy" \| "locked" \| "pending", revision?, totalChars?, bodySha256?, copyId?}], sync, syncError?}`. `undo`: `{mode, planId, notes: [{id, title, outcome?: "restored" \| "already" \| "changed" \| "locked", revision?, totalChars?, bodySha256?, copyId?, copyOutcome?: "trashed" \| "already" \| "changed"}], sync, syncError?}`. Títulos cortados a 200 caracteres. Errores: `invalid_input`, `plan_not_found` (no existe, otra biblioteca u otra configuración de privados), `plan_expired`, `plan_already_applied` (otro `operationId`), `operation_id_reused` (el de otra escritura), `privacy_config_unresolved`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
 | `hebra_set_favorite` | `id`, `favorite` | igual que `hebra_move_note` |
 | `hebra_set_archived` | `id`, `archived` | igual que `hebra_move_note` |
@@ -153,8 +156,8 @@ Reglas comunes:
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9; 9 oct 2026, D10):
-- Las 29 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`.
-- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`).
+- Las 30 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`.
+- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`); `hebra_replace_in_notes` (D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada y deshacer otra vez no cambia nada más).
 - **Escritura con consecuencias** (`destructiveHint: false`, `idempotentHint: false`): `hebra_create_note` y `hebra_append_to_note` (las escrituras iniciales, no idempotentes sin `operationId`; `hebra_append_to_note` lo admite opcional desde el 10 oct 2026, así que la anotación sigue siendo la del caso sin él).
 - Todas `openWorldHint: false`.
 
@@ -166,6 +169,10 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   no vale en otra (`invalid_input`). En las listas de notas es la clave del último resultado
   devuelto (reanuda exactamente tras él); en etiquetas y carpetas, la clave del último elemento; en versiones, el id de la última versión devuelta, y en adjuntos, su `attachmentId`. Si ese elemento ya no está, el cursor da `invalid_input`. En `hebra_note_outline` (D11) lleva la `revision` de la nota y la posición de la página siguiente: si la nota cambió entre dos páginas, `invalid_input`. En `hebra_grep` (D13) es la posición por la que seguir, `[id, línea]` (la línea de esa nota por la que empezar, o 0 si ya está entera), siempre de una nota visible ya mirada; no exige que esa nota siga ahí (sigue por las de id mayor).
   En `hebra_list_notes` se sigue aceptando el cursor sin envolver de versiones anteriores.
+  En `hebra_replace_in_notes` (D14) hay dos: `nextCursor` (`rp1`, `[planId, posición]`) da la
+  página siguiente del MISMO plan con `mode: "preview"` (con un cursor de otro plan,
+  `invalid_input`), y `continueAfter` (`rc1`, `[id, desde]`) sigue el ámbito en OTRA
+  simulación (`after`), siempre desde el id de una nota visible ya mirada.
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
   los vivos, los primeros 200 caracteres de su nombre en NFC y en minúsculas, y su id; para la papelera, la
   fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
@@ -189,7 +196,7 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000) y `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado); `notAllowed` lista lo que no hace (purgar o vaciar la
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` 20 000, `applyWithinMs` una hora y `undoWithinMs` 7 días), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000) y `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado); `notAllowed` lista lo que no hace (purgar o vaciar la
   papelera, mover o borrar carpetas, cambiar o borrar adjuntos, y purgar, crear, renombrar, mover,
   reemplazar o leer el contenido de un fichero suelto, D10);
   `privacyConfigured` es solo un booleano: ni nombres de carpetas o etiquetas privadas ni contenido.
@@ -313,6 +320,67 @@ Detalle de las escrituras (D2):
     todas las notas tienen un enlace con alias o un `hebra://`, así que el prefiltro apenas
     descarta y cuesta su consulta: es el peor caso para él, y aun así todo queda muy por
     debajo del segundo de la aceptación.
+- **Sustitución en lote** (`hebra_replace_in_notes`, D14, 10 oct 2026; `src/store/replace.ts`,
+  `src/store/replace-worker.ts`, `src/store/replace-plans.ts`, `src/store/replace-batch.ts`,
+  `src/server/tools/replace-in-notes.ts`). Todo ocurre en el ESCRITOR: un lector lo reenvía
+  entero por `writer.sock` (op `replaceInNotes`, §8) con su configuración de privados.
+  - **Simular**: qué notas se miran y cómo casa, como `hebra_grep` (vivas, visibles, sin
+    bloquear, del ámbito; prefiltro de subcadena; filtro rehecho en el turno de cada lote de
+    lectura; en orden de id y desde `after`). Las expresiones regulares, en un hilo con
+    plazo (`RegexReplaceWorker`, el mismo diseño que el del grep y el MISMO semáforo: como
+    mucho `REGEX_WORKERS_MAX` hilos de expresiones a la vez entre los dos); un literal, en
+    el hilo principal. Por nota, `replaceBodyLines` (línea a línea, con la convención de
+    D11 y conservando los terminadores) y después `reorderToggledTasks`; entra en el plan
+    si el resultado es distinto, no empieza por el prefijo de una bloqueada y no lleva una
+    etiqueta privada ni descendiente. Cortes: `maxNotes` (mira una nota más que cambia,
+    para no dar un `continueAfter` sin nada detrás), `size` (la suma de resultados llegaría
+    a 5 000 000) y `time` (2 s desde el primer cuerpo leído, entre nota y nota o matando el
+    hilo a mitad de una). Una nota en la que la expresión no termina en todo el plazo (la
+    primera de la llamada) se salta y sale en `skipped` con `too_slow`; si ya se había
+    avanzado, el corte cae en ella y `continueAfter` la reintenta. Una cuyo resultado
+    pasaría de 1 000 000 de caracteres sale en `skipped` con `too_large`. Después, en UN
+    turno del escritor, cada nota se vuelve a comprobar con su fila de ese momento (viva,
+    visible, sin bloquear y con el cuerpo simulado) y el plan se guarda entero en una
+    transacción, con un `planId` aleatorio (UUID). La respuesta sale de lo guardado.
+  - **Plan** (`hebra_mcp_replace_plans` y `hebra_mcp_replace_plan_notes`, tablas propias de
+    `library.sqlite`, como `hebra_mcp_operations`: no viajan por sync ni las toca
+    `libraryReset`): biblioteca, huella de la configuración de privados (SHA-256 de las
+    rutas y etiquetas ordenadas), fecha, `operationId` de la aplicación y estado
+    (`simulated`, `applying`, `applied`, `undone`); por nota, en orden, el id, los SHA-256
+    base y resultante, el cuerpo resultante, las coincidencias, la vista previa y, al
+    aplicar, el cuerpo base, el resultado con su prueba y el de deshacer. Se purgan al
+    empezar cada operación de plan: sin aplicar, a las 24 h; aplicados, a los 7 días.
+  - **Aplicar**: primer turno: el `operationId` en el registro compartido (huella propia
+    `replaceInNotes` + `planId`: el de otra escritura, `operation_id_reused`, y al revés), el
+    plan de esta biblioteca y configuración (`plan_not_found`), dentro de su hora
+    (`plan_expired`) y sin otro `operationId` ligado (`plan_already_applied`); queda
+    `applying`. Con el mismo `operationId` y el plan ya `applied` o `undone`, el informe
+    anotado con `replayed: true`, sin escribir. Después, cada nota sin resultado anotado,
+    en orden y en SU turno: filtro de privados rehecho; si el cuerpo es el base, se guarda
+    en el plan ANTES de escribir; `replaceBodyInTurn` (§13.4) con el cuerpo resultante y
+    `copy`: oculta, borrada o en la papelera (o un resultado ya con etiqueta privada),
+    nada; bloqueada, nada; «ya estaba» (cuerpo = resultante), nada (y si la base ya estaba
+    guardada por este plan, cuenta como `applied`: lo escribió el lote antes de un corte);
+    base, instantánea forzada y guardado; cambió, copia de conflicto con el resultado, o la
+    que ya hubiera igual. El resultado y la prueba (leída de la fila en ese turno) se anotan
+    en el plan en el mismo turno. Una aplicación a la vez por plan en el escritor. Al
+    agotarse los 20 s, sale lo hecho con `complete: false`; con todo anotado, `applied` y
+    `finish` en el registro. Una ronda al final si se escribió algo (§8). El informe sale
+    de lo anotado y de un filtro recalculado: una nota que ya no es visible no sale.
+  - **Corte (AC5)**: el cuerpo base se guarda antes de escribir y el resultado se anota
+    después, en el mismo turno; si el proceso muere entre el guardado y la anotación, la
+    nota no tiene resultado anotado y repetir la encuentra con el cuerpo resultante («ya
+    estaba»): no escribe ni crea una copia. Límite: si en ese hueco otra escritura o el sync
+    cambia la nota, repetir la toma por un choque y deja una copia (la ventana es la de dos
+    sentencias del mismo turno, como en `hebra_edit_note`).
+  - **Deshacer**: cada nota con cuerpo base guardado, en su turno: `replaceBodyInTurn` con
+    el base y `reject` sobre el SHA-256 resultante (sigue como la dejó el lote: instantánea
+    y vuelta, `restored`; ya es el base, `already`; cambió, `changed` y no se toca); cada
+    copia de conflicto del lote, `trashConflictCopiesInTurn` (a la papelera si sigue igual).
+    Repetir no cambia nada más. Deshecho, aplicar con el mismo `operationId` devuelve lo
+    anotado sin escribir.
+  - Logs: `replace.batch` con el modo y números (notas de la respuesta, `complete`,
+    `replayed`, `sync`); nunca el patrón, el reemplazo, títulos ni ids.
 - `hebra_edit_note` (D2 ampliada, 28 sep 2026):
   - **Revisión**: `r1.` + base64url de `[library_id, id, local_seq, body_sha256]` de la fila leída.
     `updatedAt` no vale (mover o archivar no lo cambia). La edición se certifica contra la base que
@@ -380,7 +448,7 @@ Detalle de las escrituras (D2):
   `privacy_config_unresolved` va antes que todo, como en las demás escrituras: si fuera al revés, una
   configuración rota delataría qué rutas tiene configuradas.
 - **Privacidad de las escrituras** (decisión 4): toda escritura (crear, añadir, editar, organizar,
-  papelera, restaurar una versión, crear y renombrar carpetas, añadir un adjunto y mandar a la papelera o sacar un fichero suelto) lleva la configuración de privados de quien la pide (también
+  papelera, restaurar una versión, crear y renombrar carpetas, añadir un adjunto, mandar a la papelera o sacar un fichero suelto y sustituir en lote, D14) lleva la configuración de privados de quien la pide (también
   la del lector por `writer.sock`, que la exige) y el escritor la aplica dentro del turno en que
   escribe y sobre el resultado: origen visible, destino visible, cuerpo resultante sin etiquetas
   privadas ni descendientes. Lo que no, `not_found`, igual que una nota o carpeta inexistente
@@ -689,6 +757,22 @@ El dispositivo acumula tres secretos:
   término buscado con la de la misma biblioteca sin ellas: idénticas, cursores incluidos.
   `hebra_read_note` con `lines`, como sin él: una oculta, `not_found`; una bloqueada,
   `note_locked`.
+- **`hebra_replace_in_notes`** (D14, 10 oct 2026; ninguna regla nueva de qué se oculta): la
+  simulación mira lo mismo que `hebra_grep` y con las mismas dos comprobaciones (antes de
+  leer ningún cuerpo y en el turno de cada lote), y el plan se vuelve a comprobar nota a
+  nota en el turno que lo guarda. Ninguna oculta entra en el plan, en `planNotes`,
+  `planMatches`, `skipped` ni en los cortes: todo sale solo de notas visibles, el plazo
+  cuenta desde el primer cuerpo leído y `continueAfter` lleva el id de una visible ya
+  mirada. Una nota cuyo resultado tendría una etiqueta privada (o descendiente) no entra,
+  sin decir por qué (regla 4 de D2: como una que no existe). El plan va ligado a la
+  configuración con la que se simuló: con otra, `plan_not_found` en `preview`, `apply` y
+  `undo`, así que un plan nunca se aplica con un filtro distinto del que lo calculó. Al
+  aplicar y al deshacer, cada nota se comprueba con su fila en el turno en que se escribe:
+  una que pasó a oculta (o se borró, o fue a la papelera) no se toca, y las páginas y los
+  informes salen con un filtro recalculado, así que tampoco se nombra. Lo comprueba
+  `test/replace/replace-privacy.node.test.ts` con la biblioteca doble del grep: simulación,
+  páginas, cortes e informes de aplicar y deshacer idénticos con y sin las siete ocultas,
+  y una nota que pasa a oculta entre simular y aplicar, que no se toca ni se nombra.
 - **Cerrado ante la duda**: si una carpeta de `privateFolders` no existe (renombrada o borrada), el
   servidor responde a toda herramienta con `privacy_config_unresolved` hasta que se corrija la
   configuración. No se sirve nada con un filtro que no se puede aplicar.
@@ -699,7 +783,7 @@ El dispositivo acumula tres secretos:
   (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy` y, desde el
   submódulo en `59b5d403`, `sync.blob_unreadable`, que solo lleva el tamaño del adjunto, y,
   desde `aea2181c`, `substring.index`, el relleno del índice de subcadena, §8), con ids opacos, códigos y recuentos.
-- **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas. Tampoco el título de un apartado (D11) ni el texto de la prueba de lo guardado; como mucho, `heading: true` en `note.append`. Ni el patrón de `hebra_grep` (D13): su `tool.call` lleva solo `count`, el número de coincidencias devueltas.
+- **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas. Tampoco el título de un apartado (D11) ni el texto de la prueba de lo guardado; como mucho, `heading: true` en `note.append`. Ni el patrón de `hebra_grep` (D13): su `tool.call` lleva solo `count`, el número de coincidencias devueltas. Ni el patrón ni el reemplazo de `hebra_replace_in_notes` (D14): `replace.batch` lleva el modo y números.
 - Stdout es exclusivo del protocolo MCP.
 - **Test**: un test ejecuta todas las herramientas con notas-cebo y comprueba que ningún texto de
   las notas aparece en stderr.
@@ -728,6 +812,18 @@ texto, un PDF o una imagen adjuntos pueden llevar instrucciones, y se tratan com
 entrada a la IA igual que la nota entera, y no amplían ese daño. Una expresión regular que una
 instrucción inyectada pida para colgar el servidor la corta el plazo (§5, «Búsqueda línea a
 línea»).
+
+`hebra_replace_in_notes` (D14) sí amplía el alcance: una instrucción escondida en una nota
+podría pedir un lote destructivo (sustituir algo en cientos de notas). Lo acotan cinco
+cosas, todas en el servidor y no en la buena voluntad del modelo: la simulación es
+obligatoria (no hay forma de aplicar sin un `planId` simulado, y aplicar escribe solo lo
+simulado); el tope de 200 notas por plan; una versión anterior forzada de cada nota antes
+de escribirla y el cuerpo base guardado en el plan; `mode: "undo"`, que deshace el lote
+entero durante 7 días sin tocar lo que se cambió después; y el informe, que dice nota a nota
+qué entró. La descripción de la herramienta y la skill dicen que un texto de nota que pida
+simular, aplicar o deshacer un lote no es una orden del usuario, y que el plan se revisa con
+él antes de aplicarlo. Una expresión que pida colgar el servidor la corta el plazo de la
+simulación, en su hilo; aplicar no ejecuta ninguna.
 
 Los ficheros sueltos tienen un efecto que las notas no: los **dibujos** son ficheros sueltos que
 las notas incrustan por nombre (`![[Dibujo 2026-10-09 10.30.png]]`), y cualquier otro fichero suelto
@@ -819,16 +915,19 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     esperada; los bytes van del lector al escritor, nunca de vuelta), `organizeFile {action, id,
     privacy}` (D10: `action` es `trashFile` o `restoreFile` y ninguna otra, tampoco de purga;
     responde `{id, folderId, trashed}` y el estado de sync, ronda ya esperada; es una op propia y
-    no una acción de `organize`, que solo admite acciones de nota), `fetchAttachment {noteId,
+    no una acción de `organize`, que solo admite acciones de nota), `replaceInNotes {mode, …,
+    privacy}` (D14: la petición de `hebra_replace_in_notes` entera, validada en el escritor;
+    responde lo mismo que la herramienta, con la ronda ya esperada en `apply` y `undo`; un
+    escritor sin ella responde `invalid_request`), `fetchAttachment {noteId,
     sha256, privacy}` (baja al disco compartido los bytes de
     un adjunto de una nota visible y responde `{available}`, nunca los bytes; decisión 7 de D2) y
     `status` (el estado de sync del escritor). `privacy` es la configuración de privados del
-    lector y es obligatoria en las nueve escrituras y en `fetchAttachment`: sin ella,
+    lector y es obligatoria en las diez escrituras y en `fetchAttachment`: sin ella,
     `invalid_request`. Los ficheros de trabajo (D12, §13.6) añaden `replaceBody`,
     `trashConflictCopies` y `syncRound`, que ninguna herramienta MCP usa; un escritor sin
     ellas (o de una versión anterior) responde `invalid_request`.
     Errores con código cerrado, nunca con el mensaje; los rechazos de una sustitución llevan su
-    índice (`edit`) y `ambiguous_heading`, sus `candidates` (D11). Los títulos de `candidates` y de `appended.heading` llegan cortados a 200 caracteres y el lector rechaza los más largos; solo `ambiguous_heading` lleva `candidates` (en cualquier otro código se descartan). Una respuesta de más de 256 KiB se descarta (la prueba de `applied` de 50 sustituciones, con el peor escape JSON, pasa de 64 KiB). Una línea de más de `MAX_MESSAGE_BYTES` se rechaza sin leerla entera: lo mayor
+    índice (`edit`) y `ambiguous_heading`, sus `candidates` (D11). Los títulos de `candidates` y de `appended.heading` llegan cortados a 200 caracteres y el lector rechaza los más largos; solo `ambiguous_heading` lleva `candidates` (en cualquier otro código se descartan). Una respuesta de más de 1 MiB (medido en unidades UTF-16 de la línea ya decodificada) se descarta (la prueba de `applied` de 50 sustituciones, con el peor escape JSON, pasa de 64 KiB; desde D14, una página de la simulación de `hebra_replace_in_notes` llega a 100 000 caracteres de JSON y su informe a 200 notas con títulos de hasta 200 caracteres; antes, 256 KiB). Una línea de más de `MAX_MESSAGE_BYTES` se rechaza sin leerla entera: lo mayor
     entre el cuerpo máximo de §5 con el peor escape JSON (las sustituciones de `editNote` suman como
     mucho lo mismo) y el base64 de un adjunto de 5 MiB (6 990 508 caracteres, que JSON no escapa),
     más un margen de 512 KiB para el sobre, la configuración de privados y los saltos de línea de
@@ -841,8 +940,9 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     no corre mientras el escritor atiende una petición.
   - Un lector reenvía `hebra_create_note`, `hebra_append_to_note`, `hebra_edit_note`, las tres de
     organización de notas, las dos de la papelera, `hebra_restore_version`, las dos de carpetas,
-    `hebra_add_attachment` y las dos de ficheros sueltos (`hebra_trash_file`,
-    `hebra_restore_file`) al escritor (las
+    `hebra_add_attachment`, las dos de ficheros sueltos (`hebra_trash_file`,
+    `hebra_restore_file`) y `hebra_replace_in_notes` en todos sus modos (D14: también la
+    simulación, porque los planes viven en la base del escritor) al escritor (las
     lecturas de la papelera, de las versiones y de los ficheros sueltos las sirve él mismo), y le pide que baje los bytes de
     un adjunto que no esté en el disco (`hebra_read_attachment`), que después lee él. El filtro de privados y los
     límites se aplican en la herramienta del lector, **antes** de reenviar y con su configuración, y el escritor vuelve a aplicar esa misma
@@ -928,6 +1028,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 | R10 | Adjuntos (decisión 7 de D2): la caché de adjuntos del motor crece con cada adjunto leído y no se purga sola; y un adjunto sin fila en `blobs` (un `sha256:` de otro dispositivo) se baja entero antes de saber si pasa de 5 MiB (hasta los 25 MiB de Hebra, `MAX_ATTACHMENT_BYTES`). | Solo se baja lo que se pide, de una nota visible, uno cada vez; `unpair` borra la caché con el resto del directorio de datos. Un tope de caché o una petición de tamaño antes de bajar serían un cambio en Hebra (Blob V2 no guarda el tamaño). |
 | R11 | Añadir adjuntos (D9) obliga a que un adjunto de 5 MiB en base64 quepa en `writer.sock`, en `POST /mcp` y en el borde (Caddy): los topes pasan de unos 650 KiB a unos 7,5 MB (8 MB en el borde), y una petición autenticada puede ocupar eso en memoria. Además, un modelo difícilmente escribe megabytes de base64 en una llamada: en la práctica cabrán imágenes pequeñas. | El tope sigue siendo exacto (lo mayor entre el cuerpo de §5 y el base64 de 5 MiB, más 512 KiB para el sobre y los saltos de línea), en HTTP se comprueba la credencial antes de leer el cuerpo, y en `writer.sock` cada conexión tiene como mucho una petición en vuelo. Una vía por ruta local (solo stdio) sería otra decisión. |
 | R12 | `hebra_grep` (D13): una expresión regular catastrófica cuelga el servidor, o el grep delata notas privadas por sus números o su tiempo. | La expresión corre en un hilo que se mata al agotarse el plazo (el bucle de eventos no se bloquea); solo se lee el cuerpo de las notas visibles, sin recuentos, y el plazo y el corte dependen solo de ellas (§5 y §6.3, con tests de cada caso). Lo único que toca todas las notas es la consulta del índice de subcadena, como en `hebra_search`. |
+| R13 | `hebra_replace_in_notes` (D14): una instrucción escondida en una nota pide un lote destructivo; un corte a mitad deja un lote a medias o duplica texto; una expresión catastrófica en la simulación. | Simulación obligatoria y aplicar SOLO lo simulado (el cuerpo guardado, sin volver a ejecutar la expresión), tope de 200 notas, instantánea forzada y cuerpo base guardado antes de escribir cada nota, `undo` del lote entero durante 7 días e informe nota a nota (§5, §6.5); el paso «ya estaba» y el plan en disco hacen repetible un `apply` cortado (`test/replace/apply-corte.node.test.ts`, con `kill -9` y su sabotaje); la simulación usa el hilo con plazo y el semáforo del grep. |
 | R7 | Lumbre no admite hoy devolver el código de emparejado a un CLI (P2). | L2a: redirección loopback con PKCE obligatorio, pedida a la sesión de Lumbre. L2 no empieza sin ella. |
 | R9 | Aprobar exige que el dispositivo que aprueba tenga `recoveryExported` (`identity-vault.ts:151`) (P7). | **Cerrado**: David confirmó el 26 sep 2026 que exportó el código de recuperación en el Mac. Es un dato dicho por él, no medido en el contenedor: si la aprobación falla en L4 con ese motivo, se revisa esto primero. |
 | R8 | **Cerrado** (L5, 26 sep 2026): Hebra (`035db7e6`) añadió `agent` a `DEVICE_LINK_PLATFORMS` (`device-link.ts:54`) y el relé de Lumbre en producción ya lo acepta. hebra-mcp declara `agent` (`LINK_PLATFORM`, `device-link.ts:38`); Hebra lo muestra como «Claude», no como «Mac». | v1 usa `agent` con la etiqueta «Claude (hebra-mcp)», saneada por `sanitizeDeviceLabel`. Petición P3 cerrada. |
@@ -1133,7 +1234,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.7 Aceptación
 
-1. Desde claude.ai web, móvil y una sesión en la nube, las veintinueve herramientas de §5
+1. Desde claude.ai web, móvil y una sesión en la nube, las treinta herramientas de §5
    responden; lo creado, añadido, editado, organizado, mandado a la papelera o restaurado (notas y
    ficheros sueltos), las carpetas creadas o renombradas y los adjuntos añadidos aparecen en Hebra.
 2. Las notas privadas no llegan por ninguna herramienta.

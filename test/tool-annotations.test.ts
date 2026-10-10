@@ -1,6 +1,6 @@
 /**
- * `annotations` MCP de las 29 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13 del 10 oct 2026): cada una
+ * `annotations` MCP de las 30 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13 y D14 del 10 oct 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -55,6 +55,9 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // D10: mandar a la papelera un fichero que ya está en ella, o sacar uno vivo, no escribe.
   hebra_trash_file: WRITE_IDEMPOTENT,
   hebra_restore_file: WRITE_IDEMPOTENT,
+  // D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada
+  // y deshacer dos veces no cambia nada más.
+  hebra_replace_in_notes: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

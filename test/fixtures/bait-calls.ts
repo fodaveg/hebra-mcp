@@ -32,6 +32,23 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_grep', arguments: { pattern: `${BAIT_TAG}|${BAIT_FOLDER}`, regex: true } },
     { name: 'hebra_grep', arguments: { pattern: 'CEBO', folder: 'Diario', subfolders: true } },
     { name: 'hebra_grep', arguments: { pattern: 'CEBO', tag: 'secreto/personal' } },
+    // D14: la simulación de un lote con el cebo como patrón, en la carpeta privada y en la
+    // etiqueta privada: un plan vacío, sin recuentos que delaten nada; aplicar un plan que
+    // no existe, `plan_not_found`. Ni el patrón ni el reemplazo llegan al log.
+    { name: 'hebra_replace_in_notes', arguments: { mode: 'simulate', pattern: BAIT_FOLDER, replacement: BAIT_TAG } },
+    {
+      name: 'hebra_replace_in_notes',
+      arguments: { mode: 'simulate', pattern: 'CEBO', replacement: 'x', folder: 'Diario', subfolders: true }
+    },
+    {
+      name: 'hebra_replace_in_notes',
+      arguments: { mode: 'simulate', pattern: `${BAIT_TAG}|${BAIT_FOLDER}`, regex: true, replacement: '$&', tag: 'secreto' }
+    },
+    {
+      name: 'hebra_replace_in_notes',
+      arguments: { mode: 'simulate', pattern: 'CEBO', replacement: 'x', ids: [library.privateFolderNoteId, library.privateTagNoteId] }
+    },
+    { name: 'hebra_replace_in_notes', arguments: { mode: 'apply', planId: library.privateFolderNoteId, operationId: 'bait-6' } },
     { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId, lines: { from: 1 } } },
     { name: 'hebra_list_notes', arguments: { limit: 100 } },
     { name: 'hebra_read_note', arguments: { id: library.privateFolderNoteId } },

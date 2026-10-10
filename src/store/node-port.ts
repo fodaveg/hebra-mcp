@@ -65,6 +65,7 @@ import {
 import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
+import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
@@ -154,6 +155,8 @@ export async function openNodeLibraryPort(
   // Registro de idempotencia de `hebra_edit_note` (`./operations.ts`): tabla propia de
   // hebra-mcp; solo la crea (y la escribe) el escritor.
   if (mode === 'readWrite') ensureOperationsTable(db);
+  // Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): igual, solo el escritor.
+  if (mode === 'readWrite') ensureReplacePlanTables(db);
   return new NodeLibraryPort(engine, db, mode);
 }
 
@@ -191,6 +194,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** Consultas propias ya preparadas (una vez por conexión; `close` las suelta). */
   private readonly statements = new Map<string, StatementSync>();
   private operationStore: OperationStore | null = null;
+  private replacePlanStore: ReplacePlanStore | null = null;
   /** `meta.library_id`: lo escribe `bootstrapLibraryId` al abrir y nada lo cambia
    *  mientras la conexión vive (`libraryReset` solo borra `binding` y `since_seq`). */
   private libraryIdCache: string | null = null;
@@ -655,7 +659,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         filesIndex: () => this.filesRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
-        operations: (this.operationStore ??= sqliteOperationStore(this.db))
+        operations: (this.operationStore ??= sqliteOperationStore(this.db)),
+        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.db))
       })
     );
   }
@@ -729,6 +734,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     this.closed = true;
     this.statements.clear();
     this.operationStore = null;
+    this.replacePlanStore = null;
     this.db.close();
   }
 }

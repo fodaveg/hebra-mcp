@@ -78,7 +78,10 @@ export const REGEX_WORKERS_MAX = 3;
 let slotsInUse = 0;
 const slotWaiters: Array<() => void> = [];
 
-function acquireSlot(): Promise<void> {
+/** Espera un hueco del semáforo. Lo comparten el hilo de `hebra_grep` y el de
+ *  `hebra_replace_in_notes` (D14, `./replace-worker.ts`): como mucho `REGEX_WORKERS_MAX`
+ *  hilos de expresiones regulares vivos en todo el proceso, sean de quien sean. */
+export function acquireSlot(): Promise<void> {
   if (slotsInUse < REGEX_WORKERS_MAX) {
     slotsInUse += 1;
     return Promise.resolve();
@@ -87,7 +90,8 @@ function acquireSlot(): Promise<void> {
   return new Promise<void>((resolve) => slotWaiters.push(resolve));
 }
 
-function releaseSlot(): void {
+/** Suelta el hueco de `acquireSlot`, una vez por hueco. */
+export function releaseSlot(): void {
   const next = slotWaiters.shift();
   if (next) next();
   else slotsInUse -= 1;

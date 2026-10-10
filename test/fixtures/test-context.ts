@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store';
 import { NoteWriter } from '../../src/store/writes';
+import { ReplaceBatch } from '../../src/store/replace-batch';
 import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import type { ServerContext, ToolContext } from '../../src/server/context';
@@ -45,7 +46,10 @@ export interface TestContext {
 /** `WriteContext` sin sync, sobre `port`: sin ronda que pedir (`sync: "not_linked"`). */
 function testWriteContext(port: NodeLibraryPort): WriteContext {
   const writer = new NoteWriter(port);
+  // `hebra_replace_in_notes` (D14): el lote sobre el mismo puerto, que lee y escribe.
+  const replace = new ReplaceBatch(port, port);
   return buildWriteContext({
+    replaceInNotes: (request) => replace.run(request),
     createNote: (input) => writer.createNote(input),
     appendToNote: (input) => writer.appendToNote(input),
     editNote: (input) => writer.editNoteLocal(input),

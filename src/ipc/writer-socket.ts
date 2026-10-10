@@ -47,6 +47,12 @@
  *   propia y no una acción de `organize`, que solo admite acciones de nota. Ninguna otra
  *   acción de ficheros existe (purgar, crear, renombrar, mover, reemplazar): una acción
  *   desconocida es `invalid_request`.
+ * - `replaceInNotes` `{mode, …, privacy}` (D14, 10 oct 2026) → el resultado de
+ *   `hebra_replace_in_notes`: `simulate` `{pattern, regex, caseSensitive, replacement,
+ *   scope, maxNotes, after?, limit}`, `preview` `{planId, cursor, limit}`, `apply`
+ *   `{planId, operationId}` (ronda ya esperada) o `undo` `{planId}` (igual). Todo ocurre
+ *   en el escritor: los planes viven en su base y la simulación usa su hilo. Un escritor
+ *   sin él (o de una versión anterior) responde `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -93,8 +99,12 @@ import type {
   FileOutcome,
   FolderOutcome,
   OrganizeOutcome,
+  ReplaceOutcome,
   RoundWait
 } from '../server/write-context';
+import { GREP_PATTERN_MAX_CHARS } from '../store/grep';
+import { REPLACE_SCOPE_MAX_IDS, REPLACEMENT_MAX_CHARS } from '../store/replace';
+import { PLAN_ID_MAX_LENGTH, type ReplaceRequest, type ReplaceScope } from '../store/replace-batch';
 import type {
   ReplaceBodyInput,
   ReplaceBodyResult,
@@ -158,8 +168,11 @@ const MAX_MIME_LENGTH = 255;
 
 /** Una respuesta nunca lleva cuerpos, pero desde D11 lleva la prueba de lo guardado: hasta
  *  50 `tail` de 200 caracteres, que con el peor escape JSON (6 bytes por unidad) pasan de
- *  64 KiB. */
-const MAX_RESPONSE_BYTES = 256 * 1024;
+ *  64 KiB. Desde D14, `replaceInNotes`: una página de la simulación (hasta
+ *  `REPLACE_RESPONSE_MAX_CHARS`, 100 000 caracteres de JSON ya escapado) o el informe de
+ *  hasta 200 notas, con títulos cortados a 200 caracteres (unos 1 600 por nota con el peor
+ *  escape): por debajo de 1 MiB. Se mide en unidades UTF-16 de la línea ya decodificada. */
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
@@ -178,6 +191,7 @@ export type WriterSocketOp =
   | 'renameFolder'
   | 'addAttachment'
   | 'organizeFile'
+  | 'replaceInNotes'
   | 'replaceBody'
   | 'trashConflictCopies'
   | 'syncRound'
@@ -194,6 +208,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'renameFolder',
   'addAttachment',
   'organizeFile',
+  'replaceInNotes',
   'replaceBody',
   'trashConflictCopies',
   'syncRound',
@@ -246,6 +261,10 @@ export interface WriterSocketHandlers {
   /** Manda un fichero suelto a la papelera o lo saca (D10), espera la ronda y devuelve el
    *  estado de sync. */
   organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
+  /** `hebra_replace_in_notes` (D14): simular, una página del plan, aplicar o deshacer, en
+   *  el escritor, con la privacidad del lector; aplicar y deshacer, con la ronda ya
+   *  esperada. Opcional: un escritor sin él responde `invalid_request`. */
+  replaceInNotes?(request: ReplaceRequest): Promise<ReplaceOutcome>;
   /**
    * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
    * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
@@ -484,6 +503,93 @@ function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput
     case 'restoreFile':
       if (!isId(id)) throw new InvalidRequest();
       return { action: params.action, id, privacy };
+    default:
+      throw new InvalidRequest();
+  }
+}
+
+/** Un entero en `[min, max]`. */
+function boundedInt(value: unknown, min: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) {
+    throw new InvalidRequest();
+  }
+  return value;
+}
+
+/** Texto acotado (un cursor, un `planId`, un patrón): ni vacío ni más largo que `max`. */
+function boundedText(value: unknown, max: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) throw new InvalidRequest();
+  return value;
+}
+
+/** Un cursor de `hebra_replace_in_notes` (el escritor lo descifra y lo vuelve a validar). */
+const REPLACE_CURSOR_MAX_LENGTH = 2_048;
+
+/** El ámbito de una simulación: carpeta, `subfolders`, etiqueta e ids, todos opcionales. */
+function replaceScopeOf(value: unknown): ReplaceScope {
+  if (!isPlainObject(value)) throw new InvalidRequest();
+  const { folder, subfolders, tag, ids } = value;
+  const scope: ReplaceScope = {};
+  if (folder !== undefined) {
+    if (!isName(folder)) throw new InvalidRequest();
+    scope.folder = folder;
+  }
+  if (subfolders !== undefined) {
+    if (typeof subfolders !== 'boolean') throw new InvalidRequest();
+    scope.subfolders = subfolders;
+  }
+  if (tag !== undefined) {
+    if (!isName(tag)) throw new InvalidRequest();
+    scope.tag = tag;
+  }
+  if (ids !== undefined) {
+    if (!Array.isArray(ids) || ids.length > REPLACE_SCOPE_MAX_IDS || !ids.every(isId)) throw new InvalidRequest();
+    scope.ids = ids as string[];
+  }
+  return scope;
+}
+
+/** `replaceInNotes` (D14): la petición de cada modo con sus topes; el escritor vuelve a
+ *  comprobar el patrón, el reemplazo y los cursores. Un campo de otro modo no viaja: se
+ *  ignora. */
+function replaceRequestOf(params: Record<string, unknown>): ReplaceRequest {
+  const privacy = privacyOf(params.privacy);
+  switch (params.mode) {
+    case 'simulate': {
+      const { pattern, regex, caseSensitive, replacement, after } = params;
+      if (typeof regex !== 'boolean' || typeof caseSensitive !== 'boolean') throw new InvalidRequest();
+      if (typeof replacement !== 'string' || replacement.length > REPLACEMENT_MAX_CHARS) throw new InvalidRequest();
+      const request: Extract<ReplaceRequest, { mode: 'simulate' }> = {
+        mode: 'simulate',
+        pattern: boundedText(pattern, GREP_PATTERN_MAX_CHARS),
+        regex,
+        caseSensitive,
+        replacement,
+        scope: replaceScopeOf(params.scope),
+        maxNotes: boundedInt(params.maxNotes, 1, 1_000),
+        limit: boundedInt(params.limit, 1, 1_000),
+        privacy
+      };
+      if (after !== undefined) request.after = boundedText(after, REPLACE_CURSOR_MAX_LENGTH);
+      return request;
+    }
+    case 'preview':
+      return {
+        mode: 'preview',
+        planId: boundedText(params.planId, PLAN_ID_MAX_LENGTH),
+        cursor: boundedText(params.cursor, REPLACE_CURSOR_MAX_LENGTH),
+        limit: boundedInt(params.limit, 1, 1_000),
+        privacy
+      };
+    case 'apply':
+      return {
+        mode: 'apply',
+        planId: boundedText(params.planId, PLAN_ID_MAX_LENGTH),
+        operationId: operationIdOf(params.operationId),
+        privacy
+      };
+    case 'undo':
+      return { mode: 'undo', planId: boundedText(params.planId, PLAN_ID_MAX_LENGTH), privacy };
     default:
       throw new InvalidRequest();
   }
@@ -780,6 +886,12 @@ export class WriterSocketServer {
         case 'organizeFile':
           result = await handlers.organizeFile(organizeFileInputOf(envelope.params));
           break;
+        case 'replaceInNotes': {
+          const input = replaceRequestOf(envelope.params);
+          if (!handlers.replaceInNotes) throw new InvalidRequest();
+          result = await handlers.replaceInNotes(input);
+          break;
+        }
         case 'replaceBody': {
           const input = replaceBodyInputOf(envelope.params);
           if (!handlers.replaceBody) throw new InvalidRequest();

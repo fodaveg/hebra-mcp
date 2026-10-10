@@ -352,3 +352,35 @@ export const readAttachmentInputShape = {
     .optional()
     .describe('Solo adjuntos de texto: cuántos caracteres devolver. Por defecto y máximo 100 000.')
 };
+
+/** `hebra_replace_in_notes` (D14, 10 oct 2026): una herramienta con `mode`. Cada modo
+ *  admite solo sus campos; el resto lo rechaza `replace-in-notes.ts` con `invalid_input`,
+ *  sin eco. Sin `.max()` en los textos: los topes los aplica el escritor, igual. */
+export const replaceInNotesInputShape = {
+  mode: z
+    .enum(['simulate', 'preview', 'apply', 'undo'])
+    .describe('`simulate` (obligatorio primero), `preview` (más páginas del plan), `apply` o `undo`.'),
+  pattern: z
+    .string()
+    .optional()
+    .describe('simulate: texto literal o, con `regex: true`, expresión regular de JavaScript (bandera `u`), como en hebra_grep: línea a línea.'),
+  regex: z.boolean().optional().describe('simulate: `pattern` es una expresión regular. Def. `false`.'),
+  caseSensitive: z.boolean().optional().describe('simulate: distinguir mayúsculas. Def. `false`.'),
+  replacement: z
+    .string()
+    .optional()
+    .describe('simulate: el texto que sustituye cada coincidencia. Literal; con `regex`, `$1`…`$99`, `$<nombre>`, `$&` y `$$` (un `$`).'),
+  folder: z.string().optional().describe('simulate: ruta de carpeta, como `path` de hebra_list_folders.'),
+  subfolders: z.boolean().optional().describe('simulate: con `folder`, también sus subcarpetas.'),
+  tag: z.string().optional().describe('simulate: solo notas con esta etiqueta (o una descendiente).'),
+  ids: z.array(z.string()).optional().describe('simulate: solo estas notas (hasta 200 ids).'),
+  maxNotes: z.number().int().min(1).max(200).optional().describe('simulate: notas como mucho en el plan (1-200). Def. 200.'),
+  after: z.string().optional().describe('simulate: `continueAfter` de una simulación anterior, para seguir el ámbito.'),
+  planId: z.string().optional().describe('preview, apply, undo: el `planId` de la simulación.'),
+  cursor: z.string().optional().describe('preview: `nextCursor` de la página anterior del plan.'),
+  limit: z.number().int().min(1).max(200).optional().describe('simulate, preview: notas por página (1-200). Def. 50.'),
+  operationId: z
+    .string()
+    .optional()
+    .describe('apply: id único de esta aplicación (un UUID). Reintentar con el mismo no repite nada y sigue lo pendiente.')
+};

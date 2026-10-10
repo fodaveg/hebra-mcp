@@ -89,6 +89,7 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     renameFolder: (input) => instance.renameFolderLocal(input),
     addAttachment: (input) => instance.addAttachmentLocal(input),
     organizeFile: (input) => instance.organizeFileLocal(input),
+    replaceInNotes: (request) => instance.replaceInNotesLocal(request),
     noteRead: (id) => instance.port.noteRead(id),
     folderDirty: (id) => instance.port.folderDirty(id),
     blobUploaded: (sha256) => instance.port.blobUploaded(sha256),

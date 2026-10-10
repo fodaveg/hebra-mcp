@@ -33,6 +33,12 @@ import type { SectionRef } from './sections';
  * - `heading_not_found`: ningún apartado con ese título (o esa aparición).
  * - `ambiguous_heading`: varios con ese título y sin `headingOccurrence`; el error lleva
  *   los candidatos (`candidates`).
+ * Sustitución en lote (`hebra_replace_in_notes`, D14, 10 oct 2026; `./replace-batch.ts`):
+ * - `plan_not_found`: el plan no existe, es de otra biblioteca o se calculó con otra
+ *   configuración de privados (las tres igual).
+ * - `plan_expired`: pasó la hora para aplicarlo, o los 7 días para deshacerlo.
+ * - `plan_already_applied`: el plan ya se aplicó (o se está aplicando) con otro
+ *   `operationId`.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -49,7 +55,10 @@ export type WriteRejectionCode =
   | 'attachment_too_large'
   | 'attachment_type_not_allowed'
   | 'heading_not_found'
-  | 'ambiguous_heading';
+  | 'ambiguous_heading'
+  | 'plan_not_found'
+  | 'plan_expired'
+  | 'plan_already_applied';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -66,7 +75,10 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'attachment_too_large',
   'attachment_type_not_allowed',
   'heading_not_found',
-  'ambiguous_heading'
+  'ambiguous_heading',
+  'plan_not_found',
+  'plan_expired',
+  'plan_already_applied'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de

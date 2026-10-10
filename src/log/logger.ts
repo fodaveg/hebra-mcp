@@ -30,7 +30,11 @@ export type ToolErrorCode =
   | 'ambiguous_heading'
   // `hebra_grep` (D13, 10 oct 2026): una expresión regular que no termina ni una nota
   // dentro del tope de tiempo.
-  | 'pattern_too_slow';
+  | 'pattern_too_slow'
+  // `hebra_replace_in_notes` (D14, 10 oct 2026; `src/store/replace-batch.ts`).
+  | 'plan_not_found'
+  | 'plan_expired'
+  | 'plan_already_applied';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

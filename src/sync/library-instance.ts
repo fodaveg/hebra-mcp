@@ -56,6 +56,12 @@ import {
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
+import {
+  ReplaceBatch,
+  type ReplaceLocal,
+  type ReplaceRequest,
+  type ReplaceTestHooks
+} from '../store/replace-batch';
 import type { PrivacyConfig } from '../privacy/config';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
@@ -161,6 +167,8 @@ export class LibraryInstance implements NoteWriteTarget {
   });
   private readonly conflictListeners = new Set<(copy: SyncConflictCopy) => void>();
   private readonly writer: NoteWriter;
+  /** `hebra_replace_in_notes` (D14): simular, aplicar y deshacer, en este escritor. */
+  private readonly replaceBatch: ReplaceBatch;
   /** Vista estable para la capa de herramientas. */
   readonly port: HebraLibraryPort;
 
@@ -171,6 +179,9 @@ export class LibraryInstance implements NoteWriteTarget {
   ) {
     this.port = stablePort(() => this.current);
     this.writer = new NoteWriter(this, { onWritten: () => void this.runner?.requestRound() });
+    this.replaceBatch = new ReplaceBatch(this.port, this, {
+      onWritten: () => void this.runner?.requestRound()
+    });
   }
 
   static async open(options: OpenLibraryInstanceOptions): Promise<LibraryInstance> {
@@ -488,6 +499,14 @@ export class LibraryInstance implements NoteWriteTarget {
    *  después sin esperarla. */
   replaceBodyLocal(input: ReplaceBodyInput, hooks?: ReplaceBodyTestHooks): Promise<ReplaceBodyResult> {
     return replaceBody(this, input, () => void this.runner?.requestRound(), hooks);
+  }
+
+  /** `hebra_replace_in_notes` (D14, `../store/replace-batch.ts`): simular, una página del
+   *  plan, aplicar o deshacer, en este escritor. Cada escritura pide su ronda sin esperarla
+   *  (la espera `WriteContext`, una vez por llamada). `hooks`, solo en tests. Rechaza con
+   *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
+  replaceInNotesLocal(request: ReplaceRequest, hooks?: ReplaceTestHooks): Promise<ReplaceLocal> {
+    return this.replaceBatch.run(request, hooks);
   }
 
   /** Mandar a la papelera las copias de conflicto de un lote que se deshace (SPEC.md §13). */

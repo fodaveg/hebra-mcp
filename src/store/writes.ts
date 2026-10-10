@@ -70,6 +70,7 @@ import {
 import { headingRejected, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
+import type { ReplacePlanStore } from './replace-plans';
 import { decodeRevision, encodeRevision } from './revision';
 import {
   capHeading,
@@ -150,6 +151,9 @@ export interface NoteWriteStore {
   conflictCopyIds(noteId: string): string[];
   /** Registro de idempotencia de las escrituras con `operationId`. */
   operations: OperationStore;
+  /** Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo los usa
+   *  `./replace-batch.ts`. */
+  replacePlans: ReplacePlanStore;
 }
 
 /** Lo que `NoteWriter` necesita del almacén: un turno exclusivo de la cola. Rechaza con

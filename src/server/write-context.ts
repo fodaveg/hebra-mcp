@@ -13,6 +13,13 @@
  */
 import type { NoteRow } from '../hebra';
 import type {
+  ReplaceApplyReport,
+  ReplaceLocal,
+  ReplacePlanView,
+  ReplaceRequest,
+  ReplaceUndoReport
+} from '../store/replace-batch';
+import type {
   AddAttachmentInput,
   AddAttachmentSaved,
   AppendToNoteInput,
@@ -57,6 +64,9 @@ export interface WriteContextSources {
   /** Mandar un fichero suelto a la papelera o sacarlo en local
    *  (`NoteWriter.organizeFileLocal`, D10), sin esperar ronda. */
   organizeFile(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>>;
+  /** `hebra_replace_in_notes` en local (`LibraryInstance.replaceInNotesLocal`, D14), sin
+   *  esperar ronda. Opcional: sin él (tests de otros lotes), la herramienta no está. */
+  replaceInNotes?(request: ReplaceRequest): Promise<ReplaceLocal>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -134,6 +144,13 @@ export type FileOutcome = FileSaved & SyncFields;
  *  estado de sync (`uploaded` exige además el blob ya subido). */
 export type AddAttachmentOutcome = EditNoteOutcome & { attachmentId: string; markdown: string };
 
+/** `hebra_replace_in_notes` (D14): la simulación (o una página del plan) tal cual, y el
+ *  informe de aplicar o deshacer con el estado de sync de lo escrito. */
+export type ReplaceOutcome =
+  | ReplacePlanView
+  | (ReplaceApplyReport & SyncFields)
+  | (ReplaceUndoReport & SyncFields);
+
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
@@ -166,6 +183,11 @@ export interface WriteContext {
    *  devuelve el estado de sync, como `organize`. Si ya estaba en ese estado, no escribe
    *  ni pide ronda. En un lector, todo ocurre en el escritor (`./forward.ts`). */
   organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
+  /** `hebra_replace_in_notes` (D14): simular, ver una página del plan, aplicar o deshacer.
+   *  Aplicar y deshacer esperan UNA ronda al final (si escribieron algo) y dicen el estado
+   *  de sync de lo escrito. En un lector, todo ocurre en el escritor (`./forward.ts`).
+   *  Opcional: sin él, `hebra_replace_in_notes` responde `invalid_input`. */
+  replaceInNotes?(request: ReplaceRequest): Promise<ReplaceOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -389,7 +411,41 @@ export function buildWriteContext(
     return { ...saved, ...syncFieldsOf(wait, await fileDirtyOf(saved.id)) };
   }
 
+  /** `hebra_replace_in_notes` (D14): la simulación y sus páginas tal cual; aplicar y
+   *  deshacer, con UNA ronda al final si escribieron algo y el estado de sync de todo lo
+   *  escrito (`uploaded` solo si ninguna nota escrita sigue sucia). */
+  async function replaceWrite(
+    replace: NonNullable<WriteContextSources['replaceInNotes']>,
+    request: ReplaceRequest
+  ): Promise<ReplaceOutcome> {
+    const { result: local, written } = await replace(request);
+    if (local.mode === 'simulate' || local.mode === 'preview') return local;
+    const result = local as ReplaceApplyReport | ReplaceUndoReport;
+    const anyDirty = async (ids: Iterable<string>): Promise<boolean | null> => {
+      let unknown = false;
+      for (const id of new Set(ids)) {
+        const dirty = await dirtyOf(id);
+        if (dirty === true) return true;
+        if (dirty === null) unknown = true;
+      }
+      return unknown ? null : false;
+    };
+    if (written.length === 0) {
+      // Sin escritura (un reintento, o nada que hacer): sin ronda; lo que el informe dice
+      // que está escrito, ¿ya subió?
+      if (!sources.isLinked()) return { ...result, sync: 'not_linked' };
+      const notes: ReadonlyArray<{ id: string; revision?: string }> = result.notes;
+      const shown = notes.filter((note) => note.revision !== undefined).map((note) => note.id);
+      return { ...result, sync: (await anyDirty(shown)) === false ? 'uploaded' : 'pending' };
+    }
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...result, ...syncFieldsOf(wait, await anyDirty(written)) };
+  }
+
+  const replace = sources.replaceInNotes?.bind(sources);
+
   return {
+    ...(replace ? { replaceInNotes: (request: ReplaceRequest) => replaceWrite(replace, request) } : {}),
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
     onConflictCopy: (listener) => sources.onConflictCopy(listener),
