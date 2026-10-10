@@ -591,7 +591,8 @@ El dispositivo acumula tres secretos:
 ### 6.4 Logs
 
 - **Qué se registra**: solo eventos cerrados en stderr, como en §11 de la spec de Hebra
-  (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy`), con ids opacos, códigos y recuentos.
+  (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy` y, desde el
+  submódulo en `59b5d403`, `sync.blob_unreadable`, que solo lleva el tamaño del adjunto), con ids opacos, códigos y recuentos.
 - **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas. Tampoco el título de un apartado (D11) ni el texto de la prueba de lo guardado; como mucho, `heading: true` en `note.append`.
 - Stdout es exclusivo del protocolo MCP.
 - **Test**: un test ejecuta todas las herramientas con notas-cebo y comprueba que ningún texto de

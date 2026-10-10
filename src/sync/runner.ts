@@ -16,8 +16,8 @@
  * que el proceso se reinicie (un token revocado no vuelve a valer; reintentar solo
  * haría ruido en el relé).
  *
- * Logs (§6.4): solo los cuatro eventos cerrados del motor (`sync.round`,
- * `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy`), con ids opacos, códigos y recuentos, por
+ * Logs (§6.4): solo los eventos cerrados del motor (`sync.round`, `sync.lease_lost`,
+ * `sync.record_error`, `sync.conflict_copy`, `sync.blob_unreadable`), con ids opacos, códigos y recuentos, por
  * una función `emit` que inyecta quien crea el runner (el logger es de L1).
  *
  * Credenciales, clave de biblioteca e identidad llegan por parámetro: el emparejado y el
@@ -40,12 +40,14 @@ import type { SyncStorePort } from '../store/sync-port';
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
 
-/** Los tres eventos del catálogo cerrado de §6.4. */
+/** Los eventos del catálogo cerrado de §6.4. `sync.blob_unreadable` llegó con el
+ *  submódulo en `59b5d403`: un adjunto pendiente sin bytes válidos, solo su tamaño. */
 export type SyncLogEventName =
   | 'sync.round'
   | 'sync.lease_lost'
   | 'sync.record_error'
-  | 'sync.conflict_copy';
+  | 'sync.conflict_copy'
+  | 'sync.blob_unreadable';
 
 /** Campos de un evento: escalares, sin contenido de notas. */
 export type SyncLogFields = Record<string, string | number | boolean | null>;
@@ -134,6 +136,9 @@ function logFieldsOf(event: LibrarySyncEvent): SyncLogFields {
       return { recordId: event.recordId, code: event.code };
     case 'sync.conflict_copy':
       return { recordId: event.recordId, copyId: event.copyId, row: event.row };
+    case 'sync.blob_unreadable':
+      // Solo el tamaño: el motor no da nombre, ruta ni hash, y aquí tampoco se añaden.
+      return { byteLength: event.byteLength };
   }
 }
 

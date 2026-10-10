@@ -70,6 +70,13 @@ import type { NoteWriteStore, NoteWriteTarget } from './writes';
 /** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de `sqlite-engine.ts`). */
 const LOCKED_BODY_PREFIX = 'hebra-locked:';
 
+/** Una ref de enlace resuelta con el motor; lo que no es un enlace, `missing`. */
+function resolveRef(engine: SqliteLibraryEngine, ref: string): LinkResolution {
+  const parsed = parseLinkRef(ref);
+  if (!parsed) return { status: 'missing', candidates: [] };
+  return engine.resolveLink(parsed);
+}
+
 export interface OpenNodeLibraryOptions {
   /** Ruta del fichero SQLite, o `:memory:` (tests). */
   sqlitePath: string;
@@ -229,20 +236,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async resolveLink(ref: string): Promise<LinkResolution> {
-    const query = parseLinkRef(ref);
-    return query
-      ? this.read(() => this.engine.resolveLink(query))
-      : { status: 'missing', candidates: [] };
+    const [resolution] = await this.resolveLinks([ref]);
+    return resolution;
   }
 
-  /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. */
+  /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. Una ref que
+   *  no es un enlace (`parseLinkRef` da `null`) sale `missing` sin preguntar al motor. */
   async resolveLinks(refs: readonly string[]): Promise<LinkResolution[]> {
-    return this.read(() =>
-      refs.map((ref): LinkResolution => {
-        const query = parseLinkRef(ref);
-        return query ? this.engine.resolveLink(query) : { status: 'missing', candidates: [] };
-      })
-    );
+    return this.read(() => refs.map((ref) => resolveRef(this.engine, ref)));
   }
 
   async backlinks(id: string, cursor: string | null = null, limit?: number): Promise<NotesPage> {
