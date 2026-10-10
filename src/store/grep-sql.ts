@@ -43,6 +43,28 @@ export function grepNoteRows(db: DatabaseSync): GrepNoteRow[] {
   }));
 }
 
+/**
+ * `fn` en una transacción de lectura (`BEGIN` diferida, también en una conexión de solo
+ * lectura): todas sus sentencias ven la MISMA instantánea de la base. En autocommit, cada
+ * sentencia tiene la suya, y en un lector el escritor de otro proceso puede confirmar entre
+ * dos de ellas.
+ */
+function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Ya no había transacción: se propaga el error de verdad.
+    }
+    throw error;
+  }
+}
+
 /** ¿Está `notes_trigram` completa con la versión de este submódulo? La marca la deja el
  *  relleno (`NodeLibraryPort.fillSubstringIndex`) con su última página; sin la tabla (una
  *  SQLite sin `trigram`, o un lector de una base que el escritor aún no ha abierto con
@@ -79,6 +101,17 @@ export function grepSubstringCandidates(
   match: string,
   rowids: readonly number[]
 ): Set<number> | null {
+  // Todo en UNA instantánea: en un lector, en autocommit, el escritor de otro proceso podía
+  // vaciar la cola entre la consulta al índice y la de la cola, y una nota que estaba en la
+  // cola (aún sin indexar) no salía en ninguna de las dos.
+  return inReadTransaction(db, () => substringCandidatesNow(db, match, rowids));
+}
+
+function substringCandidatesNow(
+  db: DatabaseSync,
+  match: string,
+  rowids: readonly number[]
+): Set<number> | null {
   if (!substringIndexComplete(db)) return null;
   const wanted = new Set(rowids);
   const out = new Set<number>();
@@ -105,27 +138,6 @@ export function grepSubstringCandidates(
   return out;
 }
 
-/**
- * `fn` en una transacción de lectura (`BEGIN` diferida, también en una conexión de solo
- * lectura): todas sus sentencias ven la MISMA instantánea de la base. En autocommit, cada
- * sentencia tiene la suya, y en un lector el escritor de otro proceso puede confirmar entre
- * dos de ellas.
- */
-function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec('BEGIN');
-  try {
-    const result = fn();
-    db.exec('COMMIT');
-    return result;
-  } catch (error) {
-    try {
-      db.exec('ROLLBACK');
-    } catch {
-      // Ya no había transacción: se propaga el error de verdad.
-    }
-    throw error;
-  }
-}
 
 /** Lo que `grepVisibleBodies` guarda entre un lote y el siguiente de la misma llamada: el
  *  árbol de carpetas (`foldersList` del motor) y su huella, para no volver a pedirlo si

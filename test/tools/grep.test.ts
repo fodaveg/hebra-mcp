@@ -442,6 +442,19 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     }
   });
 
+  it('en un lector (solo lectura) da lo mismo: sus lecturas van en una transacción de lectura', async () => {
+    const reader = await grepContext(pair.withoutPrivate, GREP_PRIVACY, 'readOnly');
+    try {
+      for (const query of PREFILTER_QUERIES) {
+        expect(await allPages(reader.ctx, { ...query, limit: 7 }), JSON.stringify(query)).toEqual(
+          await allPages(withoutPrivate.ctx, { ...query, limit: 7 })
+        );
+      }
+    } finally {
+      reader.port.close();
+    }
+  });
+
   it('una nota aún en la cola del índice se mira igual', async () => {
     const rowid = (await withoutPrivate.port.grepNotes()).find(
       (row) => row.id === pair.visibleIds.cocina
