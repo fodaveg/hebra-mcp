@@ -50,7 +50,6 @@ import {
 import type { GrepBodiesSession, GrepNoteRow } from '../../store/grep-sql';
 import {
   RegexScanWorker,
-  RegexWorkerFailed,
   type OnNote,
   type ScanNote,
   type ScanOutcome
@@ -102,6 +101,10 @@ export interface GrepOutput {
   /** Por qué paró antes de recorrerlo todo sin llenar la página: `time` (plazo) o `size`
    *  (tamaño de la respuesta). `null` si no. Con él, siempre hay `nextCursor`. */
   cutoff: 'time' | 'size' | null;
+  /** Solo si esta página se SALTÓ una nota: la expresión regular se interrumpió en ella
+   *  dos veces seguidas sin terminarla (por el plazo o por un fallo del hilo), desde la línea
+   *  `fromLine`. De esa nota, desde esa línea, no se sabe si casa. */
+  skipped?: { id: string; fromLine: number };
 }
 
 export interface GrepInput {
@@ -126,7 +129,7 @@ interface Pending extends GrepNoteRow {
   fromLine: number;
 }
 
-function parseCursor(cursor: string): { id: string; line: number } {
+function parseCursor(cursor: string): { id: string; line: number; failedOnce: boolean } {
   let payload: unknown;
   try {
     payload = JSON.parse(unwrapCursor('g1', cursor));
@@ -136,7 +139,7 @@ function parseCursor(cursor: string): { id: string; line: number } {
   }
   if (
     !Array.isArray(payload) ||
-    payload.length !== 2 ||
+    (payload.length !== 2 && !(payload.length === 3 && payload[2] === 1)) ||
     typeof payload[0] !== 'string' ||
     payload[0].length === 0 ||
     payload[0].length > CURSOR_ID_MAX_LENGTH ||
@@ -145,11 +148,14 @@ function parseCursor(cursor: string): { id: string; line: number } {
   ) {
     throw new ToolError('invalid_input');
   }
-  return { id: payload[0], line: payload[1] as number };
+  return { id: payload[0], line: payload[1] as number, failedOnce: payload.length === 3 };
 }
 
-function cursorAt(id: string, line: number): string {
-  return wrapCursor('g1', JSON.stringify([id, line]));
+/** El cursor `[id, línea]`; con `failedOnce`, `[id, línea, 1]`: la expresión regular ya se
+ *  interrumpió una vez en esa nota (punto por el que seguir), y si vuelve a interrumpirse
+ *  en ella sin avanzar nada, se salta (`skipped`). */
+function cursorAt(id: string, line: number, failedOnce = false): string {
+  return wrapCursor('g1', JSON.stringify(failedOnce ? [id, line, 1] : [id, line]));
 }
 
 /** Comparación por unidades de código: el orden de los ids, el mismo en todas las páginas. */
@@ -251,6 +257,7 @@ export async function runGrep(
   let responseChars = 0;
   let progressed = false;
   let session: GrepBodiesSession | null = null;
+  let skipped: GrepOutput['skipped'];
   let stop: { cursor: string | null; cutoff: GrepOutput['cutoff'] } | null = null;
   // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
@@ -338,15 +345,9 @@ export async function runGrep(
       };
 
       const maxHits = limit + 1 - matches.length;
-      let outcome: ScanOutcome;
-      try {
-        outcome = worker
-          ? await worker.scan(scanNotes, maxHits, deadline, () => progressed, onNote)
-          : scanLiteral(pattern, scanNotes, maxHits, deadline, () => progressed, onNote);
-      } catch (error) {
-        if (error instanceof RegexWorkerFailed) throw new ToolError('pattern_too_slow');
-        throw error;
-      }
+      const outcome: ScanOutcome = worker
+        ? await worker.scan(scanNotes, maxHits, deadline, onNote)
+        : scanLiteral(pattern, scanNotes, maxHits, deadline, () => progressed, onNote);
       if (outcome.status === 'time') {
         // `next` es la primera nota del lote sin recorrer; si el lote se acabó justo, la
         // siguiente a él.
@@ -354,9 +355,41 @@ export async function runGrep(
         stop = next ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' } : null;
         break;
       }
+      if (outcome.status === 'interrupted') {
+        const stuck = notes[outcome.next];
+        if (!stuck) {
+          // Todas las del lote terminadas y el plazo llegó antes del aviso de fin: se sigue
+          // en la siguiente, como un corte entre notas.
+          const next = pending[first + GREP_BATCH_NOTES];
+          stop = next ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' } : null;
+          break;
+        }
+        if (progressed) {
+          // Lo encontrado vale; se sigue EN la nota interrumpida, marcada como ya fallida.
+          stop = { cursor: cursorAt(stuck.id, stuck.fromLine, true), cutoff: 'time' };
+          break;
+        }
+        if (start?.failedOnce && start.id === stuck.id) {
+          // Segunda vez seguida en la misma nota sin avanzar: se salta y se dice.
+          skipped = { id: stuck.id, fromLine: stuck.fromLine };
+          stop = { cursor: cursorAt(stuck.id, 0), cutoff: 'time' };
+          break;
+        }
+        // Ni una nota en todo el plazo: la expresión es demasiado cara. El cursor permite
+        // reintentar esa nota una vez más y, si vuelve a fallar, saltarla.
+        throw new ToolError('pattern_too_slow', {
+          nextCursor: cursorAt(stuck.id, stuck.fromLine, true)
+        });
+      }
     }
   } finally {
     await worker?.close();
   }
-  return { matches, nextCursor: stop?.cursor ?? null, cutoff: stop?.cutoff ?? null };
+  const output: GrepOutput = {
+    matches,
+    nextCursor: stop?.cursor ?? null,
+    cutoff: stop?.cutoff ?? null
+  };
+  if (skipped) output.skipped = skipped;
+  return output;
 }

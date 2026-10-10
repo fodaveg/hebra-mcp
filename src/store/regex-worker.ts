@@ -38,12 +38,15 @@ export interface ScanResult {
 /** `onNote` decide si seguir (`true`) o parar (`false`: página llena o respuesta llena). */
 export type OnNote = (index: number, result: ScanResult) => boolean;
 
-/** `done`: recorrió todas; `stopped`: `onNote` pidió parar; `time`: se agotó el plazo y
- *  `next` es la primera nota sin recorrer (las de antes ya pasaron por `onNote`). */
+/** `done`: recorrió todas; `stopped`: `onNote` pidió parar; `time`: se agotó el plazo ENTRE
+ *  dos notas y `next` es la primera sin recorrer; `interrupted`: el hilo se mató (plazo) o
+ *  falló A MITAD de la nota `next`, que queda sin terminar. En los dos últimos, las de antes
+ *  de `next` ya pasaron por `onNote`. */
 export type ScanOutcome =
   | { status: 'done' }
   | { status: 'stopped' }
-  | { status: 'time'; next: number };
+  | { status: 'time'; next: number }
+  | { status: 'interrupted'; next: number };
 
 const WORKER_SOURCE = `'use strict';
 const { parentPort, workerData } = require('node:worker_threads');
@@ -53,22 +56,19 @@ parentPort.on('message', (batch) => {
   let left = batch.maxHits;
   for (let index = 0; index < batch.notes.length && left > 0; index += 1) {
     const note = batch.notes[index];
-    const result = scanBody(note.body, re, note.fromLine, left, false);
+    let result;
+    try {
+      result = scanBody(note.body, re, note.fromLine, left, false);
+    } catch {
+      parentPort.postMessage({ batch: batch.id, failed: index });
+      return;
+    }
     left -= result.hits.length / 2;
     parentPort.postMessage({ batch: batch.id, index, hits: result.hits, next: result.next });
   }
   parentPort.postMessage({ batch: batch.id, done: true });
 });
 `;
-
-/** El fallo del hilo (una excepción de la expresión, como un desbordamiento de pila de
- *  V8, o quedarse sin memoria): quien llama lo trata como una expresión demasiado cara. */
-export class RegexWorkerFailed extends Error {
-  constructor() {
-    super('regex_worker_failed');
-    this.name = 'RegexWorkerFailed';
-  }
-}
 
 /** Hilos de expresiones regulares vivos a la vez, como mucho, en todo el proceso: cada uno
  *  puede ocupar un núcleo y hasta `WORKER_HEAP_MB`. Una llamada más espera su turno, y esa
@@ -104,7 +104,7 @@ export class RegexScanWorker {
   private closed = false;
   /** El cierre en curso o hecho: cerrar dos veces espera al mismo, y el hueco se suelta una vez. */
   private closing: Promise<void> | null = null;
-  private failure: ((error: Error) => void) | null = null;
+  private failure: (() => void) | null = null;
 
   /** Espera un hueco (`REGEX_WORKERS_MAX`) y arranca el hilo; `close` lo devuelve. */
   static async start(re: RegExp): Promise<RegexScanWorker> {
@@ -126,40 +126,44 @@ export class RegexScanWorker {
       stderr: true
     });
     this.worker.unref();
-    // Sin oyente, un `error` del hilo tumbaría el proceso; se reenvía al lote en curso.
-    this.worker.on('error', () => this.failure?.(new RegexWorkerFailed()));
-    this.worker.on('exit', () => this.failure?.(new RegexWorkerFailed()));
+    // Sin oyente, un `error` del hilo (sin memoria, por ejemplo) tumbaría el proceso; se
+    // reenvía al lote en curso, igual que una salida inesperada.
+    this.worker.on('error', () => this.failure?.());
+    this.worker.on('exit', () => this.failure?.());
   }
 
   /**
    * Recorre `notes` en el hilo, en orden, como mucho `maxHits` líneas con coincidencia en
-   * total, y llama a `onNote` con cada nota terminada. Al llegar `deadline` (epoch ms),
-   * si `mayCut()` dice que esta llamada ya avanzó, mata el hilo y responde `time`; si no,
-   * también lo mata, pero rechaza con `RegexWorkerFailed` (ni una nota en todo el plazo:
-   * la expresión es demasiado cara, y cortar sin avanzar dejaría un cursor que nunca
-   * avanza). Tras un `time` o un fallo, el hilo ya no sirve.
+   * total, y llama a `onNote` con cada nota terminada. Nunca rechaza: si llega `deadline`
+   * (epoch ms) o el hilo falla (una excepción de la expresión, como un desbordamiento de
+   * pila de V8, o quedarse sin memoria), mata el hilo y responde `interrupted` con la nota
+   * que estaba recorriendo; lo ya entregado por `onNote` vale. Quien llama decide qué hacer
+   * con esa nota (cortar en ella o saltarla, `runGrep`). Tras un `interrupted`, el hilo ya
+   * no sirve.
    */
   scan(
     notes: readonly ScanNote[],
     maxHits: number,
     deadline: number,
-    mayCut: () => boolean,
     onNote: OnNote
   ): Promise<ScanOutcome> {
-    if (this.closed) return Promise.reject(new RegexWorkerFailed());
+    if (this.closed) return Promise.resolve({ status: 'interrupted', next: 0 });
     this.batchId += 1;
     const id = this.batchId;
-    return new Promise<ScanOutcome>((resolve, reject) => {
+    return new Promise<ScanOutcome>((resolve) => {
       let settled = false;
       let completed = 0;
-      const finish = (outcome: ScanOutcome | Error): void => {
+      const finish = (outcome: ScanOutcome): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         this.worker.off('message', onMessage);
         this.failure = null;
-        if (outcome instanceof Error) reject(outcome);
-        else resolve(outcome);
+        resolve(outcome);
+      };
+      const interrupt = (next: number): void => {
+        void this.close();
+        finish({ status: 'interrupted', next });
       };
       const onMessage = (message: {
         batch: number;
@@ -167,10 +171,15 @@ export class RegexScanWorker {
         hits?: number[];
         next?: number;
         done?: boolean;
+        failed?: number;
       }): void => {
-        if (message.batch !== id) return;
+        if (message.batch !== id || settled) return;
         if (message.done) {
           finish({ status: 'done' });
+          return;
+        }
+        if (message.failed !== undefined) {
+          interrupt(message.failed);
           return;
         }
         completed = message.index! + 1;
@@ -178,18 +187,8 @@ export class RegexScanWorker {
           finish({ status: 'stopped' });
         }
       };
-      const timer = setTimeout(
-        () => {
-          const progressed = mayCut();
-          void this.close();
-          finish(progressed ? { status: 'time', next: completed } : new RegexWorkerFailed());
-        },
-        Math.max(0, deadline - Date.now())
-      );
-      this.failure = (error) => {
-        void this.close();
-        finish(error);
-      };
+      const timer = setTimeout(() => interrupt(completed), Math.max(0, deadline - Date.now()));
+      this.failure = () => interrupt(completed);
       this.worker.on('message', onMessage);
       this.worker.postMessage({ id, notes, maxHits });
     });

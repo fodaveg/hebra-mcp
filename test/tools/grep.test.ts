@@ -14,7 +14,7 @@ import { runReadNote } from '../../src/server/tools/read-note';
 import type { NodeLibraryPort } from '../../src/store/node-port';
 import { substringIndexUsable, type GrepBodiesSession } from '../../src/store/grep-sql';
 import { trigramMatch } from '../../src/store/grep';
-import { regexWorkersInUse } from '../../src/store/regex-worker';
+import { RegexScanWorker, regexWorkersInUse } from '../../src/store/regex-worker';
 import type { PrivacyConfig } from '../../src/privacy/config';
 import { createNote } from '../fixtures/test-library';
 import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
@@ -390,18 +390,91 @@ describe('hebra_grep: expresiones regulares caras', () => {
       if (result) {
         expect(result.cutoff).toBe('time');
         expect(result.nextCursor).not.toBeNull();
-        // Seguir desde ahí: la trampa es lo primero, ni una nota en el plazo.
-        await expect(
-          runGrep(ctx, { pattern: '(a+)+$', regex: true, cursor: result.nextCursor! }, { timeBudgetMs: 300 })
-        ).rejects.toMatchObject({ code: 'pattern_too_slow' });
+        // Seguir desde ahí: la trampa otra vez, sin avanzar: se salta y lo dice.
+        const again = await runGrep(
+          ctx,
+          { pattern: '(a+)+$', regex: true, cursor: result.nextCursor! },
+          { timeBudgetMs: 300 }
+        );
+        expect(again.matches).toEqual([]);
+        expect(again.skipped).toMatchObject({ fromLine: 1 });
       } else {
         expect(error).toBeInstanceOf(ToolError);
         expect((error as ToolError).code).toBe('pattern_too_slow');
+        expect((error as ToolError).extra?.nextCursor).toEqual(expect.any(String));
       }
       // Con un plazo normal, una expresión normal sobre la misma biblioteca va bien.
       expect((await runGrep(ctx, { pattern: 'a{3}$', regex: true })).matches).toHaveLength(1);
     } finally {
       port.close();
+    }
+  });
+});
+
+describe('hebra_grep: una nota que la expresión no termina', () => {
+  const TRAP = `# Trampa\n${'a'.repeat(40)}!\n`;
+  const page = (ctx: ToolContext, cursor?: string) =>
+    runGrep(ctx, { pattern: '(a+)+$', regex: true, cursor }, { timeBudgetMs: 300 });
+
+  it('tras avanzar, corta EN ella; si vuelve a fallar sin avanzar, se salta y lo dice', async () => {
+    const path = await buildOrderedLibrary(['# Antes\naaa\n', TRAP, '# Después\naaaa\n']);
+    const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const first = await page(ctx);
+      expect(first.matches.map((match) => match.id)).toEqual([ids[0]]);
+      expect(first.cutoff).toBe('time');
+      expect(first.skipped).toBeUndefined();
+      const second = await page(ctx, first.nextCursor!);
+      expect(second).toMatchObject({ matches: [], cutoff: 'time', skipped: { id: ids[1], fromLine: 1 } });
+      const third = await page(ctx, second.nextCursor!);
+      expect(third.matches.map((match) => match.id)).toEqual([ids[2]]);
+      expect(third.nextCursor).toBeNull();
+    } finally {
+      port.close();
+    }
+  });
+
+  it('si es la primera, pattern_too_slow con un nextCursor que, al fallar otra vez, la salta', async () => {
+    const path = await buildOrderedLibrary([TRAP, '# Después\naaaa\n']);
+    const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const error = (await page(ctx).catch((caught: unknown) => caught)) as ToolError;
+      expect(error).toBeInstanceOf(ToolError);
+      expect(error.code).toBe('pattern_too_slow');
+      const cursor = error.extra?.nextCursor as string;
+      const skipped = await page(ctx, cursor);
+      expect(skipped).toMatchObject({ matches: [], cutoff: 'time', skipped: { id: ids[0], fromLine: 1 } });
+      const rest = await page(ctx, skipped.nextCursor!);
+      expect(rest.matches.map((match) => match.id)).toEqual([ids[1]]);
+    } finally {
+      port.close();
+    }
+  });
+
+  it('un fallo del hilo tras avanzar entrega lo hecho y dice en qué nota paró', async () => {
+    const worker = await RegexScanWorker.start(/a/u);
+    try {
+      const seen: number[] = [];
+      // La segunda «nota» no es un texto: `scanBody` lanza dentro del hilo.
+      const outcome = await worker.scan(
+        [
+          { body: 'a\nb', fromLine: 1 },
+          { body: null as unknown as string, fromLine: 1 },
+          { body: 'a', fromLine: 1 }
+        ],
+        10,
+        Date.now() + 5_000,
+        (index) => {
+          seen.push(index);
+          return true;
+        }
+      );
+      expect(seen).toEqual([0]);
+      expect(outcome).toEqual({ status: 'interrupted', next: 1 });
+    } finally {
+      await worker.close();
     }
   });
 });
@@ -594,6 +667,36 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     expect(new Set(read).size).toBeLessThan(Object.keys(VISIBLE_BODIES).length + 1);
   });
 });
+
+/** Como `buildSmallLibrary`, pero la nota i-ésima POR ID lleva el cuerpo i-ésimo (los ids
+ *  son aleatorios: se crean primero y se reparten los cuerpos después). */
+async function buildOrderedLibrary(bodies: readonly string[]): Promise<string> {
+  const path = await buildSmallLibrary(bodies.map((_, index) => `# Hueco ${index}\n`));
+  const { db, conn } = openNodeSqliteConn(path);
+  const engine = await SqliteLibraryEngine.open(conn, 'grep-ordered');
+  const rows = await engine.notesPage(null, 100);
+  const ids = rows.items.map((item) => item.id).sort();
+  for (const [index, id] of ids.entries()) {
+    const row = (await engine.noteRead(id))!;
+    const body = bodies[index]!;
+    const derived = deriveNote(body);
+    await engine.noteSave({
+      id,
+      body,
+      title: derived.title,
+      titleNorm: derived.titleNorm,
+      excerpt: derived.excerpt,
+      expectedLocalSeq: row.localSeq,
+      baseBodySha256: row.bodySha256,
+      tags: derived.tags,
+      links: derived.links,
+      blobRefs: derived.blobRefs,
+      props: derived.props
+    });
+  }
+  db.close();
+  return path;
+}
 
 /** Una biblioteca pequeña nueva (índice completo desde el principio), con estas notas. */
 async function buildSmallLibrary(bodies: readonly string[]): Promise<string> {
