@@ -128,7 +128,7 @@ export const createNoteInputShape = {
     .describe('Ruta de carpeta, como `path` de hebra_list_folders.')
 };
 
-/** Sin `.max()`: el límite de `text` lo aplica `append-to-note.ts`. */
+/** Sin `.max()`: el límite de `text` y el de `operationId` los aplica `append-to-note.ts`. */
 export const appendToNoteInputShape = {
   id: z.string(),
   text: z.string(),
@@ -136,7 +136,11 @@ export const appendToNoteInputShape = {
     .string()
     .optional()
     .describe('Título de un apartado (de hebra_note_outline): el texto va al final de ese apartado, subapartados incluidos. Sin él, al final de la nota.'),
-  headingOccurrence: headingOccurrenceField
+  headingOccurrence: headingOccurrenceField,
+  operationId: z
+    .string()
+    .optional()
+    .describe('Opcional: id único de este añadido (un UUID). Reintentar con el mismo no vuelve a añadir el texto (durante 24 h) y devuelve la misma respuesta con `replayed: true`.')
 };
 
 /** Sin `.min()`/`.max()`: número de sustituciones, tamaños y `operationId` los aplica

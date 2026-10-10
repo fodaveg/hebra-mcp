@@ -2,8 +2,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { describe, expect, it } from 'vitest';
-import { LibraryError } from '../../src/hebra';
+import { describe, expect, it, vi } from 'vitest';
+import { LibraryError, LibrarySyncEngine } from '../../src/hebra';
 import {
   InMemoryLibraryRelay,
   IDENTITY,
@@ -286,5 +286,34 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     await ok.runner.whenReady(5_000);
     expect((await ok.runner.syncStatus()).lastSyncOutcome).toBe('ok');
     await ok.runner.stop();
+  });
+
+  it('stop() para también el motor: no espera a las subidas de adjuntos en vuelo (M1)', async () => {
+    // Una ronda en vuelo; `stop` tiene que llamar a `LibrarySyncEngine.stop` (que corta
+    // las subidas de adjuntos) ANTES de esperarla, no después.
+    const stopped = vi.spyOn(LibrarySyncEngine.prototype, 'stop');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const relay = new InMemoryLibraryRelay();
+    const slow = Object.assign(Object.create(relay) as InMemoryLibraryRelay, {
+      getChanges: async (...args: Parameters<InMemoryLibraryRelay['getChanges']>) => {
+        await gate;
+        return relay.getChanges(...args);
+      }
+    });
+    const mcp = await mcpDevice(slow);
+    mcp.runner.start();
+    let done = false;
+    const stopping = mcp.runner.stop().then(() => {
+      done = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toHaveBeenCalledOnce();
+    expect(done).toBe(false);
+    release();
+    await stopping;
+    stopped.mockRestore();
   });
 });

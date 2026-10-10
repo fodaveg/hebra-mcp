@@ -10,7 +10,8 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { WRITER_LOCK_FILE, WriterLock, processIsAlive } from '../../src/lock/writer-lock';
 import { StoreError } from '../../src/store/errors';
 import { LibraryInstance } from '../../src/sync/library-instance';
@@ -151,12 +152,21 @@ describe('WriterLock', () => {
    * módulos de Node, así que corre con los tipos transformados por Node 24) y termina
    * por `process.exit` o por una señal: el fichero tiene que desaparecer.
    */
-  async function childHoldingLock(dataDir: string, then: 'exit' | 'wait') {
+  async function childHoldingLock(dataDir: string, then: 'exit' | 'wait' | 'own-handler') {
     const source = new URL('../../src/lock/writer-lock.ts', import.meta.url).href;
+    // `own-handler`: como `serve`, el proceso registra DESPUÉS su propio oyente de SIGTERM
+    // (el apagado que vacía y cierra), que dice si el bloqueo seguía ahí al recibirla.
+    const ownHandler = `
+      const { existsSync } = await import('node:fs');
+      process.once('SIGTERM', () => {
+        process.stdout.write('sigterm lock=' + (existsSync(lock.path) ? 1 : 0) + '\\n');
+      });
+    `;
     const script = `
       const { WriterLock } = await import(${JSON.stringify(source)});
       const lock = new WriterLock({ dataDir: ${JSON.stringify(dataDir)} });
       if (!lock.tryAcquire()) process.exit(3);
+      ${then === 'own-handler' ? ownHandler : ''}
       process.stdout.write('ready\\n');
       ${then === 'exit' ? 'process.exit(0);' : 'setInterval(() => {}, 1000);'}
     `;
@@ -190,6 +200,33 @@ describe('WriterLock', () => {
     const exited = new Promise<NodeJS.Signals | null>((resolve) =>
       child.once('exit', (_code, signal) => resolve(signal))
     );
+    child.kill('SIGTERM');
+    expect(await exited).toBe('SIGTERM');
+    expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
+  });
+
+  it('con un apagado propio escuchando SIGTERM no lo suelta (M1); una segunda señal sí, y termina', async () => {
+    const dataDir = tempDataDir();
+    const child = await childHoldingLock(dataDir, 'own-handler');
+    const lines: string[] = [];
+    const sigtermLine = new Promise<string>((resolve) => {
+      child.stdout!.on('data', (chunk: Buffer) => {
+        lines.push(...chunk.toString().split('\n').filter(Boolean));
+        const found = lines.find((line) => line.startsWith('sigterm'));
+        if (found) resolve(found);
+      });
+    });
+    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+      child.once('exit', (_code, signal) => resolve(signal))
+    );
+
+    child.kill('SIGTERM');
+    // El apagado propio lo encuentra en su sitio, y sigue ahí con el proceso vivo.
+    expect(await sigtermLine).toBe('sigterm lock=1');
+    expect(child.exitCode).toBeNull();
+    expect(JSON.parse(readFileSync(join(dataDir, WRITER_LOCK_FILE), 'utf8')).pid).toBe(child.pid);
+
+    // Segunda señal, ya sin el oyente (`once`): suelta y termina por la señal.
     child.kill('SIGTERM');
     expect(await exited).toBe('SIGTERM');
     expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
@@ -287,5 +324,91 @@ describe('LibraryInstance: escritor único', () => {
     const status = await writer.status();
     expect(status).toMatchObject({ writer: 'this', lastSyncOutcome: 'ok', pendingUpload: 0 });
     expect(await reader.status()).toMatchObject({ writer: 'other_instance', pendingUpload: 0 });
+  });
+});
+
+/**
+ * M2 del audit de robustez (10 oct 2026): un relevo que choca con una transacción abierta
+ * de otra conexión (el escritor viejo a mitad de un guardado). Antes `node:sqlite` abría
+ * sin espera (`database is locked` al instante) y el bloqueo se quedaba en un proceso que
+ * no escribía.
+ */
+describe('LibraryInstance: relevo con la base ocupada', () => {
+  /** Crea la base y suelta el bloqueo, como un escritor que ya se fue. */
+  async function createdLibrary(): Promise<string> {
+    const dataDir = tempDataDir();
+    const creator = await open(dataDir);
+    await creator.createNote({ body: '# Antes', privacy });
+    await creator.close();
+    return dataDir;
+  }
+
+  it('una transacción corta de otro proceso: el relevo espera y abre como escritor', async () => {
+    const dataDir = await createdLibrary();
+    const sqlitePath = join(dataDir, 'library.sqlite');
+    // Otro proceso con `BEGIN IMMEDIATE` durante 300 ms (menos que `SQLITE_BUSY_TIMEOUT_MS`).
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const { DatabaseSync } = require('node:sqlite');
+         const db = new DatabaseSync(${JSON.stringify(sqlitePath)});
+         db.exec('BEGIN IMMEDIATE');
+         process.stdout.write('locked\\n');
+         setTimeout(() => { db.exec('COMMIT'); db.close(); }, 300);`
+      ],
+      { stdio: ['ignore', 'pipe', 'inherit'] }
+    );
+    children.push(holder);
+    await new Promise<void>((resolve) =>
+      holder.stdout!.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('locked')) resolve();
+      })
+    );
+    const instance = await open(dataDir);
+    expect(instance.role).toBe('this');
+    expect((await instance.createNote({ body: '# Después', privacy })).title).toBe('Después');
+  });
+
+  it('una transacción que no termina a tiempo: suelta el bloqueo y sigue de lectora', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const dataDir = await createdLibrary();
+    const owner = liveProcess();
+    writeLock(dataDir, owner.pid!);
+    const reader = await open(dataDir);
+    expect(reader.role).toBe('other_instance');
+
+    // El poseedor muere con una transacción abierta (aquí, de otra conexión de este
+    // proceso: no la puede cerrar mientras SQLite espera, así que agota el plazo).
+    const busy = new DatabaseSync(join(dataDir, 'library.sqlite'));
+    busy.exec('BEGIN IMMEDIATE');
+    try {
+      await killAndWait(owner);
+      await reader.checkWriter();
+      expect(reader.role).toBe('other_instance');
+      expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
+      const logged = (stderr.mock.calls as unknown as [string][]).map(([line]) => String(line)).join('');
+      expect(logged).toContain('"event":"writer.takeover","result":"failed"');
+    } finally {
+      busy.exec('ROLLBACK');
+      busy.close();
+      stderr.mockRestore();
+    }
+    // Ya sin la transacción, el siguiente intento toma el relevo.
+    await reader.checkWriter();
+    expect(reader.role).toBe('this');
+  });
+
+  it('al arrancar: si no puede abrir la base, no se queda con el bloqueo', async () => {
+    const dataDir = await createdLibrary();
+    const busy = new DatabaseSync(join(dataDir, 'library.sqlite'));
+    busy.exec('BEGIN IMMEDIATE');
+    try {
+      await expect(open(dataDir)).rejects.toThrow();
+      expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
+    } finally {
+      busy.exec('ROLLBACK');
+      busy.close();
+    }
   });
 });

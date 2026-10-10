@@ -128,6 +128,10 @@ async function serveHttp(): Promise<void> {
     }
     throw error;
   }
+  // Apagado (A1 y M1 del audit de robustez, 10 oct 2026): `handle.close()` espera hasta
+  // 8 s a las peticiones HTTP en curso para que su respuesta llegue, y después vacía la
+  // cola, para el sync y suelta `writer.lock` (este oyente hace que `WriterLock` no lo
+  // suelte al recibir la señal). El contenedor da 40 s (`stop_grace_period`).
   const shutdown = async (): Promise<void> => {
     await handle.close();
     process.exit(0);

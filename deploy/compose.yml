@@ -29,6 +29,13 @@ services:
     image: hebra-mcp:latest
     container_name: hebra-mcp
     restart: unless-stopped
+    # Apagado ordenado (A1 del audit de robustez, 10 oct 2026): con SIGTERM,
+    # `serve-http` espera hasta 8 s a las peticiones HTTP en curso, hasta 10 s a
+    # la ronda de sync de una escritura y después vacía la cola y cierra la
+    # SQLite; una ronda colgada en el relé tarda hasta ~30 s en soltarse. Con
+    # los 10 s por defecto de Docker, el SIGKILL cortaba respuestas de
+    # escrituras ya guardadas (y el reintento de un append lo duplicaba).
+    stop_grace_period: 40s
     # ⚠️ NUNCA fijar `DEBUG` aquí (ni a mano con `docker compose run -e DEBUG=...`).
     # Express usa el paquete `debug` para sus trazas internas (`express:router`
     # y compañía) y, si se activa, vuelca `req.url` COMPLETO a stderr — que en

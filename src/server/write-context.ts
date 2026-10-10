@@ -161,6 +161,9 @@ export interface WriteContext {
    *  ni pide ronda. En un lector, todo ocurre en el escritor (`./forward.ts`). */
   organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
+  /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
+   *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
+  recordEditConflict(operationId: string, id: string, copyId: string): Promise<void>;
   /**
    * Pide una ronda y espera a que termine, como mucho `timeoutMs` (SPEC.md §5,
    * `hebra_append_to_note`: 10 s). Nunca rechaza: un timeout o un fallo de la ronda no
@@ -185,7 +188,10 @@ export const AWAIT_ROUND_TIMEOUT_MS = 10_000;
  *   ya, sin esperar ronda.
  * - Si sale `saved`, se pide una ronda y se espera hasta `timeoutMs` (`awaitRound`): si
  *   durante esa espera llega una copia de conflicto PARA ESTA nota (otro dispositivo la
- *   editó a la vez), el resultado es igual `conflict_copy` con esa copia.
+ *   editó a la vez), el resultado es igual `conflict_copy` con esa copia y, con
+ *   `operationId`, queda anotada en el registro para el reintento, como en una edición.
+ * - Un reintento servido por el registro (`replayed`) no escribió nada: se devuelve ya,
+ *   sin pedir ni esperar ronda (SPEC.md §8).
  * El listener se da de baja siempre, gane o pierda la carrera.
  */
 export async function appendAndAwaitRound(
@@ -199,11 +205,15 @@ export async function appendAndAwaitRound(
   });
   try {
     const saved = await write.appendToNote(input);
-    if (saved.outcome === 'conflict_copy') return saved;
+    if (saved.outcome === 'conflict_copy' || saved.replayed) return saved;
     await write.awaitRound(timeoutMs);
-    return raceCopyId === undefined
-      ? saved
-      : { id: input.id, outcome: 'conflict_copy', copyId: raceCopyId };
+    if (raceCopyId === undefined) return saved;
+    if (input.operationId !== undefined) {
+      await write
+        .recordEditConflict(input.operationId, input.id, raceCopyId)
+        .catch(() => undefined);
+    }
+    return { id: input.id, outcome: 'conflict_copy', copyId: raceCopyId };
   } finally {
     unsubscribe();
   }
@@ -366,6 +376,8 @@ export function buildWriteContext(
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
     onConflictCopy: (listener) => sources.onConflictCopy(listener),
+    recordEditConflict: (operationId, id, copyId) =>
+      sources.recordEditConflict(operationId, id, copyId).catch(() => undefined),
     awaitRound,
     editNote: (input: EditNoteInput) => saveAndAwaitRound(input, () => sources.editNote(input)),
     restoreVersion: (input: RestoreVersionInput) =>

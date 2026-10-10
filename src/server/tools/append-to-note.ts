@@ -22,13 +22,19 @@
  * Decisión 4 de David (28 sep 2026): un texto que dejaría la nota con una etiqueta
  * privada se rechaza sin escribir, con `not_found`. Antes se escribía y la salida decía
  * `hidden: true`. Una nota bloqueada responde `note_locked`.
+ *
+ * `operationId` opcional (10 oct 2026, ampliación de D2 y D11 decidida por delegación de
+ * David, tras el audit de robustez: un despliegue o una caída del escritor cortaba la
+ * respuesta de un append ya guardado y el reintento lo duplicaba). Con él, el mismo id con
+ * la misma petición no vuelve a añadir el texto y devuelve la misma respuesta con
+ * `replayed: true`; con otra petición, `operation_id_reused`. Sin él, como siempre.
  */
 import { logEvent } from '../../log/logger';
 import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH, type AppendedProof } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
-import { requireVisibleNote } from './guards';
+import { requireValidOperationId, requireVisibleNote } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
 
@@ -42,15 +48,25 @@ export interface AppendToNoteOutput {
   revision?: string;
   totalChars?: number;
   appended?: AppendedProof;
+  /** Reintento con el mismo `operationId`: lo que se guardó la primera vez, sin volver a
+   *  escribir. Si aquel guardado no llegó a anotarse entero, sin `appended`. */
+  replayed?: true;
 }
 
 export async function runAppendToNote(
   ctx: ToolContext,
-  input: { id: string; text: string; heading?: string; headingOccurrence?: number }
+  input: {
+    id: string;
+    text: string;
+    heading?: string;
+    headingOccurrence?: number;
+    operationId?: string;
+  }
 ): Promise<AppendToNoteOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
   if (input.text.length > TEXT_MAX_LENGTH) throw new ToolError('invalid_input');
   requireValidHeadingInput(input);
+  if (input.operationId !== undefined) requireValidOperationId(input.operationId);
 
   requireVisibleNote(ctx, input.id);
 
@@ -63,6 +79,7 @@ export async function runAppendToNote(
       ...(input.headingOccurrence !== undefined
         ? { headingOccurrence: input.headingOccurrence }
         : {}),
+      ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
       privacy: ctx.privacyConfig
     });
   } catch (error) {
@@ -76,7 +93,8 @@ export async function runAppendToNote(
     event: 'note.append',
     id: input.id,
     outcome,
-    ...(input.heading !== undefined ? { heading: true } : {})
+    ...(input.heading !== undefined ? { heading: true } : {}),
+    ...(input.operationId !== undefined ? { replayed: result.replayed === true } : {})
   });
 
   const output: AppendToNoteOutput = { id: input.id, outcome };
@@ -86,5 +104,6 @@ export async function runAppendToNote(
     if (result.totalChars !== undefined) output.totalChars = result.totalChars;
     if (result.appended !== undefined) output.appended = result.appended;
   }
+  if (result.replayed) output.replayed = true;
   return output;
 }

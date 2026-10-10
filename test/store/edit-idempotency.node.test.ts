@@ -8,6 +8,8 @@
  *   la guarda, una vez.
  * - El proceso murió DESPUÉS de guardar y antes de cerrar el registro: el reintento ve
  *   por el SHA-256 que ya se guardó y no repite.
+ * Lo mismo para `hebra_append_to_note` con `operationId` (10 oct 2026), que comparte el
+ * registro.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -177,6 +179,92 @@ describe('reinicio tras guardar: «no guardado» frente a «guardado pendiente d
     expect((await reopened.noteRead(created.id))?.body).toBe('# Nota\n\nhola y adiós');
     // Y la revisión que devuelve es la de lo guardado: vale para la siguiente edición.
     expect(result.outcome === 'saved' && result.revision).toBe(await revisionOf(reopened, created.id));
+  });
+
+  it('append con operationId que murió antes de guardar: el reintento añade, una sola vez', async () => {
+    const dataDir = tempDataDir();
+    const sqlitePath = join(dataDir, 'library.sqlite');
+    const port = await openNodeLibraryPort({ sqlitePath, dataDir });
+    ports.push(port);
+    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
+    const input = { id: created.id, text: 'añadido', operationId: 'op-append-antes', privacy: NO_PRIVATE };
+    const crashing: NoteWriteTarget = {
+      writeExclusive: (operation) =>
+        port.writeExclusive((store) =>
+          operation({ ...store, noteSave: () => Promise.reject(new Error('proceso muerto')) })
+        )
+    };
+    await expect(new NoteWriter(crashing).appendToNote(input)).rejects.toThrow('proceso muerto');
+    port.close();
+
+    const reopened = await openNodeLibraryPort({ sqlitePath, dataDir });
+    ports.push(reopened);
+    const result = await new NoteWriter(reopened).appendToNote(input);
+    expect(result).toMatchObject({ outcome: 'saved', appended: { tail: 'añadido' } });
+    expect(result.replayed).toBeUndefined();
+    expect((await reopened.noteRead(created.id))?.body).toBe('# Nota\n\nhola\n\nañadido');
+  });
+
+  it('append con operationId que murió tras guardar y antes de cerrar el registro: no repite, sin `appended`', async () => {
+    const dataDir = tempDataDir();
+    const sqlitePath = join(dataDir, 'library.sqlite');
+    const port = await openNodeLibraryPort({ sqlitePath, dataDir });
+    ports.push(port);
+    const created = await new NoteWriter(port).createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
+    const input = { id: created.id, text: 'añadido', operationId: 'op-append-despues', privacy: NO_PRIVATE };
+    const crashing: NoteWriteTarget = {
+      writeExclusive: (operation) =>
+        port.writeExclusive((store) =>
+          operation({
+            ...store,
+            operations: {
+              ...store.operations,
+              finish: () => {
+                throw new Error('proceso muerto');
+              }
+            }
+          })
+        )
+    };
+    await expect(new NoteWriter(crashing).appendToNote(input)).rejects.toThrow('proceso muerto');
+    expect((await port.noteRead(created.id))?.body).toBe('# Nota\n\nhola\n\nañadido');
+    port.close();
+
+    const reopened = await openNodeLibraryPort({ sqlitePath, dataDir });
+    ports.push(reopened);
+    const writer = new NoteWriter(reopened);
+    const body = '# Nota\n\nhola\n\nañadido';
+    const result = await writer.appendToNote(input);
+    // No consta dónde quedó el texto: `revision` y `totalChars` del cuerpo actual, sin
+    // `appended` (SPEC.md §5, `hebra_append_to_note`).
+    expect(result).toEqual({
+      id: created.id,
+      outcome: 'saved',
+      revision: await revisionOf(reopened, created.id),
+      totalChars: body.length,
+      replayed: true
+    });
+    expect((await reopened.noteRead(created.id))?.body).toBe(body);
+    // El registro quedó cerrado: el siguiente reintento sale igual, del registro.
+    expect(await writer.appendToNote(input)).toEqual(result);
+  });
+
+  it('append con operationId cuya ronda produjo una copia de conflicto: el reintento la devuelve', async () => {
+    const dataDir = tempDataDir();
+    const port = await openNodeLibraryPort({ sqlitePath: join(dataDir, 'library.sqlite'), dataDir });
+    ports.push(port);
+    const writer = new NoteWriter(port);
+    const created = await writer.createNote({ body: '# Nota\n\nhola', privacy: NO_PRIVATE });
+    const input = { id: created.id, text: 'añadido', operationId: 'op-append-copia', privacy: NO_PRIVATE };
+    await writer.appendToNote(input);
+    await writer.recordEditConflict('op-append-copia', created.id, 'copia-1');
+    expect(await writer.appendToNote(input)).toEqual({
+      id: created.id,
+      outcome: 'conflict_copy',
+      copyId: 'copia-1',
+      replayed: true
+    });
+    expect((await port.noteRead(created.id))?.body).toBe('# Nota\n\nhola\n\nañadido');
   });
 
   it('un registro caducado se purga: el reintento es una petición nueva y choca con su revisión', async () => {

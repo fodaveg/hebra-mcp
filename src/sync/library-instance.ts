@@ -196,7 +196,7 @@ export class LibraryInstance implements NoteWriteTarget {
     const deadline = Date.now() + OPEN_READER_TIMEOUT_MS;
     for (;;) {
       if (this.lock.tryAcquire()) {
-        await this.becomeWriter(null);
+        await this.becomeWriterOrRelease(null);
         return;
       }
       try {
@@ -208,6 +208,26 @@ export class LibraryInstance implements NoteWriteTarget {
         if (!missing || Date.now() >= deadline) throw error;
       }
       await new Promise((resolve) => setTimeout(resolve, OPEN_READER_RETRY_MS));
+    }
+  }
+
+  /**
+   * `becomeWriter` recién tomado el bloqueo. Si no llega a abrir la SQLite en
+   * lectura-escritura (M2 del audit de robustez, 10 oct 2026: otra conexión con una
+   * transacción abierta más allá de `SQLITE_BUSY_TIMEOUT_MS`), suelta el bloqueo antes de
+   * relanzar: un proceso que no escribe no puede quedárselo, porque los lectores verían un
+   * escritor vivo que no escucha en el socket y responderían `busy_other_instance`.
+   * Si falla después de abrir (ya es el escritor, con la base en lectura-escritura), el
+   * bloqueo es suyo de verdad y se queda.
+   */
+  private async becomeWriterOrRelease(previous: NodeLibraryPort | null): Promise<void> {
+    try {
+      await this.becomeWriter(previous);
+    } catch (error) {
+      // `current` solo pasa a la base en lectura-escritura cuando ya se abrió; antes es la
+      // de solo lectura (relevo) o ninguna (primer montaje).
+      if (this.current?.writable !== true) this.lock.release();
+      throw error;
     }
   }
 
@@ -274,7 +294,22 @@ export class LibraryInstance implements NoteWriteTarget {
         if (!this.lock.verify()) await this.becomeReader();
         return;
       }
-      if (this.lock.tryAcquire()) await this.becomeWriter(this.current);
+      if (!this.lock.tryAcquire()) return;
+      try {
+        await this.becomeWriterOrRelease(this.current);
+      } catch (error) {
+        // Relevo fallido (M2): el bloqueo ya está suelto y esta instancia sigue de lectora;
+        // lo intentará otra vez la siguiente escritura o el temporizador. No se relanza:
+        // quien reenvía responde `busy_other_instance` y el temporizador (`void`) no deja
+        // un rechazo sin atender. Solo el nombre y el código del error, nunca su mensaje.
+        const code = (error as { code?: unknown } | null)?.code;
+        logEvent({
+          event: 'writer.takeover',
+          result: 'failed',
+          error: error instanceof Error ? error.name : 'unknown',
+          ...(typeof code === 'string' ? { code } : {})
+        });
+      }
     });
     this.switching = next.catch(() => undefined);
     return next;

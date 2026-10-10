@@ -46,6 +46,18 @@ import type { SqliteConn } from '../hebra';
 /** `readWrite`: el escritor único. `readOnly`: el resto de instancias (SPEC.md §8). */
 export type NodeSqliteMode = 'readWrite' | 'readOnly';
 
+/**
+ * Espera de SQLite ante una base ocupada (`busy_timeout`), en milisegundos (M2 del audit
+ * de robustez, 10 oct 2026). Sin ella `node:sqlite` usa 0: un relevo que abría mientras
+ * otra conexión tenía `BEGIN IMMEDIATE` (el escritor viejo a mitad de un guardado) fallaba
+ * al instante con `database is locked`. `DatabaseSync` es síncrono y esta espera bloquea
+ * el hilo, así que es pequeña: cubre una transacción del motor, no una caída. Vale para
+ * toda la conexión: también el `wal_checkpoint(TRUNCATE)` del motor tras bloquear una nota
+ * (`wal-checkpoint.ts` de Hebra) espera ahora hasta este plazo a los lectores antes de
+ * rendirse con `busy` y dejarlo pendiente, como antes hacía al instante.
+ */
+export const SQLITE_BUSY_TIMEOUT_MS = 2_000;
+
 export type NodeSqliteBindValue = string | number | bigint | boolean | null | undefined;
 
 function toBoundValue(value: unknown): string | number | bigint | null {
@@ -76,7 +88,7 @@ export function openNodeSqliteConn(
   mode: NodeSqliteMode = 'readWrite'
 ): { db: DatabaseSync; conn: SqliteConn } {
   const readOnly = mode === 'readOnly';
-  const db = new DatabaseSync(path, { readBigInts: true, readOnly });
+  const db = new DatabaseSync(path, { readBigInts: true, readOnly, timeout: SQLITE_BUSY_TIMEOUT_MS });
   const statements = new Map<string, StatementSync>();
 
   function statementFor(sql: string): StatementSync {

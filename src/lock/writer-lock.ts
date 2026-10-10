@@ -17,7 +17,8 @@
  *   y no lo toma. Además, el poseedor revisa en cada comprobación (`verify`) que el
  *   fichero sigue siendo el suyo, y si no, deja de escribir.
  * - Soltarlo: al cerrar, en `exit` y en `SIGINT`/`SIGTERM`/`SIGHUP`, borrando el fichero
- *   solo si sigue siendo el suyo (mismo `nonce`).
+ *   solo si sigue siendo el suyo (mismo `nonce`). Con una señal, solo si nadie más la
+ *   escucha: si hay un apagado propio, lo suelta él al terminar de vaciar.
  *
  * Límite conocido: si el SO reutiliza el PID de un poseedor muerto para otro proceso,
  * el bloqueo parece vivo hasta que ese proceso termine. Un fichero con el MISMO PID que
@@ -107,11 +108,21 @@ export class WriterLock {
   private hooksInstalled = false;
   private readonly onExit = (): void => this.release();
   private readonly onSignal = (signal: NodeJS.Signals): void => {
+    // Otro oyente de la señal (el apagado de `serve` o `serve-http`, `main.ts`) va a
+    // vaciar la ronda y la cola y cerrar: el bloqueo lo suelta `LibraryInstance.close()`
+    // al final, y el hook de `exit` queda de red. Soltarlo aquí dejaba entrar a otro
+    // escritor mientras este seguía escribiendo (M1 del audit de robustez, 10 oct 2026:
+    // hasta 28 s con dos escritores). Se vuelve a armar para que una segunda señal, ya
+    // sin ese oyente (`once`), suelte el bloqueo y termine.
+    if (process.listenerCount(signal) > 0) {
+      process.once(signal, this.onSignal);
+      return;
+    }
     this.release();
     this.removeHooks();
-    // Si nadie más escucha la señal, se repite para que el proceso termine como lo
-    // habría hecho sin este manejador (con el código de la señal).
-    if (process.listenerCount(signal) === 0) process.kill(process.pid, signal);
+    // Nadie más escucha la señal: se repite para que el proceso termine como lo habría
+    // hecho sin este manejador (con el código de la señal).
+    process.kill(process.pid, signal);
   };
 
   constructor(private readonly options: WriterLockOptions) {

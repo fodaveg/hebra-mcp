@@ -19,7 +19,11 @@
  *   escribe en local como nuevo escritor; si no, `busy_other_instance`, como antes;
  * - si la conexión se cierra DESPUÉS de enviar la petición y sin respuesta, el escritor
  *   pudo ejecutarla antes de morir: no se repite (sería un texto duplicado). Se intenta
- *   el relevo para la siguiente llamada y se responde `busy_other_instance`.
+ *   el relevo para la siguiente llamada y se responde `busy_other_instance`. Las que
+ *   llevan `operationId` (también `appendToNote` si lo trae, 10 oct 2026) se pueden
+ *   reintentar sin duplicar;
+ * - si el primer intento de relevo no toma el bloqueo y el escritor se fue (B2: un zombi
+ *   tras SIGKILL todavía cuenta como vivo), se intenta otra vez a los 100 ms.
  *
  * El filtro de privados y los límites de tamaño NO están aquí: los aplica la herramienta
  * que recibe la llamada, antes de llegar a `ctx.write`, con la configuración de privados
@@ -107,9 +111,22 @@ export interface ForwardingInstance {
 export interface ForwardOptions {
   /** Tests: tiempos de espera más cortos. */
   timeoutMs?: Partial<Record<WriterSocketOp, number>>;
+  /** Tests: espera antes del segundo intento de relevo (`TAKEOVER_RETRY_MS`). */
+  takeoverRetryMs?: number;
 }
 
 type WriteOp = Exclude<WriterSocketOp, 'status'>;
+
+/**
+ * Segundo intento de relevo (B2 del audit de robustez, 10 oct 2026). Tras un SIGKILL,
+ * hasta que el padre recoge al muerto, `process.kill(pid, 0)` lo da por vivo (es un
+ * zombi) y el primer `checkWriter` no toma el bloqueo. Si el escritor se fue (nadie
+ * escucha en el socket, o cortó la conexión tras recibir la petición), se vuelve a mirar
+ * una vez pasado este tiempo. Con un escritor vivo pero lento (`timeout`) no: no se va a
+ * morir en 100 ms y solo retrasaría el `busy_other_instance`.
+ */
+export const TAKEOVER_RETRY_MS = 100;
+const TAKEOVER_RETRY_REASONS: ReadonlySet<string> = new Set(['refused', 'closed']);
 
 const SYNC_STATES: ReadonlySet<string> = new Set<SyncState>([
   'uploaded',
@@ -249,8 +266,9 @@ function asCreateResult(value: unknown): CreateNoteResult {
 }
 
 function asAppendResult(value: unknown, id: string): AppendToNoteResult {
+  const replayed = isRecord(value) && value.replayed === true ? { replayed: true as const } : {};
   if (isRecord(value) && value.outcome === 'saved') {
-    const saved: AppendToNoteResult & { outcome: 'saved' } = { id, outcome: 'saved' };
+    const saved: AppendToNoteResult & { outcome: 'saved' } = { id, outcome: 'saved', ...replayed };
     if (value.revision !== undefined) {
       if (typeof value.revision !== 'string') throw new Error('writer_protocol');
       saved.revision = value.revision;
@@ -275,7 +293,7 @@ function asAppendResult(value: unknown, id: string): AppendToNoteResult {
     return saved;
   }
   if (isRecord(value) && value.outcome === 'conflict_copy' && typeof value.copyId === 'string') {
-    return { id, outcome: 'conflict_copy', copyId: value.copyId };
+    return { id, outcome: 'conflict_copy', copyId: value.copyId, ...replayed };
   }
   throw new Error('writer_protocol');
 }
@@ -331,6 +349,12 @@ export function buildRoutedWriteContext(
       // Sin escritor que responda: relevo AHORA. `checkWriter` solo toma el bloqueo si
       // su poseedor está muerto o se fue; con un escritor vivo pero lento, no cambia nada.
       await instance.checkWriter();
+      if ((instance.role as WriterRole) !== 'this' && TAKEOVER_RETRY_REASONS.has(reason)) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, options.takeoverRetryMs ?? TAKEOVER_RETRY_MS)
+        );
+        await instance.checkWriter();
+      }
       // Releído tras `checkWriter`, que cambia el papel (TS lo daría por estrechado).
       const tookOver = (instance.role as WriterRole) === 'this';
       if (tookOver && reason !== 'closed') {
@@ -363,6 +387,10 @@ export function buildRoutedWriteContext(
           ...(input.headingOccurrence !== undefined
             ? { headingOccurrence: input.headingOccurrence }
             : {}),
+          // Con él, el reintento tras un corte (`busy_other_instance`) no duplica el texto:
+          // lo sirve el registro del escritor que lo guardó, o el del relevo (es la misma
+          // SQLite).
+          ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
           privacy: input.privacy
         },
         (value) => asAppendResult(value, input.id),
@@ -461,6 +489,10 @@ export function buildRoutedWriteContext(
         () => local.organizeFile(input)
       ),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
+    // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
+    // relevo, esta instancia ya es el escritor y lo anota en local.
+    recordEditConflict: (operationId, id, copyId) =>
+      local.recordEditConflict(operationId, id, copyId),
     awaitRound: (timeoutMs) => local.awaitRound(timeoutMs)
   };
 }

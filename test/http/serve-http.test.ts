@@ -8,6 +8,7 @@
  * verdad (C3) tiene sus propios tests en `test/http/oauth.test.ts`.
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -335,6 +336,91 @@ describe('arranque de serve-http', () => {
         instance: { checkIntervalMs: null, lock: { releaseOnExit: false, pid: 999_999, isAlive: () => true } }
       })
     ).rejects.toBeInstanceOf(WriterRequiredError);
+  });
+
+  /**
+   * A1 del audit de robustez (10 oct 2026): al apagar, `close()` cortaba en el acto las
+   * peticiones en curso y su respuesta se perdía aunque la escritura se guardara. Aquí la
+   * petición está a medias (cabeceras recibidas, cuerpo sin terminar) cuando empieza el
+   * apagado: tiene que poder terminar y recibir su respuesta.
+   */
+  describe('apagado con una petición en curso (A1)', () => {
+    async function startForShutdown(drainTimeoutMs?: number): Promise<ServeHttpHandle> {
+      const handle = await startServeHttp({
+        dataDir: tempDataDir(),
+        secrets: null,
+        config: httpConfigFor('http://127.0.0.1', 0),
+        version: '0.0.0-test',
+        authConfigured: () => true,
+        loadAuth: async () => staticBearerAuth(TOKEN),
+        instance: { checkIntervalMs: null, lock: { releaseOnExit: false } },
+        ...(drainTimeoutMs !== undefined ? { drainTimeoutMs } : {})
+      });
+      handles.push(handle);
+      return handle;
+    }
+
+    /** `POST /mcp` de un `ping` con el cuerpo partido: manda las cabeceras y la primera
+     *  mitad, y devuelve la función que manda el resto y la respuesta (o el error). */
+    async function halfSentPing(handle: ServeHttpHandle) {
+      const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' });
+      const received = new Promise<void>((resolve) => handle.server.once('request', () => resolve()));
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port: handle.port,
+        method: 'POST',
+        path: '/mcp',
+        headers: {
+          host: '127.0.0.1',
+          authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+          'content-length': Buffer.byteLength(body)
+        }
+      });
+      const response = new Promise<{ status: number; body: string } | { error: string }>((resolve) => {
+        req.once('response', (res) => {
+          let text = '';
+          res.setEncoding('utf8');
+          res.on('data', (chunk: string) => (text += chunk));
+          res.once('end', () => resolve({ status: res.statusCode ?? 0, body: text }));
+          res.once('error', (error) => resolve({ error: error.message }));
+        });
+        req.once('error', (error) => resolve({ error: (error as NodeJS.ErrnoException).code ?? error.message }));
+      });
+      req.write(body.slice(0, 10));
+      await received;
+      return {
+        finish: () => {
+          req.end(body.slice(10));
+          return response;
+        },
+        response
+      };
+    }
+
+    it('close() espera a que la petición en curso termine y responda', async () => {
+      const handle = await startForShutdown();
+      const ping = await halfSentPing(handle);
+      const closing = handle.close();
+      // Ya sin aceptar conexiones nuevas, la que estaba a medias termina.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const response = await ping.finish();
+      expect(response).toMatchObject({ status: 200 });
+      expect(JSON.parse((response as { body: string }).body)).toMatchObject({ id: 1, result: {} });
+      await closing;
+      expect(stderrText()).toContain('"event":"serve_http.closed","drained":true');
+    });
+
+    it('una petición que no termina a tiempo se corta al acabar el plazo', async () => {
+      const handle = await startForShutdown(150);
+      const ping = await halfSentPing(handle);
+      const started = Date.now();
+      await handle.close();
+      expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+      expect(await ping.response).toHaveProperty('error');
+      expect(stderrText()).toContain('"event":"serve_http.closed","drained":false');
+    });
   });
 
   it('un segundo arranque no recupera ni revoca concesiones pendientes del escritor', async () => {

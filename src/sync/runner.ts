@@ -348,11 +348,18 @@ export class SyncRunner implements SyncStatusSource {
     this.timer = null;
   }
 
-  /** Para el bucle y espera a que termine la ronda en vuelo (y la encadenada). */
+  /**
+   * Para el bucle y espera a que termine la ronda en vuelo (y la encadenada). Para también
+   * el motor (`LibrarySyncEngine.stop`): corta las subidas de adjuntos en vuelo, que si no
+   * se esperaban hasta su plazo (hasta 15 min; M1 del audit de robustez, 10 oct 2026). Los
+   * adjuntos cortados siguen pendientes para el motor siguiente. La bajada y la subida de
+   * registros no se cortan: tienen su propio plazo en el transporte.
+   */
   async stop(): Promise<void> {
     this.stopped = true;
     this.stopTimer();
     this.resolveFirstRound();
+    this.engine.stop();
     await (this.queued ?? this.current)?.catch(() => null);
     await this.current?.catch(() => null);
   }

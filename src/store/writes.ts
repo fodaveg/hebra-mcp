@@ -12,7 +12,9 @@
  *   `redirected` (la nota cambió o es una lápida), el texto quedó en una copia de
  *   conflicto visible: `conflict_copy` con su id. Si el choque llega después, con la
  *   ronda (otro dispositivo editó la misma nota), lo resuelve la tabla de §7 del almacén
- *   con otra copia, y el motor lo avisa con `sync.conflict_copy` (`SyncRunner`).
+ *   con otra copia, y el motor lo avisa con `sync.conflict_copy` (`SyncRunner`). Con
+ *   `operationId` (opcional, 10 oct 2026) usa la idempotencia de `editNote`: el reintento
+ *   no vuelve a añadir el texto.
  * - `editNote`: sustituciones puntuales (`./edits.ts`) sobre la versión que el agente
  *   leyó (`./revision.ts`), con el filtro de privados construido DENTRO del turno y la
  *   idempotencia de `./operations.ts`. Una tarea que las sustituciones marcan o desmarcan
@@ -67,7 +69,7 @@ import {
 } from './edits';
 import { headingRejected, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
-import type { OperationStore } from './operations';
+import type { OperationRecord, OperationStore } from './operations';
 import { decodeRevision, encodeRevision } from './revision';
 import {
   capHeading,
@@ -142,7 +144,7 @@ export interface NoteWriteStore {
   filesIndex(): FilesIndex;
   /** Adjuntos de una nota (`note_blob_refs`), para `fetchAttachment`. */
   noteAttachments(noteId: string): NoteAttachmentRow[];
-  /** Registro de idempotencia de `editNote`. */
+  /** Registro de idempotencia de las escrituras con `operationId`. */
   operations: OperationStore;
 }
 
@@ -176,6 +178,10 @@ export interface AppendToNoteInput {
   heading?: string;
   /** Aparición (1-based) entre los apartados con ese título; solo con `heading`. */
   headingOccurrence?: number;
+  /** Idempotencia opcional (10 oct 2026, ampliación de D2 y D11): el mismo id con la misma
+   *  petición no vuelve a añadir el texto y devuelve lo que se guardó (`replayed`). Sin
+   *  él, cada llamada añade, como siempre. Mismo registro que `EditNoteInput.operationId`. */
+  operationId?: string;
   /** Igual que `EditNoteInput.privacy`. */
   privacy: PrivacyConfig;
 }
@@ -194,7 +200,9 @@ export interface AppendedProof {
 
 /** `revision`, `totalChars` y `appended` los trae todo `saved` de esta versión; son
  *  opcionales en el tipo porque un escritor de una versión anterior (otra sesión) no los
- *  manda. Con `conflict_copy` no hay prueba: el texto fue a la copia. */
+ *  manda. Con `conflict_copy` no hay prueba: el texto fue a la copia. `replayed`: un
+ *  reintento con el mismo `operationId`, devuelto del registro sin volver a escribir (si el
+ *  registro se quedó a medias, `started`, sin `appended`: no consta dónde quedó el texto). */
 export type AppendToNoteResult =
   | {
       id: string;
@@ -202,8 +210,9 @@ export type AppendToNoteResult =
       revision?: string;
       totalChars?: number;
       appended?: AppendedProof;
+      replayed?: true;
     }
-  | { id: string; outcome: 'conflict_copy'; copyId: string };
+  | { id: string; outcome: 'conflict_copy'; copyId: string; replayed?: true };
 
 /** Separador entre el cuerpo existente y lo añadido (SPEC.md §5). */
 export const APPEND_SEPARATOR = '\n\n';
@@ -524,12 +533,54 @@ function editFingerprint(input: EditNoteInput): string {
   );
 }
 
+/** Igual que `editFingerprint` (comparten registro): un `operationId` de una edición o de
+ *  un adjunto no vale para añadir texto. El apartado va en la huella: el mismo texto en
+ *  otro apartado es otra petición. */
+function appendFingerprint(input: AppendToNoteInput): string {
+  return sha256Hex(
+    JSON.stringify([
+      'appendToNote',
+      input.id,
+      input.text,
+      input.heading ?? null,
+      input.headingOccurrence ?? null
+    ])
+  );
+}
+
+/**
+ * Primer paso de toda escritura con `operationId` (`editNote`, `restoreVersion`,
+ * `addAttachment` y, desde el 10 oct 2026, `appendToNote`), dentro del turno: purga lo
+ * caducado y busca el registro. El mismo `operationId` con otra huella es
+ * `operation_id_reused`, antes de mirar la nota. Lo que haya que hacer con un registro
+ * `done` o `started` lo decide cada escritura (la prueba de lo guardado es distinta).
+ */
+function priorOperation(
+  log: OperationStore,
+  operationId: string,
+  fingerprint: string,
+  now: number
+): OperationRecord | null {
+  log.purgeExpired(now);
+  const previous = log.lookup(operationId);
+  if (previous && previous.fingerprint !== fingerprint) {
+    throw writeRejected('operation_id_reused');
+  }
+  return previous;
+}
+
 /** Igual que `editFingerprint`: comparten registro, así que la operación va en la huella
  *  y un `operationId` de una edición no vale para restaurar (`operation_id_reused`). */
 function restoreVersionFingerprint(input: RestoreVersionInput): string {
   return sha256Hex(
     JSON.stringify(['restoreVersion', input.id, input.expectedRevision, input.versionId])
   );
+}
+
+/** Un `AppendToNoteResult` del registro: la misma forma mínima que una edición (`id` y
+ *  `revision` o `copyId`); la prueba de lo guardado viaja tal cual se anotó. */
+function isAppendResult(value: unknown): value is AppendToNoteResult {
+  return isEditNoteSaved(value);
 }
 
 function isEditNoteSaved(value: unknown): value is EditNoteSaved {
@@ -641,13 +692,51 @@ export class NoteWriter {
    * configuración de privados de quien pide: una nota oculta, o un texto que la dejaría
    * con una etiqueta privada (decisión 4), es `not_found` sin escribir; una nota
    * bloqueada, `note_locked`.
+   *
+   * Con `operationId` (10 oct 2026, ampliación de D2 y D11 decidida por delegación de
+   * David), la idempotencia de `editNote` en el mismo registro y el mismo turno: el mismo
+   * id con otra petición, `operation_id_reused`; ya terminado, se devuelve lo anotado
+   * (prueba de lo guardado incluida) con `replayed` y sin volver a escribir ni pedir
+   * ronda; a medias (`started`), si el cuerpo actual es el que se iba a guardar, se dio
+   * por guardado: se cierra el registro y responde `replayed` con `revision` y
+   * `totalChars` del cuerpo actual, sin `appended` (no consta dónde quedó el texto). Si
+   * el cuerpo ya no es ese (murió antes de guardar, o algo cambió la nota entre la muerte
+   * y el reintento), se añade.
    */
   async appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult> {
-    const result = await this.target.writeExclusive(async (store) => {
+    const { operationId } = input;
+    const fingerprint = operationId === undefined ? null : appendFingerprint(input);
+    const { result, wrote } = await this.target.writeExclusive(async (store) => {
+      const now = Date.now();
+      const log = store.operations;
+      const previous =
+        operationId === undefined || fingerprint === null
+          ? null
+          : priorOperation(log, operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null) throw new LibraryError('note_not_found');
       if (filter.isHiddenNote(note.id)) throw writeRejected('not_found');
+      const revisionOf = (row: { localSeq: number; bodySha256: string }): string =>
+        encodeRevision({
+          libraryId: store.libraryId(),
+          noteId: input.id,
+          localSeq: row.localSeq,
+          bodySha256: row.bodySha256
+        });
+      if (previous?.state === 'done' && isAppendResult(previous.result)) {
+        return { result: { ...previous.result, replayed: true as const }, wrote: false };
+      }
+      if (previous?.state === 'started' && note.bodySha256 === previous.targetBodySha256) {
+        const saved: AppendToNoteResult = {
+          id: input.id,
+          outcome: 'saved',
+          revision: revisionOf(note),
+          totalChars: note.body.length
+        };
+        log.finish(previous.operationId, saved);
+        return { result: { ...saved, replayed: true as const }, wrote: false };
+      }
       if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
       let insertion: Insertion;
       let sectionTitle: string | undefined;
@@ -671,34 +760,43 @@ export class NoteWriter {
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
-      const saved = await store.noteSave(saveInput);
-      if (saved.outcome !== 'saved') {
-        return { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo } as const;
-      }
-      // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este mismo turno), no de
-      // la entrada: si el almacén cambiara algo, se vería aquí.
-      const row = await store.noteRead(input.id);
-      const savedBody = row?.body ?? insertion.body;
-      const appended: AppendedProof = {
-        chars: input.text.length,
-        tail: proofTail(savedBody.slice(insertion.start, insertion.end)),
-        line: lineAt(savedBody, insertion.start)
-      };
-      if (sectionTitle !== undefined) appended.heading = capHeading(sectionTitle);
-      return {
-        id: input.id,
-        outcome: 'saved',
-        revision: encodeRevision({
-          libraryId: store.libraryId(),
+      if (operationId !== undefined && fingerprint !== null) {
+        log.begin({
+          operationId,
+          fingerprint,
           noteId: input.id,
-          localSeq: saved.localSeq,
-          bodySha256: saved.bodySha256
-        }),
-        totalChars: savedBody.length,
-        appended
-      } as const;
+          targetBodySha256: sha256Hex(insertion.body),
+          now
+        });
+      }
+      const saved = await store.noteSave(saveInput);
+      let outcome: AppendToNoteResult;
+      if (saved.outcome !== 'saved') {
+        outcome = { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+      } else {
+        // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este mismo turno), no de
+        // la entrada: si el almacén cambiara algo, se vería aquí.
+        const row = await store.noteRead(input.id);
+        const savedBody = row?.body ?? insertion.body;
+        const appended: AppendedProof = {
+          chars: input.text.length,
+          tail: proofTail(savedBody.slice(insertion.start, insertion.end)),
+          line: lineAt(savedBody, insertion.start)
+        };
+        if (sectionTitle !== undefined) appended.heading = capHeading(sectionTitle);
+        outcome = {
+          id: input.id,
+          outcome: 'saved',
+          revision: revisionOf(saved),
+          totalChars: savedBody.length,
+          appended
+        };
+      }
+      if (operationId !== undefined) log.finish(operationId, outcome);
+      return { result: outcome, wrote: true };
     });
-    this.written();
+    // Un reintento servido por el registro no escribió nada: ni ronda que pedir.
+    if (wrote) this.written();
     return result;
   }
 
@@ -732,12 +830,8 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      log.purgeExpired(now);
       const fingerprint = editFingerprint(input);
-      const previous = log.lookup(input.operationId);
-      if (previous && previous.fingerprint !== fingerprint) {
-        throw writeRejected('operation_id_reused');
-      }
+      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
@@ -853,12 +947,8 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      log.purgeExpired(now);
       const fingerprint = restoreVersionFingerprint(input);
-      const previous = log.lookup(input.operationId);
-      if (previous && previous.fingerprint !== fingerprint) {
-        throw writeRejected('operation_id_reused');
-      }
+      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
@@ -1157,11 +1247,7 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      log.purgeExpired(now);
-      const previous = log.lookup(input.operationId);
-      if (previous && previous.fingerprint !== fingerprint) {
-        throw writeRejected('operation_id_reused');
-      }
+      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {

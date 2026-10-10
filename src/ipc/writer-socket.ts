@@ -13,10 +13,11 @@
  * `privacy`, la configuración de privados del LECTOR, que el escritor aplica dentro del
  * turno de la escritura (D2 ampliada, 28 sep 2026); sin ella, `invalid_request`:
  * - `createNote` `{body, folderId, privacy}` → `{id, title, folderId}`.
- * - `appendToNote` `{id, text, heading?, headingOccurrence?, privacy}` →
- *   `{id, outcome, copyId?, revision?, totalChars?, appended?}`, ya con la ronda de sync
- *   esperada en el escritor (como `hebra_append_to_note` con `awaitRound`). Con `heading`
- *   (D11) el apartado se resuelve en el escritor, dentro del turno.
+ * - `appendToNote` `{id, text, heading?, headingOccurrence?, operationId?, privacy}` →
+ *   `{id, outcome, copyId?, revision?, totalChars?, appended?, replayed?}`, ya con la
+ *   ronda de sync esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
+ *   Con `heading` (D11) el apartado se resuelve en el escritor, dentro del turno; con
+ *   `operationId` (10 oct 2026), el reintento lo sirve el registro (`replayed`).
  * - `status` `{}` → el estado de sync del escritor, sin `writer` ni `linked`.
  * - `editNote` `{id, edits, expectedRevision, operationId, privacy}` → el resultado
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el
@@ -271,17 +272,19 @@ function createInputOf(params: Record<string, unknown>): CreateNoteInput {
 }
 
 function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
-  const { id, text, heading, headingOccurrence } = params;
+  const { id, text, heading, headingOccurrence, operationId } = params;
   if (!isId(id) || typeof text !== 'string' || text.length > APPEND_TEXT_MAX_LENGTH) {
     throw new InvalidRequest();
   }
   const privacy = privacyOf(params.privacy);
+  const idempotency =
+    operationId === undefined ? {} : { operationId: operationIdOf(operationId) };
   if (heading === undefined) {
     if (headingOccurrence !== undefined) throw new InvalidRequest();
-    return { id, text, privacy };
+    return { id, text, ...idempotency, privacy };
   }
   if (typeof heading !== 'string' || heading.length > HEADING_MAX_LENGTH) throw new InvalidRequest();
-  if (headingOccurrence === undefined) return { id, text, heading, privacy };
+  if (headingOccurrence === undefined) return { id, text, heading, ...idempotency, privacy };
   if (
     typeof headingOccurrence !== 'number' ||
     !Number.isSafeInteger(headingOccurrence) ||
@@ -289,7 +292,15 @@ function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
   ) {
     throw new InvalidRequest();
   }
-  return { id, text, heading, headingOccurrence, privacy };
+  return { id, text, heading, headingOccurrence, ...idempotency, privacy };
+}
+
+/** Un `operationId`: texto de 1 a `OPERATION_ID_MAX_LENGTH` caracteres. */
+function operationIdOf(value: unknown): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > OPERATION_ID_MAX_LENGTH) {
+    throw new InvalidRequest();
+  }
+  return value;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -313,14 +324,8 @@ function revisionFieldsOf(params: Record<string, unknown>): {
   expectedRevision: string;
   operationId: string;
 } {
-  const { expectedRevision, operationId } = params;
-  if (
-    typeof operationId !== 'string' ||
-    operationId.length === 0 ||
-    operationId.length > OPERATION_ID_MAX_LENGTH
-  ) {
-    throw new InvalidRequest();
-  }
+  const { expectedRevision } = params;
+  const operationId = operationIdOf(params.operationId);
   if (typeof expectedRevision !== 'string' || expectedRevision.length > REVISION_MAX_LENGTH) {
     throw new InvalidRequest();
   }
@@ -365,20 +370,21 @@ function addAttachmentInputOf(params: Record<string, unknown>): AddAttachmentInp
   ) {
     throw new InvalidRequest();
   }
-  if (
-    typeof operationId !== 'string' ||
-    operationId.length === 0 ||
-    operationId.length > OPERATION_ID_MAX_LENGTH
-  ) {
-    throw new InvalidRequest();
-  }
+  const validOperationId = operationIdOf(operationId);
   const privacy = privacyOf(params.privacy);
   const decoded = decodeAttachmentBase64(dataBase64);
   if (!decoded.ok) {
     if (decoded.code === 'attachment_too_large') throw writeRejected('attachment_too_large');
     throw new InvalidRequest();
   }
-  return { id, name, bytes: decoded.bytes, mimeType: mimeType ?? null, operationId, privacy };
+  return {
+    id,
+    name,
+    bytes: decoded.bytes,
+    mimeType: mimeType ?? null,
+    operationId: validOperationId,
+    privacy
+  };
 }
 
 function restoreVersionInputOf(params: Record<string, unknown>): RestoreVersionInput {
@@ -476,12 +482,23 @@ function inodeOf(path: string): number | null {
   }
 }
 
+/**
+ * Una conexión sin petición en curso que pasa este tiempo sin mandar nada se cierra (B4
+ * del audit de robustez, 10 oct 2026): un cliente que conecta y calla, o que deja una
+ * línea a medias, retenía la conexión (y hasta `MAX_MESSAGE_BYTES` de línea pendiente)
+ * para siempre. El lector de verdad manda su línea nada más conectar; mientras el
+ * escritor atiende una petición (hasta `FORWARD_TIMEOUT_MS` del lector) el plazo no corre.
+ */
+export const WRITER_SOCKET_IDLE_MS = 30_000;
+
 export interface WriterSocketServerOptions {
   /** Ruta del socket (`<dataDir>/writer.sock`). */
   path: string;
   handlers: WriterSocketHandlers;
   /** Tope por línea (tests). Por defecto, `MAX_MESSAGE_BYTES`. */
   maxMessageBytes?: number;
+  /** Plazo de una conexión ociosa (tests). Por defecto, `WRITER_SOCKET_IDLE_MS`. */
+  idleTimeoutMs?: number;
 }
 
 /**
@@ -498,9 +515,10 @@ export class WriterSocketServer {
   private constructor(
     readonly path: string,
     handlers: WriterSocketHandlers,
-    maxBytes: number
+    maxBytes: number,
+    idleMs: number
   ) {
-    this.server = createServer((socket) => this.accept(socket, handlers, maxBytes));
+    this.server = createServer((socket) => this.accept(socket, handlers, maxBytes, idleMs));
   }
 
   static async listen(options: WriterSocketServerOptions): Promise<WriterSocketServer> {
@@ -508,7 +526,8 @@ export class WriterSocketServer {
     const holder = new WriterSocketServer(
       path,
       options.handlers,
-      options.maxMessageBytes ?? MAX_MESSAGE_BYTES
+      options.maxMessageBytes ?? MAX_MESSAGE_BYTES,
+      options.idleTimeoutMs ?? WRITER_SOCKET_IDLE_MS
     );
     const { server } = holder;
     // `bind` en una ruta temporal y `rename` a `writer.sock`, por dos motivos:
@@ -556,7 +575,12 @@ export class WriterSocketServer {
     return holder;
   }
 
-  private accept(socket: Socket, handlers: WriterSocketHandlers, maxBytes: number): void {
+  private accept(
+    socket: Socket,
+    handlers: WriterSocketHandlers,
+    maxBytes: number,
+    idleMs: number
+  ): void {
     if (this.closed) {
       socket.destroy();
       return;
@@ -564,6 +588,12 @@ export class WriterSocketServer {
     this.connections.add(socket);
     socket.once('close', () => this.connections.delete(socket));
     socket.on('error', () => undefined);
+    // Conexión ociosa (B4): sin petición en curso, `idleMs` sin datos la cierra. Mientras
+    // hay una en curso el plazo se apaga (`pump`), para no cortar una escritura larga.
+    socket.setTimeout(idleMs);
+    socket.on('timeout', () => {
+      if (!busy) socket.destroy();
+    });
     let pending: Buffer[] = [];
     let pendingBytes = 0;
     const reject = (error: WriterSocketErrorCode): void => {
@@ -580,6 +610,7 @@ export class WriterSocketServer {
     const pump = async (): Promise<void> => {
       if (busy) return;
       busy = true;
+      socket.setTimeout(0);
       try {
         while (queue.length > 0 && !socket.destroyed) {
           await this.dispatch(socket, queue.shift()!, handlers);
@@ -587,7 +618,10 @@ export class WriterSocketServer {
       } finally {
         busy = false;
       }
-      if (!socket.destroyed) socket.resume();
+      if (!socket.destroyed) {
+        socket.setTimeout(idleMs);
+        socket.resume();
+      }
     };
     socket.on('data', (chunk: Buffer) => {
       let start = 0;

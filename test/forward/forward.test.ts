@@ -208,6 +208,42 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"appendToNote","outcome":"forwarded"');
   });
 
+  it('hebra_append_to_note con operationId desde un lector: el reintento lo sirve el registro del escritor', async () => {
+    const { writer, client } = await pair();
+    const created = await writer.createNote({ body: '# Registro\n\nuno', privacy: OPEN });
+    const args = { id: created.id, text: BAIT_TEXT, operationId: 'op-fwd-append-1' };
+    const first = await call(client, 'hebra_append_to_note', args);
+    expect(first.isError).toBe(false);
+    expect(first.value).toMatchObject({ outcome: 'saved', appended: { tail: BAIT_TEXT } });
+    const retry = await call(client, 'hebra_append_to_note', args);
+    expect(retry.value).toEqual({ ...first.value, replayed: true });
+    expect((await writer.port.noteRead(created.id))?.body).toBe(`# Registro\n\nuno\n\n${BAIT_TEXT}`);
+    // Otra petición con el mismo id: el rechazo cruza el socket con su código.
+    const reused = await call(client, 'hebra_append_to_note', { ...args, text: 'otro' });
+    expect(reused).toEqual({ isError: true, value: { error: 'operation_id_reused' } });
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+  });
+
+  it('hebra_append_to_note con operationId: la copia de conflicto de la ronda queda anotada para el reintento', async () => {
+    const { relay, writer, client } = await pair();
+    const app = await appDevice(relay);
+    const id = await appCreate(app, '# Compartida\n\ntexto base');
+    await app.sync.runRound();
+    await writer.syncRunner!.requestRound();
+    await appSave(app, id, '# Compartida\n\ntexto base\n\nEDICIÓN DEL MAC');
+    await app.sync.runRound();
+
+    const args = { id, text: BAIT_TEXT, operationId: 'op-fwd-append-2' };
+    const first = await call(client, 'hebra_append_to_note', args);
+    expect(first.value.outcome).toBe('conflict_copy');
+    const retry = await call(client, 'hebra_append_to_note', args);
+    expect(retry.value).toEqual({ ...first.value, replayed: true });
+    const copies = (await allBodies(writer.port)).filter(
+      (note) => (note.id === id || note.conflictOf === id) && note.body.includes(BAIT_TEXT)
+    );
+    expect(copies).toHaveLength(1);
+  });
+
   it('hebra_status de un lector es el estado de sync del escritor, con writer other_instance', async () => {
     const { client } = await pair();
     const status = await call(client, 'hebra_status');
@@ -797,6 +833,91 @@ describe('protocolo de writer.sock', () => {
     ).rejects.toBeInstanceOf(WriterRemoteError);
   });
 
+  it('appendToNote lleva operationId opcional hasta el escritor; uno inválido es invalid_request', async () => {
+    const seen: Array<string | undefined> = [];
+    const path = join(tempDataDir(), WRITER_SOCKET_FILE);
+    const server = await WriterSocketServer.listen({
+      path,
+      handlers: {
+        ...handlers,
+        appendToNote: async (input) => {
+          seen.push(input.operationId);
+          return { id: input.id, outcome: 'saved', replayed: true };
+        }
+      }
+    });
+    servers.push(server);
+    expect(
+      await requestWriter(path, 'appendToNote', { id: 'n1', text: 'x', operationId: 'op-1', privacy: OPEN }, 2_000)
+    ).toEqual({ id: 'n1', outcome: 'saved', replayed: true });
+    await requestWriter(path, 'appendToNote', { id: 'n1', text: 'x', privacy: OPEN }, 2_000);
+    expect(seen).toEqual(['op-1', undefined]);
+    for (const operationId of ['', 'o'.repeat(201), 7]) {
+      await expect(
+        requestWriter(path, 'appendToNote', { id: 'n1', text: 'x', operationId, privacy: OPEN }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+    expect(seen).toHaveLength(2);
+  });
+
+  describe('conexiones ociosas (B4)', () => {
+    /** Escucha con un plazo de ociosidad corto y un `appendToNote` que tarda `slowMs`. */
+    async function listenIdle(idleTimeoutMs: number, slowMs = 0) {
+      const path = join(tempDataDir(), WRITER_SOCKET_FILE);
+      const server = await WriterSocketServer.listen({
+        path,
+        idleTimeoutMs,
+        handlers: {
+          ...handlers,
+          appendToNote: async (input) => {
+            await new Promise((resolve) => setTimeout(resolve, slowMs));
+            return { id: input.id, outcome: 'saved' };
+          }
+        }
+      });
+      servers.push(server);
+      return path;
+    }
+
+    /** Conecta, manda `payload` (o nada) y resuelve cuando el escritor cierra. */
+    function closedByWriter(path: string, payload: string | null): Promise<{ data: string; ms: number }> {
+      return new Promise((resolve, reject) => {
+        const started = Date.now();
+        let data = '';
+        const socket = createConnection(path, () => {
+          if (payload !== null) socket.write(payload);
+        });
+        socket.setEncoding('utf8');
+        socket.on('data', (chunk: string) => (data += chunk));
+        socket.on('error', () => undefined);
+        socket.once('close', () => resolve({ data, ms: Date.now() - started }));
+        setTimeout(() => {
+          socket.destroy();
+          reject(new Error('el escritor no cerró la conexión ociosa'));
+        }, 5_000).unref();
+      });
+    }
+
+    it('una conexión que no manda nada se cierra pasado el plazo', async () => {
+      const path = await listenIdle(150);
+      const { data } = await closedByWriter(path, null);
+      expect(data).toBe('');
+    });
+
+    it('una línea a medias (sin salto de línea) se cierra pasado el plazo, sin responder', async () => {
+      const path = await listenIdle(150);
+      const { data } = await closedByWriter(path, '{"id":1,"op":"status","params":{}');
+      expect(data).toBe('');
+    });
+
+    it('una petición en curso más larga que el plazo no se corta', async () => {
+      const path = await listenIdle(100, 400);
+      expect(
+        await requestWriter(path, 'appendToNote', { id: 'n1', text: 'x', privacy: OPEN }, 5_000)
+      ).toEqual({ id: 'n1', outcome: 'saved' });
+    });
+  });
+
   it('el límite por defecto admite el cuerpo máximo de §5 en el peor escape JSON', () => {
     const worst = JSON.stringify({
       id: 1,
@@ -1264,6 +1385,42 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     // La siguiente ya es local.
     expect(await write.createNote({ body: '# x', privacy: OPEN })).toMatchObject({ id: 'local' });
     expect(local.created).toBe(1);
+  });
+
+  it('escritor recién muerto aún sin recoger (zombi): segundo intento de relevo a los 100 ms (B2)', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    // Fichero sin nadie escuchando, como el socket de un escritor muerto por SIGKILL.
+    writeFileSync(path, '');
+    let checks = 0;
+    let role: 'this' | 'other_instance' = 'other_instance';
+    const instance: ForwardingInstance = {
+      get role() {
+        return role;
+      },
+      writerSocketPath: path,
+      // El primero aún lo ve vivo (zombi); el segundo, ya recogido, toma el bloqueo.
+      checkWriter: vi.fn(async () => {
+        checks += 1;
+        if (checks === 2) role = 'this';
+      }),
+      status: async () => ({
+        lastSyncAt: null,
+        lastSyncOutcome: null,
+        pendingUpload: 0,
+        errorsByCode: {},
+        revoked: false,
+        writer: role
+      })
+    };
+    const local = localSpy();
+    const write = buildRoutedWriteContext(instance, local);
+    const started = Date.now();
+    expect(await write.createNote({ body: '# x', privacy: OPEN })).toMatchObject({ id: 'local' });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(90);
+    expect(instance.checkWriter).toHaveBeenCalledTimes(2);
+    expect(local.created).toBe(1);
+    expect(stderrText()).toContain('"outcome":"takeover","reason":"refused"');
   });
 
   it('sin escritor: toma el relevo y escribe en local', async () => {

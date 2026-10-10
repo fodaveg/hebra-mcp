@@ -247,7 +247,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Añadir texto a una nota',
       description:
-        'Añade texto al final de una nota existente o, con `heading`, al final de ese apartado (subapartados incluidos). Si el título se repite, `headingOccurrence`. Al guardar devuelve `revision`, `totalChars` y `appended` (tamaño, final del texto y línea, leídos de la nota guardada). Una edición concurrente produce una copia de conflicto visible, sin perder texto (sin esa prueba).',
+        'Añade texto al final de una nota existente o, con `heading`, al final de ese apartado (subapartados incluidos). Si el título se repite, `headingOccurrence`. Al guardar devuelve `revision`, `totalChars` y `appended` (tamaño, final del texto y línea, leídos de la nota guardada). Una edición concurrente produce una copia de conflicto visible, sin perder texto (sin esa prueba). Con un `operationId` nuevo por añadido, reintentar con el mismo (p. ej. tras busy_other_instance o una respuesta perdida) no lo añade dos veces: devuelve lo guardado con `replayed: true`.',
       inputSchema: appendToNoteInputShape,
       annotations: WRITE_NON_IDEMPOTENT
     },

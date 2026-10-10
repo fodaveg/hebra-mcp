@@ -2,7 +2,9 @@
  * Registro durable de operaciones de `hebra_edit_note` (D2 ampliada, 28 sep 2026): que
  * reintentar con el mismo `operationId` tras perder la respuesta no vuelva a aplicar las
  * sustituciones, y que tras un reinicio se distinga «no se guardó» de «se guardó y falta
- * subirlo».
+ * subirlo». Lo comparten, con huella propia, `hebra_restore_version`,
+ * `hebra_add_attachment` (D9) y, cuando trae `operationId` (10 oct 2026),
+ * `hebra_append_to_note`.
  *
  * Vive en la MISMA SQLite de la biblioteca, en una tabla propia de hebra-mcp
  * (`hebra_mcp_operations`), que Hebra no conoce: ni viaja por sync (el motor solo sube
