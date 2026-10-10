@@ -79,7 +79,7 @@ async function openPairingSecretStore(dataDir: string): Promise<SecretStore> {
 
 async function serve(): Promise<void> {
   const dataDir = resolveDataDir();
-  const { ctx, close } = await openServeContext({
+  const { ctx, instance, close } = await openServeContext({
     dataDir,
     secrets: await openServeSecretStore(dataDir)
   });
@@ -93,6 +93,9 @@ async function serve(): Promise<void> {
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
+  // El bloqueo lo suelta `close()` al terminar de vaciar, no la señal (M1); también si
+  // esta sesión arrancó de lectora y toma el relevo después.
+  instance.deferSignalRelease();
 
   await server.connect(transport);
 }
@@ -128,16 +131,18 @@ async function serveHttp(): Promise<void> {
     }
     throw error;
   }
-  // Apagado (A1 y M1 del audit de robustez, 10 oct 2026): `handle.close()` espera hasta
-  // 8 s a las peticiones HTTP en curso para que su respuesta llegue, y después vacía la
-  // cola, para el sync y suelta `writer.lock` (este oyente hace que `WriterLock` no lo
-  // suelte al recibir la señal). El contenedor da 40 s (`stop_grace_period`).
+  // Apagado (A1 y M1 del audit de robustez, 10 oct 2026): `handle.close()` corta las
+  // esperas de ronda de las escrituras en curso, espera a que respondan las peticiones HTTP
+  // (`HTTP_DRAIN_TIMEOUT_MS`) y después vacía la cola, para el sync y suelta `writer.lock`
+  // (`deferSignalRelease`: la señal no lo suelta). El contenedor da 50 s
+  // (`stop_grace_period`).
   const shutdown = async (): Promise<void> => {
     await handle.close();
     process.exit(0);
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
+  handle.serve.instance.deferSignalRelease();
 }
 
 function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | HttpConfigError): string {

@@ -5,9 +5,8 @@
  *
  * `hang <dataDir> <relayOrigin>`: escritor con sync por el transporte HTTP real contra un
  * relé que acepta TCP y nunca responde (la ronda se queda colgada), con `writer.sock` y el
- * apagado de `serve` (`src/server/main.ts`): su propio oyente de SIGTERM, registrado
- * DESPUÉS de abrir la instancia (y de que `WriterLock` registrara el suyo), que cierra la
- * instancia y sale con 0.
+ * apagado de `serve` (`src/server/main.ts`): su propio oyente de SIGTERM, que cierra la
+ * instancia y sale con 0, y `deferSignalRelease` para que la señal no suelte el bloqueo.
  *
  * Líneas por stdout:
  * - `ready <id>`: la nota de prueba está creada y el socket escucha.
@@ -51,6 +50,8 @@ async function main(): Promise<void> {
       process.exit(0);
     });
   });
+  // Como `serve` (`main.ts`): el bloqueo lo suelta `close()`, no la señal.
+  instance.deferSignalRelease();
   out(`ready ${id}`);
   // Lo que mantiene vivo el proceso en `serve` es el transporte MCP.
   setInterval(() => undefined, 1_000);

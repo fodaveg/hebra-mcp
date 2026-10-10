@@ -17,8 +17,9 @@
  *   y no lo toma. Además, el poseedor revisa en cada comprobación (`verify`) que el
  *   fichero sigue siendo el suyo, y si no, deja de escribir.
  * - Soltarlo: al cerrar, en `exit` y en `SIGINT`/`SIGTERM`/`SIGHUP`, borrando el fichero
- *   solo si sigue siendo el suyo (mismo `nonce`). Con una señal, solo si nadie más la
- *   escucha: si hay un apagado propio, lo suelta él al terminar de vaciar.
+ *   solo si sigue siendo el suyo (mismo `nonce`). Si el proceso declaró su propio apagado
+ *   (`deferSignalRelease`), la primera señal no lo suelta: lo suelta ese apagado al
+ *   terminar de vaciar; una segunda señal sí, y termina.
  *
  * Límite conocido: si el SO reutiliza el PID de un poseedor muerto para otro proceso,
  * el bloqueo parece vivo hasta que ese proceso termine. Un fichero con el MISMO PID que
@@ -37,6 +38,7 @@ import {
   writeSync
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { constants as osConstants } from 'node:os';
 import { join } from 'node:path';
 
 export const WRITER_LOCK_FILE = 'writer.lock';
@@ -106,23 +108,37 @@ export class WriterLock {
   private readonly now: () => number;
   private owned = false;
   private hooksInstalled = false;
+  /** `deferSignalRelease`: el proceso tiene su propio apagado, que suelta el bloqueo. */
+  private signalReleaseDeferred = false;
+  /** Ya llegó una señal con el soltado aplazado: la siguiente suelta y termina. */
+  private deferredSignalSeen = false;
   private readonly onExit = (): void => this.release();
   private readonly onSignal = (signal: NodeJS.Signals): void => {
-    // Otro oyente de la señal (el apagado de `serve` o `serve-http`, `main.ts`) va a
-    // vaciar la ronda y la cola y cerrar: el bloqueo lo suelta `LibraryInstance.close()`
-    // al final, y el hook de `exit` queda de red. Soltarlo aquí dejaba entrar a otro
-    // escritor mientras este seguía escribiendo (M1 del audit de robustez, 10 oct 2026:
-    // hasta 28 s con dos escritores). Se vuelve a armar para que una segunda señal, ya
-    // sin ese oyente (`once`), suelte el bloqueo y termine.
-    if (process.listenerCount(signal) > 0) {
+    // Con un apagado propio (`serve`, `serve-http`: `deferSignalRelease`), la primera señal
+    // no suelta el bloqueo: ese apagado vacía la ronda y la cola y lo suelta al final
+    // (`LibraryInstance.close()`), y el hook de `exit` queda de red. Soltarlo aquí dejaba
+    // entrar a otro escritor mientras este seguía escribiendo (M1 del audit de robustez,
+    // 10 oct 2026: hasta 28 s con dos escritores). Lo decide el indicador y no cuántos
+    // oyentes quedan: con `process.once`, Node quita el envoltorio antes de llamarlo, y un
+    // `serve` que toma el relevo después de arrancar tiene su oyente DELANTE del de aquí
+    // (vería 0 oyentes y mataría el proceso a mitad del apagado). Se vuelve a armar para
+    // que una segunda señal suelte el bloqueo y termine.
+    if (this.signalReleaseDeferred && !this.deferredSignalSeen) {
+      this.deferredSignalSeen = true;
       process.once(signal, this.onSignal);
       return;
     }
     this.release();
     this.removeHooks();
-    // Nadie más escucha la señal: se repite para que el proceso termine como lo habría
-    // hecho sin este manejador (con el código de la señal).
-    process.kill(process.pid, signal);
+    if (process.listenerCount(signal) === 0) {
+      // Nadie más escucha la señal: se repite para que el proceso termine como lo habría
+      // hecho sin este manejador (con el código de la señal).
+      process.kill(process.pid, signal);
+    } else if (this.deferredSignalSeen) {
+      // Segunda señal con otro oyente que no termina el proceso: se termina aquí, con el
+      // código convencional de una muerte por señal.
+      process.exit(128 + (osConstants.signals[signal] ?? 0));
+    }
   };
 
   constructor(private readonly options: WriterLockOptions) {
@@ -135,6 +151,18 @@ export class WriterLock {
   /** ¿Tiene esta instancia el bloqueo (según su última comprobación)? */
   get held(): boolean {
     return this.owned;
+  }
+
+  /**
+   * El proceso tiene su propio apagado para SIGINT/SIGTERM/SIGHUP, que cierra la
+   * instancia y suelta el bloqueo al terminar de vaciar (`main.ts` lo llama al registrarlo,
+   * por `LibraryInstance.deferSignalRelease`). Desde entonces la primera señal no suelta el
+   * bloqueo; la segunda sí, y termina el proceso. Vale tenga o no el bloqueo todavía (un
+   * lector que toma el relevo después lo hereda). Sin llamarlo, una señal lo suelta en el
+   * acto, como siempre.
+   */
+  deferSignalRelease(): void {
+    this.signalReleaseDeferred = true;
   }
 
   /**

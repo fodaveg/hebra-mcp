@@ -152,21 +152,35 @@ describe('WriterLock', () => {
    * módulos de Node, así que corre con los tipos transformados por Node 24) y termina
    * por `process.exit` o por una señal: el fichero tiene que desaparecer.
    */
-  async function childHoldingLock(dataDir: string, then: 'exit' | 'wait' | 'own-handler') {
+  async function childHoldingLock(
+    dataDir: string,
+    then: 'exit' | 'wait' | 'own-handler' | 'own-handler-first'
+  ) {
     const source = new URL('../../src/lock/writer-lock.ts', import.meta.url).href;
-    // `own-handler`: como `serve`, el proceso registra DESPUÉS su propio oyente de SIGTERM
-    // (el apagado que vacía y cierra), que dice si el bloqueo seguía ahí al recibirla.
+    // `own-handler`: como `serve`, el proceso tiene su propio oyente de SIGTERM (el apagado
+    // que vacía y cierra) y se lo dice al bloqueo (`deferSignalRelease`). El oyente dice si
+    // el bloqueo seguía ahí al recibirla y, 100 ms después (un apagado a medias), si sigue
+    // vivo y con el bloqueo. Con `own-handler` se registra DESPUÉS de tomar el bloqueo;
+    // con `own-handler-first`, ANTES, como un `serve` que arrancó de lector y tomó el
+    // relevo más tarde: su oyente queda delante del del bloqueo.
     const ownHandler = `
-      const { existsSync } = await import('node:fs');
       process.once('SIGTERM', () => {
-        process.stdout.write('sigterm lock=' + (existsSync(lock.path) ? 1 : 0) + '\\n');
+        process.stdout.write('sigterm lock=' + (existsSync(lockPath) ? 1 : 0) + '\\n');
+        setTimeout(() => {
+          process.stdout.write('still lock=' + (existsSync(lockPath) ? 1 : 0) + '\\n');
+        }, 100);
       });
     `;
+    const own = then === 'own-handler' || then === 'own-handler-first';
     const script = `
+      const { existsSync } = await import('node:fs');
       const { WriterLock } = await import(${JSON.stringify(source)});
       const lock = new WriterLock({ dataDir: ${JSON.stringify(dataDir)} });
+      const lockPath = lock.path;
+      ${then === 'own-handler-first' ? ownHandler : ''}
       if (!lock.tryAcquire()) process.exit(3);
       ${then === 'own-handler' ? ownHandler : ''}
+      ${own ? 'lock.deferSignalRelease?.();' : ''}
       process.stdout.write('ready\\n');
       ${then === 'exit' ? 'process.exit(0);' : 'setInterval(() => {}, 1000);'}
     `;
@@ -205,32 +219,45 @@ describe('WriterLock', () => {
     expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
   });
 
-  it('con un apagado propio escuchando SIGTERM no lo suelta (M1); una segunda señal sí, y termina', async () => {
-    const dataDir = tempDataDir();
-    const child = await childHoldingLock(dataDir, 'own-handler');
-    const lines: string[] = [];
-    const sigtermLine = new Promise<string>((resolve) => {
-      child.stdout!.on('data', (chunk: Buffer) => {
-        lines.push(...chunk.toString().split('\n').filter(Boolean));
-        const found = lines.find((line) => line.startsWith('sigterm'));
-        if (found) resolve(found);
-      });
+  for (const variant of ['own-handler', 'own-handler-first'] as const) {
+    const order = variant === 'own-handler' ? 'después' : 'antes (relevo)';
+    it(`con un apagado propio registrado ${order} del bloqueo no lo suelta (M1); una segunda señal sí, y termina`, async () => {
+      const dataDir = tempDataDir();
+      const child = await childHoldingLock(dataDir, variant);
+      const lines: string[] = [];
+      const exited = new Promise<NodeJS.Signals | null>((resolve) =>
+        child.once('exit', (_code, signal) => resolve(signal))
+      );
+      /** La primera línea con ese prefijo, o `exit:<señal>` si el proceso murió antes. */
+      const lineOrExit = (prefix: string) =>
+        new Promise<string>((resolve) => {
+          const check = (): void => {
+            const found = lines.find((line) => line.startsWith(prefix));
+            if (found) resolve(found);
+          };
+          child.stdout!.on('data', (chunk: Buffer) => {
+            lines.push(...chunk.toString().split('\n').filter(Boolean));
+            check();
+          });
+          check();
+          void exited.then((signal) => resolve(`exit:${signal}`));
+        });
+      const sigtermLine = lineOrExit('sigterm');
+      const stillLine = lineOrExit('still');
+
+      child.kill('SIGTERM');
+      // El apagado propio lo encuentra en su sitio y, a mitad del apagado, el proceso
+      // sigue vivo y con el bloqueo, sea cual sea el orden de los oyentes.
+      expect(await sigtermLine).toBe('sigterm lock=1');
+      expect(await stillLine).toBe('still lock=1');
+      expect(JSON.parse(readFileSync(join(dataDir, WRITER_LOCK_FILE), 'utf8')).pid).toBe(child.pid);
+
+      // Segunda señal, ya sin el oyente propio (`once`): suelta y termina por la señal.
+      child.kill('SIGTERM');
+      expect(await exited).toBe('SIGTERM');
+      expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
     });
-    const exited = new Promise<NodeJS.Signals | null>((resolve) =>
-      child.once('exit', (_code, signal) => resolve(signal))
-    );
-
-    child.kill('SIGTERM');
-    // El apagado propio lo encuentra en su sitio, y sigue ahí con el proceso vivo.
-    expect(await sigtermLine).toBe('sigterm lock=1');
-    expect(child.exitCode).toBeNull();
-    expect(JSON.parse(readFileSync(join(dataDir, WRITER_LOCK_FILE), 'utf8')).pid).toBe(child.pid);
-
-    // Segunda señal, ya sin el oyente (`once`): suelta y termina por la señal.
-    child.kill('SIGTERM');
-    expect(await exited).toBe('SIGTERM');
-    expect(existsSync(join(dataDir, WRITER_LOCK_FILE))).toBe(false);
-  });
+  }
 });
 
 describe('LibraryInstance: escritor único', () => {

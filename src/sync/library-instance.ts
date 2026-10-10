@@ -128,6 +128,11 @@ export class LibraryInstance implements NoteWriteTarget {
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private switching: Promise<void> = Promise.resolve();
+  private markShuttingDown!: () => void;
+  /** Resuelve al empezar el apagado (`beginShutdown`, o `close`). */
+  private readonly shuttingDown = new Promise<void>((resolve) => {
+    this.markShuttingDown = resolve;
+  });
   private readonly conflictListeners = new Set<(copy: SyncConflictCopy) => void>();
   private readonly writer: NoteWriter;
   /** Vista estable para la capa de herramientas. */
@@ -420,10 +425,37 @@ export class LibraryInstance implements NoteWriteTarget {
     };
   }
 
+  /**
+   * El proceso tiene su propio apagado con señal, que acaba en `close()` (M1 del audit de
+   * robustez, 10 oct 2026): el bloqueo no se suelta al llegar la señal sino al terminar de
+   * vaciar (`WriterLock.deferSignalRelease`). Lo llaman `serve` y `serve-http` al
+   * registrar su apagado, sea esta instancia escritora o lectora (un relevo posterior lo
+   * hereda).
+   */
+  deferSignalRelease(): void {
+    this.lock.deferSignalRelease();
+  }
+
+  /**
+   * Empieza el apagado (A1 del audit de robustez): las esperas de ronda de las escrituras
+   * en curso (`whenShuttingDown`, `buildWriteContext`) dejan de esperar y la respuesta sale
+   * ya, sin que la ronda la retenga. `serve-http` lo llama antes de esperar a las peticiones
+   * en curso; `close()` lo llama siempre. Idempotente; no cierra nada.
+   */
+  beginShutdown(): void {
+    this.markShuttingDown();
+  }
+
+  /** Resuelve cuando empieza el apagado (`beginShutdown`). */
+  whenShuttingDown(): Promise<void> {
+    return this.shuttingDown;
+  }
+
   /** Para el sync, cierra la SQLite y suelta el bloqueo. */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    this.beginShutdown();
     if (this.timer) clearInterval(this.timer);
     await this.switching;
     await this.closeWriterSocket();
