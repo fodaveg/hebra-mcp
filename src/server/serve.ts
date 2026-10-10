@@ -34,8 +34,9 @@ export interface OpenServeOptions {
   /** `null`: no hay llavero en esta plataforma (arranca sin emparejar). */
   secrets: SecretStore | null;
   fetcher?: Fetcher;
-  /** Tests: bloqueo, revisión del bloqueo y ritmo de sync. */
-  instance?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>;
+  /** Tests: bloqueo, revisión del bloqueo y un sync propio (relé en memoria), que sustituye
+   *  al de los secretos de `pair`. */
+  instance?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs' | 'sync'>;
   syncIntervalMs?: number | null;
   /** Tests: tiempos de espera del reenvío al escritor. */
   forward?: ForwardOptions;
@@ -94,6 +95,8 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     looseFileDirty: (id) => instance.port.looseFileDirty(id),
     isLinked: () => instance.syncRunner !== null,
     onConflictCopy: (listener) => instance.onConflictCopy(listener),
+    // Al empezar el apagado, ninguna escritura espera ya su ronda (A1).
+    shuttingDown: () => instance.whenShuttingDown(),
     requestRound: () => {
       const runner = instance.syncRunner;
       if (!runner) return Promise.resolve(null);

@@ -78,6 +78,12 @@ export interface WriteContextSources {
    * `SyncRoundResult` de Hebra) o `null` si no hay sync configurado.
    */
   requestRound(): Promise<unknown>;
+  /**
+   * Resuelve cuando empieza el apagado (`LibraryInstance.whenShuttingDown`, A1 del audit de
+   * robustez): desde entonces ninguna escritura espera su ronda y la respuesta sale ya. Sin
+   * él (tests), las esperas solo terminan con la ronda o con el plazo.
+   */
+  shuttingDown?(): Promise<void>;
 }
 
 /** Cómo terminó la espera de la ronda de después de escribir. */
@@ -249,6 +255,14 @@ export function buildWriteContext(
 ): WriteContext {
   const roundTimeoutMs = options.roundTimeoutMs ?? AWAIT_ROUND_TIMEOUT_MS;
 
+  /**
+   * Espera la ronda como mucho `timeoutMs`, y nada en cuanto empieza el apagado (A1 del
+   * audit de robustez, 10 oct 2026): la espera va DENTRO de la petición, y si durara más que
+   * el drenado de `serve-http` la respuesta de una escritura ya guardada se perdería (y el
+   * reintento de un append sin `operationId` la duplicaría). Cortada así cuenta como
+   * `timeout`: `sync: "pending"`, y una copia de conflicto que traiga esa ronda ya no llega
+   * a esta respuesta ni al registro de idempotencia (la copia queda visible en Hebra igual).
+   */
   function awaitRound(timeoutMs: number): Promise<RoundWait> {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<RoundWait>((resolve) => {
@@ -259,7 +273,10 @@ export function buildWriteContext(
       kind: 'done',
       result: 'unknown'
     }));
-    return Promise.race([round, timeout]).finally(() => {
+    const waits: Array<Promise<RoundWait>> = [round, timeout];
+    const shuttingDown = sources.shuttingDown?.();
+    if (shuttingDown) waits.push(shuttingDown.then((): RoundWait => ({ kind: 'timeout' })));
+    return Promise.race(waits).finally(() => {
       if (timer) clearTimeout(timer);
     });
   }

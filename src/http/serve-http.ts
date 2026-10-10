@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net';
 import { logEvent } from '../log/logger';
 import type { SecretStore } from '../secrets';
 import { openServeContext, type OpenServeOptions, type ServeContext } from '../server/serve';
+import { AWAIT_ROUND_TIMEOUT_MS } from '../server/write-context';
 import { createHttpApp, type HttpAuth } from './app';
 import type { HttpConfig } from './config';
 
@@ -31,11 +32,18 @@ export class ServeHttpError extends Error {
  * Cuánto espera `close()` a las peticiones HTTP en curso antes de cortar las conexiones
  * (A1 del audit de robustez, 10 oct 2026). Antes las cortaba en el acto: la escritura que
  * ya estaba en la cola se guardaba igual (`closeWhenIdle`), pero su respuesta se perdía y
- * el reintento del agente duplicaba un `hebra_append_to_note`. Cabe en el
- * `stop_grace_period` del contenedor (`deploy/compose.yml`, 40 s) junto con los 10 s de
- * espera de la ronda de una escritura y el vaciado de `serve.close()`.
+ * el reintento del agente duplicaba un `hebra_append_to_note`.
+ *
+ * Al empezar el apagado, las esperas de ronda de las escrituras en curso se cortan
+ * (`LibraryInstance.beginShutdown`), así que una petición ya no espera su ronda: le queda
+ * su turno en la cola del almacén. Aun así el plazo queda POR ENCIMA de la espera de ronda
+ * (`AWAIT_ROUND_TIMEOUT_MS`, 10 s), por si alguna espera de dentro de una petición no
+ * pasara por ese corte. Las dos esperas no se suman: la de ronda va dentro de esta.
+ * Después, `serve.close()` espera a la ronda en vuelo (hasta unos 30 s con el relé
+ * colgado) y vacía la cola: 12 + 30 caben en el `stop_grace_period` del contenedor
+ * (`deploy/compose.yml`, 50 s).
  */
-export const HTTP_DRAIN_TIMEOUT_MS = 8_000;
+export const HTTP_DRAIN_TIMEOUT_MS = AWAIT_ROUND_TIMEOUT_MS + 2_000;
 
 export interface StartServeHttpOptions
   extends Pick<OpenServeOptions, 'fetcher' | 'instance' | 'syncIntervalMs'> {
@@ -57,7 +65,8 @@ export interface ServeHttpHandle {
   serve: ServeContext;
   server: Server;
   /**
-   * Apagado ordenado: deja de aceptar conexiones, espera hasta `HTTP_DRAIN_TIMEOUT_MS` a
+   * Apagado ordenado: corta las esperas de ronda de las escrituras en curso
+   * (`beginShutdown`), deja de aceptar conexiones, espera hasta `HTTP_DRAIN_TIMEOUT_MS` a
    * que respondan las peticiones en curso, corta lo que quede y después cierra el
    * contexto (vacía la cola del almacén, para el sync y suelta el bloqueo).
    */
@@ -148,6 +157,9 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     server,
     close() {
       closing ??= (async () => {
+        // Primero, que ninguna escritura en curso siga esperando su ronda: la respuesta
+        // sale ya (con `sync: "pending"` donde lo haya).
+        serve.instance.beginShutdown();
         // `close` deja de aceptar conexiones y cierra las ociosas; las que tienen una
         // petición a medias siguen hasta responder (o hasta el plazo).
         const closed = new Promise<void>((resolve) => server.close(() => resolve()));

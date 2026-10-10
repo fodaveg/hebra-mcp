@@ -25,6 +25,8 @@ import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { BAIT_FOLDER, BAIT_TAG } from '../fixtures/test-library';
 import { BAIT_APPEND_TEXT, baitCalls } from '../fixtures/bait-calls';
+import { NO_PRIVATE } from '../fixtures/no-private';
+import { IDENTITY, InMemoryLibraryRelay, VAULT_KEY } from '../sync/devices';
 import { TOOL_NAMES } from '../fixtures/tool-names';
 import {
   connectHttpClient,
@@ -410,6 +412,67 @@ describe('arranque de serve-http', () => {
       expect(JSON.parse((response as { body: string }).body)).toMatchObject({ id: 1, result: {} });
       await closing;
       expect(stderrText()).toContain('"event":"serve_http.closed","drained":true');
+    });
+
+    it('un append ya guardado que espera una ronda que no termina responde al empezar el apagado', async () => {
+      // Relé en memoria cuya bajada se queda colgada hasta `release`: la ronda de arranque
+      // y la de después del append no terminan mientras dura el apagado.
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const relay = new InMemoryLibraryRelay();
+      const hanging = Object.assign(Object.create(relay) as InMemoryLibraryRelay, {
+        getChanges: async (...args: Parameters<InMemoryLibraryRelay['getChanges']>) => {
+          await gate;
+          return relay.getChanges(...args);
+        }
+      });
+      const drainTimeoutMs = 3_000;
+      const handle = await startServeHttp({
+        dataDir: tempDataDir(),
+        secrets: null,
+        config: httpConfigFor('http://127.0.0.1', 0),
+        version: '0.0.0-test',
+        authConfigured: () => true,
+        loadAuth: async () => staticBearerAuth(TOKEN),
+        drainTimeoutMs,
+        instance: {
+          checkIntervalMs: null,
+          lock: { releaseOnExit: false },
+          sync: { transport: hanging, identity: IDENTITY, vaultKey: VAULT_KEY, intervalMs: null }
+        }
+      });
+      handles.push(handle);
+      try {
+        const { instance } = handle.serve;
+        const { id } = await instance.createNote({ body: '# Lenta', privacy: NO_PRIVATE });
+        const client = await connectHttpClient(`http://127.0.0.1:${handle.port}`, TOKEN);
+        clients.push(client);
+        const text = 'CEBO-A1-ronda-lenta';
+        const call = client
+          .callTool({ name: 'hebra_append_to_note', arguments: { id, text, operationId: 'op-a1' } })
+          .then(
+            (result) => ({ ok: true as const, value: JSON.parse(textOf(result as CallToolResult)) }),
+            (error: unknown) => ({ ok: false as const, error: String(error) })
+          );
+        // Guardado: la petición ya solo espera la ronda, que no va a terminar.
+        for (;;) {
+          if ((await instance.port.noteRead(id))?.body.includes(text)) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        const started = Date.now();
+        const closing = handle.close();
+        const outcome = await call;
+        // La respuesta llega antes de que el drenado corte la conexión, sin esperar ronda.
+        expect(Date.now() - started).toBeLessThan(drainTimeoutMs);
+        expect(outcome).toMatchObject({ ok: true, value: { id, outcome: 'saved', appended: { tail: text } } });
+        release();
+        await closing;
+        expect(stderrText()).toContain('"event":"serve_http.closed","drained":true');
+      } finally {
+        release();
+      }
     });
 
     it('una petición que no termina a tiempo se corta al acabar el plazo', async () => {
