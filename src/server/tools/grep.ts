@@ -90,6 +90,10 @@ export interface GrepMatch {
   /** El apartado más interno que contiene la línea (D11), tal como está en la nota: sirve
    *  como `heading` de `hebra_read_note`. `null` antes del primer encabezado. */
   heading: string | null;
+  /** Cuál de los encabezados con ese título es (1-based, `occurrence` de `parseHeadings`):
+   *  el `headingOccurrence` de `hebra_read_note`, que con un título repetido hace falta.
+   *  `null` si `heading` lo es. */
+  headingOccurrence: number | null;
 }
 
 export interface GrepOutput {
@@ -283,6 +287,7 @@ export async function runGrep(
           headings ??= parseHeadings(body);
           const full = lineText(body, starts, line - 1);
           const clipped = clipAround(full, column);
+          const section = headingAtLine(headings, line);
           const found: GrepMatch = {
             id: note.id,
             title: note.title,
@@ -290,7 +295,8 @@ export async function runGrep(
             line,
             column,
             text: clipped.text,
-            heading: headingAtLine(headings, line)?.heading ?? null
+            heading: section?.heading ?? null,
+            headingOccurrence: section?.occurrence ?? null
           };
           if (clipped.text.length < full.length) {
             found.textStart = clipped.start;

@@ -10,6 +10,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ToolContext } from '../../src/server/context';
 import { ToolError } from '../../src/server/errors';
 import { runGrep, type GrepInput, type GrepMatch, type GrepOutput } from '../../src/server/tools/grep';
+import { runReadNote } from '../../src/server/tools/read-note';
 import type { NodeLibraryPort } from '../../src/store/node-port';
 import { createNote } from '../fixtures/test-library';
 import { SqliteLibraryEngine } from '../../src/hebra';
@@ -154,10 +155,31 @@ describe('hebra_grep: resultados', () => {
         text: '- GARBANZOS secos',
         before: ['- Garbanzos cocidos'],
         after: [''],
-        heading: 'Ingredientes'
+        heading: 'Ingredientes',
+        headingOccurrence: 1
       }
     ]);
     expect(out.cutoff).toBeNull();
+  });
+
+  it('headingOccurrence: el apartado sirve tal cual en hebra_read_note aunque el título se repita', async () => {
+    const path = await buildSmallLibrary(['# Doble\n\n## Dos\nuno\n\n## Dos\nbuscado aquí\n']);
+    const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      const [match] = (await runGrep(ctx, { pattern: 'buscado' })).matches;
+      expect(match).toMatchObject({ line: 7, heading: 'Dos', headingOccurrence: 2 });
+      const section = await runReadNote(ctx, {
+        id: match!.id,
+        heading: match!.heading!,
+        headingOccurrence: match!.headingOccurrence!
+      });
+      expect(section.body).toBe('## Dos\nbuscado aquí\n');
+      // La línea de un encabezado es de su propio apartado.
+      const [title] = (await runGrep(ctx, { pattern: 'Doble' })).matches;
+      expect(title).toMatchObject({ line: 1, heading: 'Doble', headingOccurrence: 1 });
+    } finally {
+      port.close();
+    }
   });
 
   it('sin distinguir mayúsculas por defecto; las tildes cuentan', async () => {
