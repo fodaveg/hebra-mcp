@@ -217,8 +217,12 @@ Detalle de las escrituras (D2):
   (`recordEditConflict`), como en una edición. **Límites**: los de la edición (24 h, un registro
   por directorio de datos); además, si murió tras guardar y antes de cerrar el registro y otra
   escritura o el sync cambió la nota antes del reintento, el SHA-256 ya no casa y el texto se
-  añade otra vez (la ventana es la de dos sentencias del mismo turno). Sin `operationId`, todo
-  como antes: cada llamada añade.
+  añade otra vez (la ventana es la de dos sentencias del mismo turno). Si el apagado empieza
+  mientras la escritura espera su ronda, la respuesta sale sin esperarla (§12.1) y una copia de
+  conflicto de esa ronda no llega a la respuesta ni al registro. Un lector de esta versión que
+  reenvía a un escritor anterior (§8) no puede contar con la idempotencia: ese escritor ignora
+  `operationId`; lo guarda igual y el lector lo registra (`forward.operation_id_ignored`), pero
+  un reintento lo duplicaría. Sin `operationId`, todo como antes: cada llamada añade.
 - **Notas por apartados** (D11, 9 oct 2026): el analizador (`src/store/sections.ts`, código propio, sin importar el de Hebra) trabaja con offsets sobre el cuerpo y nunca lo reserializa.
   - **Apartado**: una línea ATX (`^ {0,3}(#{1,6})(?:[ \t]+(.*)|[ \t]*)$`, título sin los `#` de cierre) y todo hasta el siguiente encabezado de nivel igual o menor, o el final. No cuentan como encabezado las líneas del frontmatter inicial (`---` … `---` al principio) ni las de un bloque de código cercado (``` o ~~~; un cercado sin cerrar llega al final). Se peca de detectar cercados de más y nunca de menos (un encabezado real no visto da `heading_not_found`, que es seguro; uno falso escribiría donde no es): la apertura es una línea que, tras quitar del principio cualquier combinación de espacios, tabuladores, marcadores de cita `>` y marcadores de lista (`-`, `+`, `*`, `1.`, `1)`, con su espacio), empieza por tres o más acentos graves o virgulillas (un cercado de acentos graves no admite acentos graves en su información); el cierre es una línea que, tras quitar espacios, tabuladores y `>`, es solo el mismo carácter repetido al menos tantas veces como la apertura, más espacios finales, sin tope de indentación. Un `#` sin espacio es una etiqueta, no un encabezado. Los encabezados Setext **no** cuentan (límite deliberado). Terminadores `\n` y `\r\n`. Tamaños y posiciones en unidades UTF-16.
   - **Selección**: el título se compara como `normalizedHeading` de Hebra (NFKC, recortado, espacios y tabuladores colapsados, minúsculas). `headingOccurrence` es la posición 1-based entre los encabezados con el mismo título normalizado, en orden de documento y sea cual sea su nivel. Sin `headingOccurrence`: 0 coincidencias, `heading_not_found`; más de una, `ambiguous_heading` con `candidates: [{heading, level, line, occurrence}]` (como mucho 50). El `heading` de un candidato se corta a 200 caracteres (sin partir un par suplente y sin puntos suspensivos), igual que `appended.heading`, porque ambos cruzan `writer.sock`; `section.heading` de la lectura y `sections[].heading` del esquema no se cortan. `tail` no empieza a mitad de un par suplente. Con él, la n-ésima, o `heading_not_found`.
@@ -747,13 +751,19 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     la siguiente y responde `busy_other_instance`. Una edición se puede reintentar con el mismo
     `operationId` sin duplicar (§5), y un `hebra_append_to_note` también si lleva `operationId`
     (10 oct 2026): el registro vive en la SQLite compartida, así que lo sirve el escritor que lo
-    guardó o el que tomó el relevo.
-  - **Apagado con señal** (M1 del audit de robustez, 10 oct 2026): `WriterLock` solo suelta el
-    bloqueo al recibir SIGINT, SIGTERM o SIGHUP si nadie más escucha esa señal. `serve` y
-    `serve-http` tienen su apagado (cerrar el transporte, esperar la ronda en vuelo, vaciar la cola
-    y cerrar la SQLite), y el bloqueo lo suelta `LibraryInstance.close()` al terminar: antes se
-    soltaba al llegar la señal y otro proceso podía hacerse escritor con el viejo aún escribiendo.
-    Una segunda señal suelta el bloqueo y termina. `SyncRunner.stop()` para también el motor
+    guardó o el que tomó el relevo. La respuesta de `appendToNote` devuelve el `operationId`
+    que atendió; si el lector lo mandó y no vuelve (un escritor de una versión anterior, que lo
+    ignora), registra `forward.operation_id_ignored` (sin texto ni id de nota) y responde lo
+    que dijo el escritor: el texto se guardó, pero ese append no es idempotente.
+  - **Apagado con señal** (M1 del audit de robustez, 10 oct 2026): `serve` y `serve-http`
+    tienen su apagado (cerrar el transporte, esperar la ronda en vuelo, vaciar la cola y cerrar
+    la SQLite) y, al registrarlo, se lo dicen a la instancia (`deferSignalRelease`). Desde
+    entonces la primera SIGINT, SIGTERM o SIGHUP no suelta el bloqueo: lo suelta
+    `LibraryInstance.close()` al terminar; antes se soltaba al llegar la señal y otro proceso
+    podía hacerse escritor con el viejo aún escribiendo. Lo decide ese indicador, no cuántos
+    oyentes tiene la señal: un `serve` que arranca de lector y toma el relevo después tiene su
+    oyente delante del del bloqueo. Una segunda señal suelta el bloqueo y termina. Sin el
+    indicador (otros usos de `WriterLock`), la señal lo suelta en el acto, como siempre. `SyncRunner.stop()` para también el motor
     (`LibrarySyncEngine.stop`), que corta las subidas de adjuntos en vuelo; la bajada y la subida de
     registros terminan con su propio plazo.
   - `hebra_status` de un lector devuelve el estado de sync del escritor, pedido por el socket, con
@@ -848,9 +858,13 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
     recurso `<origen>/mcp`).
   - Si otro proceso vivo tiene `writer.lock`, `serve-http` no arranca (`writer_lock_held`) en vez de
     servir como lector. Sigue escuchando en `writer.sock` como cualquier escritor.
-  - Apagado (A1 del audit de robustez, 10 oct 2026): con SIGTERM deja de aceptar conexiones,
-    espera hasta 8 s a que respondan las peticiones en curso y solo entonces corta lo que quede;
-    después cierra el contexto (ronda en vuelo, cola del almacén, SQLite y bloqueo, §8). Antes
+  - Apagado (A1 del audit de robustez, 10 oct 2026): con SIGTERM, primero las escrituras en
+    curso dejan de esperar su ronda (`beginShutdown`) y responden ya (`sync: "pending"` donde lo
+    llevan; una copia de conflicto que traiga esa ronda no llega a la respuesta ni al registro de
+    idempotencia, aunque queda visible en Hebra). Después deja de aceptar conexiones, espera
+    hasta 12 s (por encima de los 10 s de espera de ronda, que va dentro de la petición y ya no la
+    retiene) a que respondan las peticiones en curso y solo entonces corta lo que quede; después
+    cierra el contexto (ronda en vuelo, cola del almacén, SQLite y bloqueo, §8). Antes
     cortaba en el acto: la escritura en cola se guardaba igual, pero su respuesta se perdía y el
     reintento de un append lo duplicaba. Log `serve_http.closed` con `drained` (si no quedó
     ninguna a medias).
@@ -957,10 +971,12 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 - Contenedor en el servidor de Lumbre, red externa `edge`, sin puertos publicados y con volumen de estado
   (patrón de lumbre-mcp `deploy/compose.yml`). Imagen `node:24-alpine` fijada por digest y sin root.
-- `stop_grace_period: 40s` (10 oct 2026; antes, los 10 s por defecto de Docker): cabe la espera de
-  las peticiones en curso (8 s), la de la ronda de una escritura (10 s) y el vaciado; una ronda
-  colgada en el relé tarda hasta unos 30 s en soltarse. Con 10 s, el SIGKILL cortaba respuestas
-  de escrituras ya guardadas.
+- `stop_grace_period: 50s` (10 oct 2026; antes, los 10 s por defecto de Docker). Las esperas van
+  una detrás de otra así: primero el drenado de las peticiones en curso (hasta 12 s; la espera de
+  ronda de una escritura, 10 s, va DENTRO de su petición y al empezar el apagado se corta, así
+  que no se suma), después la ronda en vuelo, que con el relé colgado tarda hasta unos 30 s en
+  soltarse, y el vaciado de la cola: 12 + 30 más el vaciado caben en 50. Con 10 s, el SIGKILL
+  cortaba respuestas de escrituras ya guardadas.
 - `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
   `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
 - Host propio `mcp.hebra.pro` (elegido por David el 26 sep 2026), porque la metadata OAuth va en la raíz
