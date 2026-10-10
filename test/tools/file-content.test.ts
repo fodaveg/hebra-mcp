@@ -21,7 +21,8 @@ import type { WriteContext } from '../../src/server/write-context';
 import { FsBlobStore } from '../../src/store/blob-store-fs';
 import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
 import { replaceFileText } from '../../src/store/file-writes';
-import type { NoteWriteTarget } from '../../src/store/writes';
+import type { NoteWriteStore, NoteWriteTarget } from '../../src/store/writes';
+import { ensureFilePreviousTable, sqliteFilePreviousStore } from '../../src/store/file-previous';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 
 /**
@@ -632,6 +633,211 @@ describe('ficheros sueltos: leer y reemplazar el texto (D15)', () => {
       expect(isBusyOtherInstance(error)).toBe(true);
     } finally {
       reader.close();
+    }
+  });
+
+  // --- Revisión de D15 (10 oct 2026) ---------------------------------------------------
+
+  /** Un turno de escritura del puerto de la prueba, con partes del almacén cambiadas. */
+  function wrappedTarget(patch: (store: NoteWriteStore) => Partial<NoteWriteStore>): NoteWriteTarget {
+    const port = test!.ctx.port as unknown as NoteWriteTarget;
+    return {
+      writeExclusive: (operation) =>
+        port.writeExclusive((store) => operation({ ...store, ...patch(store) }))
+    };
+  }
+
+  const OPEN: PrivacyConfig = { privateFolders: [], privateTags: [] };
+
+  it('M1: deshacer no pisa un cambio posterior al reemplazo (file_changed, sin escribir)', async () => {
+    const { library } = await start();
+    const id = library.files.inventario;
+    await replace({ id, expectedSha256: sha256(BASE_YAML), text: NEW_YAML, operationId: 'op-x' });
+    // David añade una vista desde Hebra después del reemplazo X.
+    const theirs = `${NEW_YAML}  - type: cards\n    name: Mía\n`;
+    await withEngine(async (engine) => {
+      const blob = await engine.blobPut(new TextEncoder().encode(theirs), { mime: 'text/yaml' });
+      await engine.fileReplace(id, blob.sha256, sha256(NEW_YAML));
+    });
+    const before = raw(id);
+    // El agente relee (base al día) y pide deshacer X: perdería la vista.
+    const reread = await readText(id);
+    const undo = await replace({
+      id,
+      expectedSha256: reread.meta.sha256,
+      undoOperationId: 'op-x',
+      operationId: 'op-undo-x'
+    });
+    expect(json(undo)).toEqual({ error: 'file_changed' });
+    expect(raw(id)).toEqual(before);
+    expect((await readText(id)).text).toBe(theirs);
+  });
+
+  it('M2: un texto con BOM vuelve con su BOM; devolver lo leído responde already', async () => {
+    const { library } = await start();
+    const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+    const body = 'nombre;cantidad\npan;2\n';
+    const bytes = new Uint8Array([...bom, ...new TextEncoder().encode(body)]);
+    const id = await createFile(library.folders.lumbre, 'compra.csv', bytes, 'text/csv');
+    const before = raw(id);
+
+    const read = await readText(id);
+    expect(read.text).toBe(body);
+    expect(read.meta.sha256).toBe(sha256(bytes));
+    const same = json(
+      await replace({ id, expectedSha256: read.meta.sha256, text: read.text, operationId: 'op-bom-1' })
+    );
+    expect(same).toMatchObject({ outcome: 'already', sha256: sha256(bytes) });
+    expect(raw(id)).toEqual(before);
+
+    const next = 'nombre;cantidad\npan;3\n';
+    const saved = json(
+      await replace({ id, expectedSha256: read.meta.sha256, text: next, operationId: 'op-bom-2' })
+    );
+    const nextBytes = new Uint8Array([...bom, ...new TextEncoder().encode(next)]);
+    expect(saved).toMatchObject({
+      outcome: 'saved',
+      sha256: sha256(nextBytes),
+      byteLength: nextBytes.length
+    });
+    // Un texto que ya trae su U+FEFF no lleva otro.
+    const explicit = json(
+      await replace({
+        id,
+        expectedSha256: sha256(nextBytes),
+        text: `﻿${next}`,
+        operationId: 'op-bom-3'
+      })
+    );
+    expect(explicit).toMatchObject({ outcome: 'already', sha256: sha256(nextBytes) });
+  });
+
+  it('B1: un fichero de más de 1 000 000 bytes da file_too_large sin bajarlo ni leerlo', async () => {
+    const { library } = await start();
+    const big = 'b'.repeat(1_000_001);
+    const id = await createFile(library.folders.lumbre, 'largo.md', big, 'text/markdown');
+    let blobReads = 0;
+    let downloads = 0;
+    const target = wrappedTarget((store) => ({
+      blobRead: (sha: string) => {
+        blobReads += 1;
+        return store.blobRead(sha);
+      }
+    }));
+    const error = await replaceFileText(
+      target,
+      { id, expectedSha256: sha256(big), text: 'corto', operationId: 'op-b1', privacy: OPEN },
+      async () => {
+        downloads += 1;
+        return true;
+      },
+      () => {}
+    ).catch((caught: unknown) => caught);
+    expect((error as StoreError).code).toBe('file_too_large');
+    expect({ blobReads, downloads }).toEqual({ blobReads: 0, downloads: 0 });
+  });
+
+  it('B5: morir entre fileReplace y finish; el reintento lo da por guardado sin volver a escribir', async () => {
+    const { library } = await start();
+    const id = library.files.inventario;
+    const input = {
+      id,
+      expectedSha256: sha256(BASE_YAML),
+      text: NEW_YAML,
+      operationId: 'op-corte',
+      privacy: OPEN
+    };
+    // El proceso muere justo después de reemplazar: `finish` no llega a anotarse.
+    const dying = wrappedTarget((store) => ({
+      operations: {
+        ...store.operations,
+        finish: () => {
+          throw new Error('SIGKILL simulado');
+        }
+      }
+    }));
+    await expect(replaceFileText(dying, input, null, () => {})).rejects.toThrow('SIGKILL simulado');
+    const afterCut = raw(id);
+    expect(afterCut.sha256).toBe(sha256(NEW_YAML));
+
+    const retry = await replaceFileText(test!.ctx.port as unknown as NoteWriteTarget, input, null, () => {});
+    expect(retry).toEqual({
+      wrote: false,
+      result: {
+        id,
+        outcome: 'saved',
+        sha256: sha256(NEW_YAML),
+        byteLength: Buffer.byteLength(NEW_YAML),
+        mimeType: 'text/yaml',
+        previousSha256: sha256(BASE_YAML),
+        replayed: true
+      }
+    });
+    expect(raw(id)).toEqual(afterCut);
+    // Y desde ahí se puede deshacer: el contenido anterior se guardó antes del corte.
+    const undone = json(
+      await replace({ id, expectedSha256: sha256(NEW_YAML), undoOperationId: 'op-corte', operationId: 'op-u' })
+    );
+    expect(undone).toMatchObject({ outcome: 'saved', sha256: sha256(BASE_YAML) });
+  });
+});
+
+describe('hebra_mcp_file_previous: el tope (B5)', () => {
+  function entry(operationId: string, text: string, createdAt: number) {
+    return {
+      operationId,
+      fileId: 'f1',
+      previousSha256: 'a'.repeat(64),
+      previousText: text,
+      nextSha256: 'b'.repeat(64),
+      mime: 'text/plain',
+      createdAt
+    };
+  }
+
+  it('al pasar el tope de entradas o de bytes caen las más antiguas, nunca la recién guardada', () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      ensureFilePreviousTable(db);
+      const store = sqliteFilePreviousStore(db, { maxEntries: 3, maxBytes: 10 });
+      const now = 1_000_000;
+      store.save(entry('e1', 'aa', now + 1));
+      store.save(entry('e2', 'bb', now + 2));
+      store.save(entry('e3', 'cc', now + 3));
+      store.save(entry('e4', 'dd', now + 4));
+      const alive = (): string[] =>
+        ['e1', 'e2', 'e3', 'e4', 'e5', 'e6'].filter((id) => store.lookup(id, now) !== null);
+      expect(alive()).toEqual(['e2', 'e3', 'e4']);
+      // 7 + 2 = 9 bytes caben; con la siguiente, 11 > 10: caen las más antiguas.
+      store.save(entry('e5', 'xxxxxxx', now + 5));
+      expect(alive()).toEqual(['e4', 'e5']);
+      // Una sola que ya pasa el tope de bytes se queda: es la vuelta atrás del reemplazo
+      // que se acaba de hacer.
+      store.save(entry('e6', 'x'.repeat(50), now + 6));
+      expect(alive()).toEqual(['e6']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('M1: una tabla de antes de next_sha256 (564a6e3) se migra, y sus filas quedan sin él', () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      db.exec(`CREATE TABLE hebra_mcp_file_previous (
+        operation_id TEXT PRIMARY KEY, file_id TEXT NOT NULL, previous_sha256 TEXT NOT NULL,
+        previous_text TEXT NOT NULL, previous_bytes INTEGER NOT NULL, mime TEXT,
+        created_at INTEGER NOT NULL) WITHOUT ROWID`);
+      db.prepare(
+        `INSERT INTO hebra_mcp_file_previous VALUES ('vieja', 'f1', ?, 'texto', 5, 'text/plain', 10)`
+      ).run('a'.repeat(64));
+      ensureFilePreviousTable(db);
+      ensureFilePreviousTable(db);
+      const store = sqliteFilePreviousStore(db);
+      expect(store.lookup('vieja', 10)?.nextSha256).toBeNull();
+      store.save(entry('nueva', 'otro', 20));
+      expect(store.lookup('nueva', 20)?.nextSha256).toBe('b'.repeat(64));
+    } finally {
+      db.close();
     }
   });
 });

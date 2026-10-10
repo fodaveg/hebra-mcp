@@ -15,10 +15,20 @@
  * escritor al abrir en lectura-escritura y un lector nunca la escribe. El texto va en
  * claro, como el resto de la biblioteca local y los cuerpos base de D14.
  *
+ * Cada entrada guarda también el hash que ESCRIBIÓ el reemplazo (`next_sha256`, M1 de la
+ * revisión de D15): deshacer solo vale si el fichero sigue exactamente así. Si alguien lo
+ * cambió después (David añade una vista desde Hebra), deshacer respondería con la base que
+ * el agente acaba de releer y pisaría ese cambio; con `next_sha256` responde
+ * `file_changed`. Se guarda en la misma sentencia que el texto anterior, antes de
+ * `fileReplace`: el hash es el del texto nuevo, que ya está calculado, y `fileReplace` lo
+ * deja tal cual o no escribe (en ese caso el fichero sigue con el texto anterior y deshacer
+ * responde «ya estaba»). No depende del registro de operaciones, que caduca antes (24 h).
+ *
  * Límites: cada entrada caduca a los 7 días (`FILE_PREVIOUS_TTL_MS`) y, entre todas, como
  * mucho `FILE_PREVIOUS_MAX_ENTRIES` entradas y `FILE_PREVIOUS_MAX_BYTES` bytes de texto;
- * al guardar una que lo pasaría, caen las más antiguas. Se purga al empezar cada
- * reemplazo, en el mismo turno.
+ * al guardar una que lo pasaría, caen las más antiguas, nunca la que se acaba de guardar
+ * (es la vuelta atrás del reemplazo en curso). Se purga al empezar cada reemplazo, en el
+ * mismo turno.
  */
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
@@ -35,7 +45,8 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS hebra_mcp_file_previous (
   previous_text TEXT NOT NULL,
   previous_bytes INTEGER NOT NULL,
   mime TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  next_sha256 TEXT
 ) WITHOUT ROWID`;
 
 /** El contenido de un fichero antes de un reemplazo. */
@@ -45,6 +56,9 @@ export interface FilePreviousEntry {
   fileId: string;
   previousSha256: string;
   previousText: string;
+  /** El hash que escribió ese reemplazo; `null` solo en una fila de antes de la columna
+   *  (564a6e3), que no se puede deshacer (`file_changed`). */
+  nextSha256: string | null;
   /** Tipo con el que se leyó (`text/yaml`, `text/plain`…), para volver a escribirlo así. */
   mime: string | null;
   createdAt: number;
@@ -59,12 +73,31 @@ export interface FilePreviousStore {
   purgeExpired(now: number): void;
 }
 
-/** Crea la tabla si falta. Solo en la conexión de lectura-escritura del escritor. */
+/** Crea la tabla si falta y le añade `next_sha256` si es de antes de la columna. Solo en la
+ *  conexión de lectura-escritura del escritor. */
 export function ensureFilePreviousTable(db: DatabaseSync): void {
   db.exec(TABLE_SQL);
+  const columns = db.prepare('PRAGMA table_info(hebra_mcp_file_previous)').all() as Array<{
+    name: string;
+  }>;
+  if (!columns.some((column) => column.name === 'next_sha256')) {
+    db.exec('ALTER TABLE hebra_mcp_file_previous ADD COLUMN next_sha256 TEXT');
+  }
 }
 
-export function sqliteFilePreviousStore(db: DatabaseSync): FilePreviousStore {
+/** Topes del almacén; los tests los bajan para medir el recorte. */
+export interface FilePreviousLimits {
+  maxEntries: number;
+  maxBytes: number;
+}
+
+export function sqliteFilePreviousStore(
+  db: DatabaseSync,
+  limits: FilePreviousLimits = {
+    maxEntries: FILE_PREVIOUS_MAX_ENTRIES,
+    maxBytes: FILE_PREVIOUS_MAX_BYTES
+  }
+): FilePreviousStore {
   const prepared = new Map<string, StatementSync>();
   const statement = (sql: string): StatementSync => {
     let found = prepared.get(sql);
@@ -77,7 +110,8 @@ export function sqliteFilePreviousStore(db: DatabaseSync): FilePreviousStore {
   return {
     lookup(operationId, now) {
       const row = statement(
-        `SELECT operation_id, file_id, previous_sha256, previous_text, mime, created_at
+        `SELECT operation_id, file_id, previous_sha256, previous_text, next_sha256, mime,
+                created_at
          FROM hebra_mcp_file_previous WHERE operation_id = ? AND created_at >= ?`
       ).get(operationId, now - FILE_PREVIOUS_TTL_MS) as Record<string, unknown> | undefined;
       if (!row) return null;
@@ -86,6 +120,7 @@ export function sqliteFilePreviousStore(db: DatabaseSync): FilePreviousStore {
         fileId: String(row.file_id),
         previousSha256: String(row.previous_sha256),
         previousText: String(row.previous_text),
+        nextSha256: typeof row.next_sha256 === 'string' ? row.next_sha256 : null,
         mime: typeof row.mime === 'string' ? row.mime : null,
         createdAt: Number(row.created_at)
       };
@@ -94,8 +129,9 @@ export function sqliteFilePreviousStore(db: DatabaseSync): FilePreviousStore {
       const bytes = Buffer.byteLength(entry.previousText, 'utf8');
       statement(
         `INSERT OR REPLACE INTO hebra_mcp_file_previous
-           (operation_id, file_id, previous_sha256, previous_text, previous_bytes, mime, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+           (operation_id, file_id, previous_sha256, previous_text, previous_bytes, mime,
+            created_at, next_sha256)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         entry.operationId,
         entry.fileId,
@@ -103,19 +139,21 @@ export function sqliteFilePreviousStore(db: DatabaseSync): FilePreviousStore {
         entry.previousText,
         bytes,
         entry.mime,
-        entry.createdAt
+        entry.createdAt,
+        entry.nextSha256
       );
-      // Las más recientes primero; se borra todo lo que quede por detrás del tope de
-      // entradas o del de bytes (la recién guardada cabe siempre: pesa como mucho el tope
-      // de un reemplazo, muy por debajo del de bytes).
+      // La recién guardada se queda siempre (es la vuelta atrás del reemplazo en curso) y
+      // cuenta para los topes; de las demás, de la más reciente a la más antigua, se borra
+      // todo lo que quede por detrás del tope de entradas o del de bytes.
       const rows = statement(
         `SELECT operation_id, previous_bytes FROM hebra_mcp_file_previous
+         WHERE operation_id <> ?
          ORDER BY created_at DESC, operation_id DESC`
-      ).all() as Array<{ operation_id: string; previous_bytes: number | bigint }>;
-      let total = 0;
+      ).all(entry.operationId) as Array<{ operation_id: string; previous_bytes: number | bigint }>;
+      let total = bytes;
       rows.forEach((row, index) => {
         total += Number(row.previous_bytes);
-        if (index >= FILE_PREVIOUS_MAX_ENTRIES || total > FILE_PREVIOUS_MAX_BYTES) {
+        if (index + 1 >= limits.maxEntries || total > limits.maxBytes) {
           statement('DELETE FROM hebra_mcp_file_previous WHERE operation_id = ?').run(
             row.operation_id
           );

@@ -21,9 +21,11 @@
  *    oculta). Oculto, inexistente, lápida o en la papelera: `not_found`, todos igual.
  * 3. Reintento: `done`, lo anotado con `replayed`; `started` y el fichero ya tiene el
  *    contenido nuevo, se guardó antes de un corte (se cierra el registro).
+ *    Un tamaño ya sabido por encima del tope, `file_too_large` sin leer los bytes. Si el
+ *    fichero empieza por un BOM y el texto nuevo no, se le pone (la lectura lo quita).
  * 4. «Ya estaba»: el fichero ya tiene ese contenido; no escribe ni pide ronda.
- * 5. Base: el SHA-256 actual tiene que ser `expectedSha256`; si no, `file_changed` sin
- *    escribir.
+ * 5. Base: el SHA-256 actual tiene que ser `expectedSha256` y, al deshacer, además el que
+ *    escribió el reemplazo que se deshace; si no, `file_changed` sin escribir.
  * 6. Solo texto y solo hasta `FILE_TEXT_REPLACE_MAX_BYTES`: los bytes actuales (si no
  *    están aquí, `file_unavailable`), su tipo por el contenido (`file_type_not_allowed`)
  *    y su tamaño (`file_too_large`). El texto nuevo, con el mismo tipo, tiene que seguir
@@ -150,6 +152,24 @@ function visibleLiveFile(store: NoteWriteStore, id: string, privacy: PrivacyConf
   return { files, content };
 }
 
+const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
+
+function startsWithBom(bytes: Uint8Array | null): boolean {
+  return bytes !== null && bytes.length >= 3 && BOM.every((byte, index) => bytes[index] === byte);
+}
+
+function withBom(bytes: Uint8Array): Uint8Array {
+  const out = new Uint8Array(BOM.length + bytes.length);
+  out.set(BOM, 0);
+  out.set(bytes, BOM.length);
+  return out;
+}
+
+/** Un tamaño ya sabido (la fila de `blobs`) por encima de lo que se reemplaza. */
+function tooLargeToReplace(byteLength: number | null): boolean {
+  return byteLength !== null && byteLength > FILE_TEXT_REPLACE_MAX_BYTES;
+}
+
 /** El texto anterior con su BOM, si lo tenía: así volver atrás deja los mismos bytes. */
 function exactText(bytes: Uint8Array): string {
   return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
@@ -216,6 +236,8 @@ export async function replaceFileText(
       if (store.operations.lookup(input.operationId)?.state === 'done') return false;
       try {
         const { content } = visibleLiveFile(store, input.id, input.privacy);
+        // Uno que ya se sabe demasiado grande no se baja (B1): el turno de abajo lo rechaza.
+        if (tooLargeToReplace(content.file.byteLength)) return false;
         return content.sha256 === expected && (await store.blobRead(expected)) === null;
       } catch {
         return false; // El turno de abajo responde lo que toque, con sus comprobaciones.
@@ -236,17 +258,29 @@ export async function replaceFileText(
       if (previous?.state === 'done' && isReplaceFileTextSaved(previous.result)) {
         return { result: { ...previous.result, replayed: true }, wrote: false };
       }
+      // B1: un tamaño ya sabido por encima del tope se rechaza sin leer los bytes.
+      if (tooLargeToReplace(file.byteLength)) throw writeRejected('file_too_large');
+      // Los bytes actuales, si están aquí (si no, `null`: más abajo, `file_changed` o
+      // `file_unavailable`). Hacen falta ya para saber si llevan BOM.
+      const current = await store.blobRead(content.sha256);
 
       // El contenido nuevo: el texto, o el que guardó el reemplazo que se deshace.
       let bytes: Uint8Array;
       let undoMime: string | null = null;
+      let undoFrom: string | null | undefined;
       if (textBytes) {
-        bytes = textBytes;
+        // M2: `hebra_read_file` devuelve el texto sin el BOM (U+FEFF) y el hash de los bytes
+        // con él. Si el fichero lo lleva y el texto nuevo no, se le pone: devolver lo leído
+        // deja los mismos bytes (y es «ya estaba»), y un CSV no pierde en silencio la marca
+        // con la que Excel reconoce el UTF-8.
+        bytes = startsWithBom(current) && !startsWithBom(textBytes) ? withBom(textBytes) : textBytes;
+        if (bytes.length > FILE_TEXT_REPLACE_MAX_BYTES) throw writeRejected('file_too_large');
       } else {
         const saved = store.looseFilePrevious.lookup(input.undoOperationId!, now);
         if (!saved || saved.fileId !== input.id) throw writeRejected('invalid_input');
         bytes = newTextBytes(saved.previousText);
         undoMime = saved.mime;
+        undoFrom = saved.nextSha256;
       }
       const newSha = bytesSha256(bytes);
       const writtenType = detectFileType(bytes, undoMime ?? file.mime, file.name);
@@ -286,9 +320,15 @@ export async function replaceFileText(
         return { result: already, wrote: false };
       }
 
+      // M1: deshacer solo vale si el fichero sigue EXACTAMENTE como lo dejó el reemplazo que
+      // se deshace; un cambio posterior (de otro dispositivo o de otro reemplazo) se
+      // perdería aunque el agente haya releído la base. Una fila de antes de la columna
+      // (`null`) no se puede comprobar: cerrado ante la duda.
+      if (undoFrom !== undefined && content.sha256 !== undoFrom) {
+        throw writeRejected('file_changed');
+      }
       if (content.sha256 !== expected) throw writeRejected('file_changed');
 
-      const current = await store.blobRead(content.sha256);
       if (current === null) throw writeRejected('file_unavailable');
       if (current.length > FILE_TEXT_REPLACE_MAX_BYTES) throw writeRejected('file_too_large');
       const currentType = detectFileType(current, file.mime, file.name);
@@ -319,6 +359,7 @@ export async function replaceFileText(
         fileId: input.id,
         previousSha256: content.sha256,
         previousText: exactText(current),
+        nextSha256: newSha,
         mime: currentType.mimeType,
         createdAt: now
       });
