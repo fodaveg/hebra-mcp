@@ -252,8 +252,10 @@ export async function runGrep(
   let progressed = false;
   let session: GrepBodiesSession | null = null;
   let stop: { cursor: string | null; cutoff: GrepOutput['cutoff'] } | null = null;
+  // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
+  // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
+  const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re);
   const deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
-  const worker = pattern.literal ? null : new RegexScanWorker(pattern.re);
   try {
     for (let first = 0; first < pending.length && !stop; first += GREP_BATCH_NOTES) {
       const batch = pending.slice(first, first + GREP_BATCH_NOTES);

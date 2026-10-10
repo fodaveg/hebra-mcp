@@ -14,6 +14,7 @@ import { runReadNote } from '../../src/server/tools/read-note';
 import type { NodeLibraryPort } from '../../src/store/node-port';
 import { substringIndexUsable, type GrepBodiesSession } from '../../src/store/grep-sql';
 import { trigramMatch } from '../../src/store/grep';
+import { regexWorkersInUse } from '../../src/store/regex-worker';
 import type { PrivacyConfig } from '../../src/privacy/config';
 import { createNote } from '../fixtures/test-library';
 import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
@@ -399,6 +400,39 @@ describe('hebra_grep: expresiones regulares caras', () => {
       }
       // Con un plazo normal, una expresión normal sobre la misma biblioteca va bien.
       expect((await runGrep(ctx, { pattern: 'a{3}$', regex: true })).matches).toHaveLength(1);
+    } finally {
+      port.close();
+    }
+  });
+});
+
+describe('hebra_grep: hilos de expresiones regulares', () => {
+  it('como mucho 3 vivos a la vez, y la espera de un hueco no gasta el plazo', async () => {
+    const path = await buildSmallLibrary([`# Trampa\n${'a'.repeat(40)}!\n`]);
+    const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      let most = 0;
+      const sampler = setInterval(() => {
+        most = Math.max(most, regexWorkersInUse());
+      }, 2);
+      const started = Date.now();
+      const results = await Promise.allSettled(
+        Array.from({ length: 6 }, () =>
+          runGrep(ctx, { pattern: '(a+)+$', regex: true }, { timeBudgetMs: 250 })
+        )
+      );
+      const elapsed = Date.now() - started;
+      clearInterval(sampler);
+      // Seis llamadas que agotan su plazo de 250 ms con tres huecos: dos tandas, y las de la
+      // segunda con su plazo entero (si la espera contara, saldrían sin tiempo).
+      expect(most).toBeGreaterThan(0);
+      expect(most).toBeLessThanOrEqual(3);
+      expect(elapsed).toBeGreaterThanOrEqual(480);
+      for (const result of results) {
+        expect(result.status).toBe('rejected');
+        expect((result as PromiseRejectedResult).reason).toMatchObject({ code: 'pattern_too_slow' });
+      }
+      expect(regexWorkersInUse()).toBe(0);
     } finally {
       port.close();
     }

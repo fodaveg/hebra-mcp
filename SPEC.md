@@ -268,7 +268,9 @@ Detalle de las escrituras (D2):
     en seco (medido: un milisegundo con `(a+)+$` sobre 40 `a` y un `!`) y el bucle de eventos
     del servidor no se bloquea en ningún momento. Si no terminó ni una nota en el plazo,
     `pattern_too_slow`: seguir no avanzaría. Un hilo por llamada (arrancarlo, unos 12 ms) que se
-    cierra al terminar. El hilo y el hilo principal recorren las líneas con la misma función
+    cierra al terminar, y como mucho tres vivos a la vez en todo el proceso
+    (`REGEX_WORKERS_MAX`): la cuarta llamada espera un hueco, y esa espera no cuenta para su
+    plazo, que empieza con el hilo ya arrancado. El hilo y el hilo principal recorren las líneas con la misma función
     (`scanBody`, que el hilo recibe como código fuente). Un literal se recorre en el hilo
     principal: es lineal.
   - **Prefiltro de subcadena** (índice `notes_trigram` de Hebra, H5, §8): si el patrón tiene un

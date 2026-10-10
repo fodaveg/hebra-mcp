@@ -70,13 +70,54 @@ export class RegexWorkerFailed extends Error {
   }
 }
 
+/** Hilos de expresiones regulares vivos a la vez, como mucho, en todo el proceso: cada uno
+ *  puede ocupar un núcleo y hasta `WORKER_HEAP_MB`. Una llamada más espera su turno, y esa
+ *  espera no cuenta para su plazo (que empieza al tener el hilo). */
+export const REGEX_WORKERS_MAX = 3;
+
+let slotsInUse = 0;
+const slotWaiters: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (slotsInUse < REGEX_WORKERS_MAX) {
+    slotsInUse += 1;
+    return Promise.resolve();
+  }
+  // El que suelta un hueco se lo pasa directamente al primero que espera.
+  return new Promise<void>((resolve) => slotWaiters.push(resolve));
+}
+
+function releaseSlot(): void {
+  const next = slotWaiters.shift();
+  if (next) next();
+  else slotsInUse -= 1;
+}
+
+/** Huecos ocupados (hilos arrancados y aún sin terminar de cerrar). Para los tests. */
+export function regexWorkersInUse(): number {
+  return slotsInUse;
+}
+
 export class RegexScanWorker {
   private readonly worker: Worker;
   private batchId = 0;
   private closed = false;
+  /** El cierre en curso o hecho: cerrar dos veces espera al mismo, y el hueco se suelta una vez. */
+  private closing: Promise<void> | null = null;
   private failure: ((error: Error) => void) | null = null;
 
-  constructor(re: RegExp) {
+  /** Espera un hueco (`REGEX_WORKERS_MAX`) y arranca el hilo; `close` lo devuelve. */
+  static async start(re: RegExp): Promise<RegexScanWorker> {
+    await acquireSlot();
+    try {
+      return new RegexScanWorker(re);
+    } catch (error) {
+      releaseSlot();
+      throw error;
+    }
+  }
+
+  private constructor(re: RegExp) {
     this.worker = new Worker(WORKER_SOURCE, {
       eval: true,
       workerData: { source: re.source, flags: re.flags },
@@ -154,11 +195,18 @@ export class RegexScanWorker {
     });
   }
 
-  /** Mata el hilo (también si está en mitad de una expresión). Idempotente. */
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    this.failure = null;
-    await this.worker.terminate();
+  /** Mata el hilo (también si está en mitad de una expresión) y suelta su hueco.
+   *  Idempotente: todas las llamadas esperan al mismo cierre. */
+  close(): Promise<void> {
+    this.closing ??= (async () => {
+      this.closed = true;
+      this.failure = null;
+      try {
+        await this.worker.terminate();
+      } finally {
+        releaseSlot();
+      }
+    })();
+    return this.closing;
   }
 }
