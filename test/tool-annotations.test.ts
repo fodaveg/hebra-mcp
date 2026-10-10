@@ -17,6 +17,12 @@ const WRITE_IDEMPOTENT = {
   idempotentHint: true,
   openWorldHint: false
 };
+const WRITE_DESTRUCTIVE_IDEMPOTENT = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: false
+};
 const WRITE_NEW = {
   readOnlyHint: false,
   destructiveHint: false,
@@ -59,9 +65,11 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // y deshacer dos veces no cambia nada más.
   hebra_replace_in_notes: WRITE_IDEMPOTENT,
   // D15: leer un fichero suelto; reemplazar su texto con el mismo `operationId` no vuelve
-  // a escribir, y con un contenido que ya tiene responde «ya estaba».
+  // a escribir, y con un contenido que ya tiene responde «ya estaba». Es DESTRUCTIVA
+  // (decisión de la sesión principal en la revisión de D15): sobrescribe un fichero entero
+  // que Hebra no versiona, y la vuelta atrás solo vive en una tabla local.
   hebra_read_file: READ,
-  hebra_replace_file_text: WRITE_IDEMPOTENT,
+  hebra_replace_file_text: WRITE_DESTRUCTIVE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };
