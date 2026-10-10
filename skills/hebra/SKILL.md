@@ -97,7 +97,7 @@ sustituciones.
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
 | `hebra_links` | `id`, `limit?` 1-200, `cursor?` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. Pagina con `nextCursor`. |
 | `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El título es el `title:` del frontmatter si lo hay y, si no, el primer `# H1` del cuerpo. |
-| `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. |
+| `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. |
 | `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `totalChars`, `applied`, `sync`, `replayed`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
 | `hebra_set_favorite` | `id`, `favorite` (bool) | Idempotente. Misma salida que mover. |
@@ -133,8 +133,14 @@ traigas entera para tocar un apartado.
   1. `hebra_note_outline` con el `id` (o el `title`): los apartados con su `heading`, `level`
      y `chars`. Elige el apartado; si su título sale con `occurrence`, se repite y tienes que
      pasarlo como `headingOccurrence`.
-  2. `hebra_append_to_note` con `id`, `text`, `heading` (y `headingOccurrence`). El texto va
-     al final de ese apartado, subapartados incluidos, con una línea en blanco de separación.
+  2. `hebra_append_to_note` con `id`, `text`, `heading` (y `headingOccurrence`) y un
+     `operationId` nuevo (un UUID). El texto va al final de ese apartado, subapartados
+     incluidos, con una línea en blanco de separación.
+- **Si se pierde la respuesta del append** (`busy_other_instance`, un corte, un timeout):
+  reintenta con el MISMO `operationId` y la misma petición. Si ya se había guardado,
+  devuelve lo guardado con `replayed: true` y no lo añade otra vez (si no llegó a anotarse
+  entero, sin `appended`: comprueba con `totalChars` o leyendo el apartado). Sin
+  `operationId`, reintentar lo duplica: antes de repetir, mira si el texto ya está.
 - **Comprobar que entró entero**: con la respuesta de esa misma llamada, sin `hebra_search`
   ni releer la nota. `appended.tail` son los últimos 200 caracteres del texto tal como
   quedaron en la nota guardada, `appended.chars` su tamaño y `totalChars` el de la nota

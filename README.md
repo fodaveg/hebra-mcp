@@ -17,7 +17,10 @@ Estado a 9 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 28 herrami
 - Lectura: `hebra_search`, `hebra_list_notes`, `hebra_read_note`, `hebra_list_tags`,
   `hebra_list_folders`, `hebra_links` y `hebra_status`.
 - Creación y edición: `hebra_create_note`, `hebra_append_to_note` y `hebra_edit_note`
-  (por sustituciones).
+  (por sustituciones). `hebra_append_to_note` acepta un `operationId` opcional (10 oct
+  2026): con él, reintentar tras perder la respuesta (un despliegue, `busy_other_instance`)
+  no vuelve a añadir el texto y devuelve lo guardado con `replayed: true`, durante 24 h;
+  sin él, cada llamada añade.
 - Notas por apartados (D11): `hebra_note_outline` da el esquema de una nota (apartados,
   niveles, líneas y tamaños, sin cuerpo; limit 1-500, def. 200); `hebra_read_note` con
   `heading` lee solo un apartado (subapartados incluidos) y `hebra_append_to_note` con
