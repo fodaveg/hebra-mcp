@@ -284,7 +284,14 @@ Detalle de las escrituras (D2):
     tramos medidos (latín, griego, cirílico, puntuación y monedas, menos 28 que sin distinguir
     mayúsculas JavaScript iguala con otro y FTS5 no; `test/store/grep.test.ts` lo vuelve a medir
     contra SQLite), no se usa el índice. Sin el índice completo (relleno a medias, o un lector
-    sobre una base sin él), se recorren todas.
+    sobre una base sin él), se recorren todas. Esas reglas de lo que el índice no guarda tal
+    cual son de la versión 1 del índice (`SUBSTRING_INDEX_VERSION` de Hebra), contrastadas
+    con los vectores `cases/substring-index-text.json` del submódulo: el test recorre, para cada
+    uno, toda subcadena de tres caracteres o más sin `[`, `]`, `|` ni `!` que no esté en el texto
+    visible y comprueba que la nota sale como candidata. El índice solo se usa si la versión
+    del submódulo y la marca de la base son EXACTAMENTE 1 (`GREP_AUDITED_SUBSTRING_INDEX_VERSION`);
+    con otra, recorrido completo y, una vez por proceso, el evento `grep.substring_index`
+    (`unaudited_version`, con las dos versiones).
   - **Medida** (`npm run perf:grep`, `test/perf/grep-20mb.perf.ts`, fuera de `npm test`; 10 oct
     2026, este Mac, Node 24.19, SQLite 3.53): biblioteca sintética de 4 064 notas y 20 976 723
     caracteres de cuerpo hecha con el motor (una de cada veinte en una carpeta privada), la peor

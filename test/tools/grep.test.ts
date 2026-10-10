@@ -3,7 +3,7 @@
  * respuesta), corte por tiempo y cursor, expresión regular catastrófica, prefiltro de
  * subcadena igual que sin él, y el contrato de cada coincidencia.
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -12,7 +12,8 @@ import { ToolError } from '../../src/server/errors';
 import { runGrep, type GrepInput, type GrepMatch, type GrepOutput } from '../../src/server/tools/grep';
 import { runReadNote } from '../../src/server/tools/read-note';
 import type { NodeLibraryPort } from '../../src/store/node-port';
-import type { GrepBodiesSession } from '../../src/store/grep-sql';
+import { substringIndexUsable, type GrepBodiesSession } from '../../src/store/grep-sql';
+import { trigramMatch } from '../../src/store/grep';
 import type { PrivacyConfig } from '../../src/privacy/config';
 import { createNote } from '../fixtures/test-library';
 import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
@@ -439,6 +440,69 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     } finally {
       db.prepare("INSERT INTO meta(key, value) VALUES ('substring_index_version', ?)").run(marker.value);
       db.close();
+    }
+  });
+
+  it('con una marca de otra versión del índice que la auditada, no se usa', async () => {
+    const db = new DatabaseSync(pair.withoutPrivate);
+    try {
+      expect(await withoutPrivate.port.grepCandidates('body : "garbanzos"', [1])).not.toBeNull();
+      db.prepare("UPDATE meta SET value = '2' WHERE key = 'substring_index_version'").run();
+      expect(await withoutPrivate.port.grepCandidates('body : "garbanzos"', [1])).toBeNull();
+      // Y el resultado es el del recorrido completo.
+      expect((await runGrep(withoutPrivate.ctx, { pattern: 'Receta de pan' })).matches).toHaveLength(1);
+    } finally {
+      db.prepare("UPDATE meta SET value = '1' WHERE key = 'substring_index_version'").run();
+      db.close();
+    }
+    expect(substringIndexUsable(1, 1)).toBe(true);
+    expect(substringIndexUsable(2, 2)).toBe(false);
+    expect(substringIndexUsable(1, 2)).toBe(false);
+    expect(substringIndexUsable(1, 0)).toBe(false);
+  });
+
+  it('los vectores de texto visible de Hebra: lo que el índice no guarda sale como candidata', async () => {
+    // Solo datos (`input`/`output` de `substringIndexText`), leídos del submódulo en tiempo
+    // de test: ningún código de Hebra entra en este repo (D5).
+    const vectors = (
+      JSON.parse(
+        readFileSync(
+          join(process.cwd(), 'vendor/hebra/src/lib/library/cases/substring-index-text.json'),
+          'utf8'
+        )
+      ) as { vectors: Array<{ name: string; input: string; output: string }> }
+    ).vectors;
+    expect(vectors.length).toBeGreaterThan(10);
+    const path = await buildSmallLibrary(vectors.map((vector) => vector.input));
+    const { port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      const byBody = new Map<string, number>();
+      for (const row of await port.grepNotes()) {
+        const body = (await port.noteRead(row.id))!.body;
+        byBody.set(body, row.rowid);
+      }
+      let checked = 0;
+      for (const vector of vectors) {
+        const rowid = byBody.get(vector.input)!;
+        expect(rowid, vector.name).toBeDefined();
+        const chars = [...vector.input];
+        for (let from = 0; from < chars.length; from += 1) {
+          for (let to = from + 3; to <= chars.length; to += 1) {
+            const piece = chars.slice(from, to).join('');
+            if (/[[\]|!\n]/.test(piece) || vector.output.includes(piece)) continue;
+            for (const caseSensitive of [true, false]) {
+              const match = trigramMatch(piece, caseSensitive);
+              if (match === null) continue;
+              checked += 1;
+              const candidates = await port.grepCandidates(match, [rowid]);
+              expect(candidates?.has(rowid), `${vector.name}: «${piece}»`).toBe(true);
+            }
+          }
+        }
+      }
+      expect(checked).toBeGreaterThan(100);
+    } finally {
+      port.close();
     }
   });
 

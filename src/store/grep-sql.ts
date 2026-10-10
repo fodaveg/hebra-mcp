@@ -9,6 +9,7 @@ import type { DatabaseSync } from 'node:sqlite';
 import { SUBSTRING_INDEX_VERSION, type FoldersList } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
+import { logEvent } from '../log/logger';
 
 /** Una nota viva (ni papelera ni lápida), sin su cuerpo: lo que `hebra_grep` necesita para
  *  decidir qué recorre. `rowid` es la clave del índice de subcadena. */
@@ -70,6 +71,7 @@ function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
  *  SQLite sin `trigram`, o un lector de una base que el escritor aún no ha abierto con
  *  H5), no. */
 function substringIndexComplete(db: DatabaseSync): boolean {
+  if (!substringIndexUsable(SUBSTRING_INDEX_VERSION, SUBSTRING_INDEX_VERSION)) return false;
   const table = db
     .prepare(
       `SELECT 1 AS ok FROM sqlite_master
@@ -80,7 +82,41 @@ function substringIndexComplete(db: DatabaseSync): boolean {
   const row = db
     .prepare("SELECT CAST(value AS INTEGER) AS version FROM meta WHERE key = 'substring_index_version'")
     .get() as { version: number | bigint } | undefined;
-  return row !== undefined && Number(row.version) >= SUBSTRING_INDEX_VERSION;
+  return row !== undefined && substringIndexUsable(SUBSTRING_INDEX_VERSION, Number(row.version));
+}
+
+/**
+ * La versión del índice de subcadena de Hebra (`SUBSTRING_INDEX_VERSION`) cuyas reglas de
+ * lo que NO guarda tal cual están auditadas en hebra-mcp: los delimitadores de
+ * `trigramMatch` (`./grep.ts`) y las marcas de `grepSubstringCandidates`, contrastados con
+ * los vectores `cases/substring-index-text.json` del submódulo
+ * (`test/tools/grep.test.ts`). Si Hebra cambia lo que indexa, sube su versión, y hasta
+ * revisar esas reglas el índice no se usa.
+ */
+export const GREP_AUDITED_SUBSTRING_INDEX_VERSION = 1;
+
+let unauditedLogged = false;
+
+/**
+ * ¿Se puede usar el índice? Solo si la versión del submódulo y la de la marca de esta base
+ * son EXACTAMENTE la auditada: con otra (más nueva o más vieja), el prefiltro podría
+ * dejarse notas, así que `hebra_grep` recorre todo. La primera vez que pasa por la versión
+ * del submódulo, un evento `grep.substring_index` (`unaudited_version`, solo números).
+ */
+export function substringIndexUsable(engineVersion: number, markerVersion: number): boolean {
+  if (engineVersion !== GREP_AUDITED_SUBSTRING_INDEX_VERSION) {
+    if (!unauditedLogged) {
+      unauditedLogged = true;
+      logEvent({
+        event: 'grep.substring_index',
+        result: 'unaudited_version',
+        version: engineVersion,
+        audited: GREP_AUDITED_SUBSTRING_INDEX_VERSION
+      });
+    }
+    return false;
+  }
+  return markerVersion === GREP_AUDITED_SUBSTRING_INDEX_VERSION;
 }
 
 /**
