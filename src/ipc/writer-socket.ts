@@ -14,10 +14,12 @@
  * turno de la escritura (D2 ampliada, 28 sep 2026); sin ella, `invalid_request`:
  * - `createNote` `{body, folderId, privacy}` → `{id, title, folderId}`.
  * - `appendToNote` `{id, text, heading?, headingOccurrence?, operationId?, privacy}` →
- *   `{id, outcome, copyId?, revision?, totalChars?, appended?, replayed?}`, ya con la
- *   ronda de sync esperada en el escritor (como `hebra_append_to_note` con `awaitRound`).
- *   Con `heading` (D11) el apartado se resuelve en el escritor, dentro del turno; con
- *   `operationId` (10 oct 2026), el reintento lo sirve el registro (`replayed`).
+ *   `{id, outcome, copyId?, revision?, totalChars?, appended?, replayed?, operationId?}`,
+ *   ya con la ronda de sync esperada en el escritor (como `hebra_append_to_note` con
+ *   `awaitRound`). Con `heading` (D11) el apartado se resuelve en el escritor, dentro del
+ *   turno; con `operationId` (10 oct 2026), el reintento lo sirve el registro
+ *   (`replayed`) y la respuesta lo devuelve (un escritor anterior no lo hace: el lector lo
+ *   registra como `forward.operation_id_ignored`).
  * - `status` `{}` → el estado de sync del escritor, sin `writer` ni `linked`.
  * - `editNote` `{id, edits, expectedRevision, operationId, privacy}` → el resultado
  *   completo de `hebra_edit_note` (`EditNoteOutcome`), con la ronda ya esperada en el

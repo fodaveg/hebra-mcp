@@ -393,7 +393,19 @@ export function buildRoutedWriteContext(
           ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
           privacy: input.privacy
         },
-        (value) => asAppendResult(value, input.id),
+        (value) => {
+          const result = asAppendResult(value, input.id);
+          // Un escritor de una versión anterior ignora `operationId` sin decirlo: el texto
+          // se guardó, pero un reintento lo duplicaría. El escritor actual lo devuelve; si
+          // no vuelve, queda en el log (sin texto ni id de nota) y la respuesta es la suya.
+          if (
+            input.operationId !== undefined &&
+            (!isRecord(value) || value.operationId !== input.operationId)
+          ) {
+            logEvent({ event: 'forward.operation_id_ignored', op: 'appendToNote' });
+          }
+          return result;
+        },
         () => local.appendToNote(input)
       ),
     // La edición entera (guardado, ronda y estado de sync) ocurre en el escritor. Si la
@@ -504,7 +516,12 @@ export function writerSocketHandlers(
 ): WriterSocketHandlers {
   return {
     createNote: (input) => local.createNote(input),
-    appendToNote: (input) => appendAndAwaitRound(local, input),
+    // Devuelve el `operationId` que atendió: así el lector sabe que este escritor lo
+    // entiende (uno anterior lo ignoraría sin decirlo).
+    appendToNote: async (input) => {
+      const result = await appendAndAwaitRound(local, input);
+      return input.operationId === undefined ? result : { ...result, operationId: input.operationId };
+    },
     editNote: (input) => local.editNote(input),
     organize: (input) => local.organize(input),
     restoreVersion: (input) => local.restoreVersion(input),

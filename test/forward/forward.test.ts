@@ -222,6 +222,8 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     const reused = await call(client, 'hebra_append_to_note', { ...args, text: 'otro' });
     expect(reused).toEqual({ isError: true, value: { error: 'operation_id_reused' } });
     expect(stderrText()).not.toContain(BAIT_TEXT);
+    // El escritor de esta versión devuelve el `operationId`: el lector no avisa de nada.
+    expect(stderrText()).not.toContain('forward.operation_id_ignored');
   });
 
   it('hebra_append_to_note con operationId: la copia de conflicto de la ronda queda anotada para el reintento', async () => {
@@ -1421,6 +1423,47 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     expect(instance.checkWriter).toHaveBeenCalledTimes(2);
     expect(local.created).toBe(1);
     expect(stderrText()).toContain('"outcome":"takeover","reason":"refused"');
+  });
+
+  it('escritor de una versión anterior que ignora el operationId de un append: lo registra y devuelve su respuesta', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const received: Array<Record<string, unknown>> = [];
+    // Un escritor anterior: guarda y responde sin `operationId` (no lo conoce).
+    const server = await WriterSocketServer.listen({
+      path,
+      handlers: {
+        ...writerSocketHandlers(localSpy(), fakeInstance(path, 'this')),
+        appendToNote: async (input) => {
+          received.push({ ...input });
+          return { id: input.id, outcome: 'saved', revision: 'r1.x', totalChars: 9 };
+        }
+      }
+    });
+    servers.push(server);
+    const write = buildRoutedWriteContext(fakeInstance(path, 'other_instance'), localSpy());
+    const text = 'CEBO-escritor-viejo-4e1a';
+    const result = await write.appendToNote({ id: 'n1', text, operationId: 'op-viejo', privacy: OPEN });
+    // El texto se guardó: la respuesta es la del escritor, sin error y sin `replayed`.
+    expect(result).toEqual({ id: 'n1', outcome: 'saved', revision: 'r1.x', totalChars: 9 });
+    expect(received).toHaveLength(1);
+    expect(stderrText()).toContain('"event":"forward.operation_id_ignored","op":"appendToNote"');
+    expect(stderrText()).not.toContain(text);
+    expect(stderrText()).not.toContain('"n1"');
+
+    // Sin `operationId` no hay nada que avisar.
+    await write.appendToNote({ id: 'n1', text, privacy: OPEN });
+    expect(stderrText().split('forward.operation_id_ignored').length - 1).toBe(1);
+  });
+
+  it('el escritor actual devuelve el operationId del append', async () => {
+    const handlers = writerSocketHandlers(localSpy(), fakeInstance('', 'this'));
+    expect(
+      await handlers.appendToNote({ id: 'n1', text: 'x', operationId: 'op-eco', privacy: OPEN })
+    ).toMatchObject({ id: 'n1', outcome: 'saved', operationId: 'op-eco' });
+    expect(await handlers.appendToNote({ id: 'n1', text: 'x', privacy: OPEN })).not.toHaveProperty(
+      'operationId'
+    );
   });
 
   it('sin escritor: toma el relevo y escribe en local', async () => {
