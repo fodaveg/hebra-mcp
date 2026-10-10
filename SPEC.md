@@ -902,8 +902,12 @@ Comando `hebra-mcp pair`, interactivo en terminal:
   ya tenía notas la deja vacía y sin la marca de completo (`docs/FACHADA-NODE.md` §3 del
   submódulo). Cada vez que una instancia pasa a escritora, lanza en segundo plano
   `NodeLibraryPort.fillSubstringIndex`: `substringIndexPage` del motor, una página de
-  como mucho 250 notas por turno de la cola y cediendo el hilo entre páginas, hasta dejar
-  la marca. No retrasa el arranque ni las peticiones; con el índice ya completo cuesta una
+  como mucho 250 notas y unos 2 MiB de cuerpo (se corta en la nota que llega al tope,
+  `substringFillPageSize`: el motor calcula el texto visible en JS dentro de la
+  transacción de la página, y 250 notas grandes serían un turno de segundos) por turno de la
+  cola y cediendo el hilo entre páginas, hasta dejar la marca. Si falla (un `SQLITE_BUSY` en
+  un relevo, por ejemplo), lo reintenta `checkWriter` (cada 30 s) pasada una espera de 30 s
+  que se dobla en cada fallo seguido, hasta 15 min. No retrasa el arranque ni las peticiones; con el índice ya completo cuesta una
   lectura. Si el escritor se cierra o se releva a medias, el siguiente sigue donde se
   quedó (el motor guarda el último `rowid`). Un lector no lo intenta. Lo de después lo
   mantiene el motor (disparadores y la cola `notes_trigram_pending`, que vacía cada

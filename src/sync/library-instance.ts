@@ -99,6 +99,10 @@ import {
 } from './runner';
 
 export const WRITER_CHECK_INTERVAL_MS = 30_000;
+/** Reintentos del relleno del índice de subcadena: 30 s tras el primer fallo, el doble tras
+ *  cada fallo seguido, como mucho 15 min. Los mira `checkWriter` (cada 30 s). */
+export const SUBSTRING_RETRY_BASE_MS = 30_000;
+export const SUBSTRING_RETRY_MAX_MS = 15 * 60_000;
 export const LIBRARY_SQLITE_FILE = 'library.sqlite';
 const OPEN_READER_TIMEOUT_MS = 10_000;
 const OPEN_READER_RETRY_MS = 100;
@@ -126,6 +130,10 @@ export interface OpenLibraryInstanceOptions {
    * instancia pasa a escritor.
    */
   writerSocket?: (instance: LibraryInstance) => WriterSocketHandlers;
+  /** Espera antes de reintentar el relleno del índice de subcadena tras un fallo (se dobla
+   *  en cada fallo seguido, hasta `SUBSTRING_RETRY_MAX_MS`). Por defecto,
+   *  `SUBSTRING_RETRY_BASE_MS`; los tests la ponen a 0. */
+  substringIndexRetryMs?: number;
 }
 
 export interface InstanceStatus extends SyncStatusSnapshot {
@@ -141,6 +149,11 @@ export class LibraryInstance implements NoteWriteTarget {
   private switching: Promise<void> = Promise.resolve();
   /** El relleno del índice de subcadena en curso (`fillSubstringIndex`); nunca rechaza. */
   private substringFill: Promise<void> = Promise.resolve();
+  private substringFillRunning = false;
+  private substringFillDone = false;
+  /** Fallos seguidos del relleno, y cuándo se puede reintentar (`retrySubstringFill`). */
+  private substringFillFailures = 0;
+  private substringFillRetryAt = 0;
   private markShuttingDown!: () => void;
   /** Resuelve al empezar el apagado (`beginShutdown`, o `close`). */
   private readonly shuttingDown = new Promise<void>((resolve) => {
@@ -278,8 +291,13 @@ export class LibraryInstance implements NoteWriteTarget {
    * `hebra_grep` no usa el índice y `hebra_search` busca solo por prefijo.
    */
   private async fillSubstringIndex(port: NodeLibraryPort): Promise<void> {
+    this.substringFillRunning = true;
     try {
       const result = await port.fillSubstringIndex();
+      if (result.done) {
+        this.substringFillFailures = 0;
+        this.substringFillDone = true;
+      }
       if (result.ran) {
         logEvent({
           event: 'substring.index',
@@ -295,7 +313,25 @@ export class LibraryInstance implements NoteWriteTarget {
         error: error instanceof Error ? error.name : 'unknown',
         ...(typeof code === 'string' || typeof code === 'number' ? { code } : {})
       });
+      // Lo reintenta `checkWriter`, con una espera que se dobla en cada fallo seguido.
+      this.substringFillFailures += 1;
+      const base = this.options.substringIndexRetryMs ?? SUBSTRING_RETRY_BASE_MS;
+      this.substringFillRetryAt =
+        Date.now() + Math.min(base * 2 ** (this.substringFillFailures - 1), SUBSTRING_RETRY_MAX_MS);
+    } finally {
+      this.substringFillRunning = false;
     }
+  }
+
+  /** Desde `checkWriter`, en el escritor: si el último relleno falló (un `SQLITE_BUSY` en
+   *  un relevo, por ejemplo) y ya pasó su espera, lo vuelve a lanzar. Uno a medias porque se
+   *  cerró el puerto no cuenta: lo relanza el siguiente paso a escritor. */
+  private retrySubstringFill(): void {
+    if (this.substringFillRunning || this.substringFillDone || this.substringFillFailures === 0) {
+      return;
+    }
+    if (Date.now() < this.substringFillRetryAt) return;
+    this.substringFill = this.fillSubstringIndex(this.current);
   }
 
   /** Resuelve cuando termina (o se para) el relleno del índice de subcadena que lanzó el
@@ -346,6 +382,7 @@ export class LibraryInstance implements NoteWriteTarget {
       if (this.closed) return;
       if (this.current.writable) {
         if (!this.lock.verify()) await this.becomeReader();
+        else this.retrySubstringFill();
         return;
       }
       if (!this.lock.tryAcquire()) return;

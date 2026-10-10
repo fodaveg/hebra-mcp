@@ -10,10 +10,10 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
 import { WRITER_LOCK_FILE } from '../../src/lock/writer-lock';
-import { openNodeLibraryPort } from '../../src/store/node-port';
+import { NodeLibraryPort, openNodeLibraryPort } from '../../src/store/node-port';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { LibraryInstance, LIBRARY_SQLITE_FILE } from '../../src/sync/library-instance';
 
@@ -46,13 +46,15 @@ const BODIES = [
  * `notes_trigram`, su cola, sus disparadores ni sus marcas en `meta`. Al abrirla como
  * escritora, el motor crea la tabla vacía y, como ya hay notas, sin la marca de completo.
  */
-async function legacyLibrary(): Promise<{ dataDir: string; sqlitePath: string }> {
+async function legacyLibrary(
+  bodies: readonly string[] = BODIES
+): Promise<{ dataDir: string; sqlitePath: string }> {
   const dataDir = mkdtempSync(join(tmpdir(), 'hebra-mcp-trigram-'));
   dirs.push(dataDir);
   const sqlitePath = join(dataDir, LIBRARY_SQLITE_FILE);
   const { db, conn } = openNodeSqliteConn(sqlitePath);
   const engine = await SqliteLibraryEngine.open(conn, 'fixture', { journalMode: 'WAL' });
-  for (const body of BODIES) {
+  for (const body of bodies) {
     const created = await engine.noteCreate(null);
     const derived = deriveNote(body);
     await engine.noteSave({
@@ -188,5 +190,77 @@ describe('relleno del índice de subcadena (H5)', () => {
       port.close();
     }
     expect(marker(sqlitePath)).toBeNull();
+  });
+
+  it('tras un fallo, checkWriter lo reintenta (con espera entre intentos)', async () => {
+    const { dataDir, sqlitePath } = await legacyLibrary();
+    const busy = Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+    const spy = vi.spyOn(NodeLibraryPort.prototype, 'fillSubstringIndex').mockRejectedValueOnce(busy);
+    try {
+      const instance = await LibraryInstance.open({
+        dataDir,
+        checkIntervalMs: null,
+        substringIndexRetryMs: 0,
+        lock: { releaseOnExit: false }
+      });
+      instances.push(instance);
+      await instance.whenSubstringIndexSettled();
+      expect(marker(sqlitePath)).toBeNull();
+      // La comprobación periódica del escritor (aquí, a mano) lo vuelve a lanzar.
+      await instance.checkWriter();
+      await instance.whenSubstringIndexSettled();
+      expect(marker(sqlitePath)).toBe('1');
+      expect(spy).toHaveBeenCalledTimes(2);
+      // Hecho: la siguiente comprobación ya no lo lanza.
+      await instance.checkWriter();
+      await instance.whenSubstringIndexSettled();
+      expect(spy).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('la espera entre reintentos crece: antes de tiempo, checkWriter no lo lanza', async () => {
+    const { dataDir, sqlitePath } = await legacyLibrary();
+    const busy = Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+    const spy = vi.spyOn(NodeLibraryPort.prototype, 'fillSubstringIndex').mockRejectedValueOnce(busy);
+    try {
+      const instance = await LibraryInstance.open({
+        dataDir,
+        checkIntervalMs: null,
+        substringIndexRetryMs: 60_000,
+        lock: { releaseOnExit: false }
+      });
+      instances.push(instance);
+      await instance.whenSubstringIndexSettled();
+      await instance.checkWriter();
+      await instance.whenSubstringIndexSettled();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(marker(sqlitePath)).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('corta las páginas también por bytes de cuerpo', async () => {
+    const big = Array.from({ length: 5 }, (_, index) => `# Nota ${index}\n\n${'x'.repeat(900)}\n`);
+    const { dataDir, sqlitePath } = await legacyLibrary(big);
+    const port = await openNodeLibraryPort({ sqlitePath, dataDir });
+    try {
+      let yields = 0;
+      const result = await port.fillSubstringIndex({
+        pageBytes: 2_000,
+        yieldControl: async () => {
+          yields += 1;
+        }
+      });
+      // 5 notas de ~920 bytes con 2 000 por página: 3 (la tercera pasa del tope) y 2, que
+      // deja la marca.
+      expect(result).toEqual({ ran: true, indexed: 5, done: true });
+      expect(yields).toBe(1);
+      expect(marker(sqlitePath)).toBe('1');
+    } finally {
+      port.close();
+    }
   });
 });

@@ -175,6 +175,34 @@ function substringCandidatesNow(
 }
 
 
+/**
+ * Cuántas notas caben en la siguiente página del relleno del índice de subcadena
+ * (`NodeLibraryPort.fillSubstringIndex`): como mucho `maxNotes`, y se corta en la nota con
+ * la que el cuerpo acumulado llega a `maxBytes` (esa entra), al menos una; si no corta,
+ * `maxNotes`. Mira las mismas
+ * filas que la página del motor (`rowid` mayor que el punto guardado en
+ * `meta.substring_index_cursor`, en orden), sin leer los cuerpos: `octet_length`. Se llama
+ * en el mismo turno que la página, así que las filas son las mismas.
+ */
+export function substringFillPageSize(db: DatabaseSync, maxNotes: number, maxBytes: number): number {
+  const rows = db
+    .prepare(
+      `SELECT coalesce(octet_length(body), 0) AS bytes FROM notes
+       WHERE rowid > coalesce(
+         (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'substring_index_cursor'), 0)
+       ORDER BY rowid LIMIT ?`
+    )
+    .all(maxNotes) as Array<{ bytes: number | bigint }>;
+  let total = 0;
+  for (const [index, row] of rows.entries()) {
+    total += Number(row.bytes);
+    // Solo se recorta si el tope de bytes corta de verdad: si no, `maxNotes`, para que el
+    // motor vea una página corta al final y deje la marca sin otra vacía detrás.
+    if (total >= maxBytes && index + 1 < rows.length) return index + 1;
+  }
+  return maxNotes;
+}
+
 /** Lo que `grepVisibleBodies` guarda entre un lote y el siguiente de la misma llamada: el
  *  árbol de carpetas (`foldersList` del motor) y su huella, para no volver a pedirlo si
  *  no ha cambiado. */

@@ -57,6 +57,7 @@ import {
   grepNoteRows,
   grepSubstringCandidates,
   grepVisibleBodies,
+  substringFillPageSize,
   type GrepBodiesResult,
   type GrepBodiesSession,
   type GrepNoteRow
@@ -84,6 +85,12 @@ const LOCKED_BODY_PREFIX = 'hebra-locked:';
  *  del motor (`SUBSTRING_INDEX_BATCH_MAX`, 250), que no exporta `node.ts`. Si se pide
  *  más, el motor lo recorta igual. */
 export const SUBSTRING_FILL_PAGE = 250;
+
+/** Y bytes de cuerpo por página, más o menos: la página se corta en la nota con la que el
+ *  cuerpo acumulado llega a esto (`substringFillPageSize`). El motor calcula el texto
+ *  visible de cada nota en JS dentro de su transacción, así que 250 notas de 1 MB serían un
+ *  turno de la cola de segundos; con este tope, una página es de unas decenas de ms. */
+export const SUBSTRING_FILL_PAGE_BYTES = 2 * 1024 * 1024;
 
 /** Lo que hizo `fillSubstringIndex`: si había algo pendiente (`ran`), cuántas notas
  *  indexó y si el índice quedó completo (`done`). */
@@ -672,10 +679,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * guarda el último `rowid` hecho en `meta`.
    */
   async fillSubstringIndex(
-    options: { pageSize?: number; yieldControl?: () => Promise<void> } = {}
+    options: { pageSize?: number; pageBytes?: number; yieldControl?: () => Promise<void> } = {}
   ): Promise<SubstringFillResult> {
     if (!this.writable) return { ran: false, indexed: 0, done: false };
     const pageSize = options.pageSize ?? SUBSTRING_FILL_PAGE;
+    const pageBytes = options.pageBytes ?? SUBSTRING_FILL_PAGE_BYTES;
     const yieldControl =
       options.yieldControl ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
     let indexed = 0;
@@ -684,7 +692,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       let page: { pending: boolean; indexed: number; done: boolean };
       try {
         page = await this.write(() =>
-          this.engine.substringIndexPage(SUBSTRING_INDEX_VERSION, pageSize)
+          this.engine.substringIndexPage(
+            SUBSTRING_INDEX_VERSION,
+            substringFillPageSize(this.db, pageSize, pageBytes)
+          )
         );
       } catch (error) {
         // Cerrado o relevado entre dos páginas: no es un fallo, lo sigue otro escritor.
