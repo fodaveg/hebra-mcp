@@ -7,7 +7,7 @@
  * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite. De los ficheros
  * sueltos (D10, 9 oct 2026) solo tiene una LECTURA propia (`filesIndex`); mandarlos a la
  * papelera y sacarlos (`fileTrash`/`fileRestore` del motor) solo existe dentro del turno
- * de escritura.
+ * de escritura, y lo mismo reemplazar su contenido (`fileReplace`, D15, 10 oct 2026).
  *
  * Del mismo almacén salen tres vistas, todas por la MISMA cola (`SerialQueue`, ver su
  * cabecera) para que una ronda de sync y una escritura nunca se crucen en la conexión:
@@ -66,6 +66,8 @@ import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
+import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
+import { blobNoteRefRows } from './file-sql';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
@@ -157,6 +159,8 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensureOperationsTable(db);
   // Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): igual, solo el escritor.
   if (mode === 'readWrite') ensureReplacePlanTables(db);
+  // Contenido anterior de los ficheros sueltos reemplazados (D15, `./file-previous.ts`).
+  if (mode === 'readWrite') ensureFilePreviousTable(db);
   return new NodeLibraryPort(engine, db, mode);
 }
 
@@ -195,6 +199,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private readonly statements = new Map<string, StatementSync>();
   private operationStore: OperationStore | null = null;
   private replacePlanStore: ReplacePlanStore | null = null;
+  private looseFilePreviousStore: FilePreviousStore | null = null;
   /** `meta.library_id`: lo escribe `bootstrapLibraryId` al abrir y nada lo cambia
    *  mientras la conexión vive (`libraryReset` solo borra `binding` y `since_seq`). */
   private libraryIdCache: string | null = null;
@@ -440,6 +445,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private filesRows(): FilesIndex {
     const files = this.prepared(
         `SELECT fl.id AS id, fl.folder_id AS folder_id, fl.name AS name,
+                lower(fl.sha256) AS content_sha,
                 coalesce(fl.updated_at, fl.created_at, 0) AS updated_at,
                 fl.trashed_at AS trashed_at, b.byte_length AS byte_length, b.mime AS mime
          FROM files fl
@@ -449,6 +455,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       id: string;
       folder_id: string;
       name: string;
+      content_sha: string;
       updated_at: number | bigint;
       trashed_at: number | bigint | null;
       byte_length: number | bigint | null;
@@ -478,6 +485,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         id: String(row.id),
         folderId: String(row.folder_id),
         name: String(row.name),
+        sha256: String(row.content_sha),
         byteLength: row.byte_length === null ? null : Number(row.byte_length),
         mime: row.mime ?? null,
         updatedAt: Number(row.updated_at),
@@ -642,6 +650,13 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         // otro `file*` del motor (purgar, crear, renombrar, mover, reemplazar) está.
         fileTrash: (id) => this.engine.fileTrash(id),
         fileRestore: (id) => this.engine.fileRestore(id),
+        // D15: reemplazar el contenido de un fichero suelto con la base comprobada del
+        // motor (`file_stale`), y lo que ese reemplazo lee y guarda en el mismo turno.
+        // Solo para `./file-writes.ts`.
+        fileReplace: (fileId, nextSha, baseSha) => this.engine.fileReplace(fileId, nextSha, baseSha),
+        blobRead: (sha) => this.engine.blobRead(sha),
+        notesLinkingBlob: (sha) => blobNoteRefRows(this.db, sha),
+        looseFilePrevious: (this.looseFilePreviousStore ??= sqliteFilePreviousStore(this.db)),
         noteMove: (id, folderId) => this.engine.noteMove(id, folderId),
         noteSetFavorite: (id, favorite) => this.engine.noteSetFavorite(id, favorite),
         noteArchive: (id) => this.engine.noteArchive(id),

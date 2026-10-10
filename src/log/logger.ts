@@ -34,7 +34,12 @@ export type ToolErrorCode =
   // `hebra_replace_in_notes` (D14, 10 oct 2026; `src/store/replace-batch.ts`).
   | 'plan_not_found'
   | 'plan_expired'
-  | 'plan_already_applied';
+  | 'plan_already_applied'
+  // Leer y reemplazar ficheros sueltos (D15, 10 oct 2026; `src/store/file-writes.ts`).
+  | 'file_changed'
+  | 'file_too_large'
+  | 'file_type_not_allowed'
+  | 'file_unavailable';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

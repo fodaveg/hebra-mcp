@@ -3,8 +3,9 @@
  * `hebra_list_files`, `hebra_trash_file` y `hebra_restore_file`. Un fichero suelto es un
  * recurso de la tabla `files` de Hebra (un `.base`, un PDF que no cuelga de una nota),
  * con carpeta propia. NO es un adjunto: esos van por `./attachments.ts`. Aquí no se lee
- * su contenido ni se crea, renombra, mueve, reemplaza o purga ninguno: no hay
- * herramienta para eso.
+ * su contenido (eso es `./read-file.ts`, D15) ni se crea, renombra, mueve o purga
+ * ninguno: no hay herramienta para eso. Reemplazar el texto de uno es
+ * `./replace-file-text.ts` (D15).
  *
  * Privacidad (`FileFilter`, `src/privacy/file-filter.ts`; SPEC.md §6.3), la misma regla
  * para los vivos y para los de la papelera: oculto si su carpeta es privada (también si

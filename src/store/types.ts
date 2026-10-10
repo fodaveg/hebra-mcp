@@ -78,14 +78,18 @@ export interface TrashIndex {
  * Un fichero suelto de la biblioteca (D10, 9 oct 2026): una fila de `files` que no es
  * lápida, viva o en la papelera. `folderId` es la carpeta GUARDADA (`files.folder_id`),
  * no la efectiva: el filtro (`src/privacy/file-filter.ts`) sube por las filas de carpeta
- * si ya es una lápida, como con las notas de la papelera. No lleva el SHA-256 de sus
- * bytes: ninguna salida lo enseña, y el cruce con las notas que lo enlazan ya viene hecho
- * en `FilesIndex.refs`.
+ * si ya es una lápida, como con las notas de la papelera. El cruce con las notas que lo
+ * enlazan ya viene hecho en `FilesIndex.refs`.
  */
 export interface FileEntry {
   id: string;
   folderId: string;
   name: string;
+  /** SHA-256 de sus bytes (`files.sha256`, en minúsculas). Solo lo enseñan la lectura y
+   *  el reemplazo de UN fichero visible (D15), nunca `hebra_list_files`: lo necesitan
+   *  para leer los bytes y para la base comprobada del reemplazo, del MISMO turno que el
+   *  filtro. */
+  sha256: string;
   /** Tamaño y tipo de su fila de `blobs`; `null` si no hay fila. */
   byteLength: number | null;
   mime: string | null;
@@ -101,6 +105,15 @@ export interface FileEntry {
  *  papelera. */
 export interface FileNoteRef {
   fileId: string;
+  noteId: string;
+  noteTrashed: boolean;
+}
+
+/** Una nota (no lápida, viva o de la papelera) que enlaza unos bytes por su SHA-256: un
+ *  enlace `blob` de `links` o una fila de `note_blob_refs`. Para saber, antes de
+ *  reemplazar un fichero suelto (D15), si el contenido nuevo lo dejaría oculto por la
+ *  regla (b) de D10. */
+export interface BlobNoteRef {
   noteId: string;
   noteTrashed: boolean;
 }

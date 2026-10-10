@@ -58,8 +58,9 @@ export const TEXT_TYPE_BY_EXTENSION: Record<string, string> = {
   json: 'application/json'
 };
 
-/** Tipo de imagen o PDF por su firma (los primeros bytes), o `null`. */
-function typeBySignature(bytes: Uint8Array): string | null {
+/** Tipo de imagen o PDF por su firma (los primeros bytes), o `null`. También lo usa la
+ *  lectura de ficheros sueltos (D15, `./file-content.ts`). */
+export function typeBySignature(bytes: Uint8Array): string | null {
   const startsWith = (...prefix: number[]): boolean =>
     bytes.length >= prefix.length && prefix.every((byte, index) => bytes[index] === byte);
   if (startsWith(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
@@ -91,7 +92,7 @@ export function extensionOf(name: string | null): string | null {
 }
 
 /** El texto, si los bytes son UTF-8 válido sin NUL; si no, `null`. */
-function utf8Text(bytes: Uint8Array): string | null {
+export function utf8Text(bytes: Uint8Array): string | null {
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(bytes);

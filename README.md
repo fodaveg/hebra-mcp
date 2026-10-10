@@ -3,15 +3,15 @@
 Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, leer y añadir
 por apartados, editar por sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
-añadir adjuntos, crear y renombrar carpetas, y listar los ficheros sueltos y mandarlos a
-la papelera o sacarlos; nunca purgar ni vaciar la papelera, mover ni borrar carpetas,
-cambiar ni borrar adjuntos, ni crear, renombrar, mover o reemplazar un fichero suelto ni
-leer su contenido; `SPEC.md` §5) a
+añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
+la papelera o sacarlos, leer su contenido y reemplazar el texto de uno; nunca purgar ni
+vaciar la papelera, mover ni borrar carpetas, cambiar ni borrar adjuntos, ni crear,
+renombrar o mover un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 30 herramientas
+Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 32 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -52,8 +52,16 @@ Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 30 herram
 - Ficheros sueltos (D10; los recursos con carpeta propia que no cuelgan de una nota, como
   un `.base` o un PDF): `hebra_list_files` (los vivos por nombre o, con `trashed: true`,
   los de la papelera; limit 1-100, def. 50), `hebra_trash_file` y `hebra_restore_file`.
-  Sin purga y sin leer su contenido, crearlos, renombrarlos, moverlos ni reemplazarlos.
-  La versión 0.3.0 o posterior trae las tres de ficheros sueltos (D10).
+  Sin purga y sin crearlos, renombrarlos ni moverlos. La versión 0.3.0 o posterior trae
+  las tres de ficheros sueltos (D10).
+- Contenido de un fichero suelto (D15): `hebra_read_file` lo lee (un `.base` de Obsidian
+  Bases, `.md`, `.txt`, `.json`, `.csv` o `.yaml` como texto, por tramos de 100 000
+  caracteres; PNG, JPEG, GIF y WebP como imagen; PDF como recurso; hasta 5 MiB) y da el
+  `sha256` de sus bytes. `hebra_replace_file_text` sustituye el texto ENTERO de uno de
+  texto (hasta 1 000 000 bytes) con ese `sha256` como base: si alguien lo cambió desde la
+  lectura, `file_changed` y no escribe; conserva el id, el nombre y la carpeta, devuelve el
+  `sha256` y el tamaño de lo guardado, y guarda el contenido anterior 7 días para volver a
+  él (`undoOperationId`). Un fichero privado responde `not_found` igual que uno inexistente.
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
@@ -235,5 +243,9 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 - `src/store/replace*.ts`, `src/server/tools/replace-in-notes.ts` — `hebra_replace_in_notes`
   (D14): la sustitución línea a línea, su hilo con plazo, los planes en `library.sqlite` y
   simular, aplicar y deshacer en el escritor.
+- `src/store/file-*.ts`, `src/server/tools/read-file.ts`, `replace-file-text.ts` —
+  leer un fichero suelto y reemplazar el texto de uno (D15): tipos y topes, el reemplazo
+  con la base comprobada en el turno del escritor (`fileReplace` del motor) y el contenido
+  anterior guardado 7 días en `library.sqlite`.
 - `scripts/build.mjs`, `scripts/check-bundle.mjs`, `scripts/check-no-hebra-code.mjs` —
   build y los dos checks que corre `npm run check` junto con `typecheck` y `test`.

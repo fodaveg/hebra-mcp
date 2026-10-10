@@ -55,6 +55,13 @@ import {
   type TrashConflictCopiesResult
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
+import {
+  fetchFileBytes,
+  replaceFileText,
+  type FetchFileInput,
+  type ReplaceFileTextInput,
+  type ReplaceFileTextSaved
+} from '../store/file-writes';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
 import {
   ReplaceBatch,
@@ -528,6 +535,26 @@ export class LibraryInstance implements NoteWriteTarget {
   fetchAttachment(input: FetchAttachmentInput): Promise<boolean> {
     const runner = this.runner;
     return this.writer.fetchAttachment(input, runner ? (sha256) => runner.readBlob(sha256) : null);
+  }
+
+  /** Trae al disco los bytes de un fichero suelto visible (D15,
+   *  `../store/file-writes.ts`), como `fetchAttachment`. */
+  fetchFile(input: FetchFileInput): Promise<boolean> {
+    const runner = this.runner;
+    return fetchFileBytes(this, input, runner ? (sha256) => runner.readBlob(sha256) : null);
+  }
+
+  /** Reemplaza el texto de un fichero suelto con la base comprobada (D15,
+   *  `../store/file-writes.ts`). Si este escritor no tiene aún los bytes de la base, los
+   *  baja antes con su motor de sync. Pide la ronda de después sin esperarla. */
+  replaceFileTextLocal(input: ReplaceFileTextInput): Promise<LocalWrite<ReplaceFileTextSaved>> {
+    const runner = this.runner;
+    return replaceFileText(
+      this,
+      input,
+      runner ? (sha256) => runner.readBlob(sha256) : null,
+      () => void this.runner?.requestRound()
+    );
   }
 
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y

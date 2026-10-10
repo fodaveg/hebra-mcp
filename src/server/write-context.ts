@@ -39,6 +39,11 @@ import type {
   FetchAttachmentInput,
   LocalWrite
 } from '../store/writes';
+import type {
+  FetchFileInput,
+  ReplaceFileTextInput,
+  ReplaceFileTextSaved
+} from '../store/file-writes';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
@@ -67,6 +72,13 @@ export interface WriteContextSources {
   /** `hebra_replace_in_notes` en local (`LibraryInstance.replaceInNotesLocal`, D14), sin
    *  esperar ronda. Opcional: sin él (tests de otros lotes), la herramienta no está. */
   replaceInNotes?(request: ReplaceRequest): Promise<ReplaceLocal>;
+  /** Ficheros sueltos (D15): traer al disco los bytes de uno visible
+   *  (`LibraryInstance.fetchFile`) y reemplazar el texto de uno en local
+   *  (`LibraryInstance.replaceFileTextLocal`), sin esperar ronda. Opcionales: sin ellos
+   *  (tests de otros lotes), `hebra_read_file` solo lee lo que ya está aquí y
+   *  `hebra_replace_file_text` responde `invalid_input`. */
+  fetchFile?(input: FetchFileInput): Promise<boolean>;
+  replaceFileText?(input: ReplaceFileTextInput): Promise<LocalWrite<ReplaceFileTextSaved>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -140,6 +152,10 @@ export type FolderOutcome = FolderSaved & SyncFields;
 /** Mandar un fichero suelto a la papelera o sacarlo (D10), antes de poner la ruta. */
 export type FileOutcome = FileSaved & SyncFields;
 
+/** `hebra_replace_file_text` (D15): la prueba de lo guardado y el estado de sync (`uploaded`
+ *  exige la fila del fichero limpia y el blob nuevo ya subido). */
+export type ReplaceFileTextOutcome = ReplaceFileTextSaved & SyncFields;
+
 /** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
  *  estado de sync (`uploaded` exige además el blob ya subido). */
 export type AddAttachmentOutcome = EditNoteOutcome & { attachmentId: string; markdown: string };
@@ -188,6 +204,12 @@ export interface WriteContext {
    *  de sync de lo escrito. En un lector, todo ocurre en el escritor (`./forward.ts`).
    *  Opcional: sin él, `hebra_replace_in_notes` responde `invalid_input`. */
   replaceInNotes?(request: ReplaceRequest): Promise<ReplaceOutcome>;
+  /** Ficheros sueltos (D15): que los bytes de uno visible estén en el disco compartido
+   *  (como `fetchAttachment`, nunca los devuelve), y reemplazar su texto: escribe, espera la
+   *  ronda y devuelve el estado de sync; sin escritura («ya estaba», reintento), sin
+   *  ronda. En un lector, todo ocurre en el escritor (`./forward.ts`). Opcionales. */
+  fetchFile?(input: FetchFileInput): Promise<{ available: boolean }>;
+  replaceFileText?(input: ReplaceFileTextInput): Promise<ReplaceFileTextOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -444,8 +466,47 @@ export function buildWriteContext(
 
   const replace = sources.replaceInNotes?.bind(sources);
 
+  /** Un fichero reemplazado (D15) está subido cuando su fila ya no está sucia Y el blob
+   *  nuevo ya está en el relé; `null` si alguna de las dos cosas no se sabe. */
+  function replacedFileDirtyOf(sha256: string): (id: string) => Promise<boolean | null> {
+    return async (id) => {
+      const row = await fileDirtyOf(id);
+      let uploaded: boolean | null;
+      try {
+        uploaded = await sources.blobUploaded(sha256);
+      } catch {
+        uploaded = null;
+      }
+      if (row === true || uploaded === false) return true;
+      return row === false && uploaded === true ? false : null;
+    };
+  }
+
+  /** `hebra_replace_file_text` (D15): como `fileWrite`, con el blob nuevo en el estado. */
+  async function replaceFileWrite(
+    run: NonNullable<WriteContextSources['replaceFileText']>,
+    input: ReplaceFileTextInput
+  ): Promise<ReplaceFileTextOutcome> {
+    const { result: saved, wrote } = await run(input);
+    const dirty = replacedFileDirtyOf(saved.sha256);
+    if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id, dirty)) };
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...saved, ...syncFieldsOf(wait, await dirty(saved.id)) };
+  }
+
+  const replaceFile = sources.replaceFileText?.bind(sources);
+  const fetchFile = sources.fetchFile?.bind(sources);
+
   return {
     ...(replace ? { replaceInNotes: (request: ReplaceRequest) => replaceWrite(replace, request) } : {}),
+    ...(replaceFile
+      ? { replaceFileText: (input: ReplaceFileTextInput) => replaceFileWrite(replaceFile, input) }
+      : {}),
+    ...(fetchFile
+      ? {
+          fetchFile: async (input: FetchFileInput) => ({ available: await fetchFile(input) })
+        }
+      : {}),
     createNote: (input) => sources.createNote(input),
     appendToNote: (input) => sources.appendToNote(input),
     onConflictCopy: (listener) => sources.onConflictCopy(listener),

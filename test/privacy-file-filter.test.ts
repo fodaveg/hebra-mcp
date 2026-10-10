@@ -30,6 +30,7 @@ function file(id: string, folderId: string, extra: Partial<FileEntry> = {}): Fil
     id,
     folderId,
     name: `${id}.pdf`,
+    sha256: '0'.repeat(64),
     byteLength: 10,
     mime: 'application/pdf',
     updatedAt: 1,

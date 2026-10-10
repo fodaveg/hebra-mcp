@@ -32,7 +32,8 @@
  * - `organizeFileLocal` (D10, 9 oct 2026): mandar un fichero suelto a la papelera y
  *   sacarlo (`fileTrash`/`fileRestore` del motor, reversibles), con el filtro de los
  *   ficheros (`../privacy/file-filter.ts`) dentro del turno. Nunca lo purga, ni lo crea,
- *   renombra, mueve o reemplaza, ni lee su contenido.
+ *   renombra o mueve. Leer su contenido y reemplazar el de uno de texto (D15, 10 oct 2026)
+ *   van por `./file-writes.ts`, sobre este mismo turno.
  *
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
@@ -81,7 +82,10 @@ import {
   selectSection,
   type Insertion
 } from './sections';
+import { FILE_TEXT_REPLACE_MAX_BYTES } from './file-content';
+import type { FilePreviousStore } from './file-previous';
 import type {
+  BlobNoteRef,
   FilesIndex,
   NoteAttachmentRow,
   NoteVersion,
@@ -119,6 +123,21 @@ export interface NoteWriteStore {
    *  (`test/store/surface.node.test.ts`). */
   fileTrash(id: string): Promise<FileRow>;
   fileRestore(id: string): Promise<FileRow>;
+  /** Reemplazar el contenido de un fichero suelto (D15, 10 oct 2026): `fileReplace` del
+   *  motor, que comprueba en su transacción que el fichero sigue con `baseSha256` (si no,
+   *  `file_stale` sin escribir) y que el blob nuevo ya está. Solo lo llama
+   *  `./file-writes.ts`, en el mismo turno en que guarda el blob y el contenido anterior.
+   *  Purgar, crear, renombrar y mover un fichero siguen sin estar. */
+  fileReplace(id: string, sha256: string, baseSha256: string): Promise<FileRow>;
+  /** Bytes de un blob de este dispositivo (`blobRead` del motor, que verifica el hash), o
+   *  `null`. Para leer el contenido actual de un fichero suelto antes de reemplazarlo y la
+   *  prueba de lo guardado (D15). */
+  blobRead(sha256: string): Promise<Uint8Array | null>;
+  /** Las notas que enlazan unos bytes por su SHA-256 (`./file-sql.ts`): si alguna es
+   *  oculta, el contenido nuevo dejaría el fichero oculto por la regla (b) de D10. */
+  notesLinkingBlob(sha256: string): BlobNoteRef[];
+  /** El contenido anterior de los ficheros reemplazados (`./file-previous.ts`). */
+  looseFilePrevious: FilePreviousStore;
   /** Organización de notas (D2 ampliada): los métodos del mismo nombre de
    *  `SqliteLibraryEngine`. */
   noteMove(id: string, folderId: string): Promise<NoteRow>;
@@ -253,12 +272,18 @@ export const REPLACE_BODY_MAX_LENGTH = 1_000_000;
  * partido como lo parte un `base64` de terminal: cada 76 caracteres, 91 981 líneas en el
  * peor caso, que en JSON son `\n` (2 bytes, 183 962) o `\r\n` (4 bytes, 367 924).
  * Desde D9 manda el adjunto: 6 990 508 + 524 288 = 7 514 796 bytes (antes, 665 536 con
- * un margen de 64 KiB, que no dejaba pasar ese base64 partido).
+ * un margen de 64 KiB, que no dejaba pasar ese base64 partido). El texto de
+ * `hebra_replace_file_text` (D15, como mucho `FILE_TEXT_REPLACE_MAX_BYTES` bytes UTF-8, que
+ * nunca son más unidades UTF-16) entra igual: 6 000 000 con el peor escape.
  */
 export const WRITE_MESSAGE_MARGIN_BYTES = 512 * 1024;
 export const MAX_WRITE_MESSAGE_BYTES =
-  Math.max(CREATE_BODY_MAX_LENGTH * 6, REPLACE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) +
-  WRITE_MESSAGE_MARGIN_BYTES;
+  Math.max(
+    CREATE_BODY_MAX_LENGTH * 6,
+    REPLACE_BODY_MAX_LENGTH * 6,
+    FILE_TEXT_REPLACE_MAX_BYTES * 6,
+    ATTACHMENT_BASE64_MAX_CHARS
+  ) + WRITE_MESSAGE_MARGIN_BYTES;
 
 export interface EditNoteInput {
   id: string;
@@ -570,8 +595,9 @@ function appendFingerprint(input: AppendToNoteInput): string {
  * caducado y busca el registro. El mismo `operationId` con otra huella es
  * `operation_id_reused`, antes de mirar la nota. Lo que haya que hacer con un registro
  * `done` o `started` lo decide cada escritura (la prueba de lo guardado es distinta).
+ * Desde D15 también lo usa el reemplazo de ficheros sueltos (`./file-writes.ts`).
  */
-function priorOperation(
+export function priorOperation(
   log: OperationStore,
   operationId: string,
   fingerprint: string,

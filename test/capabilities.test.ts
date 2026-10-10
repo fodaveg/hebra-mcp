@@ -59,14 +59,20 @@ describe('capacidades', () => {
     expect(capabilities.limits.appendTextChars).toBe(20_000);
     // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover
     // o borrar carpetas y cambiar o borrar adjuntos, no. D10 (9 oct 2026): listar los
-    // ficheros sueltos y mandarlos a la papelera sí; purgarlos, crearlos, renombrarlos,
-    // moverlos, reemplazarlos o leer su contenido, no.
+    // ficheros sueltos y mandarlos a la papelera sí; D15 (10 oct 2026): leer su contenido
+    // y reemplazar el texto de uno, también; purgarlos, crearlos, renombrarlos y moverlos,
+    // no.
     expect(capabilities.notAllowed).toEqual([
       'purge_notes_or_empty_trash_or_irreversible_delete',
       'folder_move_or_delete',
       'attachment_change_or_delete',
-      'file_purge_create_rename_move_replace_or_read_content'
+      'file_purge_create_rename_move'
     ]);
+    expect(capabilities.limits.readFile).toEqual({ bytes: 5 * 1024 * 1024, textChars: 100_000 });
+    expect(capabilities.limits.replaceFileText).toEqual({
+      bytes: 1_000_000,
+      undoWithinMs: 7 * 24 * 60 * 60 * 1000
+    });
     expect(capabilities.limits.listTrash).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.listFiles).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.attachmentBytes).toBe(5 * 1024 * 1024);
@@ -89,6 +95,8 @@ describe('capacidades', () => {
         'hebra_list_files',
         'hebra_trash_file',
         'hebra_restore_file',
+        'hebra_read_file',
+        'hebra_replace_file_text',
         'hebra_note_outline'
       ])
     );
@@ -100,14 +108,15 @@ describe('capacidades', () => {
     expect(SERVER_INSTRUCTIONS).toContain('appended.tail');
   });
 
-  it('las `instructions` nombran las tres de ficheros sueltos y lo que sigue fuera (D10)', () => {
+  it('las `instructions` nombran las de ficheros sueltos y lo que sigue fuera (D10, D15)', () => {
     expect(SERVER_INSTRUCTIONS).toContain('hebra_list_files');
     expect(SERVER_INSTRUCTIONS).toContain('hebra_trash_file');
     expect(SERVER_INSTRUCTIONS).toContain('hebra_restore_file');
-    expect(SERVER_INSTRUCTIONS).toContain('No se lee su contenido');
-    expect(SERVER_INSTRUCTIONS).toContain(
-      'ni purgar, crear, renombrar, mover o reemplazar ficheros sueltos'
-    );
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_read_file');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_replace_file_text');
+    expect(SERVER_INSTRUCTIONS).toContain('expectedSha256');
+    expect(SERVER_INSTRUCTIONS).not.toContain('No se lee su contenido');
+    expect(SERVER_INSTRUCTIONS).toContain('ni purgar, crear, renombrar o mover ficheros sueltos');
   });
 
   it('las `instructions` ya no dicen que no gestiona carpetas ni añade adjuntos (D9)', () => {

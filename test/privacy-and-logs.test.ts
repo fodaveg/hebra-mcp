@@ -41,7 +41,9 @@ const TOOL_NAMES = [
   'hebra_trash_file',
   'hebra_restore_file',
   'hebra_note_outline',
-  'hebra_replace_in_notes'
+  'hebra_replace_in_notes',
+  'hebra_read_file',
+  'hebra_replace_file_text'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -73,7 +75,15 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
   // Apartados (D11).
   hebra_note_outline: { id: 'lo-que-sea' },
   // Sustitución en lote (D14).
-  hebra_replace_in_notes: { mode: 'simulate', pattern: 'lo que sea', replacement: 'x' }
+  hebra_replace_in_notes: { mode: 'simulate', pattern: 'lo que sea', replacement: 'x' },
+  // Leer y reemplazar ficheros sueltos (D15).
+  hebra_read_file: { id: 'lo-que-sea' },
+  hebra_replace_file_text: {
+    id: 'lo-que-sea',
+    expectedSha256: 'a'.repeat(64),
+    text: 'lo que sea',
+    operationId: 'op'
+  }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {

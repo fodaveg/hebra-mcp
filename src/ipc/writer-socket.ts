@@ -53,6 +53,13 @@
  *   `{planId, operationId}` (ronda ya esperada) o `undo` `{planId}` (igual). Todo ocurre
  *   en el escritor: los planes viven en su base y la simulación usa su hilo. Un escritor
  *   sin él (o de una versión anterior) responde `invalid_request`.
+ * - `fetchFile` `{id, privacy}` (D15, 10 oct 2026) → `{available}`: el escritor baja al
+ *   disco compartido los bytes de un fichero suelto visible y vivo; nunca los devuelve.
+ * - `replaceFileText` `{id, expectedSha256, text | undoOperationId, operationId, privacy}`
+ *   (D15) → `ReplaceFileTextOutcome`, con la ronda ya esperada: el texto entero de un
+ *   fichero suelto de texto, con la base comprobada en el turno del escritor. El texto va
+ *   del lector al escritor, nunca de vuelta. Un escritor sin ellas responde
+ *   `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -99,6 +106,7 @@ import type {
   FileOutcome,
   FolderOutcome,
   OrganizeOutcome,
+  ReplaceFileTextOutcome,
   ReplaceOutcome,
   RoundWait
 } from '../server/write-context';
@@ -125,6 +133,8 @@ import {
 } from '../store/errors';
 import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
 import { REVISION_MAX_LENGTH } from '../store/revision';
+import { FILE_TEXT_REPLACE_MAX_BYTES } from '../store/file-content';
+import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
@@ -192,12 +202,16 @@ export type WriterSocketOp =
   | 'addAttachment'
   | 'organizeFile'
   | 'replaceInNotes'
+  | 'fetchFile'
+  | 'replaceFileText'
   | 'replaceBody'
   | 'trashConflictCopies'
   | 'syncRound'
   | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
+  'fetchFile',
+  'replaceFileText',
   'createNote',
   'appendToNote',
   'editNote',
@@ -265,6 +279,11 @@ export interface WriterSocketHandlers {
    *  el escritor, con la privacidad del lector; aplicar y deshacer, con la ronda ya
    *  esperada. Opcional: un escritor sin él responde `invalid_request`. */
   replaceInNotes?(request: ReplaceRequest): Promise<ReplaceOutcome>;
+  /** Ficheros sueltos (D15, 10 oct 2026): traer al disco los bytes de uno visible (nunca
+   *  los devuelve) y reemplazar el texto de uno, con la ronda ya esperada. Opcionales: un
+   *  escritor sin ellos responde `invalid_request`. */
+  fetchFile?(input: FetchFileInput): Promise<{ available: boolean }>;
+  replaceFileText?(input: ReplaceFileTextInput): Promise<ReplaceFileTextOutcome>;
   /**
    * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
    * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
@@ -506,6 +525,35 @@ function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput
     default:
       throw new InvalidRequest();
   }
+}
+
+/** `fetchFile` (D15): solo el id del fichero; el escritor decide qué bytes con su filtro. */
+function fetchFileInputOf(params: Record<string, unknown>): FetchFileInput {
+  const { id } = params;
+  if (!isId(id)) throw new InvalidRequest();
+  return { id, privacy: privacyOf(params.privacy) };
+}
+
+/** `replaceFileText` (D15): `text` O `undoOperationId`, exactamente uno. El escritor vuelve
+ *  a comprobar el texto (codificable, sin NUL y dentro del tope) y el SHA-256 esperado. */
+function replaceFileTextInputOf(params: Record<string, unknown>): ReplaceFileTextInput {
+  const { id, expectedSha256, text, undoOperationId } = params;
+  if (!isId(id) || typeof expectedSha256 !== 'string' || !SHA256_HEX.test(expectedSha256)) {
+    throw new InvalidRequest();
+  }
+  const operationId = operationIdOf(params.operationId);
+  const privacy = privacyOf(params.privacy);
+  if (text !== undefined && undoOperationId === undefined) {
+    // Unidades UTF-16: nunca más que los bytes UTF-8 del tope.
+    if (typeof text !== 'string' || text.length > FILE_TEXT_REPLACE_MAX_BYTES) {
+      throw new InvalidRequest();
+    }
+    return { id, expectedSha256, text, operationId, privacy };
+  }
+  if (text === undefined && undoOperationId !== undefined) {
+    return { id, expectedSha256, undoOperationId: operationIdOf(undoOperationId), operationId, privacy };
+  }
+  throw new InvalidRequest();
 }
 
 /** Un entero en `[min, max]`. */
@@ -890,6 +938,18 @@ export class WriterSocketServer {
           const input = replaceRequestOf(envelope.params);
           if (!handlers.replaceInNotes) throw new InvalidRequest();
           result = await handlers.replaceInNotes(input);
+          break;
+        }
+        case 'fetchFile': {
+          const input = fetchFileInputOf(envelope.params);
+          if (!handlers.fetchFile) throw new InvalidRequest();
+          result = await handlers.fetchFile(input);
+          break;
+        }
+        case 'replaceFileText': {
+          const input = replaceFileTextInputOf(envelope.params);
+          if (!handlers.replaceFileText) throw new InvalidRequest();
+          result = await handlers.replaceFileText(input);
           break;
         }
         case 'replaceBody': {

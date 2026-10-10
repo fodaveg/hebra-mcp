@@ -1,18 +1,20 @@
 /**
- * Registro de las 30 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 32 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
  * (`hebra_note_outline`) y leer o añadir por apartados, desde D13 (10 oct 2026),
- * `hebra_grep` y leer por líneas, y desde D14 (10 oct 2026), sustituir en un lote de notas
- * (`hebra_replace_in_notes`: simular, aplicar, deshacer). Todas pasan por `runTool`:
+ * `hebra_grep` y leer por líneas, desde D14 (10 oct 2026), sustituir en un lote de notas
+ * (`hebra_replace_in_notes`: simular, aplicar, deshacer), y desde D15 (10 oct 2026), leer
+ * un fichero suelto y reemplazar el texto de uno. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, mueve ni borra carpetas, ni cambia ni borra
- * adjuntos, ni purga, crea, renombra, mueve o reemplaza un fichero suelto, ni lee su
- * contenido. Cada una lleva sus `annotations` MCP.
+ * adjuntos, ni purga, crea, renombra o mueve un fichero suelto (de uno se lee el
+ * contenido y, si es de texto, se reemplaza entero con la base comprobada, D15). Cada
+ * una lleva sus `annotations` MCP.
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
@@ -37,7 +39,9 @@ import {
   moveNoteInputShape,
   noteOutlineInputShape,
   readAttachmentInputShape,
+  readFileInputShape,
   readNoteInputShape,
+  replaceFileTextInputShape,
   readVersionInputShape,
   restoreFileInputShape,
   restoreNoteInputShape,
@@ -70,7 +74,9 @@ import {
   runTrashNote
 } from './tools/organize';
 import { runNoteOutline } from './tools/note-outline';
+import { runReadFile } from './tools/read-file';
 import { runReadNote } from './tools/read-note';
+import { runReplaceFileText } from './tools/replace-file-text';
 import { runReplaceInNotes } from './tools/replace-in-notes';
 import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
@@ -393,6 +399,31 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     },
     async (input) =>
       runTool(ctx, 'hebra_restore_file', (toolCtx) => runRestoreFile(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_read_file',
+    {
+      title: 'Leer un fichero suelto',
+      description:
+        'Devuelve el contenido de un fichero suelto (id de hebra_list_files; uno de la papelera no se lee): texto (un .base de Obsidian Bases, .md, .txt, .json, .csv, .yaml) como texto, por tramos de hasta 100 000 caracteres (`offset`, `maxChars`; la respuesta trae `truncated` y `nextOffset`); imagen PNG, JPEG, GIF o WebP como imagen; PDF como recurso embebido. Hasta 5 MiB (si no, file_too_large); otro tipo, file_type_not_allowed. Trae `sha256`, la base para hebra_replace_file_text. Solo lectura.',
+      inputSchema: readFileInputShape,
+      annotations: READ_ONLY
+    },
+    async (input) => runTool(ctx, 'hebra_read_file', (toolCtx) => runReadFile(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_replace_file_text',
+    {
+      title: 'Reemplazar el texto de un fichero suelto',
+      description:
+        'Sustituye el contenido ENTERO de un fichero suelto de texto (un .base, .md, .txt, .json, .csv o .yaml; hasta 1 000 000 bytes) por `text`. Lee antes con hebra_read_file y pasa su `sha256` como `expectedSha256`: si el fichero cambió desde la lectura, file_changed y no se escribe (vuelve a leerlo). Mantiene el id, el nombre y la carpeta. La respuesta trae el `sha256` y `byteLength` de lo guardado y `previousSha256`; el contenido anterior se guarda 7 días: con `undoOperationId` (el operationId de este reemplazo) en vez de `text`, vuelve a él. Reintentar con el mismo operationId no vuelve a escribir. No crea, renombra, mueve ni borra ficheros.',
+      inputSchema: replaceFileTextInputShape,
+      annotations: WRITE_IDEMPOTENT
+    },
+    async (input) =>
+      runTool(ctx, 'hebra_replace_file_text', (toolCtx) => runReplaceFileText(toolCtx, input))
   );
 
   server.registerTool(

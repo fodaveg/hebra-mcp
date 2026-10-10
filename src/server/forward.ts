@@ -9,7 +9,8 @@
  *   incluye mandar a la papelera y sacar de ella), `restoreVersion`, desde D9 (3 oct
  *   2026), `createFolder`, `renameFolder` y `addAttachment`, desde D10 (9 oct 2026),
  *   `organizeFile` (la papelera de los ficheros sueltos), y desde D14 (10 oct 2026),
- *   `replaceInNotes` en todos sus modos (los planes viven en el escritor) al escritor. Todas
+ *   `replaceInNotes` en todos sus modos (los planes viven en el escritor), y desde D15,
+ *   `replaceFileText` y `fetchFile` (los bytes de un fichero suelto) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -86,6 +87,7 @@ import type {
   RenameFolderInput,
   RestoreVersionInput
 } from '../store/writes';
+import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
   AWAIT_ROUND_TIMEOUT_MS,
@@ -95,6 +97,7 @@ import {
   type FileOutcome,
   type FolderOutcome,
   type OrganizeOutcome,
+  type ReplaceFileTextOutcome,
   type ReplaceOutcome,
   type SyncFields,
   type SyncState,
@@ -119,6 +122,10 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // `hebra_replace_in_notes` (D14): aplicar tiene un plazo de 20 s y espera una ronda al
   // final; la simulación, un hueco para su hilo y 2 s de recorrido.
   replaceInNotes: REPLACE_APPLY_BUDGET_MS + AWAIT_ROUND_TIMEOUT_MS + 30_000,
+  // Ficheros sueltos (D15): bajar los bytes (como un adjunto) y, al reemplazar, quizá
+  // bajar la base, el `blobPut` y la ronda.
+  fetchFile: 60_000,
+  replaceFileText: AWAIT_ROUND_TIMEOUT_MS + 60_000,
   // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
   replaceBody: 15_000,
   trashConflictCopies: 15_000,
@@ -261,6 +268,33 @@ function asFileOutcome(value: unknown): FileOutcome {
     id: value.id,
     folderId: value.folderId,
     trashed: value.trashed,
+    ...syncFieldsFrom(value)
+  };
+}
+
+/** Valida el `ReplaceFileTextOutcome` que devuelve el escritor (D15), campo a campo. */
+function asReplaceFileTextOutcome(value: unknown, id: string): ReplaceFileTextOutcome {
+  if (!isRecord(value) || value.id !== id) throw new Error('writer_protocol');
+  const sha = /^[0-9a-f]{64}$/;
+  if (
+    (value.outcome !== 'saved' && value.outcome !== 'already') ||
+    typeof value.sha256 !== 'string' ||
+    !sha.test(value.sha256) ||
+    typeof value.previousSha256 !== 'string' ||
+    !sha.test(value.previousSha256) ||
+    typeof value.mimeType !== 'string' ||
+    value.mimeType.length > 255
+  ) {
+    throw new Error('writer_protocol');
+  }
+  return {
+    id,
+    outcome: value.outcome,
+    sha256: value.sha256,
+    byteLength: asCount(value.byteLength),
+    mimeType: value.mimeType,
+    previousSha256: value.previousSha256,
+    ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
   };
 }
@@ -705,6 +739,46 @@ export function buildRoutedWriteContext(
             )
         }
       : {}),
+    // Ficheros sueltos (D15): bajar los bytes lo hace el escritor (el lector los lee del
+    // disco compartido con su filtro); reemplazar, también, con la privacidad de ESTE
+    // lector. Si la conexión se corta tras enviar el reemplazo, no se repite: el agente
+    // reintenta con el mismo `operationId`.
+    ...(local.fetchFile
+      ? {
+          fetchFile: (input: FetchFileInput) =>
+            routed(
+              'fetchFile',
+              { id: input.id, privacy: input.privacy },
+              (value) => {
+                if (!isRecord(value) || typeof value.available !== 'boolean') {
+                  throw new Error('writer_protocol');
+                }
+                return { available: value.available };
+              },
+              () => local.fetchFile!(input)
+            )
+        }
+      : {}),
+    ...(local.replaceFileText
+      ? {
+          replaceFileText: (input: ReplaceFileTextInput) =>
+            routed(
+              'replaceFileText',
+              {
+                id: input.id,
+                expectedSha256: input.expectedSha256,
+                ...(input.text !== undefined ? { text: input.text } : {}),
+                ...(input.undoOperationId !== undefined
+                  ? { undoOperationId: input.undoOperationId }
+                  : {}),
+                operationId: input.operationId,
+                privacy: input.privacy
+              },
+              (value) => asReplaceFileTextOutcome(value, input.id),
+              () => local.replaceFileText!(input)
+            )
+        }
+      : {}),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
     // relevo, esta instancia ya es el escritor y lo anota en local.
@@ -747,9 +821,17 @@ export function writerSocketHandlers(
   const replace = local.replaceInNotes
     ? { replaceInNotes: (request: ReplaceRequest) => local.replaceInNotes!(request) }
     : {};
+  // Ficheros sueltos (D15): con la privacidad del lector y, al reemplazar, la ronda aquí.
+  const files = {
+    ...(local.fetchFile ? { fetchFile: (input: FetchFileInput) => local.fetchFile!(input) } : {}),
+    ...(local.replaceFileText
+      ? { replaceFileText: (input: ReplaceFileTextInput) => local.replaceFileText!(input) }
+      : {})
+  };
   return {
     ...workdir,
     ...replace,
+    ...files,
     createNote: (input) => local.createNote(input),
     // Devuelve el `operationId` que atendió: así el lector sabe que este escritor lo
     // entiende (uno anterior lo ignoraría sin decirlo).

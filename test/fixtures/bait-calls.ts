@@ -158,6 +158,30 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_trash_file', arguments: { id: library.files.referencedByLockedNote } },
     { name: 'hebra_restore_file', arguments: { id: library.files.trashedPrivateFolder } },
     { name: 'hebra_restore_file', arguments: { id: library.files.trashedDeletedPrivateFolder } },
+    // D15: leer o reemplazar cualquiera de los ocultos (su contenido lleva el cebo) es
+    // `not_found`; el visible `.base` se lee y su contenido sale, sin llegar al log. El
+    // texto de un reemplazo nunca va al log.
+    ...[
+      library.files.privateFolder,
+      library.files.referencedByHash,
+      library.files.referencedByName,
+      library.files.referencedByLockedNote,
+      library.files.trashedPrivateFolder,
+      library.files.trashedDeletedPrivateFolder,
+      library.files.tombstone
+    ].flatMap((id): BaitCall[] => [
+      { name: 'hebra_read_file', arguments: { id } },
+      {
+        name: 'hebra_replace_file_text',
+        arguments: {
+          id,
+          expectedSha256: library.privateAttachmentSha,
+          text: `${BAIT_FOLDER} ${BAIT_TAG}`,
+          operationId: `bait-file-${id}`
+        }
+      }
+    ]),
+    { name: 'hebra_read_file', arguments: { id: library.files.inventario } },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en

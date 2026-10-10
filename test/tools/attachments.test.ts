@@ -189,9 +189,11 @@ describe('adjuntos en solo lectura', () => {
       const names = (await client.listTools()).tools.map((tool) => tool.name);
       expect(names).toEqual(expect.arrayContaining(['hebra_list_attachments', 'hebra_read_attachment']));
       // Añadir es `hebra_add_attachment` (D9, 3 oct 2026) y nada más: ninguna herramienta
-      // que suba por otra vía, cambie, sustituya o borre adjuntos, blobs o ficheros.
+      // que suba por otra vía, cambie, sustituya o borre adjuntos, blobs o ficheros. La
+      // única excepción de ficheros es `hebra_replace_file_text` (D15, 10 oct 2026): el
+      // TEXTO de un fichero suelto (no un adjunto), con la base comprobada.
       for (const name of names) {
-        if (name === 'hebra_add_attachment') continue;
+        if (name === 'hebra_add_attachment' || name === 'hebra_replace_file_text') continue;
         expect(name).not.toMatch(
           /(add|put|upload|delete|remove|write|update|replace|change)_(attachment|blob|file)/i
         );

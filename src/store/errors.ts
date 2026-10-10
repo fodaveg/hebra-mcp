@@ -39,6 +39,14 @@ import type { SectionRef } from './sections';
  * - `plan_expired`: pasó la hora para aplicarlo, o los 7 días para deshacerlo.
  * - `plan_already_applied`: el plan ya se aplicó (o se está aplicando) con otro
  *   `operationId`.
+ * Ficheros sueltos (`hebra_read_file` y `hebra_replace_file_text`, D15, 10 oct 2026;
+ * `./file-writes.ts`):
+ * - `file_changed`: el contenido del fichero ya no es el del `expectedSha256` (alguien lo
+ *   cambió desde la lectura); no se escribe nada.
+ * - `file_too_large`: el fichero o el texto nuevo pasan del tope.
+ * - `file_type_not_allowed`: el fichero no es de texto (al reemplazar) o no es de un tipo
+ *   que se pueda leer.
+ * - `file_unavailable`: sus bytes no están en este dispositivo y no se pudieron bajar.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -58,7 +66,11 @@ export type WriteRejectionCode =
   | 'ambiguous_heading'
   | 'plan_not_found'
   | 'plan_expired'
-  | 'plan_already_applied';
+  | 'plan_already_applied'
+  | 'file_changed'
+  | 'file_too_large'
+  | 'file_type_not_allowed'
+  | 'file_unavailable';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -78,7 +90,11 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'ambiguous_heading',
   'plan_not_found',
   'plan_expired',
-  'plan_already_applied'
+  'plan_already_applied',
+  'file_changed',
+  'file_too_large',
+  'file_type_not_allowed',
+  'file_unavailable'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de

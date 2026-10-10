@@ -42,7 +42,10 @@ export const TOOL_NAMES: readonly string[] = [
   // Búsqueda línea a línea (D13, 10 oct 2026).
   'hebra_grep',
   // Sustitución en lote (D14, 10 oct 2026).
-  'hebra_replace_in_notes'
+  'hebra_replace_in_notes',
+  // Leer ficheros sueltos y reemplazar el texto de uno (D15, 10 oct 2026).
+  'hebra_read_file',
+  'hebra_replace_file_text'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
@@ -63,8 +66,10 @@ export const REMOVED_FOLDER_TOOLS: readonly string[] = [
 ];
 
 /** Lo que sigue fuera del MCP tras D10 (9 oct 2026, que trajo listar los ficheros sueltos
- *  y mandarlos a la papelera): purgarlos, vaciar su papelera, crearlos, renombrarlos,
- *  moverlos, reemplazarlos y leer su contenido. Ningún transporte las lista. */
+ *  y mandarlos a la papelera) y D15 (10 oct 2026, que trajo leer su contenido y
+ *  reemplazar el TEXTO de uno, `hebra_replace_file_text`): purgarlos, vaciar su papelera,
+ *  crearlos, renombrarlos, moverlos y reemplazar los bytes de uno cualquiera. Ningún
+ *  transporte las lista. */
 export const FORBIDDEN_FILE_TOOLS: readonly string[] = [
   'hebra_purge_file',
   'hebra_delete_file',
@@ -72,6 +77,5 @@ export const FORBIDDEN_FILE_TOOLS: readonly string[] = [
   'hebra_create_file',
   'hebra_rename_file',
   'hebra_move_file',
-  'hebra_replace_file',
-  'hebra_read_file'
+  'hebra_replace_file'
 ];

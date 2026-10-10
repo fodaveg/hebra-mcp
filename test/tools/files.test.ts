@@ -787,7 +787,7 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
     test = undefined;
   });
 
-  it('trae los ficheros sin lápidas ni hash, y qué notas los enlazan por nombre o por hash', async () => {
+  it('trae los ficheros sin lápidas, con su hash (solo interno), y qué notas los enlazan por nombre o por hash', async () => {
     test = await buildTestContext();
     const library = test.library;
     const index = await test.ctx.port.filesIndex();
@@ -799,10 +799,14 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
         .map(([, id]) => id)
         .sort()
     );
+    // Desde D15 (10 oct 2026) el índice trae el SHA-256 de los bytes, en minúsculas: lo
+    // necesitan `hebra_read_file` y `hebra_replace_file_text` del MISMO turno que el filtro.
+    // `hebra_list_files` sigue sin enseñarlo (el test de la lista, arriba).
     for (const file of index.files) {
       expect(Object.keys(file).sort()).toEqual(
-        ['byteLength', 'folderId', 'id', 'mime', 'name', 'trashedAt', 'updatedAt'].sort()
+        ['byteLength', 'folderId', 'id', 'mime', 'name', 'sha256', 'trashedAt', 'updatedAt'].sort()
       );
+      expect(file.sha256).toMatch(/^[0-9a-f]{64}$/);
     }
     // La carpeta es la GUARDADA: la de una carpeta ya borrada no es una carpeta viva.
     const live = new Set((await test.ctx.port.foldersList()).folders.map((folder) => folder.id));

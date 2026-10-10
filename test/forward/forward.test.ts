@@ -11,6 +11,7 @@
  * y las ramas del lector cuando el escritor no responde.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { createConnection, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,7 @@ import { buildWriteContext, type WriteContext } from '../../src/server/write-con
 import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
 import { mapWriteError } from '../../src/server/tools/write-errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
+import { FILE_TEXT_REPLACE_MAX_BYTES } from '../../src/store/file-content';
 import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import {
@@ -619,6 +621,82 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).not.toContain('plano-reenviado');
   });
 
+  it('leer y reemplazar un fichero suelto desde un lector (D15): baja y escribe el escritor, con la privacidad del lector', async () => {
+    const { relay, writer, reader, client } = await pair({ blobs: true });
+    // Un `.base` creado en la app (como lo deja su editor de Bases): llega al escritor con
+    // la ronda, pero sus bytes siguen en el relé.
+    const yaml = `views:\n  - type: table\n    name: ${BAIT_TEXT}\n`;
+    const app = await appDevice(relay, 'Mac', { blobs: true });
+    const blob = await app.engine.blobPut(new TextEncoder().encode(yaml), { mime: 'text/yaml' });
+    const file = await app.engine.fileCreate(null, 'Tareas.base', blob.sha256);
+    expect((await app.sync.runRound()).result).toBe('ok');
+    await writer.syncRunner!.requestRound();
+    expect(await writer.port.blobRead(blob.sha256)).toBeNull();
+
+    // Leer: el lector pide al escritor que lo baje (`fetchFile`) y lo lee del disco.
+    const read = (await client.callTool({
+      name: 'hebra_read_file',
+      arguments: { id: file.id }
+    })) as CallToolResult;
+    expect(read.isError).not.toBe(true);
+    expect(read.content[1]).toEqual({ type: 'text', text: yaml });
+    const meta = JSON.parse((read.content[0] as { text: string }).text) as Record<string, unknown>;
+    expect(meta).toMatchObject({ id: file.id, mimeType: 'text/yaml', sha256: blob.sha256 });
+
+    // Reemplazar: lo hace el escritor, con la ronda esperada allí; la app recibe el
+    // contenido nuevo con la misma identidad.
+    const next = 'views:\n  - type: cards\n';
+    const nextSha = createHash('sha256').update(next).digest('hex');
+    const args = { id: file.id, expectedSha256: blob.sha256, text: next, operationId: 'op-fwd-file' };
+    const replaced = await call(client, 'hebra_replace_file_text', args);
+    expect(replaced).toEqual({
+      isError: false,
+      value: {
+        id: file.id,
+        outcome: 'saved',
+        sha256: nextSha,
+        byteLength: next.length,
+        mimeType: 'text/yaml',
+        previousSha256: blob.sha256,
+        sync: 'uploaded'
+      }
+    });
+    // El reintento lo sirve el registro del escritor, sin volver a escribir.
+    expect((await call(client, 'hebra_replace_file_text', args)).value).toMatchObject({
+      outcome: 'saved',
+      replayed: true
+    });
+    expect((await app.sync.runRound()).result).toBe('ok');
+    const onApp = app.engine.fileRead(file.id, null);
+    expect(onApp).toMatchObject({ id: file.id, name: 'Tareas.base', sha256: nextSha });
+    expect(new TextDecoder().decode((await app.sync.readBlob(nextSha))!)).toBe(next);
+
+    // La privacidad del LECTOR viaja y la aplica el escritor dentro del turno.
+    const routedWrite = buildRoutedWriteContext(reader, localWriteContext(reader));
+    const unresolved = await routedWrite.replaceFileText!({
+      id: file.id,
+      expectedSha256: nextSha,
+      text: 'otra',
+      operationId: 'op-fwd-unresolved',
+      privacy: { privateFolders: [['no-existe']], privateTags: [] }
+    }).catch((error: unknown) => error);
+    expect(unresolved).toMatchObject({ code: 'privacy_config_unresolved' });
+    const missing = await routedWrite.replaceFileText!({
+      id: 'no-existe',
+      expectedSha256: nextSha,
+      text: 'otra',
+      operationId: 'op-fwd-missing',
+      privacy: OPEN
+    }).catch((error: unknown) => error);
+    expect(missing).toMatchObject({ code: 'not_found' });
+
+    expect(stderrText()).toContain('"event":"write.forward","op":"fetchFile","outcome":"forwarded"');
+    expect(stderrText()).toContain('"event":"write.forward","op":"replaceFileText","outcome":"forwarded"');
+    expect(stderrText()).not.toContain(BAIT_TEXT);
+    expect(stderrText()).not.toContain('Tareas.base');
+    expect(stderrText()).not.toContain(nextSha);
+  });
+
   it('adjunto desde un lector: el escritor lo baja al disco compartido y el lector lo lee de ahí', async () => {
     const { relay, writer, client } = await pair({ blobs: true });
     const app = await appDevice(relay, 'Mac', { blobs: true });
@@ -775,6 +853,16 @@ describe('protocolo de writer.sock', () => {
       trashed: input.action === 'trashFile',
       sync: 'not_linked'
     }),
+    fetchFile: async (input) => ({ available: input.id === 'f1' }),
+    replaceFileText: async (input) => ({
+      id: input.id,
+      outcome: 'saved',
+      sha256: 'b'.repeat(64),
+      byteLength: input.text?.length ?? 0,
+      mimeType: 'text/yaml',
+      previousSha256: input.expectedSha256,
+      sync: 'not_linked'
+    }),
     status: async () => ({
       lastSyncAt: null,
       lastSyncOutcome: null,
@@ -927,6 +1015,64 @@ describe('protocolo de writer.sock', () => {
       params: { body: '\u0001'.repeat(CREATE_BODY_MAX_LENGTH), folderId: null }
     });
     expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
+  });
+
+  it('el límite por defecto admite el texto máximo de replaceFileText en el peor escape JSON (D15)', () => {
+    const worst = JSON.stringify({
+      id: 1,
+      op: 'replaceFileText',
+      params: {
+        id: 'f'.repeat(200),
+        expectedSha256: 'a'.repeat(64),
+        text: '\u0001'.repeat(FILE_TEXT_REPLACE_MAX_BYTES),
+        operationId: 'o'.repeat(200),
+        privacy: OPEN
+      }
+    });
+    expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
+  });
+
+  it('fetchFile y replaceFileText por el socket (D15): privacidad obligatoria y entrada revalidada', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    expect(await requestWriter(path, 'fetchFile', { id: 'f1', privacy: OPEN }, 2_000)).toEqual({
+      available: true
+    });
+    for (const params of [{ id: 'f1' }, { id: '', privacy: OPEN }, { id: 7, privacy: OPEN }]) {
+      await expect(requestWriter(path, 'fetchFile', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
+    const valid = {
+      id: 'f1',
+      expectedSha256: 'a'.repeat(64),
+      text: 'views: []\n',
+      operationId: 'op-1',
+      privacy: OPEN
+    };
+    expect(await requestWriter(path, 'replaceFileText', valid, 2_000)).toMatchObject({
+      id: 'f1',
+      outcome: 'saved'
+    });
+    const { text: _text, ...withoutText } = valid;
+    expect(
+      await requestWriter(path, 'replaceFileText', { ...withoutText, undoOperationId: 'op-0' }, 2_000)
+    ).toMatchObject({ id: 'f1' });
+    for (const params of [
+      { ...valid, privacy: undefined },
+      { ...valid, expectedSha256: 'A'.repeat(64) },
+      { ...valid, expectedSha256: 'a'.repeat(63) },
+      { ...valid, operationId: '' },
+      { ...valid, undoOperationId: 'op-0' },
+      withoutText,
+      { ...valid, text: 'x'.repeat(FILE_TEXT_REPLACE_MAX_BYTES + 1) },
+      { ...valid, id: '' }
+    ]) {
+      await expect(requestWriter(path, 'replaceFileText', params, 2_000)).rejects.toMatchObject({
+        code: 'invalid_request'
+      });
+    }
   });
 
   it('el escritor vuelve a comprobar los límites de §5 y rechaza JSON inválido', async () => {

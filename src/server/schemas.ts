@@ -275,7 +275,7 @@ export const listTrashInputShape = {
 };
 
 /** Ficheros sueltos (D10, 9 oct 2026): listar, mandar a la papelera y sacar, por id. Nada
- *  de purgar, crear, renombrar, mover, reemplazar ni leer su contenido. Sin
+ *  de purgar, crear, renombrar ni mover (leer y reemplazar el texto, D15, abajo). Sin
  *  `.min()`/`.max()` en `name`: su longitud (1–255) la aplica `files.ts` con
  *  `invalid_input`, sin eco de la entrada. */
 export const listFilesInputShape = {
@@ -301,6 +301,44 @@ export const trashFileInputShape = {
 
 export const restoreFileInputShape = {
   id: z.string().describe('Id de un fichero de hebra_list_files con `trashed: true`.')
+};
+
+/** Leer y reemplazar el contenido de un fichero suelto (D15, 10 oct 2026). */
+export const readFileInputShape = {
+  id: z.string().describe('Id de un fichero de hebra_list_files (vivo, no de la papelera).'),
+  offset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('Solo ficheros de texto: carácter por el que empezar. Por defecto 0.'),
+  maxChars: z
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .optional()
+    .describe('Solo ficheros de texto: cuántos caracteres devolver. Por defecto y máximo 100 000.')
+};
+
+/** Sin `.max()` en `text` ni en los ids: los topes los aplica `replace-file-text.ts` con
+ *  `file_too_large` o `invalid_input`, sin eco, y otra vez el escritor. */
+export const replaceFileTextInputShape = {
+  id: z.string().describe('Id de un fichero de texto de hebra_list_files.'),
+  expectedSha256: z
+    .string()
+    .describe('`sha256` que dio hebra_read_file: el contenido sobre el que se escribe. Si el fichero cambió desde entonces, file_changed.'),
+  text: z
+    .string()
+    .optional()
+    .describe('El contenido nuevo ENTERO (UTF-8, hasta 1 000 000 bytes). Exactamente uno de `text` y `undoOperationId`.'),
+  undoOperationId: z
+    .string()
+    .optional()
+    .describe('En vez de `text`: el operationId de un reemplazo anterior de este fichero (7 días) para volver al contenido que tenía antes.'),
+  operationId: z
+    .string()
+    .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a escribir.')
 };
 
 /** Versiones anteriores (ampliación de D2, 30 sep 2026). */

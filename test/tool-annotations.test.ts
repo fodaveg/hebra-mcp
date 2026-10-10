@@ -58,6 +58,10 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada
   // y deshacer dos veces no cambia nada más.
   hebra_replace_in_notes: WRITE_IDEMPOTENT,
+  // D15: leer un fichero suelto; reemplazar su texto con el mismo `operationId` no vuelve
+  // a escribir, y con un contenido que ya tiene responde «ya estaba».
+  hebra_read_file: READ,
+  hebra_replace_file_text: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

@@ -4,8 +4,8 @@
  * Hebra (un `.base`, un PDF que no cuelga de una nota): tiene carpeta propia y no tiene
  * etiquetas, así que `PrivacyFilter` (`./filter.ts`), que solo conoce notas vivas, no
  * sabe decidir sobre él. Este filtro decide qué ficheros puede ver el MCP:
- * `hebra_list_files` los lista, y `hebra_trash_file`/`hebra_restore_file` solo actúan
- * sobre ellos. Un fichero oculto responde igual que uno inexistente (`not_found`), y la
+ * `hebra_list_files` los lista, y `hebra_trash_file`/`hebra_restore_file` y, desde D15,
+ * `hebra_read_file`/`hebra_replace_file_text` solo actúan sobre ellos. Un fichero oculto responde igual que uno inexistente (`not_found`), y la
  * lista no dice cuántos se saltó.
  *
  * La regla es la misma para los vivos y para los de la papelera, y tiene dos partes:
@@ -61,15 +61,35 @@ export class FileFilter {
   private readonly hiddenByReference = new Set<string>();
   private readonly trash: TrashFilter;
 
-  private constructor(live: PrivacyFilter, index: FilesIndex, config: PrivacyConfig) {
+  private constructor(
+    private readonly live: PrivacyFilter,
+    index: FilesIndex,
+    config: PrivacyConfig
+  ) {
     this.trash = TrashFilter.fromSnapshot(live, index.trash, config);
     for (const file of index.files) this.files.set(file.id, file);
     for (const ref of index.refs) {
-      const noteVisible = ref.noteTrashed
-        ? this.trash.isVisible(ref.noteId)
-        : !live.isHiddenNote(ref.noteId);
-      if (!noteVisible) this.hiddenByReference.add(ref.fileId);
+      if (this.isHiddenReference(ref)) this.hiddenByReference.add(ref.fileId);
     }
+  }
+
+  /** `true` si la nota que enlaza (viva o de la papelera) no se ve: la que hace oculto al
+   *  fichero por la regla (b). Cerrado ante la duda: una nota que el filtro de su estado
+   *  no conoce cuenta como oculta. */
+  isHiddenReference(ref: { noteId: string; noteTrashed: boolean }): boolean {
+    return ref.noteTrashed ? !this.trash.isVisible(ref.noteId) : this.live.isHiddenNote(ref.noteId);
+  }
+
+  /**
+   * Un fichero VISIBLE con el SHA-256 de sus bytes, del mismo almacén que el filtro (D15:
+   * `hebra_read_file` y `hebra_replace_file_text`); `undefined` igual que `visibleMeta`.
+   * El hash solo sale de aquí para un fichero que se ve: su contenido se puede leer
+   * entero, así que el hash no dice nada que el contenido no diga.
+   */
+  contentOf(id: string): { file: VisibleFile; sha256: string } | undefined {
+    const entry = this.files.get(id);
+    const file = entry ? this.visibleOf(entry) : undefined;
+    return entry && file ? { file, sha256: entry.sha256.toLowerCase() } : undefined;
   }
 
   /** Sobre el almacén de ahora; `live` es el filtro de esta misma llamada. */
