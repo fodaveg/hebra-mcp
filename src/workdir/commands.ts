@@ -13,7 +13,7 @@
  * ronda de sync trajo otra versión de una nota devuelta; 2 error de uso o de la carpeta.
  */
 import { randomBytes } from 'node:crypto';
-import { relative, resolve } from 'node:path';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
 import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
@@ -68,9 +68,16 @@ function nowOf(io: CommandIo): Date {
   return io.now ? io.now() : new Date();
 }
 
+/** Una ruta para imprimir: relativa al directorio actual, para pasarla tal cual a `cat` o
+ *  `sed`, salvo que haya que subir (`../`): entonces, la absoluta. */
+function display(io: CommandIo, absolute: string): string {
+  const rel = relative(io.cwd, absolute);
+  if (rel === '') return '.';
+  return rel.startsWith('..') || isAbsolute(rel) ? absolute : rel;
+}
+
 function shown(io: CommandIo, workdir: Workdir, ruta: string): string {
-  const rel = relative(io.cwd, workdir.filePath(ruta));
-  return rel === '' ? '.' : rel;
+  return display(io, workdir.notePath(ruta));
 }
 
 /** La ronda, sin que un escritor que no responde tumbe la orden: lo escrito ya está en la
@@ -83,8 +90,9 @@ async function syncRoundQuietly(lib: WorkdirLibrary): Promise<RoundWait> {
   }
 }
 
-function describeRound(round: RoundWait, linked: boolean): string {
-  if (round.kind === 'no_sync' || !linked) return 'sin emparejar, sin sync';
+function describeRound(round: RoundWait): string {
+  // Lo dice la ronda del escritor (que puede ser otro proceso), no los secretos de este.
+  if (round.kind === 'no_sync') return 'sin emparejar, sin sync';
   if (round.kind === 'timeout') return 'la ronda no terminó a tiempo; seguirá sola';
   return round.result === 'ok' ? 'ok' : `ronda con resultado ${round.result}`;
 }
@@ -252,8 +260,8 @@ export async function checkoutCommand(io: CommandIo, open: OpenLibrary, args: Ch
     };
     workdir.writeCheckout(file);
 
-    const where = relative(io.cwd, workdir.root) || '.';
-    io.out(`Sacadas ${taken.length} notas en ${where} (sync: ${describeRound(round, lib.linked)}).`);
+    const where = display(io, workdir.root);
+    io.out(`Sacadas ${taken.length} notas en ${where} (sync: ${describeRound(round)}).`);
     if (taken.length <= MAX_LISTED_PATHS) {
       for (const ruta of taken.sort()) io.out(`  ${shown(io, workdir, ruta)}`);
     } else {
@@ -333,7 +341,7 @@ export function statusCommand(io: CommandIo, args: StatusArgs): number {
     ['sin seguimiento (D no crea notas desde ficheros)', untracked],
     ['base dañada (vuelve a sacarlas con checkout --forzar)', damaged.map((entry) => entry.ruta)]
   ];
-  io.out(`${relative(io.cwd, workdir.root) || '.'}: ${entries.length} notas sacadas el ${checkout.sacadaEn}.`);
+  io.out(`${display(io, workdir.root)}: ${entries.length} notas sacadas el ${checkout.sacadaEn}.`);
   const age = nowOf(io).getTime() - Date.parse(checkout.sacadaEn);
   if (age > STALE_CHECKOUT_MS) {
     io.out('Aviso: la sacada tiene más de 24 h; lo que devuelvas puede chocar con lo editado en Hebra.');
@@ -596,7 +604,7 @@ export async function applyCommand(
     if (changedBySync.length > 0) unclean = true;
 
     const summary = [...counts].map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`).join(', ');
-    io.out(`Lote ${lote}: ${summary || 'nada escrito'} (sync: ${describeRound(round, lib.linked)}).`);
+    io.out(`Lote ${lote}: ${summary || 'nada escrito'} (sync: ${describeRound(round)}).`);
     const budget = new CompactBudget(io);
     for (const item of written) {
       const { added, removed } = diffStat(item.entry.base!, item.entry.edited!);
@@ -609,7 +617,7 @@ export async function applyCommand(
         io.out(header);
       }
     }
-    budget.finish(`${relative(io.cwd, workdir.loteDir(lote))}/cambios.diff`);
+    budget.finish(`${display(io, workdir.loteDir(lote))}/cambios.diff`);
     for (const ruta of changedBySync) {
       io.out(`  ${shown(io, workdir, ruta)}  la ronda de sync trajo otra versión: revisa las copias de conflicto en Hebra`);
     }
@@ -752,7 +760,7 @@ export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoAr
       }
     }
     const round = await syncRoundQuietly(lib);
-    io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round, lib.linked)}).`);
+    io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round)}).`);
     for (const { ruta, name } of results) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
     if (results.length === 0) io.out('  Nada que deshacer.');
     return unclean ? 1 : 0;

@@ -180,16 +180,16 @@ export class Workdir {
   }
 
   /** Ruta absoluta del fichero de una nota (`ruta` con `/`). */
-  filePath(ruta: string): string {
+  notePath(ruta: string): string {
     return join(this.root, ...ruta.split('/'));
   }
 
   readNoteFile(ruta: string): string | null {
-    return readIfExists(this.filePath(ruta));
+    return readIfExists(this.notePath(ruta));
   }
 
   writeNoteFile(ruta: string, body: string): void {
-    writeAtomic(this.filePath(ruta), body);
+    writeAtomic(this.notePath(ruta), body);
   }
 
   /**

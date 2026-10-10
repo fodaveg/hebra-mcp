@@ -134,6 +134,12 @@ describe('checkout (AC1): por consulta, título, carpeta y --all', () => {
     expect(out.text()).not.toContain(CEBO);
     expect(out.text()).toContain('Sacadas 3 notas');
     expect(out.text()).toContain('hebra-mcp apply --dir trabajo');
+    // §6.4: stderr solo lleva eventos cerrados; ni títulos, ni cuerpos, ni rutas.
+    const stderr = vi
+      .mocked(process.stderr.write)
+      .mock.calls.map((call) => String(call[0]))
+      .join('');
+    for (const text of ['Receta', 'Lumbre', 'Plan', CEBO, 'trabajo']) expect(stderr).not.toContain(text);
   });
 
   it('--consulta, --titulo y --carpeta, solos y combinados', async () => {
