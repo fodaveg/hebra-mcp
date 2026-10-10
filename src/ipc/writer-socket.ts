@@ -49,10 +49,10 @@
  *   desconocida es `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
- *   - `replaceBody` `{id, body, baseBodySha256, baseLocalSeq, onConflict, privacy}` →
+ *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
  *     `ReplaceBodyResult` (`src/store/body-writes.ts`): el cuerpo entero con la base
  *     comprobada en el turno del escritor, sin esperar la ronda;
- *   - `trashConflictCopies` `{originalId, bodySha256, copyId?, privacy}` → recuentos:
+ *   - `trashConflictCopies` `{originalId, bodySha256, copyId?, notBefore?, exclude?, privacy}` → recuentos:
  *     solo copias de conflicto de esa nota con ese cuerpo;
  *   - `syncRound` `{}` → `RoundWait`: pide una ronda y la espera como mucho
  *     `AWAIT_ROUND_TIMEOUT_MS` (antes de `checkout`, después de `apply` y `undo`).
@@ -163,6 +163,9 @@ const MAX_RESPONSE_BYTES = 256 * 1024;
 
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
+
+/** Copias que un `trashConflictCopies` puede excluir (las de otros lotes de esa nota). */
+const MAX_EXCLUDED_COPIES = 1_000;
 
 export type WriterSocketOp =
   | 'createNote'
@@ -489,30 +492,38 @@ function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput
 /** `replaceBody` (ficheros de trabajo, SPEC.md §13): el cuerpo con su tope, la base que se
  *  sacó (SHA-256 y `local_seq`) y qué hacer con un conflicto. */
 function replaceBodyInputOf(params: Record<string, unknown>): ReplaceBodyInput {
-  const { id, body, baseBodySha256, baseLocalSeq, onConflict } = params;
+  const { id, body, baseBodySha256, onConflict } = params;
   if (!isId(id) || typeof body !== 'string' || body.length > REPLACE_BODY_MAX_LENGTH) {
     throw new InvalidRequest();
   }
   if (typeof baseBodySha256 !== 'string' || !SHA256_HEX.test(baseBodySha256)) throw new InvalidRequest();
-  if (typeof baseLocalSeq !== 'number' || !Number.isSafeInteger(baseLocalSeq) || baseLocalSeq < 0) {
-    throw new InvalidRequest();
-  }
   if (onConflict !== 'copy' && onConflict !== 'reject') throw new InvalidRequest();
-  return { id, body, baseBodySha256, baseLocalSeq, onConflict, privacy: privacyOf(params.privacy) };
+  return { id, body, baseBodySha256, onConflict, privacy: privacyOf(params.privacy) };
 }
 
 /** `trashConflictCopies` (SPEC.md §13): solo copias de conflicto de `originalId` con ese
  *  cuerpo. */
 function trashConflictCopiesInputOf(params: Record<string, unknown>): TrashConflictCopiesInput {
-  const { originalId, bodySha256, copyId } = params;
+  const { originalId, bodySha256, copyId, notBefore, exclude } = params;
   if (!isId(originalId) || typeof bodySha256 !== 'string' || !SHA256_HEX.test(bodySha256)) {
     throw new InvalidRequest();
   }
   if (copyId !== undefined && !isId(copyId)) throw new InvalidRequest();
+  if (notBefore !== undefined && (typeof notBefore !== 'number' || !Number.isSafeInteger(notBefore) || notBefore < 0)) {
+    throw new InvalidRequest();
+  }
+  if (exclude !== undefined && (!Array.isArray(exclude) || exclude.length > MAX_EXCLUDED_COPIES || !exclude.every(isId))) {
+    throw new InvalidRequest();
+  }
   const privacy = privacyOf(params.privacy);
-  return copyId === undefined
-    ? { originalId, bodySha256, privacy }
-    : { originalId, bodySha256, copyId, privacy };
+  return {
+    originalId,
+    bodySha256,
+    ...(copyId === undefined ? {} : { copyId }),
+    ...(notBefore === undefined ? {} : { notBefore }),
+    ...(exclude === undefined ? {} : { exclude: exclude as string[] }),
+    privacy
+  };
 }
 
 /** Código cerrado de un fallo del escritor; nunca el mensaje. */

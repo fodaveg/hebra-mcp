@@ -36,6 +36,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { PrivacyConfig } from '../privacy/config';
+import { TrashFilter } from '../privacy/trash-filter';
 import {
   LOCKED_BODY_PREFIX,
   privacyInTurn,
@@ -49,14 +50,17 @@ export { REPLACE_BODY_MAX_LENGTH } from './writes';
 
 export type ConflictMode = 'copy' | 'reject';
 
+/** `expectedLocalSeq` de un guardado que tiene que salir como copia de conflicto: el motor
+ *  empieza en 1 y solo sube, así que -1 nunca coincide con el de la nota. */
+const NO_LOCAL_SEQ = -1;
+
 export interface ReplaceBodyInput {
   id: string;
   /** El cuerpo nuevo, entero. */
   body: string;
-  /** SHA-256 hex del cuerpo sobre el que se editó (la base sacada). */
+  /** SHA-256 hex del cuerpo sobre el que se editó (la base sacada). Es lo ÚNICO que decide
+   *  si hay conflicto: el `local_seq` de la sacada no viaja (ver `NO_LOCAL_SEQ`). */
   baseBodySha256: string;
-  /** `local_seq` de esa base: con él y el SHA, el motor decide si hay conflicto. */
-  baseLocalSeq: number;
   onConflict: ConflictMode;
   /** Configuración de privados de quien pide (la del CLI, o la del lector por el socket). */
   privacy: PrivacyConfig;
@@ -82,9 +86,13 @@ export interface TrashConflictCopiesInput {
   originalId: string;
   /** El cuerpo que dejó el lote en la copia: solo se tocan las que siguen así. */
   bodySha256: string;
-  /** Si el diario sabe qué copia fue, solo esa; si no (corte antes de anotarla), todas
-   *  las de esa nota con ese cuerpo. */
+  /** Si el diario sabe qué copia fue, solo esa; si no (corte antes de anotarla), las de
+   *  esa nota con ese cuerpo que cumplan `notBefore` y `exclude`. */
   copyId?: string;
+  /** Sin `copyId`: solo copias creadas desde este instante (epoch ms, el del intento). */
+  notBefore?: number;
+  /** Sin `copyId`: copias que no se tocan (las que anotaron otros lotes). */
+  exclude?: string[];
   privacy: PrivacyConfig;
 }
 
@@ -148,11 +156,12 @@ export async function replaceBodyInTurn(
     const existing = await findCopy(store, note.id, editedSha);
     if (existing) return { result: { outcome: 'conflict_copy', copyId: existing, reused: true }, wrote: false };
   }
-  // Base del guardado: la sacada si cambió por debajo (el motor hace la copia); la actual
-  // si el cuerpo sigue siendo la base (solo cambiaron metadatos, o nada).
-  const base = changedUnderneath
-    ? { localSeq: input.baseLocalSeq, bodySha256: input.baseBodySha256 }
-    : note;
+  // Base del guardado: la actual si el cuerpo sigue siendo la base (solo cambiaron
+  // metadatos, o nada). Si cambió por debajo, el SHA de la sacada con un `local_seq` que no
+  // puede coincidir: el motor escribe in situ si `local_seq` coincide AUNQUE el cuerpo sea
+  // otro, y un `rev` de la sacada que coincidiera por casualidad (carpeta copiada de otra
+  // máquina, biblioteca re-emparejada) pisaría la edición ajena sin copia ni instantánea.
+  const base = changedUnderneath ? { localSeq: NO_LOCAL_SEQ, bodySha256: input.baseBodySha256 } : note;
   const saveInput = saveInputFor(note, input.body, base);
   if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
     return { result: { outcome: 'unavailable' }, wrote: false };
@@ -179,20 +188,36 @@ export async function trashConflictCopiesInTurn(
   input: TrashConflictCopiesInput
 ): Promise<{ result: TrashConflictCopiesResult; wrote: boolean }> {
   const filter = privacyInTurn(store, input.privacy);
+  // La papelera tiene su propio filtro (`isHiddenNote` solo conoce las notas vivas).
+  const trash = TrashFilter.fromSnapshot(filter, store.trashIndex(), input.privacy);
   const result: TrashConflictCopiesResult = { trashed: 0, already: 0, changed: 0 };
-  const ids = input.copyId === undefined ? store.conflictCopyIds(input.originalId) : [input.copyId];
+  const named = input.copyId !== undefined;
+  const excluded = new Set(input.exclude ?? []);
+  const ids = named ? [input.copyId!] : store.conflictCopyIds(input.originalId);
   for (const id of ids) {
     const copy = await store.noteRead(id);
+    // Solo copias de conflicto de ESA nota: con otra nota no hace nada.
     if (!copy || copy.conflictOf !== input.originalId) {
-      if (input.copyId !== undefined) result.changed += 1;
+      if (named) result.changed += 1;
+      continue;
+    }
+    // La privacidad, antes de decir nada de la copia (tampoco si está en la papelera).
+    const hidden = copy.trashedAt !== null ? !trash.isVisible(copy.id) : filter.isHiddenNote(copy.id);
+    if (hidden) {
+      if (named) result.changed += 1;
+      continue;
+    }
+    // Sin id anotado (lote cortado): ni las que otro lote anotó como suyas ni las de antes
+    // del intento.
+    if (!named && (excluded.has(copy.id) || (input.notBefore !== undefined && copy.createdAt < input.notBefore))) {
       continue;
     }
     if (copy.trashedAt !== null) {
       if (copy.bodySha256 === input.bodySha256) result.already += 1;
       continue;
     }
-    if (filter.isHiddenNote(copy.id) || copy.bodySha256 !== input.bodySha256) {
-      if (input.copyId !== undefined) result.changed += 1;
+    if (copy.bodySha256 !== input.bodySha256) {
+      if (named) result.changed += 1;
       continue;
     }
     await store.noteTrash(copy.id);

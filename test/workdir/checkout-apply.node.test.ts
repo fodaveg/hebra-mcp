@@ -83,7 +83,6 @@ async function seedLibrary(): Promise<Seeded> {
       id: receta,
       body: '# Receta\n\nLumbre de pan COPIA\n',
       baseBodySha256: '0'.repeat(64),
-      baseLocalSeq: 0,
       onConflict: 'copy',
       privacy: OPEN
     });

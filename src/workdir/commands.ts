@@ -14,14 +14,17 @@
  */
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
+import { deriveNote, type NoteRow } from '../hebra';
 import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
 import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
 import { LOCKED_BODY_PREFIX } from '../store/writes';
 import type { RoundWait } from '../server/write-context';
+import type { WriterRole } from '../sync/library-instance';
 import { compactDiff, diffStat, unifiedDiff } from './diff';
 import {
   findWorkdir,
+  safeRuta,
   sha256Hex,
   Workdir,
   WorkdirError,
@@ -77,24 +80,68 @@ function display(io: CommandIo, absolute: string): string {
 }
 
 function shown(io: CommandIo, workdir: Workdir, ruta: string): string {
+  // Una ruta tocada a mano en los metadatos no se resuelve (quedaría fuera de la carpeta).
+  if (safeRuta(ruta) === null) return `(ruta no válida en los metadatos: ${JSON.stringify(ruta)})`;
   return display(io, workdir.notePath(ruta));
 }
 
+/** Lo que pasó con la ronda: lo que responde el escritor, o por qué no respondió. */
+export type RoundOutcome = RoundWait | { kind: 'old_writer' } | { kind: 'unreachable' };
+
 /** La ronda, sin que un escritor que no responde tumbe la orden: lo escrito ya está en la
- *  SQLite y la ronda periódica del escritor lo subirá. */
-async function syncRoundQuietly(lib: WorkdirLibrary): Promise<RoundWait> {
+ *  SQLite y lo subirá la ronda de quien la tenga abierta. */
+async function syncRoundQuietly(lib: WorkdirLibrary): Promise<RoundOutcome> {
   try {
     return await lib.syncRound();
-  } catch {
-    return { kind: 'timeout' };
+  } catch (error) {
+    return errorCode(error) === 'invalid_request' ? { kind: 'old_writer' } : { kind: 'unreachable' };
   }
 }
 
-function describeRound(round: RoundWait): string {
-  // Lo dice la ronda del escritor (que puede ser otro proceso), no los secretos de este.
-  if (round.kind === 'no_sync') return 'sin emparejar, sin sync';
-  if (round.kind === 'timeout') return 'la ronda no terminó a tiempo; seguirá sola';
-  return round.result === 'ok' ? 'ok' : `ronda con resultado ${round.result}`;
+/**
+ * La ronda en una frase. Lo dice la ronda del escritor (que puede ser otro proceso), no los
+ * secretos de este. `role` es el de este proceso al terminar: si era el escritor, al salir
+ * no queda nadie que siga la ronda, y lo pendiente sube la próxima vez que algo abra la
+ * biblioteca.
+ */
+export function describeRound(round: RoundOutcome, role: WriterRole): string {
+  switch (round.kind) {
+    case 'no_sync':
+      return 'sin emparejar, sin sync';
+    case 'old_writer':
+      return 'el escritor (otro proceso de hebra-mcp) es de una versión anterior y no atiende la petición de ronda; lo escrito lo subirá su ronda periódica';
+    case 'unreachable':
+      return 'el escritor (otro proceso de hebra-mcp) no respondió; lo escrito está en la biblioteca y lo subirá su ronda';
+    case 'timeout':
+      return role === 'this'
+        ? 'la ronda no terminó a tiempo; lo pendiente sube la próxima vez que un proceso de hebra-mcp abra la biblioteca'
+        : 'la ronda no terminó a tiempo; la sigue el escritor (otro proceso de hebra-mcp)';
+    case 'done':
+      return round.result === 'ok' ? 'ok' : `ronda con resultado ${round.result}`;
+  }
+}
+
+/**
+ * ¿Puede salir esta nota a disco, decidido con la fila RECIÉN leída y un filtro hecho
+ * DESPUÉS de leerla (D3)? Una ronda de sync a mitad del `checkout` puede haberla vuelto
+ * privada: por su carpeta (la efectiva de la fila, en el árbol de `filter`), por una
+ * etiqueta de su cuerpo (con `deriveNote`, sus ancestros incluidos) o por lo que ya diga el
+ * índice. También fuera: papelera, archivada, copia de conflicto y bloqueada.
+ */
+function canLeave(row: NoteRow | null, filter: PrivacyFilter): boolean {
+  if (!row || row.trashedAt !== null || row.archivedAt !== null || row.conflictOf !== null) return false;
+  if (row.body.startsWith(LOCKED_BODY_PREFIX)) return false;
+  if (filter.isHiddenNote(row.id) || filter.isFolderHidden(row.effectiveFolderId)) return false;
+  return !filter.hidesAnyTag((deriveNote(row.body).tags ?? []).map(({ tag }) => tag));
+}
+
+/** La más antigua de unas fechas ISO (o `fallback` si no hay ninguna). */
+function oldest(dates: Array<string | undefined>, fallback: string): string {
+  let result: string | null = null;
+  for (const date of dates) {
+    if (date !== undefined && (result === null || Date.parse(date) < Date.parse(result))) result = date;
+  }
+  return result ?? fallback;
 }
 
 /** Nombres (tal como están guardados) de las carpetas de Hebra hasta `folderId`. */
@@ -148,6 +195,15 @@ export async function checkoutCommand(io: CommandIo, open: OpenLibrary, args: Ch
       throw new UsageError('checkout: falta --dir <carpeta de trabajo>');
     }
   }
+  const release = workdir.acquireLock();
+  try {
+    return await checkoutLocked(io, open, args, workdir);
+  } finally {
+    release();
+  }
+}
+
+async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutArgs, workdir: Workdir): Promise<number> {
   const lib = await open();
   try {
     const round = await syncRoundQuietly(lib);
@@ -200,17 +256,38 @@ export async function checkoutCommand(io: CommandIo, open: OpenLibrary, args: Ch
       }
     }
 
-    // Notas que salen: vivas, visibles, sin bloquear, no copias de conflicto ni archivadas.
-    const rows = [];
+    // Se leen las candidatas; qué sale se decide DESPUÉS, con un filtro rehecho tras leer
+    // (una ronda de sync a mitad pudo volver privada alguna: `canLeave`).
+    const read: NoteRow[] = [];
     const seen = new Set<string>();
-    const foundTitles = new Set<string>();
-    let shaMismatch = 0;
     for (const id of candidates) {
       if (seen.has(id)) continue;
       seen.add(id);
       const row = await lib.port.noteRead(id);
-      if (!row || row.trashedAt !== null || row.archivedAt !== null || row.conflictOf !== null) continue;
-      if (filter.isHiddenNote(row.id) || row.body.startsWith(LOCKED_BODY_PREFIX)) continue;
+      if (row) read.push(row);
+    }
+    // Y las sacadas antes que esta vez no se piden: por si ya no pueden estar en disco.
+    const previous = new Map<string, NoteRow | null>();
+    for (const entry of existing?.notas ?? []) {
+      if (!seen.has(entry.id)) previous.set(entry.id, await lib.port.noteRead(entry.id));
+    }
+    const fresh = await PrivacyFilter.build(lib.port, lib.privacyConfig);
+    if (fresh.unresolved) {
+      throw new WorkdirError(
+        'la configuración de privados no se puede aplicar (una carpeta privada configurada no existe): no se saca nada'
+      );
+    }
+
+    // Notas que salen: vivas, visibles, sin bloquear, no copias de conflicto ni archivadas.
+    const rows: NoteRow[] = [];
+    const leftOut = new Set<string>();
+    const foundTitles = new Set<string>();
+    let shaMismatch = 0;
+    for (const row of read) {
+      if (!canLeave(row, fresh)) {
+        leftOut.add(row.id);
+        continue;
+      }
       if (allowed && !allowed.has(row.effectiveFolderId)) continue;
       if (sha256Hex(row.body) !== row.bodySha256) {
         shaMismatch += 1;
@@ -222,46 +299,80 @@ export async function checkoutCommand(io: CommandIo, open: OpenLibrary, args: Ch
     }
     rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
-    // Rutas: las ya sacadas conservan la suya; las nuevas, sin chocar (NFC y minúsculas).
+    const at = nowOf(io).toISOString();
     const entries = new Map<string, string>();
     for (const entry of existing?.notas ?? []) entries.set(entry.id, entry.ruta);
+
+    // Lo sacado antes que ya no puede estar en disco (privado ahora, en la papelera,
+    // bloqueado o borrado): sin editar, se retira; editado, se avisa sin nombrarlo.
+    let retired = 0;
+    let keptEdited = 0;
+    const readIds = new Set(read.map((row) => row.id));
+    for (const [id, ruta] of entries) {
+      const gone = previous.has(id)
+        ? !canLeave(previous.get(id) ?? null, fresh)
+        : leftOut.has(id) || !readIds.has(id);
+      if (!gone) continue;
+      const meta = workdir.readMeta(id);
+      const file = meta && safeRuta(meta.ruta) !== null ? workdir.readNoteFile(meta.ruta) : null;
+      const base = meta ? workdir.readBase(meta) : null;
+      if (file !== null && file !== base) {
+        keptEdited += 1;
+        continue;
+      }
+      workdir.removeNote(id, meta?.ruta ?? ruta);
+      entries.delete(id);
+      retired += 1;
+    }
+
+    // Rutas: las ya sacadas conservan la suya; las nuevas, sin chocar (NFC y minúsculas).
     const used = new Set([...entries.values()].map(pathKey));
     const taken: string[] = [];
     const notOverwritten: string[] = [];
     for (const row of rows) {
-      let ruta = entries.get(row.id);
-      if (ruta === undefined) {
-        ruta = assignNotePath(used, folderNames(filter, row.effectiveFolderId), row.title, row.id);
-        entries.set(row.id, ruta);
-      }
+      const known = entries.get(row.id);
+      const ruta =
+        known !== undefined && safeRuta(known) !== null
+          ? known
+          : assignNotePath(used, folderNames(fresh, row.effectiveFolderId), row.title, row.id);
       const meta = workdir.readMeta(row.id);
-      if (meta && !args.forzar) {
-        const file = workdir.readNoteFile(meta.ruta);
-        const base = workdir.readBase(meta);
+      if (!args.forzar) {
+        const metaRuta = meta && safeRuta(meta.ruta) !== null ? meta.ruta : null;
+        const file = workdir.readNoteFile(metaRuta ?? ruta);
+        const base = meta ? workdir.readBase(meta) : null;
         // Una edición que ya quedó en una copia de conflicto está a salvo en Hebra: volver a
-        // sacar la nota la refresca. Cualquier otra edición sin devolver no se pisa.
+        // sacar la nota la refresca. Cualquier otra edición sin devolver no se pisa, y un
+        // fichero que no es de esta carpeta (sin metadatos) tampoco.
         const savedInCopy =
-          file !== null && meta.conflicto?.tipo === 'copia' && sha256Hex(file) === meta.conflicto.sha;
-        if (file !== null && (base === null || file !== base) && !savedInCopy) {
-          notOverwritten.push(meta.ruta);
+          file !== null && meta?.conflicto?.tipo === 'copia' && sha256Hex(file) === meta.conflicto.sha;
+        const foreign = meta === null && file !== null && file !== row.body;
+        if (foreign || (meta !== null && file !== null && (base === null || file !== base) && !savedInCopy)) {
+          notOverwritten.push(metaRuta ?? ruta);
           continue;
         }
       }
-      const next: NoteMeta = { id: row.id, ruta, rev: row.localSeq, sha: row.bodySha256 };
+      entries.set(row.id, ruta);
+      const next: NoteMeta = { id: row.id, ruta, rev: row.localSeq, sha: row.bodySha256, sacadaEn: at };
       workdir.setBase(next, row.body);
       workdir.writeNoteFile(ruta, row.body);
       taken.push(ruta);
     }
+    const notas = [...entries].map(([id, ruta]) => ({ id, ruta })).sort((a, b) => (a.ruta < b.ruta ? -1 : 1));
     const file: CheckoutFile = {
       version: 1,
       biblioteca: libraryId,
-      sacadaEn: nowOf(io).toISOString(),
-      notas: [...entries].map(([id, ruta]) => ({ id, ruta })).sort((a, b) => (a.ruta < b.ruta ? -1 : 1))
+      // La base más antigua de las sacadas, no la de hoy: una sacada parcial no rejuvenece
+      // el aviso de 24 h de las demás.
+      sacadaEn: oldest(
+        notas.map(({ id }) => workdir.readMeta(id)?.sacadaEn ?? existing?.sacadaEn),
+        at
+      ),
+      notas
     };
     workdir.writeCheckout(file);
 
     const where = display(io, workdir.root);
-    io.out(`Sacadas ${taken.length} notas en ${where} (sync: ${describeRound(round)}).`);
+    io.out(`Sacadas ${taken.length} notas en ${where} (sync: ${describeRound(round, lib.role)}).`);
     if (taken.length <= MAX_LISTED_PATHS) {
       for (const ruta of taken.sort()) io.out(`  ${shown(io, workdir, ruta)}`);
     } else {
@@ -275,6 +386,21 @@ export async function checkoutCommand(io: CommandIo, open: OpenLibrary, args: Ch
       if (!foundTitles.has(title)) io.out(`Sin nota con el título «${title}».`);
     }
     if (shaMismatch > 0) io.out(`${shaMismatch} notas no se han sacado: su SHA no casa con el del almacén.`);
+    // Sin nombrarlas: alguna puede haberse vuelto privada.
+    if (retired > 0) {
+      io.out(
+        retired === 1
+          ? 'Retirada 1 nota sacada antes que ya no se puede sacar (privada, en la papelera, bloqueada o borrada).'
+          : `Retiradas ${retired} notas sacadas antes que ya no se pueden sacar (privadas, en la papelera, bloqueadas o borradas).`
+      );
+    }
+    if (keptEdited > 0) {
+      io.out(
+        keptEdited === 1
+          ? '1 nota sacada antes ya no se puede sacar y tiene una edición sin devolver: su fichero no se ha tocado, y apply no la devolverá.'
+          : `${keptEdited} notas sacadas antes ya no se pueden sacar y tienen ediciones sin devolver: sus ficheros no se han tocado, y apply no las devolverá.`
+      );
+    }
     io.out(`Edita los .md y devuelve con: hebra-mcp apply --dir ${where}   (para ver antes el diff: --simular)`);
     return 0;
   } finally {
@@ -308,8 +434,11 @@ function scan(workdir: Workdir): Scan {
   for (const { id, ruta } of checkout.notas) {
     tracked.add(workdir.keyOf(ruta));
     const meta = workdir.readMeta(id);
-    const base = meta ? workdir.readBase(meta) : null;
-    const edited = workdir.readNoteFile(meta?.ruta ?? ruta);
+    // Una ruta tocada a mano (absoluta, con `..`, dentro de `.hebra-d`…) en cualquiera de
+    // los dos JSON es una base dañada: ni se lee ni se devuelve (`safeRuta`).
+    const valid = safeRuta(ruta) !== null && (meta === null || safeRuta(meta.ruta) !== null);
+    const base = meta && valid ? workdir.readBase(meta) : null;
+    const edited = valid ? workdir.readNoteFile(meta?.ruta ?? ruta) : null;
     let state: ScanState;
     if (!meta || base === null) state = 'base_danada';
     else if (edited === null) state = 'falta';
@@ -341,8 +470,13 @@ export function statusCommand(io: CommandIo, args: StatusArgs): number {
     ['sin seguimiento (D no crea notas desde ficheros)', untracked],
     ['base dañada (vuelve a sacarlas con checkout --forzar)', damaged.map((entry) => entry.ruta)]
   ];
-  io.out(`${display(io, workdir.root)}: ${entries.length} notas sacadas el ${checkout.sacadaEn}.`);
-  const age = nowOf(io).getTime() - Date.parse(checkout.sacadaEn);
+  // La base más antigua, nota a nota: una sacada parcial reciente no esconde las viejas.
+  const since = oldest(
+    entries.map((entry) => entry.meta?.sacadaEn ?? checkout.sacadaEn),
+    checkout.sacadaEn
+  );
+  io.out(`${display(io, workdir.root)}: ${entries.length} notas sacadas; la base más antigua es del ${since}.`);
+  const age = nowOf(io).getTime() - Date.parse(since);
   if (age > STALE_CHECKOUT_MS) {
     io.out('Aviso: la sacada tiene más de 24 h; lo que devuelvas puede chocar con lo editado en Hebra.');
   }
@@ -485,6 +619,22 @@ export async function applyCommand(
   hooks: ApplyTestHooks = {}
 ): Promise<number> {
   const workdir = findWorkdir(io.cwd, args.dir);
+  // `--simular` no escribe nada en la carpeta: no necesita el cerrojo.
+  const release = args.simular ? () => undefined : workdir.acquireLock();
+  try {
+    return await applyLocked(io, open, args, hooks, workdir);
+  } finally {
+    release();
+  }
+}
+
+async function applyLocked(
+  io: CommandIo,
+  open: OpenLibrary,
+  args: ApplyArgs,
+  hooks: ApplyTestHooks,
+  workdir: Workdir
+): Promise<number> {
   const { checkout, entries, untracked } = scan(workdir);
   const candidates = entries
     .filter((entry) => entry.state === 'editada' && !entry.meta?.conflicto)
@@ -558,7 +708,6 @@ export async function applyCommand(
           id: entry.id,
           body: edited,
           baseBodySha256: meta.sha,
-          baseLocalSeq: meta.rev,
           onConflict: args.conflicto === 'copia' ? 'copy' : 'reject'
         });
       } catch (error) {
@@ -569,7 +718,10 @@ export async function applyCommand(
       const name = outcomeName(result);
       counts.set(name, (counts.get(name) ?? 0) + 1);
       if (result.outcome === 'applied' || result.outcome === 'already') {
-        workdir.setBase({ id: entry.id, ruta: entry.ruta, rev: result.localSeq, sha: result.bodySha256 }, edited);
+        workdir.setBase(
+          { id: entry.id, ruta: entry.ruta, rev: result.localSeq, sha: result.bodySha256, sacadaEn: at() },
+          edited
+        );
       } else if (result.outcome === 'conflict_copy') {
         workdir.writeMeta({ ...meta, conflicto: { tipo: 'copia', lote, copyId: result.copyId, sha: editedSha } });
       } else if (result.outcome === 'conflict_rejected') {
@@ -604,7 +756,7 @@ export async function applyCommand(
     if (changedBySync.length > 0) unclean = true;
 
     const summary = [...counts].map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`).join(', ');
-    io.out(`Lote ${lote}: ${summary || 'nada escrito'} (sync: ${describeRound(round)}).`);
+    io.out(`Lote ${lote}: ${summary || 'nada escrito'} (sync: ${describeRound(round, lib.role)}).`);
     const budget = new CompactBudget(io);
     for (const item of written) {
       const { added, removed } = diffStat(item.entry.base!, item.entry.edited!);
@@ -647,6 +799,21 @@ interface UndoItem {
   shaEditado: string;
   resultado: ApplyOutcomeName | null;
   copyId?: string;
+  /** Cuándo se intentó (epoch ms): una copia anterior no la pudo dejar este lote. */
+  intentoEn: number;
+}
+
+/** Copias de conflicto que OTROS lotes anotaron como suyas, por nota: un lote cortado no
+ *  las toca aunque tengan el mismo cuerpo. */
+function copiesOfOtherLotes(workdir: Workdir, lote: string): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const other of workdir.lotes()) {
+    if (other === lote) continue;
+    for (const entry of workdir.readJournal(other)) {
+      if (entry.paso === 'hecho' && entry.copyId) out.set(entry.id, [...(out.get(entry.id) ?? []), entry.copyId]);
+    }
+  }
+  return out;
 }
 
 const UNDO_LABEL: Record<UndoOutcomeName, string> = {
@@ -662,11 +829,28 @@ const UNDO_LABEL: Record<UndoOutcomeName, string> = {
 export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoArgs): Promise<number> {
   const workdir = findWorkdir(io.cwd, args.dir);
   if (!workdir.hasLote(args.lote)) throw new WorkdirError(`no existe el lote ${args.lote}`);
+  const release = workdir.acquireLock();
+  try {
+    return await undoLocked(io, open, args, workdir);
+  } finally {
+    release();
+  }
+}
+
+async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, workdir: Workdir): Promise<number> {
   const checkout = workdir.readCheckout();
   const items = new Map<string, UndoItem>();
+  const otherCopies = copiesOfOtherLotes(workdir, args.lote);
   for (const entry of workdir.readJournal(args.lote)) {
     if (entry.paso === 'intento') {
-      items.set(entry.id, { id: entry.id, ruta: entry.ruta, shaEditado: entry.shaEditado, resultado: null });
+      const intentoEn = Date.parse(entry.en);
+      items.set(entry.id, {
+        id: entry.id,
+        ruta: entry.ruta,
+        shaEditado: entry.shaEditado,
+        resultado: null,
+        intentoEn: Number.isFinite(intentoEn) ? intentoEn : 0
+      });
     } else if (entry.paso === 'hecho') {
       const item = items.get(entry.id);
       if (item) {
@@ -695,9 +879,8 @@ export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoAr
       if (resultado === 'rechazada_por_conflicto' || resultado === 'no_disponible' || resultado === 'bloqueada') {
         continue; // Ese lote no escribió nada en esta nota.
       }
-      if (resultado === 'copia_de_conflicto' || resultado === null) {
-        // La copia que dejó el lote (o, si se cortó antes de anotarla, las de esa nota con
-        // ese cuerpo) va a la papelera si sigue igual.
+      if (resultado === 'copia_de_conflicto') {
+        // La copia que anotó el lote va a la papelera si sigue igual.
         const trashed = await lib.trashConflictCopies({
           originalId: item.id,
           bodySha256: item.shaEditado,
@@ -705,19 +888,19 @@ export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoAr
         });
         if (trashed.trashed > 0) record(item, 'copia_a_la_papelera');
         else if (trashed.changed > 0) record(item, 'copia_cambiada');
-        // Cortado tras dejar una copia: el original no lo escribió este lote.
-        if (resultado === 'copia_de_conflicto' || trashed.trashed > 0 || trashed.already > 0) continue;
+        continue;
       }
       const base = workdir.readLoteBase(args.lote, item.id);
       if (base === null) {
         record(item, 'no_disponible');
         continue;
       }
+      // Lo que diga la biblioteca decide, no las copias: si el original es el editado, lo
+      // escribió este lote y se restaura (`reject`: si cambió después, no se toca).
       const result = await lib.replaceBody({
         id: item.id,
         body: base,
         baseBodySha256: item.shaEditado,
-        baseLocalSeq: 0,
         onConflict: 'reject'
       });
       let name: UndoOutcomeName;
@@ -739,17 +922,37 @@ export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoAr
           name = 'bloqueada';
           break;
       }
-      // Sin «intento» ni «hecho» (lote cortado antes de escribir) y la nota ya como la
-      // base: no había nada que deshacer y no se anota.
-      if (name === 'ya_estaba' && resultado === null) continue;
+      if (resultado === null && result.outcome !== 'applied') {
+        // Lote cortado tras «intento» y sin «hecho»: el original no es el editado, así que
+        // si el lote escribió algo fue una copia de conflicto. Solo una de ESTE lote: con su
+        // cuerpo, creada después del intento y que ningún otro lote anotó como suya.
+        const trashed = await lib.trashConflictCopies({
+          originalId: item.id,
+          bodySha256: item.shaEditado,
+          notBefore: item.intentoEn,
+          exclude: otherCopies.get(item.id) ?? []
+        });
+        if (trashed.trashed > 0) {
+          record(item, 'copia_a_la_papelera');
+          continue;
+        }
+        // Nada que deshacer: el lote no llegó a escribir en esta nota.
+        if (name === 'ya_estaba') continue;
+      }
       record(item, name);
       if (result.outcome === 'applied') {
         // La carpeta de trabajo vuelve a la base si seguía como la dejó el lote; si el
         // fichero ya tenía otra edición, no se pisa y queda marcada para no devolverla.
         const meta = workdir.readMeta(item.id);
-        if (meta && meta.sha === item.shaEditado) {
+        if (meta && meta.sha === item.shaEditado && safeRuta(meta.ruta) !== null) {
           const file = workdir.readNoteFile(meta.ruta);
-          const restored: NoteMeta = { id: meta.id, ruta: meta.ruta, rev: result.localSeq, sha: result.bodySha256 };
+          const restored: NoteMeta = {
+            id: meta.id,
+            ruta: meta.ruta,
+            rev: result.localSeq,
+            sha: result.bodySha256,
+            sacadaEn: at()
+          };
           if (file !== null && sha256Hex(file) === item.shaEditado) {
             workdir.setBase(restored, base);
             workdir.writeNoteFile(meta.ruta, base);
@@ -760,7 +963,7 @@ export async function undoCommand(io: CommandIo, open: OpenLibrary, args: UndoAr
       }
     }
     const round = await syncRoundQuietly(lib);
-    io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round)}).`);
+    io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round, lib.role)}).`);
     for (const { ruta, name } of results) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
     if (results.length === 0) io.out('  Nada que deshacer.');
     return unclean ? 1 : 0;

@@ -11,6 +11,7 @@
  *     lotes/<lote>/diario.jsonl
  *     lotes/<lote>/base/<id>.base
  *     lotes/<lote>/cambios.diff
+ *     cerrojo                  { pid, token, en } mientras corre checkout, apply o undo
  * ```
  *
  * - Las bases NO terminan en `.md`: un script que recorre `**\/*.md` (el `rglob` de Python
@@ -23,7 +24,8 @@
  *   entre los dos últimos pasos, la siguiente lectura ve que `<id>.base.next` casa con el
  *   `sha` nuevo y termina el cambio (`readBase`); si muere antes, el `.next` sobra y se
  *   pisa la próxima vez.
- * - `ruta` va siempre con `/` y en NFC, sea cual sea la plataforma.
+ * - `ruta` va siempre con `/` y en NFC, sea cual sea la plataforma. Al leer los JSON se
+ *   normaliza, y una que saldría de la carpeta o caería en `.hebra-d` no se usa (`safeRuta`).
  */
 import { createHash, randomBytes } from 'node:crypto';
 import {
@@ -37,12 +39,23 @@ import {
   statSync,
   writeFileSync
 } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { pathKey } from './names';
 
 export const META_DIR = '.hebra-d';
 export const CHECKOUT_FILE = 'checkout.json';
 export const LAYOUT_VERSION = 1;
+export const LOCK_FILE = 'cerrojo';
+
+/** ¿Vive el proceso? `EPERM` es que vive y es de otro usuario. */
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
 
 /** Marca de conflicto de una nota sacada: no se vuelve a devolver hasta otro `checkout`. */
 export type ConflictMark =
@@ -60,6 +73,10 @@ export interface NoteMeta {
   rev: number;
   /** SHA-256 hex del cuerpo base. */
   sha: string;
+  /** ISO 8601 de cuando la base se tomó de la biblioteca (`checkout`, o el `apply`/`undo`
+   *  que la puso al día). El aviso de 24 h de `status` mira la más antigua. Ausente en
+   *  metadatos anteriores: vale `CheckoutFile.sacadaEn`. */
+  sacadaEn?: string;
   conflicto?: ConflictMark;
 }
 
@@ -67,9 +84,25 @@ export interface CheckoutFile {
   version: typeof LAYOUT_VERSION;
   /** `library_id` de la biblioteca de la que se sacó: `apply` se niega con otra. */
   biblioteca: string;
-  /** ISO 8601 del último `checkout`. */
+  /** ISO 8601 de la base MÁS ANTIGUA de las notas sacadas (no la del último `checkout`:
+   *  una sacada parcial no rejuvenece las demás). */
   sacadaEn: string;
   notas: Array<{ id: string; ruta: string }>;
+}
+
+/**
+ * Una `ruta` de los metadatos, normalizada (`/`, NFC), o `null` si no es una ruta de nota de
+ * esta carpeta: absoluta (también `C:` o `\\servidor`), con `..`, dentro de `.hebra-d` o sin
+ * `.md`. Los JSON se pueden tocar a mano o con un script: nunca se lee ni se escribe fuera.
+ */
+export function safeRuta(ruta: unknown): string | null {
+  if (typeof ruta !== 'string' || ruta.length === 0) return null;
+  if (isAbsolute(ruta) || /^[A-Za-z]:/u.test(ruta) || /^[\\/]/u.test(ruta)) return null;
+  const segments = ruta.normalize('NFC').split(/[\\/]+/u).filter((part) => part.length > 0 && part !== '.');
+  if (segments.length === 0 || segments.includes('..')) return null;
+  if (pathKey(segments[0]) === pathKey(META_DIR)) return null;
+  const normalized = segments.join('/');
+  return normalized.toLowerCase().endsWith('.md') ? normalized : null;
 }
 
 export function sha256Hex(text: string): string {
@@ -130,7 +163,12 @@ export class Workdir {
     if (value.version !== LAYOUT_VERSION || !Array.isArray(value.notas)) {
       throw new WorkdirError(`${this.checkoutPath} no tiene la forma esperada`);
     }
-    return value;
+    // Rutas normalizadas (`\` de Windows → `/`, NFC). Una que no vale (`safeRuta`) se queda
+    // tal cual: quien la usa la ve con `safeRuta` y la trata como base dañada.
+    const notas = value.notas
+      .filter((entry) => typeof entry?.id === 'string')
+      .map((entry) => ({ id: entry.id, ruta: safeRuta(entry.ruta) ?? String(entry.ruta) }));
+    return { ...value, notas };
   }
 
   writeCheckout(file: CheckoutFile): void {
@@ -145,9 +183,21 @@ export class Workdir {
     return join(this.metaDir, 'base', `${idFileName(id)}.base`);
   }
 
+  /** Metadatos de una nota, con la `ruta` normalizada como en `readCheckout`. */
   readMeta(id: string): NoteMeta | null {
     const text = readIfExists(this.metaPath(id));
-    return text === null ? null : (JSON.parse(text) as NoteMeta);
+    if (text === null) return null;
+    const meta = JSON.parse(text) as NoteMeta;
+    return { ...meta, ruta: safeRuta(meta.ruta) ?? String(meta.ruta) };
+  }
+
+  /** Retira una nota de la carpeta: su fichero (si lo hay), su base y sus metadatos. */
+  removeNote(id: string, ruta: string): void {
+    if (safeRuta(ruta) !== null) rmSync(this.notePath(ruta), { force: true });
+    const base = this.basePath(id);
+    rmSync(base, { force: true });
+    rmSync(`${base}.next`, { force: true });
+    rmSync(this.metaPath(id), { force: true });
   }
 
   writeMeta(meta: NoteMeta): void {
@@ -179,9 +229,63 @@ export class Workdir {
     renameSync(`${path}.next`, path);
   }
 
-  /** Ruta absoluta del fichero de una nota (`ruta` con `/`). */
+  /** Ruta absoluta del fichero de una nota. Lanza con una `ruta` que no vale (`safeRuta`):
+   *  ninguna orden lee ni escribe fuera de la carpeta de trabajo. */
   notePath(ruta: string): string {
-    return join(this.root, ...ruta.split('/'));
+    const safe = safeRuta(ruta);
+    const path = safe === null ? null : join(this.root, ...safe.split('/'));
+    const rel = path === null ? '..' : relative(this.root, path);
+    if (path === null || rel.startsWith('..') || isAbsolute(rel)) {
+      throw new WorkdirError('una ruta de los metadatos queda fuera de la carpeta de trabajo');
+    }
+    return path;
+  }
+
+  // ---- cerrojo ----
+
+  private get lockPath(): string {
+    return join(this.metaDir, LOCK_FILE);
+  }
+
+  /**
+   * Cerrojo de la carpeta de trabajo (`.hebra-d/cerrojo`): `checkout`, `apply` y `undo`
+   * escriben en ella y no pueden ir a la vez. Se crea en exclusiva (`wx`) con el PID; uno
+   * de un proceso que ya no vive se retira. Devuelve con qué soltarlo (también se suelta
+   * al salir el proceso).
+   */
+  acquireLock(): () => void {
+    mkdirSync(this.metaDir, { recursive: true });
+    const token = randomBytes(8).toString('hex');
+    const content = JSON.stringify({ pid: process.pid, token, en: new Date().toISOString() });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        writeFileSync(this.lockPath, content, { encoding: 'utf8', flag: 'wx' });
+        const release = (): void => {
+          process.removeListener('exit', release);
+          if (readIfExists(this.lockPath) === content) rmSync(this.lockPath, { force: true });
+        };
+        process.once('exit', release);
+        return release;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const held = readIfExists(this.lockPath);
+      let pid: number | null = null;
+      try {
+        const parsed = JSON.parse(held ?? 'null') as { pid?: unknown } | null;
+        pid = typeof parsed?.pid === 'number' ? parsed.pid : null;
+      } catch {
+        pid = null;
+      }
+      if (pid !== null && processAlive(pid)) {
+        throw new WorkdirError(
+          `otra orden está usando esta carpeta de trabajo (proceso ${pid}): espera a que termine y repite`
+        );
+      }
+      // De un proceso muerto (o ilegible): se retira y se vuelve a intentar una vez.
+      rmSync(this.lockPath, { force: true });
+    }
+    throw new WorkdirError('no se pudo tomar el cerrojo de la carpeta de trabajo: repite la orden');
   }
 
   readNoteFile(ruta: string): string | null {
