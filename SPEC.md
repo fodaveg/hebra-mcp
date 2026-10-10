@@ -26,7 +26,7 @@ y mandarlos a la papelera, el 9 oct 2026; D11, leer y escribir una nota por apar
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep–10 oct 2026, cerradas)
+## 3. Decisiones de David (26 sep–10 oct 2026, cerradas; D12, ficheros de trabajo, el 10 oct 2026)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
@@ -41,6 +41,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D9 | **Carpetas y adjuntos** (3 oct 2026, «te autorizo a hacer todo lo que te pida hebra», a petición de la sesión de Hebra, que necesita replicar la estructura de carpetas de Obsidian y subir capturas PNG de audits). Sustituye en parte los puntos 5 y 7 de D2: 1) el MCP **crea y renombra carpetas** visibles (`hebra_create_folder`, `hebra_rename_folder`); **mover y borrar carpetas siguen fuera**; 2) la privacidad de una carpeta se decide **con la configuración, antes de mirar el motor**: una ruta resultante que es una carpeta privada configurada (o queda debajo de una), renombrar una carpeta que tiene una privada configurada debajo, o cualquier choque de nombre con algo no visible responden el mismo `folder_unavailable`, exista o no esa carpeta; `folder_name_taken` solo sale con una hermana VISIBLE; crear es idempotente (una visible con ese nombre bajo ese padre se devuelve con `created: false`) y renombrar al nombre que ya tiene no escribe; 3) el MCP **añade un adjunto** a una nota visible (`hebra_add_attachment`), con los MISMOS tipos y el mismo tope de 5 MiB que la lectura (decisión 7), guardado con `blobPut` del motor y referenciado al final del cuerpo como `![[sha256:H\|nombre]]` por la vía de `hebra_append_to_note` (copia de conflicto si choca) con la idempotencia de `hebra_edit_note` (`operationId`); sube al relé con la ronda de sync (Blob V2), así que nunca queda un blob sin una nota que lo referencie; **borrar y cambiar adjuntos siguen fuera**. | La opción A sacaba las carpetas del MCP porque sus errores revelaban carpetas privadas; con un error único decidido desde la configuración ya no las revelan. |
 | D10 | **Ficheros sueltos** (9 oct 2026, «adelante con las tres»; antes, por la sesión de Hebra de Fedora, que necesitaba mandar ficheros sueltos a la papelera: «pidele a la sesión en el mac de hebra-mcp que lo haga»). Amplía la decisión 6 de D2 a los ficheros sueltos de la biblioteca (la tabla `files` de Hebra: un `.base`, un PDF que no cuelga de una nota): 1) el MCP **lista** los ficheros sueltos (`hebra_list_files`), **manda uno a la papelera** (`hebra_trash_file`) y **lo saca** (`hebra_restore_file`); 2) **nunca purga** un fichero ni lo borra de forma irreversible, y **leer su contenido, crearlo, renombrarlo, moverlo o reemplazarlo siguen fuera**; 3) privacidad (decisión técnica del orquestador, que aplica a los ficheros las reglas 4 y 6 de D2 y cierra ante la duda): un fichero está oculto **(a)** si su carpeta es privada o subcarpeta, también si la carpeta ya se borró (se sube por las lápidas como en la papelera de notas), o **(b)** si lo enlaza alguna nota oculta, viva o de la papelera, por su nombre o por el SHA-256 de sus bytes; la regla es la misma para los vivos y para los de la papelera, se aplica en la herramienta y otra vez en el escritor, y un fichero oculto responde `not_found`, igual que uno inexistente; restaurar nunca deja un fichero en una carpeta que el cliente no ve; 4) sin `operationId`: mandar y sacar son idempotentes por estado, como `hebra_trash_note`. | Los ficheros sueltos estaban fuera de v1 (§10, «Después de v1»). Coste asumido de la regla (b): oculta de más con homónimos (un fichero visible que se llama igual que otro enlazado desde una nota oculta tampoco sale). |
 | D11 | **Notas por apartados** (9 oct 2026; alcance de David en la tarea de Lumbre «hebra-mcp: leer y escribir una nota por apartados, sin traer la nota entera», con la orden «haz […] y sube»; el diseño, de Claude). Motivo: una nota de decisiones real ocupa 43 700 bytes y 8 apartados, y registrar una decisión costaba tres llamadas con la nota entera en el contexto (leerla, `hebra_edit_note` y un `hebra_search` para comprobar que el texto entró, porque la escritura respondía «saved» sin prueba). Criterio: registrar una decisión en un apartado con DOS llamadas pequeñas (esquema de la nota y añadir al apartado), sin que el cuerpo entero pase por el contexto del cliente y con la respuesta de la escritura como prueba de lo guardado. 1) **Apartado** = un encabezado ATX y todo lo que sigue hasta el siguiente de nivel igual o menor o el final (subapartados incluidos); no cuentan las líneas del frontmatter inicial ni de los bloques de código cercados, y los encabezados Setext (subrayados con `===` o `---`) **no** son apartados (límite deliberado: menos falsos positivos al escribir). Títulos comparados como `normalizedHeading` de Hebra (NFKC, recortados, espacios colapsados, minúsculas); el analizador es código propio de hebra-mcp (`src/store/sections.ts`), no importa el de Hebra. 2) `hebra_read_note` y `hebra_append_to_note` aceptan `heading?` y `headingOccurrence?`; la herramienta nueva `hebra_note_outline` da el esquema (títulos, niveles, líneas y tamaños, sin cuerpo). 3) Un título ambiguo no se adivina: `ambiguous_heading` con los candidatos, y se elige con `headingOccurrence`. 4) Las escrituras devuelven **prueba de lo guardado** leída del cuerpo guardado, no un eco de la entrada (`appended`, `applied`, `totalChars`, `revision`). 5) `hebra_search` devuelve el apartado más interno del fragmento (`heading`). 6) Privacidad sin cambios: ninguna regla nueva; una nota oculta responde `not_found` también con `heading`, y ningún título de apartado ni texto de nota entra en un log. 7) **Ampliada el 10 oct 2026** (decidido por delegación de David, con la ampliación de D2 del mismo día): con `operationId`, el reintento de `hebra_append_to_note` devuelve la prueba de lo guardado anotada en el registro (la de la primera vez) con `replayed: true`, sin volver a escribir; si el registro se quedó a medias (`started`) y el cuerpo es el que se iba a guardar, `revision` y `totalChars` del cuerpo actual, sin `appended` (no consta dónde quedó el texto). | Descartado: partir la nota en varias o reservar marcadores de apartado (cambiaría el contenido del usuario). Descartado: Setext y apartados por HTML o negritas (ambiguos y fáciles de escribir sin querer). Coste asumido: una nota con dos apartados del mismo título obliga a elegir por `headingOccurrence`. |
+| D12 | **Ficheros de trabajo con vuelta** (10 oct 2026, decidido por David; tarea D de Lumbre c4f2fd52, sobre la sonda de la opción D del audit `2026-10-10-sqlite-o-markdown.md` de Hebra): `hebra-mcp checkout`, `apply` y `undo`, más `status` y `diff` de consulta, como subórdenes LOCALES del mismo dispositivo emparejado que `serve` (§13). 1) SQLite sigue mandando: los `.md` son una copia de trabajo y vuelven solo con `apply`. 2) **Excepción a D2 solo en esta vía local**: `apply` y `undo` reescriben el cuerpo entero comprobando la base (`expectedLocalSeq` y `baseBodySha256` del motor), con instantánea forzada antes y el cuerpo base guardado por lote. Las herramientas MCP, por stdio y en el conector remoto, siguen por sustituciones y no ganan ninguna escritura nueva. 3) D3 se aplica: lo privado no sale en `checkout` ni se puede devolver una nota que lo sea o lo pasaría a ser. | Coste para un agente local igual al de editar ficheros sueltos (AC7 de la sonda, ronda 2: 0,95× en tokens) sin cambiar quién manda. Descartado para la vía local: traducir el diff a sustituciones como la vía remota (frágil al mover apartados, y una reescritura grande serían varias llamadas sin atomicidad por nota). |
 
 ## 4. Arquitectura
 
@@ -714,7 +715,9 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     un adjunto de una nota visible y responde `{available}`, nunca los bytes; decisión 7 de D2) y
     `status` (el estado de sync del escritor). `privacy` es la configuración de privados del
     lector y es obligatoria en las nueve escrituras y en `fetchAttachment`: sin ella,
-    `invalid_request`.
+    `invalid_request`. Los ficheros de trabajo (D12, §13.6) añaden `replaceBody`,
+    `trashConflictCopies` y `syncRound`, que ninguna herramienta MCP usa; un escritor sin
+    ellas (o de una versión anterior) responde `invalid_request`.
     Errores con código cerrado, nunca con el mensaje; los rechazos de una sustitución llevan su
     índice (`edit`) y `ambiguous_heading`, sus `candidates` (D11). Los títulos de `candidates` y de `appended.heading` llegan cortados a 200 caracteres y el lector rechaza los más largos; solo `ambiguous_heading` lleva `candidates` (en cualquier otro código se descartan). Una respuesta de más de 256 KiB se descarta (la prueba de `applied` de 50 sustituciones, con el peor escape JSON, pasa de 64 KiB). Una línea de más de `MAX_MESSAGE_BYTES` se rechaza sin leerla entera: lo mayor
     entre el cuerpo máximo de §5 con el peor escape JSON (las sustituciones de `editNote` suman como
@@ -1023,3 +1026,165 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
 
 C1 y C2 van en paralelo.
+
+## 13. Ficheros de trabajo con vuelta (D12, 10 oct 2026)
+
+Decidido por David el 10 oct 2026 (tarea D de Lumbre c4f2fd52). Parte del contrato de la sonda
+de Hebra (`docs/sondas/opcion-d-contrato.md`, en `59b5d403`) y de la aceptación AC1-AC7 del audit
+`docs/audits/2026-10-10-sqlite-o-markdown.md`; el código es propio (D5): nada del prototipo
+`scripts/sonda-d/hebra-d.ts` se copia. Código en `src/workdir/` y `src/store/body-writes.ts`.
+
+### 13.1 Órdenes
+
+- `hebra-mcp checkout --dir <carpeta> <selección> [--forzar]`: ronda de sync y saca las notas como
+  `.md`. Selección: `--all`, `--consulta <texto>` (búsqueda FTS), `--titulo <título exacto>` y
+  `--carpeta <ruta>` (con sus subcarpetas). `--consulta` y `--titulo` se repiten y se suman; con
+  `--carpeta` además, solo entra lo de esas carpetas. Un título sin nota se lista. Imprime las
+  rutas (hasta 60; con más, el patrón) y cómo devolverlas. Una nota ya sacada conserva su ruta; si
+  su fichero tiene una edición sin devolver no se pisa (se lista), salvo con `--forzar` o si esa
+  edición ya quedó en una copia de conflicto (§13.4).
+- `hebra-mcp apply [--conflicto copia|rechazar] [--simular|--dry-run]`: devuelve las cambiadas
+  (§13.4), espera una ronda e imprime el resumen y un diff compacto (líneas cambiadas recortadas
+  alrededor del cambio, 6 por nota y unos 3 000 caracteres en total). `--simular` imprime lo mismo
+  sin abrir la biblioteca ni escribir nada: ni lote, ni metadatos, ni nota.
+- `hebra-mcp undo --lote <lote>`: deshace un lote (§13.5).
+- `hebra-mcp status [--rutas]` y `hebra-mcp diff [--stat] [ficheros…]`: consulta, sin abrir la
+  biblioteca. `status` da cifras de lo editado sin devolver, en conflicto, lo que falta, lo que no
+  tiene seguimiento y las bases dañadas (5 rutas por lista; todas con `--rutas`) y avisa si la
+  sacada tiene más de 24 h. `diff` es el unificado base → editado de las cambiadas.
+- Sin `--dir`, `apply`, `undo`, `status` y `diff` buscan la carpeta subiendo desde el directorio
+  actual y, si no, en un subdirectorio inmediato cuando solo uno la tiene.
+- Salida: 0 todo limpio; 1 si algo no entró limpio (copia de conflicto, rechazada, no disponible,
+  bloqueada, base dañada, en conflicto de antes, demasiado grande, o la ronda trajo otra versión de
+  una nota devuelta); 2 error de uso o de la carpeta. stdout es de quien lanza la orden (rutas y
+  títulos, como en `pair`); stderr, los eventos cerrados de §6.4, sin títulos, cuerpos ni rutas.
+
+### 13.2 Carpeta de trabajo
+
+```
+<carpeta>/
+  <carpetas de Hebra saneadas>/<título saneado> (<8 primeros del id>).md   ← el cuerpo, byte a byte
+  .hebra-d/
+    checkout.json            { version: 1, biblioteca, sacadaEn, notas: [{ id, ruta }] }
+    notas/<id>.json          { id, ruta, rev, sha, conflicto? }
+    base/<id>.base           el cuerpo base
+    lotes/<lote>/diario.jsonl, base/<id>.base, cambios.diff
+```
+
+- El `.md` es la nota tal cual, sin cabecera: los metadatos van aparte.
+- Las bases no terminan en `.md` (un `**/*.md` no las toca) y se comprueban contra su `sha`: una
+  base tocada es «base dañada» y no se devuelve (`checkout --forzar` la rehace).
+- Los JSON se escriben con temporal y `rename`. La base nueva se escribe como `<id>.base.next`,
+  después los metadatos y después el `rename`: un corte entre los dos últimos se completa en la
+  siguiente lectura.
+- `biblioteca` es el `library_id`: `apply` y `undo` se niegan con otra biblioteca.
+- La correspondencia fichero → nota vive en `checkout.json`: renombrar o mover un fichero no
+  cambia el título (sale del cuerpo); el renombrado sale como «falta» y el nuevo como «sin
+  seguimiento», y ninguno se devuelve.
+
+### 13.3 Nombres y plataformas
+
+- Título más los 8 primeros del id; carpetas de Hebra como directorios. Todo en NFC.
+- `: * ? " < > | / \` y los caracteres de control pasan a `-`; sin espacios ni puntos al final;
+  sin punto al principio (un directorio oculto se lo saltan `rg` y otros); los nombres de
+  dispositivo de Windows (`CON`, `PRN`, `AUX`, `NUL`, `COM0-9`, `LPT0-9`, también con `¹²³`, en
+  cualquier caja y con cualquier extensión) llevan `_` delante. Título recortado a 150 bytes UTF-8
+  sin partir un carácter; sin título, «Sin título».
+- Dos rutas que solo difieren en mayúsculas o en NFC/NFD son la misma (en macOS y Windows lo
+  serían): la segunda lleva el id entero. Al leer la carpeta, se compara en NFC y, si el sistema
+  de ficheros no distingue mayúsculas (se mira en la propia carpeta), también sin ellas.
+- Las rutas de `checkout.json` van con `/`; una ruta con `\` de Windows se lee igual.
+- El diff es propio (`src/workdir/diff.ts`), no el `diff` del sistema: líneas comparadas byte a
+  byte (un `\r` cuenta) y un tope de memoria (con más de 4 000 pasos de Myers sin terminar, el
+  tramo central sale entero como quitado y añadido).
+
+### 13.4 `apply`
+
+Abre un lote y, por cada nota cuyo fichero difiere de su base (sin conflicto anterior), en orden
+de ruta: anota «intento» en el diario (con los SHA de la base y del editado), guarda la base en el
+lote y pide al escritor `replaceBody`, que en UN turno de la cola (`src/store/body-writes.ts`):
+
+1. Aplica el filtro de privados (D3). Una nota borrada, en la papelera u oculta, o un cuerpo que la
+   dejaría con una etiqueta privada: «no disponible», sin escribir y sin decir cuál de las cuatro.
+2. Nota bloqueada (o cuerpo que lo parece): «bloqueada», sin escribir.
+3. **«Ya estaba»**: si el cuerpo actual ya es el editado, no escribe. Es lo que hace repetible un
+   `apply` cortado (§13.8).
+4. Si el cuerpo actual es la base: instantánea forzada (`noteVersionSnapshot`) y `noteSave`.
+5. Si cambió por debajo: con `copia` (por defecto), busca una copia de conflicto viva de esa nota
+   con el mismo cuerpo editado y, si no la hay, `noteSave` con la base vieja: el motor deja el
+   texto en una copia visible (`conflictOf`) y no toca el original. Con `rechazar`, no escribe.
+   En los dos casos la nota queda «en conflicto» y no se vuelve a devolver hasta otro `checkout`.
+
+Después pone al día los metadatos, anota «hecho» con el resultado y añade su diff a
+`cambios.diff`. Cada nota entra entera o no entra (una transacción del motor); el lote no es
+atómico y repetir `apply` completa lo pendiente. Cada escritura pide su ronda sin esperarla (el
+runner las encadena, §8); al final se espera una (`syncRound`) y se relee: si la ronda trajo otra
+versión de una nota recién devuelta (otro dispositivo la editó a la vez), lo dice; el motor ya la
+resolvió con una copia de conflicto. Si esa versión llega en una ronda ANTES de escribir la nota,
+sale como copia de conflicto en el paso 5.
+
+**Excepción a D2.** Es la única vía de hebra-mcp que reescribe el cuerpo entero, y solo existe
+aquí, en local. El motivo de D2 (que nadie machaque a ciegas lo que no vio) lo cubren la
+comprobación de base del motor, la instantánea forzada y la base guardada por lote.
+
+### 13.5 `undo`, `status` y `diff`
+
+`undo --lote` recorre el diario. Por cada nota que el lote escribió, o pudo escribir (un
+«intento» sin «hecho», de un corte): si su cuerpo actual es el editado, vuelve a escribir la base
+(instantánea forzada antes); si ya es la base, nada; si cambió después, no la toca y la lista. Una
+copia de conflicto del lote va a la papelera (reversible) si sigue igual. La carpeta de trabajo
+vuelve a la base si el fichero seguía como lo dejó el lote; si tenía otra edición, no se pisa y
+queda «en conflicto». Repetir `undo` no hace nada.
+
+### 13.6 Escritor único y sync
+
+El CLI abre la biblioteca como `serve` (`openServeContext`: mismo directorio de datos, mismos
+secretos de `pair`, mismo `config.json` de privados, mismo `writer.lock`), así que es el MISMO
+dispositivo, no otro:
+
+- **Si nadie tiene `writer.lock`**, el CLI es el escritor mientras dura la orden: escribe en la
+  SQLite, sincroniza y atiende en `writer.sock` lo que le reenvíen otras sesiones; al cerrar,
+  suelta el bloqueo.
+- **Si otro proceso lo tiene** (un `serve` por stdio, `serve-http`), el CLI es lector: lee de la
+  réplica en solo lectura y reenvía por `writer.sock` tres ops nuevas: `replaceBody` (el turno de
+  §13.4, sin esperar la ronda), `trashConflictCopies` (solo copias de esa nota con ese cuerpo) y
+  `syncRound` (pide una ronda y la espera hasta `AWAIT_ROUND_TIMEOUT_MS`). El escritor aplica la
+  configuración de privados que recibe, como en las demás. Si el escritor no responde, el relevo
+  de §8 (`routeWrite`). Un escritor de una versión anterior responde `invalid_request`: `apply`
+  lo dice, se corta y no escribe.
+- Por qué reenviar y no negarse: con Claude Code abierto casi siempre hay un `serve` vivo con el
+  bloqueo, y negarse dejaría la orden inservible justo cuando se usa.
+- Ronda de sync antes de `checkout` y después de `apply` y `undo`, en el escritor que sea. Si no
+  responde a tiempo, la orden sigue: lo escrito ya está en la SQLite y lo subirá la ronda
+  periódica del escritor.
+
+### 13.7 Límites
+
+- **D no crea ni borra notas desde ficheros**: un `.md` nuevo sale «sin seguimiento» y uno borrado
+  o renombrado, «falta»; ninguno se devuelve. Por eso no sirve como biblioteca de ficheros
+  permanente: es una copia de trabajo que vuelve a Hebra y se tira.
+- Sin adjuntos ni ficheros sueltos (`.base`, PDF, dibujos): solo cuerpos de nota. Un `![[…]]`
+  editado viaja como texto.
+- No salen: notas bloqueadas, papelera, copias de conflicto, archivadas y privadas (D3). Las
+  ocultas del listado general sí salen con `--all` (es una preferencia de vista, no de
+  privacidad).
+- Un cuerpo de más de 1 000 000 de unidades UTF-16 no se devuelve (cabe en una línea del socket).
+- Copia en claro de lo sacado en el disco del agente, como cualquier fichero suyo.
+- Rutas largas de Windows (260 caracteres) sin tratar; tampoco se ha corrido en Windows.
+- Sin vigilancia de cambios: lo editado y olvidado lo cuenta `status` (con el aviso de 24 h).
+
+### 13.8 Pruebas
+
+En `test/workdir/`, sobre bibliotecas temporales, nunca la de David:
+
+- `checkout-apply.node.test.ts`: AC1 (selecciones; fuera bloqueadas, papelera, archivadas, copias
+  y privadas; nada privado en disco ni en stderr), AC2 y AC3 (`status`, `diff`, `--simular` sin
+  escribir), AC4 (copia y rechazo, sin reenviar en cadena), AC6 (`undo`), base dañada, fichero
+  renombrado, nombres de Windows, NFC, otra biblioteca, bloqueada y etiqueta privada.
+- `apply-corte.node.test.ts`: AC5, la H1 de la sonda con un proceso hijo real y `kill -9` dentro de
+  una nota. Sabotaje: `HEBRA_MCP_TEST_SABOTAJE=sin-ya-estaba` se salta el paso «ya estaba» en el
+  `apply` repetido y el test sale rojo (una copia de conflicto duplicada).
+- `otro-escritor.node.test.ts`: otro escritor vivo con sync sobre el relé en memoria y una «app»
+  como la monta Hebra: reenvío, ronda que trae otra versión y escritor antiguo.
+- Sin verificar aquí: la ronda real con la app de Hebra (segunda mitad de AC4 contra el relé de
+  producción) y AC7 (coste), que midió la sonda.

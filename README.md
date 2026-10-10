@@ -49,6 +49,9 @@ Estado a 9 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 28 herrami
 - Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
   `folder_unavailable` para todo lo privado. Sin mover ni borrar.
 
+Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
+devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).
+
 Emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
 por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
 `https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
@@ -78,6 +81,30 @@ confirmes que es tu biblioteca. Los secretos van al llavero del sistema (servici
 `hebra-mcp`, `@napi-rs/keyring`), nunca a ficheros, variables de entorno ni argumentos.
 Con una identidad ya guardada (tras revocar la conexión en Lumbre), `pair` solo renueva
 la credencial. Contrato completo: `SPEC.md` §7.
+
+## Ficheros de trabajo (`checkout` y `apply`)
+
+Para editar notas con herramientas normales (`rg`, `sed`, un script, un formateador): se sacan
+como `.md`, se editan y se devuelven. SQLite sigue mandando; es el mismo dispositivo que
+`serve` (D12, `SPEC.md` §13).
+
+```sh
+hebra-mcp checkout --dir trabajo --consulta "TestFlight"   # o --all, --titulo "…", --carpeta "Proyectos"
+# … editar trabajo/**/*.md …
+hebra-mcp apply --simular        # el diff, sin escribir nada
+hebra-mcp apply                  # devuelve solo las cambiadas; imprime el lote
+hebra-mcp undo --lote <lote>     # deshace ese lote
+hebra-mcp status                 # editadas sin devolver, en conflicto, que faltan…
+hebra-mcp diff [--stat] [ficheros…]
+```
+
+- `apply` reescribe el cuerpo entero comprobando la base: si la nota cambió en Hebra mientras
+  tanto, tu versión queda en una copia de conflicto visible (`--conflicto rechazar`: no escribe
+  y la lista). Repetir un `apply` cortado no duplica nada.
+- Lo privado (`config.json`), lo bloqueado, la papelera, las archivadas y las copias de conflicto
+  no salen.
+- No crea ni borra notas: un `.md` nuevo o renombrado no se devuelve. Sin adjuntos.
+- Si otra sesión tiene `serve` abierto, la orden le pasa las escrituras por `writer.sock`.
 
 ## Almacén de secretos: llavero o fichero
 
@@ -187,5 +214,8 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 - `src/store/node-port.ts`, `src/store/types.ts` — el puerto de lectura/escritura propio
   de hebra-mcp sobre el motor (`HebraLibraryPort`): deliberadamente más estrecho que el
   `LibraryStorePort` completo de Hebra, ver el comentario de cabecera de `node-port.ts`.
+- `src/workdir/`, `src/store/body-writes.ts` — ficheros de trabajo (`checkout`, `apply`,
+  `undo`, `status`, `diff`; `SPEC.md` §13): nombres, diff propio, la carpeta `.hebra-d` y
+  la única escritura de cuerpo entero de hebra-mcp, solo en esta vía local.
 - `scripts/build.mjs`, `scripts/check-bundle.mjs`, `scripts/check-no-hebra-code.mjs` —
   build y los dos checks que corre `npm run check` junto con `typecheck` y `test`.
