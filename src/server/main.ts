@@ -13,6 +13,8 @@
  *   Configuración por entorno (`../http/config.ts`), nunca secretos.
  * - `oauth-revoke-all`: revocación local de todos los tokens de `serve-http`;
  *   `oauth-set-secret` devuelve un error de método sustituido (`../oauth/cli.ts`).
+ * - `checkout`, `apply`, `undo`, `status`, `diff`: ficheros de trabajo con vuelta
+ *   (SPEC.md §13, `../workdir/`). Aquí stdout es de quien lanza la orden.
  *
  * `main()` solo se ejecuta cuando este fichero es el módulo que arrancó Node (no al
  * importarlo): `scripts/check-bundle.mjs` importa dinámicamente CADA fichero de `dist/`
@@ -44,6 +46,8 @@ import {
   runOAuthRevokeAll,
   runOAuthSetSecret
 } from '../oauth';
+import { isWorkdirCommand, runWorkdirCommand, WORKDIR_USAGE } from '../workdir/cli';
+import { openWorkdirLibrary } from '../workdir/library';
 import { buildMcpServer } from './build-server';
 import { openServeContext, WriterRequiredError } from './serve';
 
@@ -53,7 +57,8 @@ const USAGE = [
   `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
   '  hebra-mcp unpair',
   '  hebra-mcp serve-http',
-  '  hebra-mcp oauth-revoke-all'
+  '  hebra-mcp oauth-revoke-all',
+  ...WORKDIR_USAGE
 ].join('\n');
 
 /** El almacén del modo elegido (SPEC.md §12.3), o `null` si en modo `keychain` el
@@ -183,8 +188,33 @@ async function interactive(
   }
 }
 
+/**
+ * Ficheros de trabajo (SPEC.md §13): `checkout`, `apply`, `undo`, `status` y `diff`. La
+ * biblioteca se abre como en `serve` (mismo directorio de datos, mismos secretos, mismo
+ * `writer.lock`): escritor si nadie lo es, lector que reenvía si no. Sale con el código de
+ * la orden; `process.exit` corta lo que quede vivo (keep-alive de fetch).
+ */
+async function workdir(subcommand: Parameters<typeof runWorkdirCommand>[0], rest: string[]): Promise<void> {
+  const dataDir = resolveDataDir();
+  const code = await runWorkdirCommand(
+    subcommand,
+    rest,
+    {
+      cwd: process.cwd(),
+      out: (line) => process.stdout.write(`${line}\n`),
+      err: (line) => process.stderr.write(`${line}\n`)
+    },
+    async () => openWorkdirLibrary({ dataDir, secrets: await openServeSecretStore(dataDir) })
+  );
+  process.exit(code);
+}
+
 async function main(): Promise<void> {
   const [subcommand, ...rest] = process.argv.slice(2);
+  if (isWorkdirCommand(subcommand)) {
+    await workdir(subcommand, rest);
+    return;
+  }
   switch (subcommand) {
     case 'serve':
       await serve();

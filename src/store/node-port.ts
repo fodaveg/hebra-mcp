@@ -521,6 +521,15 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     }));
   }
 
+  /** Copias de conflicto vivas de `noteId` (`notes.conflict_of`), en la papelera o no: el
+   *  turno de escritura de los ficheros de trabajo (`./body-writes.ts`). SQL propio. */
+  private conflictCopyRows(noteId: string): string[] {
+    const rows = this.prepared(
+      'SELECT id FROM notes WHERE conflict_of = ? AND deleted = 0 ORDER BY id'
+    ).all(noteId) as Array<{ id: string }>;
+    return rows.map((row) => String(row.id));
+  }
+
   async blobRead(sha256: string): Promise<Uint8Array | null> {
     return this.read(() => this.engine.blobRead(sha256));
   }
@@ -596,6 +605,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         trashIndex: () => this.trashRows(),
         filesIndex: () => this.filesRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),
+        conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db))
       })
     );

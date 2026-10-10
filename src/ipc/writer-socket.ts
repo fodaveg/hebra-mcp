@@ -47,6 +47,17 @@
  *   propia y no una acción de `organize`, que solo admite acciones de nota. Ninguna otra
  *   acción de ficheros existe (purgar, crear, renombrar, mover, reemplazar): una acción
  *   desconocida es `invalid_request`.
+ * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
+ *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
+ *   - `replaceBody` `{id, body, baseBodySha256, baseLocalSeq, onConflict, privacy}` →
+ *     `ReplaceBodyResult` (`src/store/body-writes.ts`): el cuerpo entero con la base
+ *     comprobada en el turno del escritor, sin esperar la ronda;
+ *   - `trashConflictCopies` `{originalId, bodySha256, copyId?, privacy}` → recuentos:
+ *     solo copias de conflicto de esa nota con ese cuerpo;
+ *   - `syncRound` `{}` → `RoundWait`: pide una ronda y la espera como mucho
+ *     `AWAIT_ROUND_TIMEOUT_MS` (antes de `checkout`, después de `apply` y `undo`).
+ *   Un escritor sin estos manejadores (o de una versión anterior) responde
+ *   `invalid_request`.
  * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?, candidates?}` con
  * un código cerrado (`WriterSocketErrorCode`), en los rechazos de una sustitución su
  * índice y, en `ambiguous_heading` (D11), los candidatos (títulos y posiciones).
@@ -81,8 +92,15 @@ import type {
   EditNoteOutcome,
   FileOutcome,
   FolderOutcome,
-  OrganizeOutcome
+  OrganizeOutcome,
+  RoundWait
 } from '../server/write-context';
+import type {
+  ReplaceBodyInput,
+  ReplaceBodyResult,
+  TrashConflictCopiesInput,
+  TrashConflictCopiesResult
+} from '../store/body-writes';
 import { decodeAttachmentBase64 } from '../store/attachment-content';
 import { editsWithinLimits, type TextEdit } from '../store/edits';
 import { HEADING_PROOF_MAX_CHARS, type SectionRef } from '../store/sections';
@@ -101,6 +119,7 @@ import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
   MAX_WRITE_MESSAGE_BYTES,
+  REPLACE_BODY_MAX_LENGTH,
   type AddAttachmentInput,
   type AppendToNoteInput,
   type AppendToNoteResult,
@@ -156,6 +175,9 @@ export type WriterSocketOp =
   | 'renameFolder'
   | 'addAttachment'
   | 'organizeFile'
+  | 'replaceBody'
+  | 'trashConflictCopies'
+  | 'syncRound'
   | 'status';
 
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
@@ -169,6 +191,9 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'renameFolder',
   'addAttachment',
   'organizeFile',
+  'replaceBody',
+  'trashConflictCopies',
+  'syncRound',
   'status'
 ]);
 
@@ -218,6 +243,17 @@ export interface WriterSocketHandlers {
   /** Manda un fichero suelto a la papelera o lo saca (D10), espera la ronda y devuelve el
    *  estado de sync. */
   organizeFile(input: OrganizeFileInput): Promise<FileOutcome>;
+  /**
+   * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
+   * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
+   * deshace y esperar una ronda de sync. Opcionales: un escritor que no los tiene responde
+   * `invalid_request`, igual que uno de una versión anterior que no conoce la op.
+   * `replaceBody` y `trashConflictCopies` NO esperan la ronda (la pide el escritor y la
+   * espera `syncRound`, una vez por lote).
+   */
+  replaceBody?(input: ReplaceBodyInput): Promise<ReplaceBodyResult>;
+  trashConflictCopies?(input: TrashConflictCopiesInput): Promise<TrashConflictCopiesResult>;
+  syncRound?(): Promise<RoundWait>;
   status(): Promise<WriterSyncStatus>;
 }
 
@@ -448,6 +484,35 @@ function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput
     default:
       throw new InvalidRequest();
   }
+}
+
+/** `replaceBody` (ficheros de trabajo, SPEC.md §13): el cuerpo con su tope, la base que se
+ *  sacó (SHA-256 y `local_seq`) y qué hacer con un conflicto. */
+function replaceBodyInputOf(params: Record<string, unknown>): ReplaceBodyInput {
+  const { id, body, baseBodySha256, baseLocalSeq, onConflict } = params;
+  if (!isId(id) || typeof body !== 'string' || body.length > REPLACE_BODY_MAX_LENGTH) {
+    throw new InvalidRequest();
+  }
+  if (typeof baseBodySha256 !== 'string' || !SHA256_HEX.test(baseBodySha256)) throw new InvalidRequest();
+  if (typeof baseLocalSeq !== 'number' || !Number.isSafeInteger(baseLocalSeq) || baseLocalSeq < 0) {
+    throw new InvalidRequest();
+  }
+  if (onConflict !== 'copy' && onConflict !== 'reject') throw new InvalidRequest();
+  return { id, body, baseBodySha256, baseLocalSeq, onConflict, privacy: privacyOf(params.privacy) };
+}
+
+/** `trashConflictCopies` (SPEC.md §13): solo copias de conflicto de `originalId` con ese
+ *  cuerpo. */
+function trashConflictCopiesInputOf(params: Record<string, unknown>): TrashConflictCopiesInput {
+  const { originalId, bodySha256, copyId } = params;
+  if (!isId(originalId) || typeof bodySha256 !== 'string' || !SHA256_HEX.test(bodySha256)) {
+    throw new InvalidRequest();
+  }
+  if (copyId !== undefined && !isId(copyId)) throw new InvalidRequest();
+  const privacy = privacyOf(params.privacy);
+  return copyId === undefined
+    ? { originalId, bodySha256, privacy }
+    : { originalId, bodySha256, copyId, privacy };
 }
 
 /** Código cerrado de un fallo del escritor; nunca el mensaje. */
@@ -703,6 +768,22 @@ export class WriterSocketServer {
           break;
         case 'organizeFile':
           result = await handlers.organizeFile(organizeFileInputOf(envelope.params));
+          break;
+        case 'replaceBody': {
+          const input = replaceBodyInputOf(envelope.params);
+          if (!handlers.replaceBody) throw new InvalidRequest();
+          result = await handlers.replaceBody(input);
+          break;
+        }
+        case 'trashConflictCopies': {
+          const input = trashConflictCopiesInputOf(envelope.params);
+          if (!handlers.trashConflictCopies) throw new InvalidRequest();
+          result = await handlers.trashConflictCopies(input);
+          break;
+        }
+        case 'syncRound':
+          if (!handlers.syncRound) throw new InvalidRequest();
+          result = await handlers.syncRound();
           break;
         case 'status':
           result = await handlers.status();

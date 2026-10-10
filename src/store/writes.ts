@@ -144,6 +144,10 @@ export interface NoteWriteStore {
   filesIndex(): FilesIndex;
   /** Adjuntos de una nota (`note_blob_refs`), para `fetchAttachment`. */
   noteAttachments(noteId: string): NoteAttachmentRow[];
+  /** Ids de las copias de conflicto vivas (no lápidas) de una nota, en la papelera o no.
+   *  Solo las usa `./body-writes.ts` (ficheros de trabajo, SPEC.md §13): no repetir una
+   *  copia al reintentar y mandar a la papelera las de un lote que se deshace. */
+  conflictCopyIds(noteId: string): string[];
   /** Registro de idempotencia de las escrituras con `operationId`. */
   operations: OperationStore;
 }
@@ -225,6 +229,13 @@ export const CREATE_BODY_MAX_LENGTH = 100_000;
 /** Límite del texto de `hebra_append_to_note` (SPEC.md §5), igual que el de arriba. */
 export const APPEND_TEXT_MAX_LENGTH = 20_000;
 
+/** Límite del cuerpo entero que devuelven los ficheros de trabajo (`replaceBody`,
+ *  SPEC.md §13; `./body-writes.ts`), en unidades UTF-16. Vive aquí y no en
+ *  `./body-writes.ts` para entrar en `MAX_WRITE_MESSAGE_BYTES` sin una importación
+ *  circular. Con el peor escape JSON son 6 000 000 bytes: por debajo del base64 de un
+ *  adjunto, así que el tope de la línea no cambia. */
+export const REPLACE_BODY_MAX_LENGTH = 1_000_000;
+
 /**
  * Tope, en bytes, de una petición de escritura: una línea de `writer.sock`
  * (`MAX_MESSAGE_BYTES`, `src/ipc/writer-socket.ts`) y el cuerpo de `POST /mcp`
@@ -242,7 +253,8 @@ export const APPEND_TEXT_MAX_LENGTH = 20_000;
  */
 export const WRITE_MESSAGE_MARGIN_BYTES = 512 * 1024;
 export const MAX_WRITE_MESSAGE_BYTES =
-  Math.max(CREATE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) + WRITE_MESSAGE_MARGIN_BYTES;
+  Math.max(CREATE_BODY_MAX_LENGTH * 6, REPLACE_BODY_MAX_LENGTH * 6, ATTACHMENT_BASE64_MAX_CHARS) +
+  WRITE_MESSAGE_MARGIN_BYTES;
 
 export interface EditNoteInput {
   id: string;
@@ -596,7 +608,7 @@ function isEditNoteSaved(value: unknown): value is EditNoteSaved {
  * sync ni otra escritura pueden cambiarlo hasta que el turno acabe). Cerrado ante la
  * duda: una configuración que no se puede aplicar rechaza sin escribir.
  */
-function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): PrivacyFilter {
+export function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): PrivacyFilter {
   const filter = PrivacyFilter.fromSnapshot(store.foldersList(), store.notesVisibilityIndex(), config);
   if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
   return filter;

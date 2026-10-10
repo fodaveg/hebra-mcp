@@ -45,6 +45,15 @@ import {
 } from '../ipc/writer-socket';
 import { WriterLock, type WriterLockOptions } from '../lock/writer-lock';
 import { logEvent } from '../log/logger';
+import {
+  replaceBody,
+  trashConflictCopies,
+  type ReplaceBodyInput,
+  type ReplaceBodyResult,
+  type ReplaceBodyTestHooks,
+  type TrashConflictCopiesInput,
+  type TrashConflictCopiesResult
+} from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
@@ -395,6 +404,18 @@ export class LibraryInstance implements NoteWriteTarget {
    *  `NoteWriter.organizeFileLocal`). */
   organizeFileLocal(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>> {
     return this.writer.organizeFileLocal(input);
+  }
+
+  /** Reescribir el cuerpo entero con la base comprobada: SOLO los ficheros de trabajo
+   *  (`hebra-mcp apply`/`undo`, SPEC.md §13; `../store/body-writes.ts`). Pide la ronda de
+   *  después sin esperarla. */
+  replaceBodyLocal(input: ReplaceBodyInput, hooks?: ReplaceBodyTestHooks): Promise<ReplaceBodyResult> {
+    return replaceBody(this, input, () => void this.runner?.requestRound(), hooks);
+  }
+
+  /** Mandar a la papelera las copias de conflicto de un lote que se deshace (SPEC.md §13). */
+  trashConflictCopiesLocal(input: TrashConflictCopiesInput): Promise<TrashConflictCopiesResult> {
+    return trashConflictCopies(this, input, () => void this.runner?.requestRound());
   }
 
   /** Trae al disco los bytes de un adjunto (`NoteWriter.fetchAttachment`) con el motor

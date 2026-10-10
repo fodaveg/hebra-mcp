@@ -49,6 +49,12 @@ import {
 } from '../ipc/writer-socket';
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from '../status/status-source';
+import type {
+  ReplaceBodyInput,
+  ReplaceBodyResult,
+  TrashConflictCopiesInput,
+  TrashConflictCopiesResult
+} from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
 import { HEADING_PROOF_MAX_CHARS } from '../store/sections';
 import { EDITS_MAX_COUNT, WRITE_PROOF_TAIL_CHARS, type AppliedEdit } from '../store/edits';
@@ -96,6 +102,10 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // Hasta 7 MB de petición, el `blobPut` (con `fsync`) y la ronda.
   addAttachment: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   organizeFile: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
+  replaceBody: 15_000,
+  trashConflictCopies: 15_000,
+  syncRound: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   status: 5_000
 };
 
@@ -115,7 +125,7 @@ export interface ForwardOptions {
   takeoverRetryMs?: number;
 }
 
-type WriteOp = Exclude<WriterSocketOp, 'status'>;
+export type WriteOp = Exclude<WriterSocketOp, 'status'>;
 
 /**
  * Segundo intento de relevo (B2 del audit de robustez, 10 oct 2026). Tras un SIGKILL,
@@ -320,6 +330,54 @@ function remoteCodeOf(error: unknown): string {
 }
 
 /**
+ * Una escritura: en local si esta instancia es el escritor; si no, reenviada al escritor
+ * por `writer.sock`, con el relevo de la cabecera si no responde. La usan
+ * `buildRoutedWriteContext` (las herramientas) y los ficheros de trabajo
+ * (`src/workdir/library.ts`, SPEC.md §13).
+ */
+export async function routeWrite<T>(
+  instance: ForwardingInstance,
+  op: WriteOp,
+  params: Record<string, unknown>,
+  parse: (value: unknown) => T,
+  writeLocally: () => Promise<T>,
+  options: ForwardOptions = {}
+): Promise<T> {
+  if (instance.role === 'this') return writeLocally();
+  const timeoutMs = options.timeoutMs?.[op] ?? FORWARD_TIMEOUT_MS[op];
+  let result: unknown;
+  try {
+    result = await requestWriter(instance.writerSocketPath, op, params, timeoutMs);
+  } catch (error) {
+    if (!isWriterUnavailable(error)) {
+      logEvent({ event: 'write.forward', op, outcome: 'remote_error', code: remoteCodeOf(error) });
+      throw error;
+    }
+    const reason = error.reason;
+    // Sin escritor que responda: relevo AHORA. `checkWriter` solo toma el bloqueo si
+    // su poseedor está muerto o se fue; con un escritor vivo pero lento, no cambia nada.
+    await instance.checkWriter();
+    if ((instance.role as WriterRole) !== 'this' && TAKEOVER_RETRY_REASONS.has(reason)) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, options.takeoverRetryMs ?? TAKEOVER_RETRY_MS)
+      );
+      await instance.checkWriter();
+    }
+    // Releído tras `checkWriter`, que cambia el papel (TS lo daría por estrechado).
+    const tookOver = (instance.role as WriterRole) === 'this';
+    if (tookOver && reason !== 'closed') {
+      logEvent({ event: 'write.forward', op, outcome: 'takeover', reason });
+      return writeLocally();
+    }
+    logEvent({ event: 'write.forward', op, outcome: 'busy', reason, tookOver });
+    throw busyOtherInstance();
+  }
+  const parsed = parse(result);
+  logEvent({ event: 'write.forward', op, outcome: 'forwarded' });
+  return parsed;
+}
+
+/**
  * El `WriteContext` de `serve`: local en el escritor, reenviado en un lector.
  * `local` es el de siempre, sobre la instancia (`buildWriteContext`).
  */
@@ -328,46 +386,12 @@ export function buildRoutedWriteContext(
   local: WriteContext,
   options: ForwardOptions = {}
 ): WriteContext {
-  const timeoutOf = (op: WriterSocketOp): number => options.timeoutMs?.[op] ?? FORWARD_TIMEOUT_MS[op];
-
-  async function routed<T>(
+  const routed = <T>(
     op: WriteOp,
     params: Record<string, unknown>,
     parse: (value: unknown) => T,
     writeLocally: () => Promise<T>
-  ): Promise<T> {
-    if (instance.role === 'this') return writeLocally();
-    let result: unknown;
-    try {
-      result = await requestWriter(instance.writerSocketPath, op, params, timeoutOf(op));
-    } catch (error) {
-      if (!isWriterUnavailable(error)) {
-        logEvent({ event: 'write.forward', op, outcome: 'remote_error', code: remoteCodeOf(error) });
-        throw error;
-      }
-      const reason = error.reason;
-      // Sin escritor que responda: relevo AHORA. `checkWriter` solo toma el bloqueo si
-      // su poseedor está muerto o se fue; con un escritor vivo pero lento, no cambia nada.
-      await instance.checkWriter();
-      if ((instance.role as WriterRole) !== 'this' && TAKEOVER_RETRY_REASONS.has(reason)) {
-        await new Promise((resolve) =>
-          setTimeout(resolve, options.takeoverRetryMs ?? TAKEOVER_RETRY_MS)
-        );
-        await instance.checkWriter();
-      }
-      // Releído tras `checkWriter`, que cambia el papel (TS lo daría por estrechado).
-      const tookOver = (instance.role as WriterRole) === 'this';
-      if (tookOver && reason !== 'closed') {
-        logEvent({ event: 'write.forward', op, outcome: 'takeover', reason });
-        return writeLocally();
-      }
-      logEvent({ event: 'write.forward', op, outcome: 'busy', reason, tookOver });
-      throw busyOtherInstance();
-    }
-    const parsed = parse(result);
-    logEvent({ event: 'write.forward', op, outcome: 'forwarded' });
-    return parsed;
-  }
+  ): Promise<T> => routeWrite(instance, op, params, parse, writeLocally, options);
 
   return {
     createNote: (input: CreateNoteInput) =>
@@ -509,12 +533,36 @@ export function buildRoutedWriteContext(
   };
 }
 
+/** Lo que el escritor necesita para atender los ficheros de trabajo (SPEC.md §13):
+ *  `LibraryInstance` lo tiene. Sin ello (tests de otros lotes), esas ops responden
+ *  `invalid_request`. */
+export interface WorkdirWriterInstance {
+  replaceBodyLocal(input: ReplaceBodyInput): Promise<ReplaceBodyResult>;
+  trashConflictCopiesLocal(input: TrashConflictCopiesInput): Promise<TrashConflictCopiesResult>;
+}
+
+function hasWorkdirWrites(instance: object): instance is WorkdirWriterInstance {
+  const candidate = instance as Partial<WorkdirWriterInstance>;
+  return typeof candidate.replaceBodyLocal === 'function' && typeof candidate.trashConflictCopiesLocal === 'function';
+}
+
 /** Lo que hace el escritor con lo que le reenvían (`LibraryInstance.open({ writerSocket })`). */
 export function writerSocketHandlers(
   local: WriteContext,
-  instance: Pick<ForwardingInstance, 'status'>
+  instance: Pick<ForwardingInstance, 'status'> & Partial<WorkdirWriterInstance>
 ): WriterSocketHandlers {
+  // Ficheros de trabajo: cuerpo entero con base comprobada y papelera de copias, en el
+  // turno de ESTE escritor; la ronda la espera `syncRound`, una vez por lote.
+  const workdir = hasWorkdirWrites(instance)
+    ? {
+        replaceBody: (input: ReplaceBodyInput) => instance.replaceBodyLocal(input),
+        trashConflictCopies: (input: TrashConflictCopiesInput) =>
+          instance.trashConflictCopiesLocal(input),
+        syncRound: () => local.awaitRound(AWAIT_ROUND_TIMEOUT_MS)
+      }
+    : {};
   return {
+    ...workdir,
     createNote: (input) => local.createNote(input),
     // Devuelve el `operationId` que atendió: así el lector sabe que este escritor lo
     // entiende (uno anterior lo ignoraría sin decirlo).
