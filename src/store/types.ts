@@ -26,7 +26,8 @@ import type {
   TagsList,
   TitleCandidates
 } from '../hebra';
-import type { GrepNoteRow } from './grep-sql';
+import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
+import type { PrivacyConfig } from '../privacy/config';
 
 /** `NoteVersionsList`/`NoteVersion` de Hebra (`library/types.ts`): `node.ts` no los
  *  reexporta, así que salen de la firma del motor en vez de importarlos por `$lib`. */
@@ -201,8 +202,14 @@ export interface HebraLibraryPort {
    *  (`grepSubstringCandidates` de `./grep-sql.ts`), o `null` si el índice no está
    *  completo. Solo lee el cuerpo de las de `rowids`. */
   grepCandidates(match: string, rowids: readonly number[]): Promise<Set<number> | null>;
-  /** `hebra_grep` (D13): el cuerpo de las de `rowids` que siguen vivas y sin bloquear. */
-  grepBodies(rowids: readonly number[]): Promise<Map<number, string>>;
+  /** `hebra_grep` (D13): el cuerpo de las de `rowids` que siguen vivas, sin bloquear y
+   *  visibles con el filtro de `privacy` rehecho en ese mismo turno (`grepVisibleBodies`).
+   *  `session` es la que devolvió el lote anterior de la misma llamada, o `null`. */
+  grepBodies(
+    rowids: readonly number[],
+    privacy: PrivacyConfig,
+    session: GrepBodiesSession | null
+  ): Promise<GrepBodiesResult>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

@@ -47,7 +47,7 @@ import {
   trigramMatch,
   type GrepPattern
 } from '../../store/grep';
-import type { GrepNoteRow } from '../../store/grep-sql';
+import type { GrepBodiesSession, GrepNoteRow } from '../../store/grep-sql';
 import {
   RegexScanWorker,
   RegexWorkerFailed,
@@ -250,6 +250,7 @@ export async function runGrep(
   const matches: GrepMatch[] = [];
   let responseChars = 0;
   let progressed = false;
+  let session: GrepBodiesSession | null = null;
   let stop: { cursor: string | null; cutoff: GrepOutput['cutoff'] } | null = null;
   const deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
   const worker = pattern.literal ? null : new RegexScanWorker(pattern.re);
@@ -260,8 +261,16 @@ export async function runGrep(
         stop = { cursor: cursorAt(batch[0]!.id, batch[0]!.fromLine), cutoff: 'time' };
         break;
       }
-      const bodies = await ctx.port.grepBodies(batch.map((note) => note.rowid));
-      // Una que ya no está viva o se bloqueó desde `grepNotes` se salta.
+      const read = await ctx.port.grepBodies(
+        batch.map((note) => note.rowid),
+        ctx.privacyConfig,
+        session
+      );
+      if (read.unresolved) throw new ToolError('privacy_config_unresolved');
+      session = read.session;
+      const bodies = read.bodies;
+      // Una que ya no está viva, se bloqueó o pasó a ser oculta desde `grepNotes` (el filtro
+      // se rehace en el turno de la lectura) se salta.
       const notes = batch.filter((note) => bodies.has(note.rowid));
       const scanNotes: ScanNote[] = notes.map((note) => ({
         body: bodies.get(note.rowid)!,

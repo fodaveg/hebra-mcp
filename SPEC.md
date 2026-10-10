@@ -239,7 +239,12 @@ Detalle de las escrituras (D2):
   - **Qué se mira**: las notas vivas (ni papelera ni lápida), visibles para el filtro de §6.3,
     sin bloquear (su cuerpo va cifrado) y de la carpeta y la etiqueta pedidas. Eso se decide
     con id, carpeta, etiquetas y la columna `locked`, sin leer ningún cuerpo; después solo se
-    lee el cuerpo de esas. Las copias de conflicto visibles salen, con `isConflictCopy`, como
+    lee el cuerpo de esas, por lotes de 64, y en el MISMO turno (una transacción de lectura)
+    se vuelve a comprobar cada una con su fila de ese momento: viva, sin bloquear y visible
+    con el filtro rehecho (`PrivacyFilter.fromSnapshot`, como el escritor), con la carpeta
+    efectiva y las etiquetas (`note_tags`) de la misma sentencia que el cuerpo. El árbol de
+    carpetas se vuelve a pedir si cambió desde el lote anterior. Así, una nota que una
+    ronda de sync oculta a mitad de una llamada no sale. Las copias de conflicto visibles salen, con `isConflictCopy`, como
     en `hebra_search`.
   - **Cómo casa**: el literal se escapa y se compila como la expresión regular, con la bandera
     `u` (y `i` sin distinguir mayúsculas: el plegado simple de Unicode; «canción» no casa con
@@ -648,8 +653,10 @@ El dispositivo acumula tres secretos:
   oculta): una nota de carpeta privada o subcarpeta, con etiqueta privada o descendiente, en la
   papelera o bloqueada (esta, porque su cuerpo va cifrado), y la copia de conflicto de una
   oculta (hereda su carpeta), no se mira. Lo decide la herramienta ANTES de leer ningún
-  cuerpo, con ids, carpetas, etiquetas y la columna `locked`, así que de una oculta nunca se
-  lee el cuerpo (`test/tools/grep.test.ts` lo comprueba sobre las lecturas del almacén). Qué
+  cuerpo, con ids, carpetas, etiquetas y la columna `locked`, y otra vez en el turno en que
+  lee cada lote, con el filtro rehecho sobre las filas de ese momento (§5, «Qué se mira»):
+  una nota que pasa a oculta a mitad de la llamada tampoco sale. De una oculta nunca se
+  devuelve nada del cuerpo (`test/tools/grep.test.ts` lo comprueba sobre las lecturas del almacén). Qué
   NO revela, porque la respuesta solo depende de las notas visibles: ningún recuento (ni de
   coincidencias, ni de notas con coincidencias, ni de notas recorridas), ni si «hay más»
   (`nextCursor` solo existe si queda otra coincidencia visible o si hubo un corte), ni dónde

@@ -12,12 +12,15 @@ import { ToolError } from '../../src/server/errors';
 import { runGrep, type GrepInput, type GrepMatch, type GrepOutput } from '../../src/server/tools/grep';
 import { runReadNote } from '../../src/server/tools/read-note';
 import type { NodeLibraryPort } from '../../src/store/node-port';
+import type { GrepBodiesSession } from '../../src/store/grep-sql';
+import type { PrivacyConfig } from '../../src/privacy/config';
 import { createNote } from '../fixtures/test-library';
-import { SqliteLibraryEngine } from '../../src/hebra';
+import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import {
   buildGrepLibraryPair,
   GREP_BAIT,
+  GREP_PRIVACY,
   grepContext,
   VISIBLE_BODIES,
   type GrepLibraryPair
@@ -105,9 +108,9 @@ describe('hebra_grep: privacidad (D3)', () => {
     const spy: ToolContext = {
       ...withPrivate.ctx,
       port: Object.assign(Object.create(Object.getPrototypeOf(port)), port, {
-        grepBodies: (rowids: readonly number[]) => {
+        grepBodies: (rowids: readonly number[], ...rest: [PrivacyConfig, GrepBodiesSession | null]) => {
           asked.push(...rowids);
-          return port.grepBodies(rowids);
+          return port.grepBodies(rowids, ...rest);
         },
         grepCandidates: (match: string, rowids: readonly number[]) => {
           asked.push(...rowids);
@@ -118,6 +121,70 @@ describe('hebra_grep: privacidad (D3)', () => {
     for (const query of QUERIES) await allPages(spy, { ...query, limit: 5 });
     expect(asked.length).toBeGreaterThan(0);
     for (const rowid of hiddenRowids) expect(asked).not.toContain(rowid);
+  });
+
+  it('una nota que pasa a oculta entre dos lotes no sale: el filtro se rehace en el turno de la lectura', async () => {
+    const path = await buildSmallLibrary(
+      Array.from({ length: 70 }, (_, index) => `# Nota ${index}\ntérmino ${index}\n`)
+    );
+    const setup = openNodeSqliteConn(path);
+    const diario = await (await SqliteLibraryEngine.open(setup.conn, 'grep-setup')).folderCreate(null, 'Diario');
+    setup.db.close();
+    const { ctx, port } = await grepContext(path, GREP_PRIVACY);
+    // Otro escritor (como una ronda de sync) sobre el mismo fichero.
+    const other = openNodeSqliteConn(path);
+    const engine = await SqliteLibraryEngine.open(other.conn, 'grep-sync', { journalMode: 'WAL' });
+    try {
+      // Las tres últimas por id caen en el segundo lote (64 por lote).
+      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const [moved, tagged, nested] = ids.slice(-3) as [string, string, string];
+      let calls = 0;
+      const spy: ToolContext = {
+        ...ctx,
+        port: Object.assign(Object.create(Object.getPrototypeOf(port)), port, {
+          grepBodies: async (...args: unknown[]) => {
+            const out = await (port.grepBodies as (...inner: unknown[]) => Promise<unknown>)(...args);
+            calls += 1;
+            if (calls === 1) {
+              // Entre el primer lote y el segundo: una pasa a la carpeta privada y otra
+              // gana `#secreto`.
+              await engine.noteMove(moved, diario.id);
+              // Y una tercera, a una subcarpeta privada que no existía al empezar.
+              const nueva = await engine.folderCreate(diario.id, 'Nueva');
+              await engine.noteMove(nested, nueva.id);
+              const row = (await engine.noteRead(tagged))!;
+              const body = '# Nota marcada\n#secreto\ntérmino secreto\n';
+              const derived = deriveNote(body);
+              await engine.noteSave({
+                id: tagged,
+                body,
+                title: derived.title,
+                titleNorm: derived.titleNorm,
+                excerpt: derived.excerpt,
+                expectedLocalSeq: row.localSeq,
+                baseBodySha256: row.bodySha256,
+                tags: derived.tags,
+                links: derived.links,
+                blobRefs: derived.blobRefs,
+                props: derived.props
+              });
+            }
+            return out;
+          }
+        })
+      };
+      const out = await runGrep(spy, { pattern: 'término', limit: 100 });
+      expect(calls).toBe(2);
+      const seen = out.matches.map((match) => match.id);
+      expect(seen).toHaveLength(67);
+      expect(seen).not.toContain(moved);
+      expect(seen).not.toContain(nested);
+      expect(seen).not.toContain(tagged);
+      expect(JSON.stringify(out)).not.toContain('secreto');
+    } finally {
+      port.close();
+      other.db.close();
+    }
   });
 
   it('una carpeta o una etiqueta privadas dan lista vacía, como una inexistente', async () => {
@@ -403,9 +470,9 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     const spy: ToolContext = {
       ...withoutPrivate.ctx,
       port: Object.assign(Object.create(Object.getPrototypeOf(port)), port, {
-        grepBodies: (rowids: readonly number[]) => {
+        grepBodies: (rowids: readonly number[], ...rest: [PrivacyConfig, GrepBodiesSession | null]) => {
           read.push(...rowids);
-          return port.grepBodies(rowids);
+          return port.grepBodies(rowids, ...rest);
         }
       })
     };

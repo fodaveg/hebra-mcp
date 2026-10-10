@@ -6,7 +6,9 @@
  * esas se lee el cuerpo.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { SUBSTRING_INDEX_VERSION } from '../hebra';
+import { SUBSTRING_INDEX_VERSION, type FoldersList } from '../hebra';
+import type { PrivacyConfig } from '../privacy/config';
+import { PrivacyFilter } from '../privacy/filter';
 
 /** Una nota viva (ni papelera ni lápida), sin su cuerpo: lo que `hebra_grep` necesita para
  *  decidir qué recorre. `rowid` es la clave del índice de subcadena. */
@@ -104,16 +106,107 @@ export function grepSubstringCandidates(
 }
 
 /**
- * El cuerpo de las notas de `rowids` que siguen vivas y sin bloquear (pudo cambiar algo
- * desde `grepNoteRows`: la que ya no lo esté, falta en el resultado).
+ * `fn` en una transacción de lectura (`BEGIN` diferida, también en una conexión de solo
+ * lectura): todas sus sentencias ven la MISMA instantánea de la base. En autocommit, cada
+ * sentencia tiene la suya, y en un lector el escritor de otro proceso puede confirmar entre
+ * dos de ellas.
  */
-export function grepBodies(db: DatabaseSync, rowids: readonly number[]): Map<number, string> {
-  const rows = db
-    .prepare(
-      `SELECT n.rowid AS rid, n.body AS body FROM json_each(?) AS wanted
-       CROSS JOIN notes AS n ON n.rowid = wanted.value
-       WHERE n.deleted = 0 AND n.trashed_at IS NULL AND n.locked = 0`
-    )
-    .all(JSON.stringify(rowids)) as Array<{ rid: number | bigint; body: string | null }>;
-  return new Map(rows.map((row) => [Number(row.rid), String(row.body ?? '')]));
+function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec('BEGIN');
+  try {
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // Ya no había transacción: se propaga el error de verdad.
+    }
+    throw error;
+  }
+}
+
+/** Lo que `grepVisibleBodies` guarda entre un lote y el siguiente de la misma llamada: el
+ *  árbol de carpetas (`foldersList` del motor) y su huella, para no volver a pedirlo si
+ *  no ha cambiado. */
+export interface GrepBodiesSession {
+  signature: string;
+  folders: FoldersList;
+}
+
+export interface GrepBodiesResult {
+  /** `rowid` → cuerpo, solo de las que siguen vivas, sin bloquear y VISIBLES. */
+  bodies: Map<number, string>;
+  /** La configuración de privados ya no se puede aplicar (una carpeta privada configurada
+   *  desapareció): quien llama no devuelve nada (`privacy_config_unresolved`). */
+  unresolved: boolean;
+  session: GrepBodiesSession;
+}
+
+/**
+ * El cuerpo de las notas de `rowids` que, AHORA, siguen vivas, sin bloquear y visibles,
+ * en una sola transacción de lectura (D13, SPEC.md §6.3). El filtro de privados de la
+ * herramienta es la instantánea del principio de la llamada, y entre ese turno y este (o
+ * entre dos lotes) una ronda de sync puede haber movido una nota a una carpeta privada o
+ * haberle puesto una etiqueta privada: por eso se rehace aquí, como el escritor dentro de
+ * su turno (`PrivacyFilter.fromSnapshot`), con la carpeta efectiva y las etiquetas
+ * (`note_tags`) leídas en la MISMA sentencia que el cuerpo, y el árbol de carpetas de esta
+ * misma transacción. El árbol (`foldersList` del motor, que cuenta notas y recorre la
+ * tabla) solo se vuelve a pedir si cambió la huella de `folders` desde el lote anterior.
+ */
+export function grepVisibleBodies(
+  db: DatabaseSync,
+  foldersList: () => FoldersList,
+  rowids: readonly number[],
+  privacy: PrivacyConfig,
+  session: GrepBodiesSession | null
+): GrepBodiesResult {
+  return inReadTransaction(db, () => {
+    const signature = String(
+      (
+        db
+          .prepare(
+            `SELECT json_group_array(json_array(id, parent_id, name, deleted)) AS sig
+             FROM (SELECT id, parent_id, name, deleted FROM folders ORDER BY id)`
+          )
+          .get() as { sig: string }
+      ).sig
+    );
+    const current =
+      session && session.signature === signature ? session : { signature, folders: foldersList() };
+    const rows = db
+      .prepare(
+        `SELECT n.rowid AS rid, n.id AS id, n.body AS body,
+                CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
+                (SELECT GROUP_CONCAT(t.tag, char(10)) FROM note_tags AS t WHERE t.note_id = n.id) AS tags
+         FROM json_each(?) AS wanted
+         CROSS JOIN notes AS n ON n.rowid = wanted.value
+         LEFT JOIN folders AS f ON f.id = n.folder_id
+         WHERE n.deleted = 0 AND n.trashed_at IS NULL AND n.locked = 0`
+      )
+      .all(JSON.stringify(rowids)) as Array<{
+      rid: number | bigint;
+      id: string;
+      body: string | null;
+      folder_id: string;
+      tags: string | null;
+    }>;
+    const filter = PrivacyFilter.fromSnapshot(
+      current.folders,
+      rows.map((row) => ({
+        id: String(row.id),
+        folderId: String(row.folder_id),
+        tags: row.tags ? row.tags.split('\n') : []
+      })),
+      privacy
+    );
+    const bodies = new Map<number, string>();
+    if (!filter.unresolved) {
+      for (const row of rows) {
+        if (!filter.isHiddenNote(String(row.id))) bodies.set(Number(row.rid), String(row.body ?? ''));
+      }
+    }
+    return { bodies, unresolved: filter.unresolved, session: current };
+  });
 }

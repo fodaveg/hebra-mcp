@@ -53,7 +53,15 @@ import {
 } from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import { FsBlobStore } from './blob-store-fs';
-import { grepBodies, grepNoteRows, grepSubstringCandidates, type GrepNoteRow } from './grep-sql';
+import {
+  grepNoteRows,
+  grepSubstringCandidates,
+  grepVisibleBodies,
+  type GrepBodiesResult,
+  type GrepBodiesSession,
+  type GrepNoteRow
+} from './grep-sql';
+import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import { SerialQueue } from './serial-queue';
@@ -570,8 +578,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => grepSubstringCandidates(this.db, match, rowids));
   }
 
-  async grepBodies(rowids: readonly number[]): Promise<Map<number, string>> {
-    return this.read(() => grepBodies(this.db, rowids));
+  async grepBodies(
+    rowids: readonly number[],
+    privacy: PrivacyConfig,
+    session: GrepBodiesSession | null
+  ): Promise<GrepBodiesResult> {
+    return this.read(() =>
+      grepVisibleBodies(this.db, () => this.engine.foldersList(), rowids, privacy, session)
+    );
   }
 
   /** Si un blob ya está en el relé (`blobs.uploaded`), para el estado de sync de un

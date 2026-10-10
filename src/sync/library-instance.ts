@@ -55,7 +55,8 @@ import {
   type TrashConflictCopiesResult
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
-import type { GrepNoteRow } from '../store/grep-sql';
+import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
+import type { PrivacyConfig } from '../privacy/config';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
   FilesIndex,
@@ -574,8 +575,11 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     grepNotes: (): Promise<GrepNoteRow[]> => current().grepNotes(),
     grepCandidates: (match: string, rowids: readonly number[]): Promise<Set<number> | null> =>
       current().grepCandidates(match, rowids),
-    grepBodies: (rowids: readonly number[]): Promise<Map<number, string>> =>
-      current().grepBodies(rowids),
+    grepBodies: (
+      rowids: readonly number[],
+      privacy: PrivacyConfig,
+      session: GrepBodiesSession | null
+    ): Promise<GrepBodiesResult> => current().grepBodies(rowids, privacy, session),
     close: (): void => current().close()
   };
 }
