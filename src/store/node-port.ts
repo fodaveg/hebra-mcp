@@ -37,6 +37,7 @@ import {
   cleanSearchPage,
   parseLinkRef,
   SqliteLibraryEngine,
+  SUBSTRING_INDEX_VERSION,
   type FoldersList,
   type LibraryOpenInfo,
   type LinkResolution,
@@ -69,6 +70,19 @@ import type { NoteWriteStore, NoteWriteTarget } from './writes';
 
 /** Prefijo de un cuerpo bloqueado (`LOCKED_MARK` de `sqlite-engine.ts`). */
 const LOCKED_BODY_PREFIX = 'hebra-locked:';
+
+/** Notas por página del relleno del índice de subcadena (`fillSubstringIndex`): el tope
+ *  del motor (`SUBSTRING_INDEX_BATCH_MAX`, 250), que no exporta `node.ts`. Si se pide
+ *  más, el motor lo recorta igual. */
+export const SUBSTRING_FILL_PAGE = 250;
+
+/** Lo que hizo `fillSubstringIndex`: si había algo pendiente (`ran`), cuántas notas
+ *  indexó y si el índice quedó completo (`done`). */
+export interface SubstringFillResult {
+  ran: boolean;
+  indexed: number;
+  done: boolean;
+}
 
 /** Una ref de enlace resuelta con el motor; lo que no es un enlace, `missing`. */
 function resolveRef(engine: SqliteLibraryEngine, ref: string): LinkResolution {
@@ -609,6 +623,52 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         operations: (this.operationStore ??= sqliteOperationStore(this.db))
       })
     );
+  }
+
+  /**
+   * Rellena el índice de subcadena de Hebra (`notes_trigram`, H5 del audit de buscadores)
+   * con las notas guardadas antes de que existiera. Es la obligación de un escritor Node
+   * que abre la biblioteca sin la app (`docs/FACHADA-NODE.md` §3 del submódulo): el motor
+   * crea la tabla al abrir, pero en una base con notas la deja vacía y sin la marca de
+   * completo hasta que alguien recorra `substringIndexPage` hasta el final.
+   *
+   * Una página (como mucho `SUBSTRING_FILL_PAGE` notas, en su transacción) por turno de la
+   * cola y cediendo el hilo entre una y otra: las herramientas, las escrituras y el sync se
+   * cuelan entre medias, y el arranque no espera. Con el índice ya completo cuesta una
+   * lectura de `meta`. Lo que se guarda después lo mantiene el propio motor (disparadores y
+   * la cola `notes_trigram_pending`, que vacía cada transacción suya).
+   *
+   * Solo el escritor: un lector (`readOnly`) no escribe y vuelve sin intentarlo
+   * (`ran: false`). Si el puerto se cierra o deja de ser el escritor a medias, se para sin
+   * error (`done: false`): el siguiente escritor sigue donde se quedó, porque el motor
+   * guarda el último `rowid` hecho en `meta`.
+   */
+  async fillSubstringIndex(
+    options: { pageSize?: number; yieldControl?: () => Promise<void> } = {}
+  ): Promise<SubstringFillResult> {
+    if (!this.writable) return { ran: false, indexed: 0, done: false };
+    const pageSize = options.pageSize ?? SUBSTRING_FILL_PAGE;
+    const yieldControl =
+      options.yieldControl ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 0)));
+    let indexed = 0;
+    let ran = false;
+    for (;;) {
+      let page: { pending: boolean; indexed: number; done: boolean };
+      try {
+        page = await this.write(() =>
+          this.engine.substringIndexPage(SUBSTRING_INDEX_VERSION, pageSize)
+        );
+      } catch (error) {
+        // Cerrado o relevado entre dos páginas: no es un fallo, lo sigue otro escritor.
+        if (!this.writable) return { ran, indexed, done: false };
+        throw error;
+      }
+      if (!page.pending) return { ran, indexed, done: page.done };
+      ran = true;
+      indexed += page.indexed;
+      if (page.done) return { ran, indexed, done: true };
+      await yieldControl();
+    }
   }
 
   /** La vista `LibraryPort` del motor de sync (`./sync-port.ts`). Una por puerto. */

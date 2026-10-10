@@ -137,6 +137,8 @@ export class LibraryInstance implements NoteWriteTarget {
   private timer: ReturnType<typeof setInterval> | null = null;
   private closed = false;
   private switching: Promise<void> = Promise.resolve();
+  /** El relleno del índice de subcadena en curso (`fillSubstringIndex`); nunca rechaza. */
+  private substringFill: Promise<void> = Promise.resolve();
   private markShuttingDown!: () => void;
   /** Resuelve al empezar el apagado (`beginShutdown`, o `close`). */
   private readonly shuttingDown = new Promise<void>((resolve) => {
@@ -262,6 +264,42 @@ export class LibraryInstance implements NoteWriteTarget {
       runner.start();
     }
     await this.openWriterSocket();
+    this.substringFill = this.fillSubstringIndex(port);
+  }
+
+  /**
+   * El relleno del índice de subcadena de Hebra (`NodeLibraryPort.fillSubstringIndex`),
+   * en segundo plano: el escritor no espera a que termine para atender peticiones, y cada
+   * página es un turno más de la cola. Solo lo lanza el escritor (un lector no escribe),
+   * cada vez que pasa a serlo; uno a medias lo sigue el siguiente. Nunca rechaza: un fallo
+   * se anota con el nombre y el código del error, sin mensaje. Mientras no termina,
+   * `hebra_grep` no usa el índice y `hebra_search` busca solo por prefijo.
+   */
+  private async fillSubstringIndex(port: NodeLibraryPort): Promise<void> {
+    try {
+      const result = await port.fillSubstringIndex();
+      if (result.ran) {
+        logEvent({
+          event: 'substring.index',
+          result: result.done ? 'done' : 'paused',
+          indexed: result.indexed
+        });
+      }
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      logEvent({
+        event: 'substring.index',
+        result: 'failed',
+        error: error instanceof Error ? error.name : 'unknown',
+        ...(typeof code === 'string' || typeof code === 'number' ? { code } : {})
+      });
+    }
+  }
+
+  /** Resuelve cuando termina (o se para) el relleno del índice de subcadena que lanzó el
+   *  último paso a escritor; ya resuelta si no hay ninguno. Para los tests. */
+  whenSubstringIndexSettled(): Promise<void> {
+    return this.substringFill;
   }
 
   private async openWriterSocket(): Promise<void> {

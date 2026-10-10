@@ -593,7 +593,8 @@ El dispositivo acumula tres secretos:
 
 - **Qué se registra**: solo eventos cerrados en stderr, como en §11 de la spec de Hebra
   (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy` y, desde el
-  submódulo en `59b5d403`, `sync.blob_unreadable`, que solo lleva el tamaño del adjunto), con ids opacos, códigos y recuentos.
+  submódulo en `59b5d403`, `sync.blob_unreadable`, que solo lleva el tamaño del adjunto, y,
+  desde `aea2181c`, `substring.index`, el relleno del índice de subcadena, §8), con ids opacos, códigos y recuentos.
 - **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas. Tampoco el título de un apartado (D11) ni el texto de la prueba de lo guardado; como mucho, `heading: true` en `note.append`.
 - Stdout es exclusivo del protocolo MCP.
 - **Test**: un test ejecuta todas las herramientas con notas-cebo y comprueba que ningún texto de
@@ -788,6 +789,18 @@ Comando `hebra-mcp pair`, interactivo en terminal:
   escritor (§5). Las rondas no los bajan. Sí suben los que añade `hebra_add_attachment`: la ronda
   de después de la escritura sube los blobs referenciados, presentes y sin subir de este
   dispositivo, con el transporte de blobs del `SyncRunner`.
+- **Índice de subcadena de Hebra** (`notes_trigram`, H5 del audit de buscadores de Hebra;
+  submódulo desde `aea2181c`): el motor crea la tabla al abrir, pero en una biblioteca que
+  ya tenía notas la deja vacía y sin la marca de completo (`docs/FACHADA-NODE.md` §3 del
+  submódulo). Cada vez que una instancia pasa a escritora, lanza en segundo plano
+  `NodeLibraryPort.fillSubstringIndex`: `substringIndexPage` del motor, una página de
+  como mucho 250 notas por turno de la cola y cediendo el hilo entre páginas, hasta dejar
+  la marca. No retrasa el arranque ni las peticiones; con el índice ya completo cuesta una
+  lectura. Si el escritor se cierra o se releva a medias, el siguiente sigue donde se
+  quedó (el motor guarda el último `rowid`). Un lector no lo intenta. Lo de después lo
+  mantiene el motor (disparadores y la cola `notes_trigram_pending`, que vacía cada
+  transacción suya). Mientras no termina, `hebra_search` busca solo por prefijo. Log: `substring.index` con `result` (`done`,
+  `paused` o `failed`) y el número de notas indexadas, nunca texto.
 
 ## 9. Riesgos
 
