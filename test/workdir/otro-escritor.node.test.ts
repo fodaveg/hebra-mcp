@@ -21,7 +21,7 @@ import { Workdir } from '../../src/workdir/layout';
 import type { WorkdirLibrary } from '../../src/workdir/library';
 import { InMemoryLibraryRelay } from '../hebra-testing';
 import { allBodies, appDevice, appSave, IDENTITY, VAULT_KEY } from '../sync/devices';
-import { capture, createNote, opener, removeTempDirs, tempDir } from './helpers';
+import { capture, createNote, lockNote, opener, removeTempDirs, tempDir, writePrivacy } from './helpers';
 
 const children: ChildProcess[] = [];
 const instances: LibraryInstance[] = [];
@@ -50,8 +50,11 @@ function livePid(): number {
   return child.pid!;
 }
 
-async function setup(options: { oldWriter?: boolean } = {}) {
+async function setup(options: { oldWriter?: boolean; privateTags?: string[] } = {}) {
   const dataDir = tempDir();
+  // La configuración de privados es la del CLI (el lector); el escritor la recibe con cada
+  // escritura y la vuelve a aplicar en su turno.
+  if (options.privateTags) writePrivacy(dataDir, { privateTags: options.privateTags });
   const relay = new InMemoryLibraryRelay();
   const sync = { transport: relay, blobTransport: null, identity: IDENTITY, vaultKey: VAULT_KEY, intervalMs: null };
   const writer = await LibraryInstance.open({
@@ -130,6 +133,23 @@ describe('otro proceso es el escritor: el CLI reenvía por writer.sock', () => {
     await app.sync.runRound();
     expect((await app.port.noteRead(ids.b))!.body).toBe('# Nota B\n\ntexto B\n');
     expect(readFileSync(fileOf(ids.b), 'utf8')).toBe('# Nota B\n\ntexto B\n');
+  });
+
+  it('privacidad y bloqueo en el turno del escritor: una etiqueta privada y una nota bloqueada no entran', async () => {
+    const { dataDir, writer, ids, open, cwd, fileOf } = await setup({ privateTags: ['secreto'] });
+    writeFileSync(fileOf(ids.a), '# Nota A\n\ntexto A #secreto\n');
+    writeFileSync(fileOf(ids.b), '# Nota B\n\ntexto B y más\n');
+    writeFileSync(fileOf(ids.c), '# Nota C\n\ntexto C y más\n');
+    // B se bloquea en la biblioteca después del checkout (otra app).
+    lockNote(dataDir, ids.b);
+    const out = capture(cwd);
+    expect(await applyCommand(out.io, open, { dir: 'trabajo', conflicto: 'copia', simular: false })).toBe(1);
+    expect(out.text()).toContain('no disponible');
+    expect(out.text()).toContain('bloqueada: no se escribió nada');
+    expect((await writer.port.noteRead(ids.a))!.body).toBe('# Nota A\n\ntexto A\n');
+    expect((await writer.port.noteRead(ids.b))!.body.startsWith('hebra-locked:')).toBe(true);
+    // La tercera, sin nada de eso, entra por el mismo escritor.
+    expect((await writer.port.noteRead(ids.c))!.body).toBe('# Nota C\n\ntexto C y más\n');
   });
 
   it('un escritor de una versión anterior: apply lo dice y no escribe nada', async () => {
