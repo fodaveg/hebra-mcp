@@ -38,6 +38,16 @@
  *    de +10 sobre el máximo legítimo medido, por debajo de una copia real de 40 líneas
  *    (35) y muy por debajo del caso que motivó la regla (80): un fichero que lo cruce no
  *    es un import de más, es una copia.
+ *
+ *    Desde el 10 oct 2026 las líneas de Hebra incluyen también `scripts/sonda-d` (el
+ *    prototipo de la opción D, que `src/workdir/` reimplementa desde el contrato). Prueba
+ *    negativa medida ese día en `59b5d403`, con un script ad hoc no versionado: 60 líneas
+ *    seguidas de `hebra-d.ts` (desde la 753, el principio de `commandApply`; 33
+ *    significativas) en un fichero propio registrado con `git add -N` comparten 33 y el
+ *    check sale rojo («src/zz-sonda-probe.ts (33 líneas compartidas)»); contadas solo
+ *    contra `src` y `src-tauri/src`, como antes, compartían 2 y pasaban. Con este cambio,
+ *    `src/store/node-port.ts` sube de 23 a 24 (una firma) y lo de `src/workdir/` queda
+ *    entre 1 y 9.
  */
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -100,8 +110,12 @@ function significantLines(text) {
 
 // Todas las líneas significativas de los dos motores de Hebra (TS y Rust), en un solo
 // set: no hace falta saber DE QUÉ fichero viene una línea para decidir que se comparte.
+// Desde el 10 oct 2026 también las del prototipo de la opción D (`scripts/sonda-d`,
+// `hebra-d.ts` y su arnés): `src/workdir/` reimplementa lo mismo desde el contrato, y una
+// copia del prototipo tiene que saltar aquí igual que una del motor (prueba negativa en la
+// cabecera).
 const vendorLines = new Set();
-const vendorSourceDirs = ['src', join('src-tauri', 'src')];
+const vendorSourceDirs = ['src', join('src-tauri', 'src'), join('scripts', 'sonda-d')];
 for (const line of git(['ls-tree', '-r', '--name-only', 'HEAD'], vendorDir).trim().split('\n')) {
   if (!vendorSourceDirs.some((dir) => line.startsWith(`${dir}/`))) continue;
   let text;
