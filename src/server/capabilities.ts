@@ -29,7 +29,12 @@ import {
   REPLACE_RESPONSE_MAX_CHARS,
   REPLACE_SIMULATE_BUDGET_MS
 } from '../store/replace-batch';
-import { PLAN_APPLY_TTL_MS, PLAN_UNDO_RETENTION_MS } from '../store/replace-plans';
+import {
+  PLAN_APPLY_TTL_MS,
+  PLAN_UNDO_RETENTION_MS,
+  STORED_PLAN_CHARS_MAX,
+  STORED_PLANS_MAX
+} from '../store/replace-plans';
 import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes';
 import { LIMITS } from './pagination';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_TEXT_MAX_CHARS } from './tools/attachments';
@@ -125,8 +130,13 @@ export interface Capabilities {
       responseChars: number;
       simulateTimeBudgetMs: number;
       applyTimeBudgetMs: number;
+      undoTimeBudgetMs: number;
       applyWithinMs: number;
       undoWithinMs: number;
+      /** Planes guardados sin aplicar, y la suma de sus cuerpos resultantes: al pasarlos,
+       *  cae el más antiguo sin aplicar. */
+      storedPlans: number;
+      storedPlanChars: number;
     };
     createNoteBodyChars: number;
     appendTextChars: number;
@@ -184,8 +194,11 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
         responseChars: REPLACE_RESPONSE_MAX_CHARS,
         simulateTimeBudgetMs: REPLACE_SIMULATE_BUDGET_MS,
         applyTimeBudgetMs: REPLACE_APPLY_BUDGET_MS,
+        undoTimeBudgetMs: REPLACE_APPLY_BUDGET_MS,
         applyWithinMs: PLAN_APPLY_TTL_MS,
-        undoWithinMs: PLAN_UNDO_RETENTION_MS
+        undoWithinMs: PLAN_UNDO_RETENTION_MS,
+        storedPlans: STORED_PLANS_MAX,
+        storedPlanChars: STORED_PLAN_CHARS_MAX
       },
       createNoteBodyChars: CREATE_BODY_MAX_LENGTH,
       appendTextChars: APPEND_TEXT_MAX_LENGTH,

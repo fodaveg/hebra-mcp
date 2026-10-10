@@ -291,6 +291,9 @@ export class LibraryInstance implements NoteWriteTarget {
     }
     await this.openWriterSocket();
     this.substringFill = this.fillSubstringIndex(port);
+    // Planes caducados de `hebra_replace_in_notes` (D14, M3): un turno corto, en segundo
+    // plano; nunca rechaza.
+    void this.replaceBatch.purgeExpired();
   }
 
   /**
@@ -392,8 +395,13 @@ export class LibraryInstance implements NoteWriteTarget {
     const next = this.switching.then(async () => {
       if (this.closed) return;
       if (this.current.writable) {
-        if (!this.lock.verify()) await this.becomeReader();
-        else this.retrySubstringFill();
+        if (!this.lock.verify()) {
+          await this.becomeReader();
+        } else {
+          this.retrySubstringFill();
+          // M3 (D14): los planes caducados se van también sin otra operación de plan.
+          await this.replaceBatch.purgeExpired();
+        }
         return;
       }
       if (!this.lock.tryAcquire()) return;

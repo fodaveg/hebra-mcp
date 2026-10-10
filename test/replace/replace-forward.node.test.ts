@@ -101,9 +101,10 @@ describe('hebra_replace_in_notes desde un lector', () => {
 
     const replay = (await call({ mode: 'apply', planId: plan.planId!, operationId: 'op-r' })) as ReplaceApplyReport;
     expect(replay.replayed).toBe(true);
-    // Otra configuración de privados (la del escritor, sin privados) no ve el plan del lector.
+    // Otra configuración de privados (la del escritor, sin privados) no puede aplicar el plan
+    // del lector (deshacer sí podría: M4 de la revisión).
     expect(
-      await codeOf(writer.replaceInNotesLocal({ mode: 'undo', planId: plan.planId!, privacy: OPEN }))
+      await codeOf(writer.replaceInNotesLocal({ mode: 'apply', planId: plan.planId!, operationId: 'op-r', privacy: OPEN }))
     ).toBe('plan_not_found');
 
     const undo = (await call({ mode: 'undo', planId: plan.planId! })) as ReplaceUndoReport;
@@ -138,7 +139,7 @@ describe('hebra_replace_in_notes desde un lector', () => {
           ...base,
           replaceInNotes: async (request) => {
             seen.push(request);
-            return { mode: 'undo', planId: 'p', notes: [], sync: 'not_linked' };
+            return { mode: 'undo', planId: 'p', complete: true, notes: [], sync: 'not_linked' };
           }
         }
       })

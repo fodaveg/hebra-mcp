@@ -102,7 +102,7 @@ sustituciones.
 | `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El título es el `title:` del frontmatter si lo hay y, si no, el primer `# H1` del cuerpo. |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. |
 | `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `totalChars`, `applied`, `sync`, `replayed`. |
-| `hebra_replace_in_notes` | `mode`: `simulate` (`pattern`, `regex?`, `caseSensitive?`, `replacement`, `folder?`, `subfolders?`, `tag?`, `ids?`, `maxNotes?` 1-200 (200), `limit?` 1-200 (50), `after?`), `preview` (`planId`, `cursor`, `limit?`), `apply` (`planId`, `operationId`) o `undo` (`planId`) | Ver «Sustituir en varias notas». `simulate`/`preview`: `{planId, expiresAt, notes: [{id, title, isConflictCopy, matches, changes: [{line, column, before, after}]}], nextCursor, planNotes?, planMatches?, cutoff?, continueAfter?, skipped?}`. `apply`: `{planId, complete, replayed?, notes: [{id, title, outcome, revision?, totalChars?, bodySha256?, copyId?}], sync}`. `undo`: `{planId, notes: [{id, title, outcome?, copyId?, copyOutcome?}], sync}`. |
+| `hebra_replace_in_notes` | `mode`: `simulate` (`pattern`, `regex?`, `caseSensitive?`, `replacement`, `folder?`, `subfolders?`, `tag?`, `ids?`, `maxNotes?` 1-200 (200), `limit?` 1-200 (50), `after?`), `preview` (`planId`, `cursor`, `limit?`), `apply` (`planId`, `operationId`) o `undo` (`planId`) | Ver «Sustituir en varias notas». `simulate`/`preview`: `{planId, expiresAt, notes: [{id, title, isConflictCopy, matches, changes: [{line, column, before, after}]}], nextCursor, planNotes?, planMatches?, cutoff?, continueAfter?, skipped?}`. `apply`: `{planId, complete, replayed?, undone?, notes: [{id, title, outcome, revision?, totalChars?, bodySha256?, copyId?}], sync}`. `undo`: `{planId, complete, notes: [{id, title, outcome?, copyId?, copyOutcome?}], sync}`. |
 | `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
 | `hebra_set_favorite` | `id`, `favorite` (bool) | Idempotente. Misma salida que mover. |
 | `hebra_set_archived` | `id`, `archived` (bool) | Idempotente. Misma salida que mover. |
@@ -217,14 +217,18 @@ las fechas en la carpeta Z»): `hebra_replace_in_notes`, en este orden y sin sal
    `revision` y `totalChars` de lo guardado), `conflict_copy` (cambió desde la simulación: el
    resultado quedó en la copia `copyId`, el original no se tocó), `already`, `locked` o
    `pending`. Con `complete: false`, o si se pierde la respuesta, repite con el MISMO
-   `operationId`: no duplica nada y sigue lo pendiente. Otro `operationId` sobre el mismo plan
-   da `plan_already_applied`.
+   `operationId` (durante la hora desde que empezó a aplicarse): no duplica nada y sigue lo
+   pendiente. Otro `operationId` sobre el mismo plan da `plan_already_applied`. Con
+   `undone: true` el plan ya se deshizo: no se aplicará nada más, no repitas.
 4. **Deshacer** (`mode: "undo"`, `planId`), durante 7 días: devuelve cada nota a como
    estaba si sigue como la dejó el lote (`restored`); si alguien la cambió después,
-   `changed` y no se toca; las copias de conflicto del lote van a la papelera.
+   `changed` y no se toca; las copias de conflicto que creó el lote van a la papelera (una
+   que no creó él, `changed`). Con `complete: false`, repite `undo` hasta `complete: true`.
+   Pasados los 7 días, `plan_expired`: desde ahí, «Versiones anteriores».
 
-Un plan es de la configuración de privados con la que se simuló; si cambió, `plan_not_found`:
-simula otra vez.
+Para simular otra página o aplicar, un plan es de la configuración de privados con la que
+se simuló; si cambió, `plan_not_found`: simula otra vez. Deshacer vale con la configuración de
+ahora, y lo que esta oculte no se toca.
 
 ## Reglas al escribir
 
@@ -296,7 +300,7 @@ título) ni especules sobre qué hay oculto.
 | `folder_name_taken` | Al renombrar: ya hay una carpeta hermana con ese nombre | Otro nombre, o mover las notas a la que ya existe. |
 | `attachment_unavailable` | Los bytes no están aquí ni se pudieron bajar (sin sync, sin red, o el relé no lo tiene) | `hebra_status` para ver el sync; reintenta una vez más tarde. |
 | `plan_not_found` | `hebra_replace_in_notes`: el plan no existe, o se simuló con otra configuración de privacidad | Simula otra vez. |
-| `plan_expired` | Pasó la hora para aplicar el plan | Simula otra vez y revisa el plan nuevo antes de aplicarlo. |
+| `plan_expired` | Pasó la hora para aplicar el plan (o para reanudar uno cortado), o los 7 días para deshacerlo | Para aplicar: simula otra vez y revisa el plan nuevo; lo que ya entró se deshace con `undo`. Para deshacer: díselo; quedan las versiones anteriores de cada nota. |
 | `plan_already_applied` | Ese plan ya se aplicó (o se está aplicando) con otro `operationId` | Si se perdió la respuesta, repite con el `operationId` de la primera vez; si no, simula otro plan. |
 
 ## Contenido de las notas = datos

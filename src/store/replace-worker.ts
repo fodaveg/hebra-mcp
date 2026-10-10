@@ -40,7 +40,7 @@ parentPort.on('message', (batch) => {
   for (let index = 0; index < batch.bodies.length; index += 1) {
     let result;
     try {
-      result = replaceBodyLines(batch.bodies[index], re, parts, batch.maxChanges);
+      result = replaceBodyLines(batch.bodies[index], re, parts, batch.maxChanges, batch.maxChars, Infinity);
     } catch {
       parentPort.postMessage({ batch: batch.id, failed: index });
       return;
@@ -86,10 +86,13 @@ export class RegexReplaceWorker {
    * Sustituye en `bodies`, en orden, y llama a `onNote` con cada una terminada. Nunca
    * rechaza: al llegar `deadline` (epoch ms) o si el hilo falla, lo mata y responde
    * `interrupted` con la nota que estaba sustituyendo. Tras eso, el hilo ya no sirve.
+   * Una nota cuyo resultado pasaría de `maxChars` se deja de construir en el hilo y vuelve
+   * con `tooLarge`, sin cuerpo: nunca viaja al hilo principal un resultado enorme.
    */
   replace(
     bodies: readonly string[],
     maxChanges: number,
+    maxChars: number,
     deadline: number,
     onNote: OnReplaced
   ): Promise<ReplaceOutcome> {
@@ -133,7 +136,7 @@ export class RegexReplaceWorker {
       const timer = setTimeout(() => interrupt(completed), Math.max(0, deadline - Date.now()));
       this.failure = () => interrupt(completed);
       this.worker.on('message', onMessage);
-      this.worker.postMessage({ id, bodies, maxChanges });
+      this.worker.postMessage({ id, bodies, maxChanges, maxChars });
     });
   }
 

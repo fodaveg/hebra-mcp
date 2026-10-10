@@ -269,7 +269,8 @@ describe('topes, páginas y caducidad', () => {
     const plan = (await call(SIMULATE)) as ReplacePlanView;
     const other = { privateFolders: [], privateTags: ['otra'] };
     expect(await codeOf(call({ mode: 'apply', planId: plan.planId!, operationId: 'o1' }, other))).toBe('plan_not_found');
-    expect(await codeOf(call({ mode: 'undo', planId: plan.planId! }, other))).toBe('plan_not_found');
+    // Deshacer no exige la misma configuración (M4 de la revisión): sin aplicar, no hace nada.
+    expect(((await call({ mode: 'undo', planId: plan.planId! }, other)) as ReplaceUndoReport).notes).toEqual([]);
     const cursor = `rp1.${Buffer.from(JSON.stringify([plan.planId, 0])).toString('base64url')}`;
     expect(await codeOf(call({ mode: 'preview', planId: plan.planId!, cursor }, other))).toBe('plan_not_found');
     expect(((await call({ mode: 'preview', planId: plan.planId!, cursor })) as ReplacePlanView).notes).toHaveLength(1);

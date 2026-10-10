@@ -19,7 +19,7 @@ function run(body: string, pattern: string, replacement: string, options: { rege
   if (!compiled) throw new Error('patrón inválido');
   const parts = compileReplacement(replacement, compiled);
   if (!parts) throw new Error('reemplazo inválido');
-  return replaceBodyLines(body, globalPattern(compiled), parts, 3);
+  return replaceBodyLines(body, globalPattern(compiled), parts, 3, 1_000_000, Infinity);
 }
 
 describe('compileReplacement', () => {
@@ -85,6 +85,22 @@ describe('replaceBodyLines', () => {
 
   it('sin distinguir mayúsculas con el plegado de hebra_grep; las tildes cuentan', () => {
     expect(run('Canción CANCIÓN cancion\n', 'canción', 'X').body).toBe('X X cancion\n');
+  });
+
+  it('deja de construir en cuanto el resultado pasaría del tope, también a mitad de línea (M1)', () => {
+    const compiled = compileGrepPattern('e', { regex: false, caseSensitive: false })!;
+    const parts = compileReplacement('x'.repeat(10_000), compiled)!;
+    const result = replaceBodyLines(`${'e'.repeat(1_000)}\n`, globalPattern(compiled), parts, 3, 50_000, Infinity);
+    expect(result).toMatchObject({ body: '', tooLarge: true });
+    expect(result.count).toBeLessThanOrEqual(6);
+    // Justo en el tope, cabe.
+    expect(replaceBodyLines('eeeee\n', globalPattern(compiled), parts, 3, 50_001, Infinity).tooLarge).toBeUndefined();
+  });
+
+  it('mira el plazo cada 1 024 líneas (M1)', () => {
+    const compiled = compileGrepPattern('a', { regex: false, caseSensitive: false })!;
+    const result = replaceBodyLines('a\n'.repeat(5_000), globalPattern(compiled), [{ kind: 'text', text: 'b' }], 3, 1_000_000, 0);
+    expect(result).toMatchObject({ body: '', timedOut: true, count: 1_023 });
   });
 
   it('un cuerpo vacío no tiene líneas', () => {

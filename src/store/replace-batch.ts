@@ -55,8 +55,11 @@ import {
   type ReplaceLinesResult,
   type ReplacementPart
 } from './replace';
+import { logEvent } from '../log/logger';
 import {
   PLAN_APPLY_TTL_MS,
+  STORED_PLAN_CHARS_MAX,
+  STORED_PLANS_MAX,
   type ApplyOutcome,
   type NoteProof,
   type PlanNoteRecord,
@@ -218,6 +221,9 @@ export interface ReplaceApplyReport {
   complete: boolean;
   /** Devuelto de lo anotado, sin escribir nada. */
   replayed?: true;
+  /** El plan se deshizo (o se está deshaciendo): no se va a aplicar nada más, y
+   *  `complete` es `true` aunque quedaran notas sin aplicar. */
+  undone?: true;
   notes: ReplaceReportNote[];
 }
 
@@ -226,8 +232,9 @@ export interface ReplaceUndoNote {
   id: string;
   title: string;
   /** Solo si el lote escribió la nota: `restored` (vuelve a la base), `already` (ya estaba
-   *  en la base), `changed` (cambió después del lote: no se toca), `locked`. */
-  outcome?: 'restored' | 'already' | 'changed' | 'locked';
+   *  en la base), `changed` (cambió después del lote: no se toca), `locked`; `pending` si
+   *  esta llamada no llegó a ella (plazo). */
+  outcome?: 'restored' | 'already' | 'changed' | 'locked' | 'pending';
   revision?: string;
   totalChars?: number;
   bodySha256?: string;
@@ -239,6 +246,8 @@ export interface ReplaceUndoNote {
 export interface ReplaceUndoReport {
   mode: 'undo';
   planId: string;
+  /** `false`: el plazo cortó la llamada; repetir `undo` sigue por lo que falta. */
+  complete: boolean;
   notes: ReplaceUndoNote[];
 }
 
@@ -264,6 +273,11 @@ export interface ReplaceBatchOptions {
   /** Tests: otros plazos. */
   simulateBudgetMs?: number;
   applyBudgetMs?: number;
+  undoBudgetMs?: number;
+  /** Tests: otros topes de lo guardado sin aplicar (`STORED_PLANS_MAX`,
+   *  `STORED_PLAN_CHARS_MAX`). */
+  maxStoredPlans?: number;
+  maxStoredPlanChars?: number;
 }
 
 /** Lo que la simulación lee del almacén (fuera del turno de escritura). */
@@ -350,13 +364,20 @@ async function proofOf(store: NoteWriteStore, id: string): Promise<NoteProof | n
   return row ? { localSeq: row.localSeq, bodySha256: row.bodySha256, totalChars: row.body.length } : null;
 }
 
-/** Un plan de ESTA biblioteca y de ESTA configuración de privados; si no, `plan_not_found`
- *  (las tres causas igual). */
-function requirePlan(store: NoteWriteStore, planId: string, privacy: PrivacyConfig): PlanRecord {
+/** Un plan de ESTA biblioteca y, con `samePrivacy` (`preview` y `apply`), de ESTA
+ *  configuración de privados; si no, `plan_not_found` (las causas, igual). `undo` no la
+ *  exige (M4: comprueba cada nota en su turno con la de ahora). Una lápida (aplicado hace
+ *  más de 7 días, ya sin cuerpos), `plan_expired`. */
+function requirePlan(store: NoteWriteStore, planId: string, privacy: PrivacyConfig, samePrivacy: boolean): PlanRecord {
   const plan = store.replacePlans.plan(planId);
-  if (!plan || plan.libraryId !== store.libraryId() || plan.privacySha256 !== privacyFingerprint(privacy)) {
+  if (
+    !plan ||
+    plan.libraryId !== store.libraryId() ||
+    (samePrivacy && plan.privacySha256 !== privacyFingerprint(privacy))
+  ) {
     throw writeRejected('plan_not_found');
   }
+  if (plan.state === 'expired') throw writeRejected('plan_expired');
   return plan;
 }
 
@@ -387,6 +408,24 @@ export class ReplaceBatch {
         return this.serialized(request.planId, () => this.apply(request, hooks));
       case 'undo':
         return this.serialized(request.planId, () => this.undo(request));
+    }
+  }
+
+  /**
+   * Purga los planes caducados (M3), en UN turno corto del escritor: dos `DELETE` y un
+   * `UPDATE`, sin leer cuerpos. La llama la instancia al pasar a escritor y en cada
+   * `checkWriter` (cada 30 s), además de cada operación de plan. Nunca rechaza: un fallo
+   * se anota sin mensaje y lo reintenta la siguiente.
+   */
+  async purgeExpired(): Promise<void> {
+    try {
+      await this.target.writeExclusive(async (store) => store.replacePlans.purgeExpired(Date.now()));
+    } catch (error) {
+      logEvent({
+        event: 'replace.purge',
+        result: 'failed',
+        error: error instanceof Error ? error.name : 'unknown'
+      });
     }
   }
 
@@ -514,7 +553,8 @@ export class ReplaceBatch {
     let progressed = false;
     let session: GrepBodiesSession | null = null;
     const worker = pattern.literal ? null : await RegexReplaceWorker.start(re, parts);
-    const deadline = Date.now() + (this.options.simulateBudgetMs ?? REPLACE_SIMULATE_BUDGET_MS);
+    // El plazo cuenta desde el primer cuerpo leído, como en `hebra_grep`.
+    let deadline = Infinity;
     try {
       for (let first = 0; first < pending.length && cutoff === null; first += SIMULATE_BATCH_NOTES) {
         const batch = pending.slice(first, first + SIMULATE_BATCH_NOTES);
@@ -530,6 +570,7 @@ export class ReplaceBatch {
         );
         if (read.unresolved) throw writeRejected('privacy_config_unresolved');
         session = read.session;
+        if (deadline === Infinity) deadline = Date.now() + (this.options.simulateBudgetMs ?? REPLACE_SIMULATE_BUDGET_MS);
         // Una que dejó de estar viva, se bloqueó o pasó a oculta (filtro rehecho en el
         // turno de la lectura) se salta.
         const notes = batch.filter((note) => read.bodies.has(note.rowid));
@@ -540,6 +581,14 @@ export class ReplaceBatch {
           progressed = true;
           const note = notes[index]!;
           const base = bodies[index]!;
+          // M1: un resultado que pasaría del tope ni siquiera se construyó; se dice, antes
+          // de ningún trabajo con él (`reorderToggledTasks`, `deriveNote`).
+          if (result.tooLarge) {
+            if (skipped.length < SKIPPED_MAX) {
+              skipped.push({ id: note.id, title: capHeading(note.title), reason: 'too_large' });
+            }
+            return true;
+          }
           if (result.count === 0) return true;
           // Las tareas que la sustitución marca o desmarca se colocan como en el editor de
           // Hebra (David, 4 oct 2026: «el orden tiene que ser el mismo venga de donde venga
@@ -581,7 +630,7 @@ export class ReplaceBatch {
         };
 
         const outcome = worker
-          ? await worker.replace(bodies, PREVIEW_CHANGES_PER_NOTE, deadline, onNote)
+          ? await worker.replace(bodies, PREVIEW_CHANGES_PER_NOTE, REPLACE_BODY_MAX_LENGTH, deadline, onNote)
           : this.replaceLiteral(bodies, re, parts, deadline, () => progressed, onNote);
         if (outcome.status === 'stopped') break;
         if (outcome.status === 'interrupted') {
@@ -639,6 +688,18 @@ export class ReplaceBatch {
         keep.push(entry);
       }
       if (keep.length === 0) return keep;
+      // M2: tope de lo guardado sin aplicar. Caen los más antiguos SIN aplicar; uno aplicado
+      // o a medias nunca (hace falta para deshacer).
+      const maxPlans = this.options.maxStoredPlans ?? STORED_PLANS_MAX;
+      const maxChars = this.options.maxStoredPlanChars ?? STORED_PLAN_CHARS_MAX;
+      const newChars = keep.reduce((sum, entry) => sum + entry.resultBody.length, 0);
+      const stored = store.replacePlans.unapplied();
+      let storedChars = stored.reduce((sum, plan) => sum + plan.resultChars, 0);
+      while (stored.length > 0 && (stored.length + 1 > maxPlans || storedChars + newChars > maxChars)) {
+        const oldest = stored.shift()!;
+        store.replacePlans.deleteUnapplied(oldest.planId);
+        storedChars -= oldest.resultChars;
+      }
       store.replacePlans.insert(
         {
           planId,
@@ -686,7 +747,9 @@ export class ReplaceBatch {
   }
 
   /** Un literal se sustituye en el hilo principal (es lineal), mirando el plazo entre nota
-   *  y nota si ya se avanzó algo en esta llamada. */
+   *  y nota si ya se avanzó algo en esta llamada, y también DENTRO de cada nota (M1: una
+   *  nota enorme no se lo salta); con el tope de tamaño del resultado mientras se
+   *  construye. Una nota cortada por el plazo cuenta como interrumpida, como en el hilo. */
   private replaceLiteral(
     bodies: readonly string[],
     re: RegExp,
@@ -701,8 +764,9 @@ export class ReplaceBatch {
       re.lastIndex = 0;
       const body = bodies[index]!;
       const result = re.test(body)
-        ? replaceBodyLines(body, re, parts, PREVIEW_CHANGES_PER_NOTE)
+        ? replaceBodyLines(body, re, parts, PREVIEW_CHANGES_PER_NOTE, REPLACE_BODY_MAX_LENGTH, deadline)
         : { body, count: 0, changes: [] };
+      if (result.timedOut) return { status: 'interrupted', next: index };
       if (!onNote(index, result)) return { status: 'stopped' };
     }
     return { status: 'done' };
@@ -736,7 +800,7 @@ export class ReplaceBatch {
     const from = parsePageCursor(request.cursor, request.planId);
     const { plan, rows } = await this.target.writeExclusive(async (store) => {
       store.replacePlans.purgeExpired(Date.now());
-      const found = requirePlan(store, request.planId, request.privacy);
+      const found = requirePlan(store, request.planId, request.privacy, true);
       return { plan: found, rows: store.replacePlans.notes(request.planId) };
     });
     // Solo las que siguen visibles ahora: una que pasó a oculta no se nombra.
@@ -784,7 +848,7 @@ export class ReplaceBatch {
       store.operations.purgeExpired(now);
       const previous = store.operations.lookup(request.operationId);
       if (previous && previous.fingerprint !== fingerprint) throw writeRejected('operation_id_reused');
-      const plan = requirePlan(store, request.planId, request.privacy);
+      const plan = requirePlan(store, request.planId, request.privacy, true);
       if (plan.applyOperationId === null) {
         if (now - plan.createdAt > PLAN_APPLY_TTL_MS) throw writeRejected('plan_expired');
         store.replacePlans.startApply(plan.planId, request.operationId, now);
@@ -800,10 +864,19 @@ export class ReplaceBatch {
         return { plan: { ...plan, state: 'applying' as const }, rows: store.replacePlans.notes(plan.planId) };
       }
       if (plan.applyOperationId !== request.operationId) throw writeRejected('plan_already_applied');
+      // B2: un `apply` cortado se reanuda solo durante la hora desde que empezó (la misma
+      // ventana que para empezarlo). Pasada, `plan_expired`: lo que entró se deshace con
+      // `undo`, y el resto se simula otra vez. Responder lo anotado sigue valiendo.
+      if (plan.state === 'applying' && now - (plan.appliedAt ?? 0) > PLAN_APPLY_TTL_MS) {
+        throw writeRejected('plan_expired');
+      }
       return { plan, rows: store.replacePlans.notes(plan.planId) };
     });
     const { plan } = start;
-    if (plan.state === 'applied' || plan.state === 'undone') {
+    if (plan.state !== 'applying') {
+      // `applied`, o deshecho (`undoing`/`undone`): lo anotado, sin escribir. Deshecho, el
+      // plan no se reanuda nunca, y se dice (`undone`, `complete: true`), para que repetir
+      // no quede esperando unas pendientes que ya no se van a aplicar (B1).
       return { result: await this.applyReport(plan, start.rows, request.privacy, true), written: [] };
     }
 
@@ -853,6 +926,11 @@ export class ReplaceBatch {
     if (visible && bodies.base === null && note.bodySha256 === row.baseSha256) {
       plans.saveBase(planId, row.position, note.body);
     }
+    // B5: el primer intento queda anotado ANTES de escribir. Una copia de conflicto que se
+    // reutiliza (`findCopy`) solo es de este plan si apareció después de un intento suyo
+    // anterior (un corte entre crearla y anotarla) y ningún otro plan la tiene como suya.
+    const earlierAttempt = row.attemptAt;
+    plans.markAttempt(planId, row.position, Date.now());
     const { result, wrote } = await replaceBodyInTurn(
       store,
       {
@@ -867,6 +945,7 @@ export class ReplaceBatch {
     if (wrote) await hooks.afterWrite?.(row.position);
     let outcome: ApplyOutcome;
     let copyId: string | null = null;
+    let copyOwned = false;
     let proof: NoteProof | null = null;
     switch (result.outcome) {
       case 'applied':
@@ -879,10 +958,17 @@ export class ReplaceBatch {
         outcome = bodies.base !== null ? 'applied' : 'already';
         proof = await proofOf(store, row.noteId);
         break;
-      case 'conflict_copy':
+      case 'conflict_copy': {
         outcome = 'conflict_copy';
         copyId = result.copyId;
+        if (!result.reused) {
+          copyOwned = true;
+        } else if (earlierAttempt !== null && !plans.copyOwnedElsewhere(copyId, planId)) {
+          const copy = await store.noteRead(copyId);
+          copyOwned = copy !== null && copy.createdAt >= earlierAttempt;
+        }
         break;
+      }
       case 'locked':
         outcome = 'locked';
         break;
@@ -890,7 +976,7 @@ export class ReplaceBatch {
         // `unavailable` (y `conflict_rejected`, que con `copy` no se da).
         outcome = 'unavailable';
     }
-    plans.recordApply(planId, row.position, outcome, copyId, proof);
+    plans.recordApply(planId, row.position, outcome, copyId, copyOwned, proof);
     return wrote;
   }
 
@@ -916,12 +1002,16 @@ export class ReplaceBatch {
       if (row.copyId !== null) entry.copyId = row.copyId;
       notes.push(entry);
     }
+    const undone = plan.state === 'undoing' || plan.state === 'undone';
     const report: ReplaceApplyReport = {
       mode: 'apply',
       planId: plan.planId,
-      complete: rows.every((row) => row.outcome !== null),
+      // B7: lo pendiente que ya no es visible no cuenta (ni se nombra); deshecho, nada queda
+      // pendiente (B1).
+      complete: undone || rows.every((row) => row.outcome !== null || !visible.has(row.noteId)),
       notes
     };
+    if (undone) report.undone = true;
     if (replayed) report.replayed = true;
     return report;
   }
@@ -947,35 +1037,55 @@ export class ReplaceBatch {
 
   private async undo(request: ReplaceUndoRequest): Promise<ReplaceLocal> {
     if (!isId(request.planId)) throw writeRejected('invalid_input');
+    /** Lo que esta vuelta atrás tiene que mirar: lo que el lote escribió o su copia. */
+    const touched = (row: PlanNoteRecord): boolean => row.hasBase || row.copyId !== null;
     const start = await this.target.writeExclusive(async (store) => {
       store.replacePlans.purgeExpired(Date.now());
-      const plan = requirePlan(store, request.planId, request.privacy);
+      // M4: deshacer no exige la configuración con que se simuló (cada nota se vuelve a
+      // comprobar en su turno con la de AHORA), pero sí una que se pueda aplicar.
+      privacyInTurn(store, request.privacy);
+      const plan = requirePlan(store, request.planId, request.privacy, false);
+      // Una vuelta atrás nueva empieza de cero; una a medias (`undoing`, cortada por el
+      // plazo) sigue por las que le faltan.
+      if (plan.applyOperationId !== null && plan.state !== 'undoing') {
+        store.replacePlans.resetUndo(plan.planId);
+        store.replacePlans.setState(plan.planId, 'undoing');
+      }
       return { plan, rows: store.replacePlans.notes(plan.planId) };
     });
     const { plan } = start;
     const written: string[] = [];
+    const deadline = Date.now() + (this.options.undoBudgetMs ?? REPLACE_APPLY_BUDGET_MS);
+    let first = true;
     for (const row of start.rows) {
-      if (!row.hasBase && row.copyId === null) continue;
+      if (!touched(row) || row.undoOutcome !== null || row.undoCopy !== null) continue;
+      // Al menos una nota por llamada, como `apply`, para que repetir siempre avance.
+      if (!first && Date.now() >= deadline) break;
+      first = false;
       const wrote = await this.target.writeExclusive((store) =>
-        this.undoNoteInTurn(store, plan.planId, row, request.privacy)
+        this.undoNoteInTurn(store, plan, row, request.privacy)
       );
-      if (wrote) {
-        written.push(row.copyId !== null && !row.hasBase ? row.copyId : row.noteId);
+      if (wrote.length > 0) {
+        written.push(...wrote);
         this.written();
       }
     }
     const rows = await this.target.writeExclusive(async (store) => {
-      if (plan.applyOperationId !== null) store.replacePlans.setState(plan.planId, 'undone');
-      return store.replacePlans.notes(plan.planId);
+      const now = store.replacePlans.notes(plan.planId);
+      const done = now.every((row) => !touched(row) || row.undoOutcome !== null || row.undoCopy !== null);
+      if (plan.applyOperationId !== null && done) store.replacePlans.setState(plan.planId, 'undone');
+      return now;
     });
     const { rows: visible } = await this.visibleNow(request.privacy);
     const notes: ReplaceUndoNote[] = [];
     for (const row of rows) {
-      if (!row.hasBase && row.copyId === null) continue;
+      if (!touched(row)) continue;
       const live = visible.get(row.noteId);
       if (!live) continue;
       const entry: ReplaceUndoNote = { id: row.noteId, title: capHeading(live.title) };
-      if (row.undoOutcome !== null && row.undoOutcome !== 'unavailable') entry.outcome = row.undoOutcome;
+      const processed = row.undoOutcome !== null || row.undoCopy !== null;
+      if (!processed) entry.outcome = 'pending';
+      else if (row.undoOutcome !== null && row.undoOutcome !== 'unavailable') entry.outcome = row.undoOutcome;
       if (row.undoProof) Object.assign(entry, this.proofFields(plan, row.noteId, row.undoProof));
       if (row.copyId !== null && row.undoCopy !== null) {
         entry.copyId = row.copyId;
@@ -984,20 +1094,26 @@ export class ReplaceBatch {
       if (entry.outcome === undefined && entry.copyOutcome === undefined) continue;
       notes.push(entry);
     }
-    return { result: { mode: 'undo', planId: plan.planId, notes }, written };
+    // B7: lo pendiente que ya no es visible no cuenta.
+    const complete = rows.every(
+      (row) => !touched(row) || row.undoOutcome !== null || row.undoCopy !== null || !visible.has(row.noteId)
+    );
+    return { result: { mode: 'undo', planId: plan.planId, complete, notes }, written };
   }
 
-  /** Deshace una nota del plan en SU turno del escritor. Devuelve si escribió. */
+  /** Deshace una nota del plan en SU turno del escritor. Devuelve lo que escribió: la nota
+   *  restaurada y la copia mandada a la papelera, las dos si hizo las dos (B4). */
   private async undoNoteInTurn(
     store: NoteWriteStore,
-    planId: string,
+    plan: PlanRecord,
     row: PlanNoteRecord,
     privacy: PrivacyConfig
-  ): Promise<boolean> {
+  ): Promise<string[]> {
+    const planId = plan.planId;
     const plans = store.replacePlans;
     const bodies = plans.bodies(planId, row.position);
-    if (!bodies) return false;
-    let wrote = false;
+    if (!bodies) return [];
+    const wrote: string[] = [];
     let outcome: UndoOutcome | null = null;
     let proof: NoteProof | null = null;
     if (bodies.base !== null) {
@@ -1010,7 +1126,7 @@ export class ReplaceBatch {
         onConflict: 'reject',
         privacy
       });
-      wrote = restored.wrote;
+      if (restored.wrote) wrote.push(row.noteId);
       switch (restored.result.outcome) {
         case 'applied':
           outcome = 'restored';
@@ -1031,14 +1147,18 @@ export class ReplaceBatch {
       }
     }
     let copy: UndoCopyOutcome | null = null;
-    if (row.copyId !== null) {
+    if (row.copyId !== null && !row.copyOwned) {
+      // B5: una copia que este plan reutilizó pero no creó (de otro plan, o de los ficheros
+      // de trabajo) no se toca.
+      copy = 'changed';
+    } else if (row.copyId !== null) {
       const trashed = await trashConflictCopiesInTurn(store, {
         originalId: row.noteId,
         bodySha256: row.resultSha256,
         copyId: row.copyId,
         privacy
       });
-      wrote = wrote || trashed.wrote;
+      if (trashed.wrote) wrote.push(row.copyId);
       copy = trashed.result.trashed > 0 ? 'trashed' : trashed.result.already > 0 ? 'already' : 'changed';
     }
     plans.recordUndo(planId, row.position, outcome, copy, proof);

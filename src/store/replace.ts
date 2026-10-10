@@ -127,6 +127,10 @@ export interface ReplaceLinesResult {
   body: string;
   count: number;
   changes: Array<[number, string, string]>;
+  /** El resultado pasaría de `maxChars`: se dejó de construir (`body` vacío). */
+  tooLarge?: true;
+  /** Se llegó a `deadline` a mitad de la nota (`body` vacío). */
+  timedOut?: true;
 }
 
 /**
@@ -135,13 +139,22 @@ export interface ReplaceLinesResult {
  * terminadores de línea se conservan tal cual (`\r\n` incluido); un salto de línea al
  * final no abre una línea más, igual que en `scanBody`.
  *
+ * Topes (hallazgo M1 de la revisión de D14): en cuanto el resultado pasaría de `maxChars`
+ * se deja de construir, también a mitad de una línea (un `e` sustituido por 10 000
+ * caracteres en una línea de 1 MB serían miles de millones), y se responde `tooLarge` sin
+ * cuerpo; y cada 1 024 líneas se mira `deadline` (epoch ms) y, si
+ * pasó, `timedOut` sin cuerpo. En el hilo de las expresiones, `deadline` es `Infinity`:
+ * allí el plazo lo hace cumplir `Worker.terminate()`.
+ *
  * Autocontenida A PROPÓSITO (sin nada de fuera de su cuerpo): ver la cabecera.
  */
 export function replaceBodyLines(
   body: string,
   re: RegExp,
   parts: ReadonlyArray<ReplacementPart>,
-  maxChanges: number
+  maxChanges: number,
+  maxChars: number,
+  deadline: number
 ): ReplaceLinesResult {
   const changes: Array<[number, string, string]> = [];
   let out = '';
@@ -149,6 +162,8 @@ export function replaceBodyLines(
   const length = body.length;
   let from = 0;
   let line = 1;
+  // Se lanza desde la función de reemplazo para cortar un `replace` que ya no cabe.
+  const tooLarge = { tooLarge: true };
   const build = (args: unknown[]): string => {
     const last = args[args.length - 1];
     const named = typeof last === 'object' && last !== null ? (last as Record<string, unknown>) : null;
@@ -167,18 +182,31 @@ export function replaceBodyLines(
     return piece;
   };
   while (from < length) {
+    if (line % 1_024 === 0 && Date.now() >= deadline) return { body: '', count, changes, timedOut: true };
     const newline = body.indexOf('\n', from);
     let end = newline < 0 ? length : newline;
     if (newline > from && body.charCodeAt(newline - 1) === 13) end = newline - 1;
     const text = body.slice(from, end);
     let found = 0;
+    // Lo que el resultado lleva hasta aquí más lo que esta línea crece con cada sustitución.
+    let grown = out.length + text.length;
     re.lastIndex = 0;
-    const replaced = text.replace(re, (...args: unknown[]) => {
-      found += 1;
-      return build(args);
-    });
+    let replaced: string;
+    try {
+      replaced = text.replace(re, (...args: unknown[]) => {
+        found += 1;
+        const piece = build(args);
+        grown += piece.length - String(args[0]).length;
+        if (grown > maxChars) throw tooLarge;
+        return piece;
+      });
+    } catch (error) {
+      if (error === tooLarge) return { body: '', count: count + found, changes, tooLarge: true };
+      throw error;
+    }
     out += replaced;
     out += body.slice(end, newline < 0 ? length : newline + 1);
+    if (out.length > maxChars) return { body: '', count: count + found, changes, tooLarge: true };
     if (found > 0) {
       count += found;
       if (replaced !== text && changes.length < maxChanges) changes.push([line, text, replaced]);

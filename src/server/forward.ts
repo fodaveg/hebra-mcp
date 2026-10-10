@@ -399,17 +399,20 @@ function asReplaceOutcome(value: unknown): ReplaceOutcome {
         ...syncFieldsFrom(record)
       };
       if (record.replayed === true) report.replayed = true;
+      if (record.undone === true) report.undone = true;
       return report;
     }
     case 'undo': {
+      if (typeof record.complete !== 'boolean') throw new Error('writer_protocol');
       const report: ReplaceUndoReport & SyncFields = {
         mode: 'undo',
         planId: asString(record.planId),
+        complete: record.complete,
         notes: asArray(record.notes).map((entry): ReplaceUndoNote => {
           const note = asRecordValue(entry);
           const out: ReplaceUndoNote = { id: asString(note.id), title: asString(note.title), ...proofFieldsFrom(note) };
           if (note.outcome !== undefined) {
-            out.outcome = oneOfValues(note.outcome, ['restored', 'already', 'changed', 'locked'] as const);
+            out.outcome = oneOfValues(note.outcome, ['restored', 'already', 'changed', 'locked', 'pending'] as const);
           }
           if (note.copyId !== undefined) out.copyId = asString(note.copyId);
           if (note.copyOutcome !== undefined) {
