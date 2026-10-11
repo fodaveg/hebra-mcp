@@ -49,6 +49,9 @@ export interface ToolContext {
   /** Lo que usa la respuesta, para la puerta final (`./privacy-gate.ts`): uno por intento.
    *  Opcional para los tests que llaman a una herramienta directamente, sin puerta. */
   usage?: GateUsage;
+  /** La época de privacidad del almacén al empezar la llamada, antes de su filtro
+   *  (`HebraLibraryPort.privacyEpoch`): la que compara la puerta final. */
+  epoch?: string;
   /** Lo que solo debe pasar si la puerta acepta ESTE intento (un log que no puede salir una
    *  vez por intento repetido). Sin puerta, se hace en el acto (`afterGate`). */
   deferred?: Array<() => void>;
@@ -75,13 +78,24 @@ export function afterGate(ctx: ToolContext, run: () => void): void {
  *  memoria (`knownPrivateFolderIds`), y con ella viaja a las escrituras. */
 export async function resolveToolContext(ctx: ServerContext): Promise<ToolContext> {
   const current = ctx.privacyConfigSource ? await ctx.privacyConfigSource.current() : ctx.privacyConfig;
-  const { config, filter } = await privacyWithMemory(ctx.port, current);
+  // La época de privacidad ANTES del filtro (`./privacy-gate.ts`): cualquier cambio desde aquí,
+  // también mientras se construye, hace que la puerta final no pase. Si anotar la memoria de
+  // carpetas privadas (A3) la cambia, se toma otra vez: lo que anota esta misma llamada no
+  // cuenta como un cambio de otro (la segunda vez ya no anota nada).
+  let epoch = await ctx.port.privacyEpoch();
+  let resolved = await privacyWithMemory(ctx.port, current);
+  if (resolved.remembered) {
+    epoch = await ctx.port.privacyEpoch();
+    resolved = await privacyWithMemory(ctx.port, current);
+  }
+  const { config, filter } = resolved;
   return {
     port: ctx.port,
     privacy: filter,
     privacyConfig: config,
     status: ctx.status,
     write: ctx.write,
-    usage: new GateUsage(filter)
+    usage: new GateUsage(filter),
+    epoch
   };
 }

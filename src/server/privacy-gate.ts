@@ -17,9 +17,8 @@
  *    desde cero: la configuración de ahora, la memoria de las carpetas privadas (A3, tabla y
  *    proceso), el árbol de carpetas con la ruta de AHORA de cada antecesora, etiquetas,
  *    bloqueadas y lápidas; y, solo si la respuesta los usó, la papelera, los ficheros sueltos
- *    y las notas que enlazan cada adjunto. Aunque la respuesta no use nada, una configuración
- *    que ya no resuelve es `privacy_config_unresolved` (cerrado ante la duda; basta el árbol
- *    de carpetas).
+ *    y las notas que enlazan cada adjunto. Siempre, aunque la respuesta no use nada: una
+ *    configuración que ya no resuelve es `privacy_config_unresolved` (cerrado ante la duda).
  * 3. Contra ese filtro, lo que usó la respuesta (`GateUsage`): notas vivas, notas de la
  *    papelera, carpetas (con la ruta que se enseñó), ficheros sueltos, bytes de adjuntos,
  *    etiquetas enseñadas y la nota del registro de un `operationId`. Cada cosa tiene que
@@ -27,10 +26,13 @@
  *    el filtro de la llamada decidió que se veía y, si se leyó aparte, el de la fila leída, que
  *    tienen que coincidir entre sí y con el de ahora; de una carpeta, la ruta que se enseñó.
  *    Nunca `updated_at`, que dos guardados seguidos pueden compartir.
- * 4. Y la configuración tiene que ser la MISMA en la llamada, en el paso 1 y justo después
- *    de la transacción (se vuelve a mirar la huella): cualquier cambio (una etiqueta privada
- *    nueva, que vuelve privada una versión antigua o una etiqueta de un recuento) cambia lo
- *    que la llamada pudo enseñar, y la respuesta no vale.
+ * 4. Y nada de lo que puede cambiar la privacidad puede haber cambiado durante la llamada,
+ *    aunque no se haya declarado (la garantía de la CLASE, que no depende de que cada
+ *    herramienta declare bien cada rama): la configuración tiene que ser la MISMA en la
+ *    llamada, en el paso 1 y justo después de la transacción (se vuelve a mirar la huella), y
+ *    la ÉPOCA de privacidad del almacén (`HebraLibraryPort.privacyEpoch`: notas, carpetas,
+ *    ficheros sueltos y memoria de carpetas privadas; ver `privacyEpochOf`) que la llamada tomó
+ *    al empezar, ANTES de su filtro, tiene que ser la de la transacción de la puerta.
  * 5. Si algo de eso no se cumple, no se poda la respuesta (podar deja huecos en cursores,
  *    recuentos y resoluciones que ya se calcularon con ello): se REPITE la llamada entera con
  *    un filtro nuevo, hasta `GATE_ATTEMPTS` veces. Si la última tampoco pasa, sale la
@@ -42,22 +44,27 @@
  * por delante) se declaran: la puerta los juzga con todo lo demás, y si no pasa, el cursor se
  * descarta con la respuesta y se calcula otra vez en el intento siguiente.
  *
- * Una escritura que escribió no se repite: su informe pasa por la misma puerta, solo con la
- * visibilidad (sus propios guardados cambian los sellos), y se filtra (`GatePolicy.redact`):
- * por defecto, si algo de lo que nombra ya no se ve, la respuesta de algo que no existe. Un
- * RECHAZO (el escritor o la herramienta no escribieron nada: `no_match`, `ambiguous_heading`,
- * `operation_id_reused`, `folder_name_taken`…) se repite como una lectura.
+ * Una escritura no se repite. Su informe pasa por la misma puerta, solo con la visibilidad de
+ * lo declarado (sus propios guardados, y la ronda que espera, cambian los sellos y la época), y
+ * se reduce a lo que resiste el filtro nuevo (`GatePolicy.redact`: por defecto, si algo de lo
+ * que nombra ya no se ve, la respuesta de algo que no existe). Un error de una escritura ligado
+ * a un objeto (`no_match`, `ambiguous_heading`, `note_locked`, `operation_id_reused`,
+ * `folder_name_taken`…), si la puerta no pasa entera (también por la configuración o la
+ * época: con algo cambiado no se puede confirmar que ese objeto se siga viendo), pasa a
+ * `not_found` (`folder_unavailable` en las carpetas).
  *
- * Coste: dos lecturas de la huella de `config.json` y una transacción de lectura con el árbol
- * de carpetas y el índice de visibilidad (lo mismo que `PrivacyFilter.build`), más la papelera
- * o los ficheros solo cuando la respuesta los usa. Medido en SPEC.md §6.3.
+ * Coste: dos lecturas de la huella de `config.json`, la época al empezar (tres sumas sobre
+ * `notes`, `folders` y `files`) y una transacción de lectura con el árbol de carpetas, el
+ * índice de visibilidad y la época (lo mismo que `PrivacyFilter.build`, más las sumas), más la
+ * papelera o los ficheros solo cuando la respuesta los usa. Y repeticiones: cualquier
+ * escritura de notas, carpetas o ficheros (una ronda de sync, otra llamada) a mitad de una
+ * lectura la repite. Medido en SPEC.md §6.3 (`gateStats`).
  */
 import { ROOT_FOLDER_ID } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { FileFilter } from '../privacy/file-filter';
 import { PrivacyFilter } from '../privacy/filter';
-import { FolderIndex } from '../privacy/folder-index';
 import { withRememberedFolders } from '../privacy/folder-memory';
 import { TrashFilter } from '../privacy/trash-filter';
 import type { ToolErrorCode } from '../log/logger';
@@ -220,9 +227,15 @@ interface GateDeclared {
 
 /** El resultado de la puerta: si pasa, y qué no pasó, para filtrar un informe. */
 export interface GateVerdict {
+  /** Todo: lo declarado, la configuración y la época. */
   passed: boolean;
+  /** Solo lo declarado (lo que filtra el informe de una escritura). */
+  declaredPassed: boolean;
   /** La configuración de privados cambió durante la llamada: nada de lo que usó vale. */
   configChanged: boolean;
+  /** La época de privacidad del almacén cambió durante la llamada (algo que puede cambiar
+   *  lo que es privado se escribió, por quien sea): nada de lo que usó está garantizado. */
+  epochChanged: boolean;
   /** Notas (vivas, de la papelera o en cualquier estado) que ya no se ven o cambiaron. */
   failedNotes: ReadonlySet<string>;
   failedFiles: ReadonlySet<string>;
@@ -230,16 +243,6 @@ export interface GateVerdict {
   failedBlobs: ReadonlySet<string>;
   failedTags: ReadonlySet<string>;
 }
-
-const PASSED: GateVerdict = {
-  passed: true,
-  configChanged: false,
-  failedNotes: new Set(),
-  failedFiles: new Set(),
-  failedFolders: new Set(),
-  failedBlobs: new Set(),
-  failedTags: new Set()
-};
 
 /**
  * La configuración de privados de AHORA, esperando la recarga en vuelo. Una que ya no se
@@ -275,18 +278,11 @@ export async function passGate(
   port: HebraLibraryPort,
   config: PrivacyConfig,
   usage: GateUsage,
-  options: { seals: boolean }
+  options: { seals: boolean; epoch?: string }
 ): Promise<GateVerdict> {
   const used = usage.declared();
-  if (usage.empty) {
-    // Nada que juzgar, pero cerrado ante la duda igual (R3-6 de la 3.ª revisión de Codex): una
-    // ruta configurada que ya no resuelve es `privacy_config_unresolved`. Basta el árbol.
-    const folders = FolderIndex.fromList(await port.foldersList());
-    if (config.privateFolders.some((segments) => folders.idsForPath(segments).every((id) => id === ROOT_FOLDER_ID))) {
-      throw new ToolError('privacy_config_unresolved');
-    }
-    return PASSED;
-  }
+  // Siempre la transacción entera, aunque no haya nada declarado (R3-6 de la 3.ª revisión de
+  // Codex): el filtro de ahora tiene que resolver, y la época tiene que ser la de la llamada.
   // Sellos solo de lo que lleva sello (una nota que solo cuenta por visible se juzga con el
   // índice de visibilidad, que ya va entero), y si es nota la de un registro de operación.
   const sealed = options.seals
@@ -354,14 +350,18 @@ export async function passGate(
     }
   }
   const failedTags = new Set([...used.tags].filter((tag) => live.isTagHidden(tag)));
+  const declaredPassed =
+    failedNotes.size === 0 &&
+    failedFiles.size === 0 &&
+    failedFolders.size === 0 &&
+    failedBlobs.size === 0 &&
+    failedTags.size === 0;
+  const epochChanged = options.epoch !== undefined && options.epoch !== snapshot.epoch;
   return {
-    passed:
-      failedNotes.size === 0 &&
-      failedFiles.size === 0 &&
-      failedFolders.size === 0 &&
-      failedBlobs.size === 0 &&
-      failedTags.size === 0,
+    passed: declaredPassed && !epochChanged,
+    declaredPassed,
     configChanged: false,
+    epochChanged,
     failedNotes,
     failedFiles,
     failedFolders,
@@ -379,14 +379,14 @@ export async function passGate(
 export async function finalGate(
   server: Pick<ServerContext, 'privacyConfig' | 'privacyConfigSource'>,
   port: HebraLibraryPort,
-  callConfig: PrivacyConfig,
+  call: { config: PrivacyConfig; epoch?: string },
   usage: GateUsage,
   options: { seals: boolean }
 ): Promise<GateVerdict> {
   const before = await gateConfig(server);
-  const verdict = await passGate(port, before, usage, options);
+  const verdict = await passGate(port, before, usage, { ...options, epoch: call.epoch });
   const after = await gateConfig(server);
-  if (samePrivacyConfig(before, callConfig) && samePrivacyConfig(before, after)) return verdict;
+  if (samePrivacyConfig(before, call.config) && samePrivacyConfig(before, after)) return verdict;
   return { ...verdict, passed: false, configChanged: true };
 }
 
@@ -395,12 +395,16 @@ export type ToolOutcome = { ok: true; value: unknown } | { ok: false; error: Too
 
 /**
  * Qué hace la puerta con una herramienta (`register-tools.ts`):
- * - `repeat` (las lecturas): si no pasa, se repite; al agotar los intentos, `fallback`, la
- *   respuesta del estado fresco (por defecto, `not_found`). `discard` deshace lo que deja un
- *   intento descartado (el plan de una simulación).
- * - `filter` (las escrituras): un rechazo que no pasa se repite como una lectura; lo demás no
- *   se repite y `redact` decide qué sale con el veredicto (por defecto, si algo ya no se ve,
- *   `not_found`).
+ * - `repeat` (las lecturas): si no pasa (lo declarado, la configuración o la época), se repite
+ *   entera, también si dio un error; al agotar los intentos, `fallback`, la respuesta del
+ *   estado fresco (por defecto, `not_found`). `discard` deshace lo que deja un intento
+ *   descartado (el plan de una simulación).
+ * - `filter` (las escrituras): no se repiten. Un informe se reduce a lo que resiste el filtro
+ *   nuevo (`redact`, sobre lo declarado: por defecto, si algo ya no se ve, `not_found`); la
+ *   época no lo anula, porque la propia escritura (y su ronda) la cambian. Un error ligado a un
+ *   objeto, si la puerta no pasa ENTERA (lo declarado, la configuración o la época: con
+ *   algo cambiado no se puede confirmar que ese objeto se siga viendo), pasa a `staleError`
+ *   (por defecto, `not_found`).
  */
 export type GatePolicy =
   | {
@@ -408,49 +412,54 @@ export type GatePolicy =
       fallback?: () => ToolOutcome;
       discard?: (outcome: ToolOutcome) => Promise<void>;
     }
-  | { kind: 'filter'; redact?: (outcome: ToolOutcome, verdict: GateVerdict) => ToolOutcome };
+  | {
+      kind: 'filter';
+      redact?: (outcome: ToolOutcome, verdict: GateVerdict) => ToolOutcome;
+      staleError?: (error: ToolError, verdict: GateVerdict) => ToolOutcome;
+    };
 
 /**
- * Los errores de una escritura que son un RECHAZO: ni la herramienta ni el escritor
- * escribieron nada, así que repetir la llamada es seguro (y, con lo que ya no se ve fuera, da
- * la respuesta de ahora). Fuera quedan `busy_other_instance` (un reenvío pudo escribir y
- * perder la respuesta) e `invalid_input` (también lo que da un fallo desconocido).
+ * Los errores que no dependen de ningún objeto de la biblioteca (la entrada, el escritor, la
+ * configuración): una escritura los devuelve tal cual aunque la puerta no pase. Todos los
+ * demás (`no_match`, `ambiguous_heading`, `note_locked`, `operation_id_reused`,
+ * `folder_name_taken`, `revision_conflict`…) dicen algo de una nota, carpeta o fichero.
  */
-const REJECTIONS: ReadonlySet<ToolErrorCode> = new Set<ToolErrorCode>([
-  'not_found',
-  'ambiguous_title',
+const OBJECT_FREE_ERRORS: ReadonlySet<ToolErrorCode> = new Set<ToolErrorCode>([
+  'invalid_input',
+  'busy_other_instance',
   'writer_outdated',
-  'revision_conflict',
-  'no_match',
-  'ambiguous_match',
-  'overlapping_edits',
-  'note_locked',
-  'operation_id_reused',
-  'attachment_too_large',
-  'attachment_type_not_allowed',
-  'attachment_unavailable',
-  'folder_unavailable',
-  'folder_name_taken',
-  'heading_not_found',
-  'ambiguous_heading',
-  'plan_not_found',
-  'plan_expired',
-  'plan_already_applied',
-  'file_changed',
-  'file_too_large',
-  'file_type_not_allowed',
-  'file_unavailable'
+  'privacy_config_unresolved'
 ]);
 
-/** ¿Es un rechazo, sin nada escrito, que se puede repetir? */
-export function isRejection(outcome: ToolOutcome): boolean {
-  return !outcome.ok && REJECTIONS.has(outcome.error.code);
+/** ¿Un error que no dice nada de ningún objeto? */
+export function isObjectFreeError(error: ToolError): boolean {
+  return OBJECT_FREE_ERRORS.has(error.code);
 }
 
 export const NOT_FOUND_OUTCOME = (): ToolOutcome => ({ ok: false, error: new ToolError('not_found') });
 
-/** El filtro por defecto de un informe de escritura: si algo de lo que usó ya no se ve, la
- *  respuesta de algo que no existe (C3), aunque la escritura se hiciera. */
+/** El filtro por defecto de un informe de escritura: si algo de lo que nombra ya no se ve,
+ *  la respuesta de algo que no existe (C3), aunque la escritura se hiciera. */
 export function redactWhole(outcome: ToolOutcome, verdict: GateVerdict): ToolOutcome {
-  return verdict.passed ? outcome : NOT_FOUND_OUTCOME();
+  return verdict.declaredPassed ? outcome : NOT_FOUND_OUTCOME();
 }
+
+/**
+ * Lo que repite la puerta, para medirlo (SPEC.md §6.3; `test/perf/gate-repeats.perf.ts`):
+ * llamadas, intentos repetidos (y por qué) y respuestas del estado fresco. Solo números, en
+ * este proceso; nunca sale en ninguna respuesta ni en el log.
+ */
+export const gateStats = {
+  calls: 0,
+  repeats: 0,
+  repeatsByEpoch: 0,
+  repeatsByConfig: 0,
+  fresh: 0,
+  reset(): void {
+    this.calls = 0;
+    this.repeats = 0;
+    this.repeatsByEpoch = 0;
+    this.repeatsByConfig = 0;
+    this.fresh = 0;
+  }
+};

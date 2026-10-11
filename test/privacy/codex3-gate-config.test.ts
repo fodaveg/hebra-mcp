@@ -37,7 +37,10 @@ it('R3: la configuración se aplica también si cambia antes de la transacción 
   });
   try {
     const result = await h.call('hebra_read_note', { id: h.library.privateFolderNoteId });
-    expect(spy).toHaveBeenCalledTimes(1);
+    // Ajustado en la 3.ª vuelta de d64e187e: la puerta hace su transacción en todos los
+    // intentos (también sin nada declarado, R3-6), así que el intento repetido la vuelve a
+    // llamar. Lo que fija el test es que la primera ve el cambio antes de su lectura.
+    expect(spy.mock.calls.length).toBeGreaterThanOrEqual(1);
     spy.mockRestore();
     expect((await h.call('hebra_read_note', { id: h.library.privateFolderNoteId })).json).toEqual(NOT_FOUND);
     expect(result.json, 'Salen cuerpo y título privados: la transacción de la puerta usa una configuración anterior')

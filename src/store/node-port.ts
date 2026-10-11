@@ -69,7 +69,13 @@ import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { blobNoteRefRows } from './file-sql';
-import { noteStamps, noteVisibilityRows, trashIndexRows } from './privacy-sql';
+import {
+  ensurePrivacyEpochIndexes,
+  noteStamps,
+  noteVisibilityRows,
+  privacyEpochOf,
+  trashIndexRows
+} from './privacy-sql';
 import { ensurePrivateFoldersTable, readPrivateFolders, writePrivateFolders } from './private-folders';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
@@ -170,6 +176,8 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensureFilePreviousTable(db);
   // Memoria de las carpetas privadas (A3 del audit de privacidad, `./private-folders.ts`).
   if (mode === 'readWrite') ensurePrivateFoldersTable(db);
+  // Índices de la época de privacidad de la puerta final (`./privacy-sql.ts`).
+  if (mode === 'readWrite') ensurePrivacyEpochIndexes(db);
   return new NodeLibraryPort(engine, db, mode);
 }
 
@@ -362,10 +370,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   async privacyRecheck(request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> {
     return this.read(() =>
       inReadTransaction(this.db, () => {
+        const remembered = this.rememberedRows();
         const snapshot: PrivacyRecheckSnapshot = {
           folders: this.engine.foldersList(),
           notes: noteVisibilityRows(this.db),
-          remembered: this.rememberedRows(),
+          remembered,
+          epoch: privacyEpochOf(this.db, remembered),
           stamps: noteStamps(this.db, request.notes)
         };
         if (request.files || request.blobs.length > 0) snapshot.files = this.filesRows();
@@ -376,6 +386,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         return snapshot;
       })
     );
+  }
+
+  /** La época de privacidad (`privacyEpochOf`, `./privacy-sql.ts`), en una transacción de
+   *  lectura dentro de un turno de la cola. */
+  async privacyEpoch(): Promise<string> {
+    return this.read(() => inReadTransaction(this.db, () => privacyEpochOf(this.db, this.rememberedRows())));
   }
 
   /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`),

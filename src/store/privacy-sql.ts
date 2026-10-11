@@ -7,7 +7,13 @@
  * su cola y dentro del turno de escritura) y `hebra_grep` (`./grep-sql.ts`).
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { FolderRowFact, NoteStamp, NoteVisibilityEntry, TrashIndex } from './types';
+import type {
+  FolderRowFact,
+  NoteStamp,
+  NoteVisibilityEntry,
+  RememberedPrivateFolder,
+  TrashIndex
+} from './types';
 
 /** Todas las filas de carpeta, vivas y lápidas, con su padre GUARDADO. */
 export function folderRowFacts(db: DatabaseSync): FolderRowFact[] {
@@ -142,6 +148,44 @@ export function noteStamps(db: DatabaseSync, ids: readonly string[]): Map<string
     stamps.set(String(row.id), { localSeq: Number(row.local_seq), trashed: Number(row.trashed) !== 0 });
   }
   return stamps;
+}
+
+/**
+ * La ÉPOCA de privacidad del almacén (puerta final, `src/server/privacy-gate.ts`): una huella
+ * que cambia con cualquier cosa que pueda cambiar lo que es privado. `local_seq` del motor NO
+ * es una secuencia global (cada fila lleva la suya y la sube en cada guardado, también los que
+ * trae el sync, mover, bloquear, mandar a la papelera o volver lápida), así que no vale su
+ * máximo: se toma, por tabla, el número de filas y la SUMA de `local_seq`, que sube con
+ * cualquier cambio de cualquier fila (y el número, con una fila nueva o purgada): `notes`
+ * (vivas, de la papelera y lápidas, con sus etiquetas, carpeta y bloqueo, que se guardan con
+ * la fila), `folders` (vivas y lápidas: nombre y padre) y `files`. Y la memoria de las carpetas
+ * privadas (A3), la de la tabla y la del proceso (`remembered`), entera. Lo que no cubre: lo
+ * que el motor reescribe sin subir `local_seq` al abrir una biblioteca de una versión anterior
+ * (las derivadas de `deriveVersion`), que no ocurre con el proceso sirviendo.
+ */
+/**
+ * Índices propios de hebra-mcp para la época (`privacyEpochOf`): con `local_seq` en un índice,
+ * la suma se lee del índice y no recorre las filas (el cuerpo va en la fila de `notes`, y con
+ * notas largas eso eran megas por llamada). Solo el escritor los crea, al abrir, como sus tablas
+ * propias; un lector usa los que haya (sin ellos, la misma suma, más lenta). Un índice más en
+ * una tabla del motor no cambia nada de lo que guarda ni de lo que sincroniza.
+ */
+export function ensurePrivacyEpochIndexes(db: DatabaseSync): void {
+  db.exec('CREATE INDEX IF NOT EXISTS hebra_mcp_epoch_notes ON notes(local_seq)');
+  db.exec('CREATE INDEX IF NOT EXISTS hebra_mcp_epoch_folders ON folders(local_seq)');
+  db.exec('CREATE INDEX IF NOT EXISTS hebra_mcp_epoch_files ON files(local_seq)');
+}
+
+export function privacyEpochOf(db: DatabaseSync, remembered: readonly RememberedPrivateFolder[]): string {
+  const sums = db
+    .prepare(
+      `SELECT (SELECT count(*) || '.' || coalesce(sum(local_seq), 0) FROM notes) AS notes,
+              (SELECT count(*) || '.' || coalesce(sum(local_seq), 0) FROM folders) AS folders,
+              (SELECT count(*) || '.' || coalesce(sum(local_seq), 0) FROM files) AS files`
+    )
+    .get() as { notes: string; folders: string; files: string };
+  const memory = remembered.map((entry) => `${entry.pathKey}\u0000${entry.folderId}`).sort();
+  return JSON.stringify([String(sums.notes), String(sums.folders), String(sums.files), memory]);
 }
 
 /**

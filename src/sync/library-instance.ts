@@ -661,6 +661,7 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     privacyRecheck: (request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> =>
       current().privacyRecheck(request),
+    privacyEpoch: (): Promise<string> => current().privacyEpoch(),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
     filesIndex: (): Promise<FilesIndex> => current().filesIndex(),
     notesLinkingBlobs: (sha256s: readonly string[]): Promise<BlobNoteRef[][]> =>

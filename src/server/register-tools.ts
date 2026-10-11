@@ -30,7 +30,8 @@ import {
   GATE_ATTEMPTS,
   NOT_FOUND_OUTCOME,
   finalGate,
-  isRejection,
+  gateStats,
+  isObjectFreeError,
   redactWhole,
   type GatePolicy,
   type GateVerdict,
@@ -162,13 +163,31 @@ function emptyList(key: string): () => unknown {
 const WRITE: GatePolicy = { kind: 'filter' };
 
 /**
+ * Crear o renombrar una carpeta: como `WRITE`, pero un error que la puerta no confirma (un
+ * choque de nombres con una hermana que ya no se ve, o con la configuración cambiada) es
+ * `folder_unavailable`, el error único de D9 para «ese nombre no se puede usar ahí»; si lo que
+ * ya no se ve es la carpeta de la que se parte (`folderId` o `parentId`), `not_found`.
+ */
+function folderWrite(input: Record<string, unknown>): GatePolicy {
+  const own = typeof input.folderId === 'string' ? input.folderId : input.parentId;
+  return {
+    kind: 'filter',
+    staleError(error, verdict) {
+      const ownHidden = typeof own === 'string' && verdict.failedFolders.has(own);
+      const code = error.code === 'not_found' || ownHidden ? 'not_found' : 'folder_unavailable';
+      return { ok: false, error: new ToolError(code) };
+    }
+  };
+}
+
+/**
  * Una escritura sobre UNA nota que puede acabar en una copia de conflicto (`copyId`): si la
  * nota ya no se ve, `not_found` (C3); si solo la copia, el informe sin su id.
  */
 const WRITE_WITH_COPY: GatePolicy = {
   kind: 'filter',
   redact(outcome, verdict) {
-    if (verdict.passed || !outcome.ok) return redactWhole(outcome, verdict);
+    if (verdict.declaredPassed || !outcome.ok) return redactWhole(outcome, verdict);
     const value = outcome.value as { id?: unknown; copyId?: unknown };
     const onlyCopy =
       typeof value.copyId === 'string' &&
@@ -191,7 +210,7 @@ const WRITE_WITH_COPY: GatePolicy = {
 const REPLACE_REPORT: GatePolicy = {
   kind: 'filter',
   redact(outcome, verdict) {
-    if (verdict.passed || !outcome.ok) return outcome;
+    if (verdict.declaredPassed || !outcome.ok) return outcome;
     type Entry = { id: string; outcome?: string; copyId?: string; copyOutcome?: unknown };
     const report = outcome.value as { mode: string; complete: boolean; notes: Entry[] };
     const notes = report.notes
@@ -262,8 +281,8 @@ const GATE_POLICIES: Record<
   hebra_restore_version: WRITE_WITH_COPY,
   hebra_list_attachments: read(),
   hebra_read_attachment: read(),
-  hebra_create_folder: WRITE,
-  hebra_rename_folder: WRITE,
+  hebra_create_folder: (input) => folderWrite(input),
+  hebra_rename_folder: (input) => folderWrite(input),
   hebra_add_attachment: WRITE_WITH_COPY,
   hebra_replace_in_notes: (input, server) =>
     input.mode === 'apply' || input.mode === 'undo'
@@ -320,6 +339,7 @@ async function runTool(
   const unresolved = (): ReturnType<typeof toOkResult> =>
     finish({ ok: false, error: new ToolError('privacy_config_unresolved') });
 
+  gateStats.calls += 1;
   for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt += 1) {
     let toolCtx: ToolContext;
     try {
@@ -337,10 +357,15 @@ async function runTool(
     if (!outcome.ok && outcome.error.operationTarget !== undefined) {
       usage.operationTarget(outcome.error.operationTarget);
     }
-    const reads = policy.kind === 'repeat' || isRejection(outcome);
     let verdict: GateVerdict;
     try {
-      verdict = await finalGate(ctx, ctx.port, toolCtx.privacyConfig, usage, { seals: reads });
+      verdict = await finalGate(
+        ctx,
+        ctx.port,
+        { config: toolCtx.privacyConfig, epoch: toolCtx.epoch },
+        usage,
+        { seals: policy.kind === 'repeat' }
+      );
     } catch (error) {
       if (error instanceof ToolError) return finish({ ok: false, error });
       throw error;
@@ -350,14 +375,20 @@ async function runTool(
       return finish(accepted);
     };
     if (verdict.passed) return accept(outcome);
-    // Un rechazo no escribió nada: se repite como una lectura, y si ningún intento pasa,
-    // `not_found` (abajo).
-    if (policy.kind === 'filter' && !isRejection(outcome)) {
-      return accept((policy.redact ?? redactWhole)(outcome, verdict));
+    if (policy.kind === 'filter') {
+      // Una escritura no se repite. Su informe, reducido a lo que resiste el filtro nuevo; un
+      // error ligado a un objeto que no se puede confirmar visible, el de algo que no existe.
+      if (outcome.ok) return accept((policy.redact ?? redactWhole)(outcome, verdict));
+      if (isObjectFreeError(outcome.error)) return accept(outcome);
+      return accept(policy.staleError?.(outcome.error, verdict) ?? NOT_FOUND_OUTCOME());
     }
-    if (policy.kind === 'repeat') await policy.discard?.(outcome);
+    gateStats.repeats += 1;
+    if (verdict.epochChanged) gateStats.repeatsByEpoch += 1;
+    if (verdict.configChanged) gateStats.repeatsByConfig += 1;
+    await policy.discard?.(outcome);
   }
   // Ningún intento pasó: el estado fresco, nunca lo que se leyó.
+  gateStats.fresh += 1;
   return finish(policy.kind === 'repeat' && policy.fallback ? policy.fallback() : NOT_FOUND_OUTCOME());
 }
 

@@ -85,6 +85,8 @@ export interface PrivacyRecheckSnapshot {
   folders: FoldersList;
   notes: NoteVisibilityEntry[];
   remembered: RememberedPrivateFolder[];
+  /** La época de privacidad del almacén en esta misma transacción (`privacyEpoch`). */
+  epoch: string;
   stamps: Map<string, NoteStamp>;
   trash?: TrashIndex;
   files?: FilesIndex;
@@ -238,6 +240,11 @@ export interface HebraLibraryPort {
    *  de la cola y en una transacción de lectura, para que el filtro, la memoria de las
    *  carpetas privadas y los sellos sean del mismo instante del almacén. */
   privacyRecheck(request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot>;
+  /** La ÉPOCA de privacidad del almacén (`privacyEpochOf` de `./privacy-sql.ts`): una huella
+   *  que cambia con cualquier cambio de notas, carpetas, ficheros sueltos o de la memoria de
+   *  carpetas privadas. La toma cada llamada al empezar, ANTES de construir su filtro, y la
+   *  puerta final la compara con la de su transacción. */
+  privacyEpoch(): Promise<string>;
   /** Notas de la papelera (sin lápidas) y TODAS las filas de carpeta, lápidas incluidas,
    *  en un solo turno de la cola: para `hebra_list_trash` y `hebra_restore_note`
    *  (ampliación de D2 del 30 sep 2026). */

@@ -900,7 +900,7 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
   }
   const lib = await open();
   let unclean = false;
-  const results: Array<{ ruta: string; name: UndoOutcomeName }> = [];
+  const results: Array<{ id: string; ruta: string; name: UndoOutcomeName }> = [];
   try {
     if ((await lib.port.libraryId()) !== checkout.biblioteca) {
       throw new WorkdirError('esta carpeta de trabajo es de otra biblioteca: no se deshace nada');
@@ -908,7 +908,7 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
     const at = (): string => nowOf(io).toISOString();
     const record = (item: UndoItem, name: UndoOutcomeName): void => {
       workdir.appendJournal(args.lote, { paso: 'deshacer', id: item.id, resultado: name, en: at() });
-      results.push({ ruta: item.ruta, name });
+      results.push({ id: item.id, ruta: item.ruta, name });
       if (name === 'cambiada_despues' || name === 'no_disponible' || name === 'bloqueada' || name === 'copia_cambiada') {
         unclean = true;
       }
@@ -1002,9 +1002,13 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
       }
     }
     const round = await syncRoundQuietly(lib);
+    // El informe, por la puerta final tras la ronda, como el de `apply` (§13.4): una nota que
+    // la ronda dejó oculta no se nombra. El diario del lote ya lo anotó todo.
+    const hidden = await hiddenAfterRound(lib, results.map((result) => ({ entry: { id: result.id } })));
+    const reported = results.filter((result) => !hidden.has(result.id));
     io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round, lib.role)}).`);
-    for (const { ruta, name } of results) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
-    if (results.length === 0) io.out('  Nada que deshacer.');
+    for (const { ruta, name } of reported) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
+    if (reported.length === 0) io.out('  Nada que deshacer.');
     return unclean ? 1 : 0;
   } finally {
     await lib.close();

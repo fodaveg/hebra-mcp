@@ -821,16 +821,31 @@ El dispositivo acumula tres secretos:
      con el de ahora; de una carpeta, su ruta. Nunca `updated_at`. Lo que solo decide por estar
      visible (una homónima, el original de `conflictOf`, las notas de un recuento) no lleva
      sello: editarlo no repite la llamada.
-  4. La configuración tiene que ser la MISMA en la llamada, en el paso 1 y justo después de la
-     transacción (se vuelve a mirar su huella; se comparan las rutas y etiquetas configuradas, no
-     la memoria de carpetas, que el paso 2 rehace): cualquier cambio invalida la respuesta, porque
-     cambia lo que pudo enseñar sin tocar ninguna fila: el cuerpo de una versión antigua con una
-     etiqueta que acaba de ser privada (R3-3), una etiqueta de un recuento (R3-7), lo que cambió
-     entre el paso 1 y la transacción (R3-5) o el nombre de una carpeta con el que choca un
-     renombrado.
-  5. Si algo no se cumple, no se poda la respuesta (podar dejaba huecos en cursores, recuentos y
-     resoluciones calculados con ello): se REPITE la llamada entera, con un filtro nuevo, hasta 3
-     veces (`GATE_ATTEMPTS`). Si la tercera tampoco pasa, sale el estado fresco que declara la
+  4. **La época de privacidad, cerrada por defecto** (lo que garantiza la CLASE, aunque una
+     herramienta deje una rama sin declarar; tras la 3.ª revisión de Codex, decisión de la
+     sesión principal): nada que pueda cambiar lo que es privado puede haber cambiado durante
+     la llamada. Al empezar, ANTES de construir su filtro, la llamada toma la época del almacén
+     (`HebraLibraryPort.privacyEpoch`); la puerta la vuelve a tomar DENTRO de su transacción, y
+     tienen que coincidir. `local_seq` del motor no es una secuencia global (cada fila lleva la
+     suya), así que la época es, por tabla, el número de filas y la SUMA de `local_seq` de
+     `notes` (vivas, de la papelera y lápidas: la fila lleva su carpeta, etiquetas y bloqueo),
+     `folders` (vivas y lápidas) y `files`, que sube con cualquier guardado de cualquier fila
+     (también los del sync), y la memoria de carpetas privadas entera (tabla y proceso); lo que
+     anota la propia llamada al empezar no cuenta (se toma otra vez tras anotarlo). Con un
+     índice propio de hebra-mcp sobre `local_seq` en esas tres tablas (lo crea el escritor al
+     abrir, como sus tablas), la suma no recorre las filas: 0,07 ms con 3 000 notas, frente a
+     6,6 ms sin él. Lo que no cubre: lo que el motor reescribe sin subir `local_seq` al abrir una
+     biblioteca de una versión anterior (las derivadas de una versión nueva de `deriveNote`), que
+     no pasa con el proceso sirviendo. Y la configuración tiene que ser la MISMA en la llamada,
+     en el paso 1 y justo después de la transacción (se vuelve a mirar su huella; se comparan las
+     rutas y etiquetas configuradas, no la memoria de carpetas, que el paso 2 rehace): cambia lo
+     que la llamada pudo enseñar sin tocar ninguna fila (el cuerpo de una versión antigua con una
+     etiqueta que acaba de ser privada, R3-3; una etiqueta de un recuento, R3-7; lo que cambió
+     entre el paso 1 y la transacción, R3-5; el nombre con el que choca un renombrado).
+  5. Si algo no se cumple en una LECTURA, no se poda la respuesta (podar dejaba huecos en
+     cursores, recuentos y resoluciones calculados con ello): se REPITE la llamada entera, también
+     si dio un error, con un filtro y una época nuevos, hasta 3 veces (`GATE_ATTEMPTS`). Si la
+     tercera tampoco pasa, sale el estado fresco que declara la
      herramienta: una lista vacía y sin cursor en las listas y búsquedas, un plan vacío o una
      página vacía en `hebra_replace_in_notes`, y `not_found` en lo demás; nunca lo que se leyó. El
      estado fresco es indistinguible del final real de una lista (o de un plan sin notas): a
@@ -844,15 +859,28 @@ El dispositivo acumula tres secretos:
   las notas, la clave de la última devuelta; el de los backlinks, igual; el de `hebra_grep` y
   `continueAfter`, una nota ya mirada (declarada); el de `preview`, la clave de la última nota
   devuelta (abajo). Si la puerta no pasa, el cursor se descarta con la respuesta y se vuelve a
-  calcular. Las escrituras que escribieron no se repiten: su informe pasa por la misma puerta
-  tras la ronda, solo con la visibilidad (sus guardados cambian los sellos), y se filtra (abajo,
-  «Escrituras»). Un RECHAZO (`no_match`, `ambiguous_heading`, `note_locked`,
-  `operation_id_reused`, `folder_name_taken`, `revision_conflict`…: ni la herramienta ni el
-  escritor escribieron nada) que no pasa la puerta se repite como una lectura, y la respuesta es
-  la de ahora (la nota ya oculta, `not_found`; la carpeta con la que chocaba ya privada,
-  `folder_unavailable`; el registro de un `operationId` de algo ya oculto, como nunca usado, C12).
-  No cuentan como rechazo `busy_other_instance` (un reenvío pudo escribir y perder la respuesta) ni
-  `invalid_input`. **Coste medido** (11 oct 2026, este Mac, Node 24, biblioteca sintética de
+  calcular. Las ESCRITURAS no se repiten (ni las que escribieron ni las que dieron un error): su
+  informe pasa por la misma puerta tras la ronda y se reduce a lo que resiste el filtro nuevo,
+  juzgando lo declarado y solo su visibilidad (la propia escritura, y la ronda que espera,
+  cambian los sellos y la época, que por eso no anulan un informe; abajo, «Escrituras»). Un
+  ERROR de una escritura ligado a un objeto (`no_match`, `ambiguous_heading` con sus candidatos,
+  `note_locked`, `operation_id_reused`, `folder_name_taken`, `revision_conflict`…), si la puerta
+  no pasa entera (lo declarado, la configuración o la época: con algo cambiado no se puede
+  confirmar que ese objeto se siga viendo), es `not_found`; en crear y renombrar carpetas,
+  `folder_unavailable` (el error único de D9), salvo que lo que ya no se ve sea la carpeta de la
+  que se parte (`not_found`). Solo los errores que no dicen nada de ningún objeto
+  (`invalid_input`, `busy_other_instance`, `writer_outdated`, `privacy_config_unresolved`) salen
+  tal cual. Coste asumido: un error de una escritura con una ronda de sync en marcha puede ser
+  `not_found` aunque la nota se siga viendo. **Repeticiones medidas**
+  (`test/perf/gate-repeats.perf.ts`, `gateStats`; 3 000 notas, 300 llamadas de cada herramienta,
+  escrituras de otra conexión, como una ronda de sync, intercaladas a mitad de llamada cada cierto
+  tiempo): sin escrituras, ninguna repetición; con una escritura por segundo, se repitieron una
+  vez 6 de 300 `hebra_read_note` y 9 de 300 `hebra_search`, sin ningún estado fresco; con una
+  escritura cada 20 ms (más de una por llamada) o en cada lectura, todas se repitieron tres veces
+  y las 300 acabaron en el estado fresco (`not_found`, lista vacía). Es el coste de cerrar por
+  defecto: mientras alguien escribe sin parar más deprisa de lo que dura una llamada, las
+  lecturas no responden; con las rondas de sync de verdad (de una en una, separadas por
+  segundos) es una repetición de vez en cuando. **Coste medido** (11 oct 2026, este Mac, Node 24, biblioteca sintética de
   3 000 notas de unos 2 KB en 60 carpetas, con privadas por carpeta y por etiqueta;
   `test/perf/gate-latency.perf.ts`, 300 llamadas por el camino entero del MCP tras 30 en caliente,
   el mismo fichero sobre una copia de cc64c7a y sobre la rama, dos rondas alternas, con la puerta
@@ -913,10 +941,11 @@ El dispositivo acumula tres secretos:
   oculto, `not_found`), el informe de aplicar y deshacer de `hebra_replace_in_notes` (sin las
   notas, ni el `copyId` de las copias, que la ronda dejó ocultos; `complete` no cuenta lo
   pendiente que ya no se ve) y el de `hebra-mcp apply` (§13.4). La nota de una escritura cuenta
-  para la puerta desde que se comprueba, no solo si la escritura sale bien: un rechazo
+  para la puerta desde que se comprueba, no solo si la escritura sale bien: un error
   (`ambiguous_heading` con sus candidatos, `no_match`, `note_locked`, `operation_id_reused`…) de
-  una nota que pasó a oculta mientras tanto se repite y responde `not_found` (R3-1, R3-2 de la 3.ª
-  revisión de Codex; arriba, «Cuándo se evalúa»).
+  una nota que pasó a oculta mientras tanto, o con la época o la configuración cambiadas,
+  responde `not_found`, sin repetirse (R3-1, R3-2 de la 3.ª revisión de Codex; arriba, «Cuándo
+  se evalúa»).
   **El registro de `operationId`** (C12 de la revisión de Codex): un `operationId` ya usado con otra
   petición responde `operation_id_reused`, salvo que el registro sea de una nota (viva o de la
   papelera) o un fichero suelto que con la configuración de quien pide ya no se ve: entonces se trata

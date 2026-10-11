@@ -55,7 +55,7 @@ export type PrivacyMemoryPort = Pick<
 export async function privacyWithMemory(
   port: PrivacyMemoryPort,
   config: PrivacyConfig
-): Promise<{ config: PrivacyConfig; filter: PrivacyFilter }> {
+): Promise<{ config: PrivacyConfig; filter: PrivacyFilter; remembered: boolean }> {
   const configured = [...new Set(config.privateFolders.map((segments) => privacyPathKey(segments)))];
   const remembered = await port.rememberedPrivateFolders();
   const seen = new Set<string>();
@@ -72,9 +72,11 @@ export async function privacyWithMemory(
   const fresh = filter
     .resolvedPrivateFolders()
     .filter((entry) => !seen.has(`${entry.pathKey}\u0000${entry.folderId}`));
-  if (fresh.length > 0 || stale) await port.rememberPrivateFolders(fresh, configured);
-  if (fresh.length === 0) return { config: withMemory, filter };
+  // `remembered`: si anotó u olvidó algo (cambia la época de privacidad de la puerta final).
+  const wrote = fresh.length > 0 || stale;
+  if (wrote) await port.rememberPrivateFolders(fresh, configured);
+  if (fresh.length === 0) return { config: withMemory, filter, remembered: wrote };
   // Lo de ahora también viaja con la configuración (al escritor, si esta llamada escribe).
   for (const entry of fresh) known.add(entry.folderId);
-  return { config: { ...base, knownPrivateFolderIds: [...known].sort() }, filter };
+  return { config: { ...base, knownPrivateFolderIds: [...known].sort() }, filter, remembered: wrote };
 }
