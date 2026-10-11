@@ -832,7 +832,7 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
   });
 
   it('una nota BLOQUEADA y oculta también oculta el fichero suelto que adjunta (solo consta en note_blob_refs)', async () => {
-    test = await buildTestContext();
+    test = await buildTestContext(undefined, { lockedNote: true });
     const library = test.library;
     const id = library.files.referencedByLockedNote;
     // La premisa, medida en el almacén: el motor no deriva enlaces de una nota bloqueada
@@ -852,7 +852,8 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
       true
     );
 
-    // El fichero está en la raíz, una carpeta visible: solo la referencia lo oculta.
+    // El fichero está en la raíz, una carpeta visible, y no se puede incrustar por nombre
+    // (no tiene extensión): solo la referencia lo oculta.
     const index = await test.ctx.port.filesIndex();
     expect(index.files.find((file) => file.id === id)?.folderId).toBe('root');
     expect(index.refs).toContainEqual({

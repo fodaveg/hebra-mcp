@@ -1,0 +1,63 @@
+/**
+ * La configuración de privados de UNA llamada con la memoria de las carpetas privadas (A3
+ * del audit de privacidad adversarial, 10 oct 2026; SPEC.md §6.3, D16).
+ *
+ * `privateFolders` son rutas, y una ruta se resuelve a carpetas con el almacén de cada
+ * momento. Si la carpeta privada se mueve dentro de otra y se crea una nueva con su nombre,
+ * la ruta pasa a nombrar la nueva y la vieja quedaba visible. Por eso se recuerda a qué
+ * carpetas resolvió cada ruta (`hebra_mcp_private_folders`, `src/store/private-folders.ts`) y
+ * el filtro oculta la unión: las de ahora y las recordadas de las rutas que SIGUEN
+ * configuradas (`PrivacyConfig.knownPrivateFolderIds`).
+ *
+ * Se llama en cada llamada de herramienta (`resolveToolContext`), al abrir los ficheros de
+ * trabajo (`src/workdir/library.ts`) y, en el escritor, antes de cada ronda de sync
+ * (`beforeSyncRound` de `serve`): así una ronda que trae la carpeta movida encuentra
+ * anotada la de antes aunque nadie haya llamado a una herramienta entre medias.
+ *
+ * Lo que queda fuera: una ruta que nunca se resolvió con esa configuración (configurada con
+ * el proceso parado y movida antes de la primera ronda) no tiene nada que recordar; la ruta
+ * de ahora nombra la que el usuario ve hoy con ese nombre.
+ */
+import type { HebraLibraryPort } from '../store/types';
+import type { PrivacyConfig } from './config';
+import { PrivacyFilter } from './filter';
+import { privacyPathKey } from './folder-index';
+
+/** Lo que necesita del almacén: el filtro y la memoria. */
+export type PrivacyMemoryPort = Pick<
+  HebraLibraryPort,
+  'foldersList' | 'notesVisibilityIndex' | 'rememberedPrivateFolders' | 'rememberPrivateFolders'
+>;
+
+/**
+ * La configuración con `knownPrivateFolderIds` y el filtro construido con ella. Anota las
+ * carpetas que la configuración resuelve ahora y no estaban, y olvida las de las rutas que
+ * ya no están configuradas (en la tabla, solo si este proceso es el escritor).
+ */
+export async function privacyWithMemory(
+  port: PrivacyMemoryPort,
+  config: PrivacyConfig
+): Promise<{ config: PrivacyConfig; filter: PrivacyFilter }> {
+  const configured = [...new Set(config.privateFolders.map((segments) => privacyPathKey(segments)))];
+  const keys = new Set(configured);
+  const remembered = await port.rememberedPrivateFolders();
+  const known = new Set<string>();
+  const seen = new Set<string>();
+  let stale = false;
+  for (const entry of remembered) {
+    seen.add(`${entry.pathKey}\u0000${entry.folderId}`);
+    if (keys.has(entry.pathKey)) known.add(entry.folderId);
+    else stale = true;
+  }
+  const { knownPrivateFolderIds: _ignored, ...base } = config;
+  const withMemory: PrivacyConfig = known.size > 0 ? { ...base, knownPrivateFolderIds: [...known].sort() } : base;
+  const filter = await PrivacyFilter.build(port, withMemory);
+  const fresh = filter
+    .resolvedPrivateFolders()
+    .filter((entry) => !seen.has(`${entry.pathKey}\u0000${entry.folderId}`));
+  if (fresh.length > 0 || stale) await port.rememberPrivateFolders(fresh, configured);
+  if (fresh.length === 0) return { config: withMemory, filter };
+  // Lo de ahora también viaja con la configuración (al escritor, si esta llamada escribe).
+  for (const entry of fresh) known.add(entry.folderId);
+  return { config: { ...base, knownPrivateFolderIds: [...known].sort() }, filter };
+}

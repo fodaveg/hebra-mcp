@@ -13,7 +13,7 @@
  * Solo cubre notas VIVAS (ni papelera ni lápida): `notesVisibilityIndex()` ya las
  * excluye en SQL (SPEC.md §5: «las notas en la papelera nunca se devuelven»).
  */
-import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
+import type { FolderRowFact, HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
 
 export interface NoteIndexEntry {
   folderId: string;
@@ -21,6 +21,12 @@ export interface NoteIndexEntry {
    *  para el filtro (una etiqueta privada oculta también a sus descendientes) y para
    *  enseñar (`visibleTagsOf` en `filter.ts` se queda solo con las hoja). */
   tags: Set<string>;
+  /** Bloqueada (A1 del audit de privacidad): no deriva etiquetas. */
+  locked: boolean;
+  /** La carpeta guardada si no está viva, y las lápidas por encima (A2): ver
+   *  `NoteVisibilityEntry` en `src/store/types.ts`. */
+  storedFolderId?: string;
+  folderTrail?: readonly FolderRowFact[];
 }
 
 export class LibraryIndex {
@@ -37,7 +43,14 @@ export class LibraryIndex {
   /** Sobre filas ya leídas (el filtro de DENTRO de un turno de escritura). */
   static fromRows(rows: readonly NoteVisibilityEntry[]): LibraryIndex {
     const notes = new Map<string, NoteIndexEntry>();
-    for (const row of rows) notes.set(row.id, { folderId: row.folderId, tags: new Set(row.tags) });
+    for (const row of rows) {
+      const entry: NoteIndexEntry = { folderId: row.folderId, tags: new Set(row.tags), locked: row.locked === true };
+      if (row.storedFolderId !== undefined) {
+        entry.storedFolderId = row.storedFolderId;
+        entry.folderTrail = row.folderTrail ?? [];
+      }
+      notes.set(row.id, entry);
+    }
     return new LibraryIndex(notes);
   }
 

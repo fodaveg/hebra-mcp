@@ -16,8 +16,11 @@
  *    `not_found`, igual que una inexistente.
  * 3. DESDE LA CONFIGURACIÓN, antes de mirar el motor (`isPrivateFolderPath`): una ruta
  *    resultante privada o debajo de una privada, `folder_unavailable`. Al renombrar,
- *    también una carpeta con una privada debajo, o una descendiente que quedaría en una
- *    ruta privada. La respuesta no depende de que la carpeta privada exista.
+ *    también una carpeta por debajo de cuya ruta hay una ruta privada configurada
+ *    (`isPrivatePathPrefix`, M4 del audit de privacidad), o una descendiente que quedaría en
+ *    una ruta privada. La respuesta no depende de que la carpeta privada exista ni de dónde
+ *    esté: lo único que delata es la configuración (la misma fuga que al crear, aceptada en
+ *    D9).
  * 4. Hermanas homónimas (`folderNameKey`, la comparación del motor): una VISIBLE es la
  *    misma carpeta al crear (idempotente) o `folder_name_taken` al renombrar; si solo hay
  *    ocultas, `folder_unavailable`. El escritor además traduce un `folder_name_taken` del
@@ -127,7 +130,11 @@ export function planRenameFolder(
   // hubiera marcado (p. ej. una homónima que no resolvió). Con el índice bien, una así ya
   // es oculta y sale arriba como `not_found`, igual que una inexistente.
   if (filter.isPrivateFolderPath(filter.folderSegments(folderId))) return reject('folder_unavailable');
-  if (filter.hasHiddenFolderBelow(folderId)) return reject('folder_unavailable');
+  // Una ruta privada CONFIGURADA por debajo de la suya: renombrarla cambiaría por dónde se
+  // resuelve. Desde la configuración, sin mirar qué hay debajo en el almacén (M4 del audit de
+  // privacidad, 10 oct 2026): mirando el árbol, renombrar a su mismo nombre decía qué
+  // carpeta visible, también entre homónimas, tenía una privada dentro.
+  if (filter.isPrivatePathPrefix(filter.folderSegments(folderId))) return reject('folder_unavailable');
   const parentId = filter.folderParent(folderId) ?? ROOT_FOLDER_ID;
   const renamed = [...filter.folderSegments(parentId), pathSegment(name)];
   if (filter.isPrivateFolderPath(renamed)) return reject('folder_unavailable');

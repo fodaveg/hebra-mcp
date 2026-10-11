@@ -1443,7 +1443,7 @@ export class NoteWriter {
     download: ((sha256: string) => Promise<boolean>) | null
   ): Promise<boolean> {
     const sha256 = input.sha256.toLowerCase();
-    const present = await this.target.writeExclusive(async (store) => {
+    const found = await this.target.writeExclusive(async (store) => {
       const filter = privacyInTurn(store, input.privacy);
       const note = await store.noteRead(input.noteId);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
@@ -1452,11 +1452,17 @@ export class NoteWriter {
       if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
       const row = store.noteAttachments(note.id).find((entry) => entry.sha256 === sha256);
       if (!row) throw writeRejected('not_found');
-      return row.present;
+      // Bytes que son también de algo oculto (M6 del audit de privacidad): no se bajan, y
+      // se responde como si no estuvieran (lo mismo que la herramienta).
+      const files = FileFilter.fromSnapshot(filter, store.filesIndex(), input.privacy);
+      const hidden =
+        store.notesLinkingBlob(sha256).some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256);
+      return { present: row.present, hidden };
     });
+    if (found.hidden) return false;
     // `readBlob` mira primero lo local (y verifica el hash): se le pide aunque la fila
     // diga que está, por si el fichero se quedó a medias.
-    return download ? download(sha256) : present;
+    return download ? download(sha256) : found.present;
   }
 
   /**

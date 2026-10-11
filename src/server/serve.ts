@@ -14,7 +14,8 @@
  */
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
-import { loadPrivacyConfig } from '../privacy';
+import { PrivacyConfigSource } from '../privacy/config-source';
+import { privacyWithMemory } from '../privacy/folder-memory';
 import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
 import { LibraryInstanceStatusSource } from '../status/status-source';
@@ -138,18 +139,26 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     const register = await registerLinkedDevice(linked, options.fetcher);
     logEvent({ event: 'sync.register', result: register });
   }
-  const [instance, privacyConfig] = await Promise.all([
-    LibraryInstance.open({
-      dataDir,
-      deviceLabel: 'Claude',
-      sync: linked?.config ?? null,
-      // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
-      // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
-      writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened), opened),
-      ...options.instance
-    }),
-    loadPrivacyConfig(dataDir)
-  ]);
+  // `config.json` se lee ANTES de abrir la biblioteca: el escritor anota las carpetas
+  // privadas antes de cada ronda de sync, también la primera (A3 del audit de privacidad,
+  // `privacyWithMemory`), y para eso necesita la configuración. Después se relee en cada
+  // llamada si cambió (M5, `PrivacyConfigSource`).
+  const privacySource = await PrivacyConfigSource.open(dataDir);
+  const privacyConfig = privacySource.initial;
+  const instance = await LibraryInstance.open({
+    dataDir,
+    deviceLabel: 'Claude',
+    sync: linked?.config ?? null,
+    // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
+    // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
+    writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened), opened),
+    beforeSyncRound: async (port) => {
+      // Una configuración rota no anota nada (las herramientas ya responden
+      // `privacy_config_unresolved`); un fallo aquí no para la ronda.
+      await privacyWithMemory(port, await privacySource.current());
+    },
+    ...options.instance
+  });
   if (options.writerOnly) {
     if (instance.role !== 'this') {
       await instance.close();
@@ -160,6 +169,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     const ctx: ServerContext = {
       port: instance.port,
       privacyConfig,
+      privacyConfigSource: privacySource,
       status: new LibraryInstanceStatusSource(instance, linked !== null),
       write: localWriteContext(instance)
     };
@@ -176,6 +186,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const ctx: ServerContext = {
     port: instance.port,
     privacyConfig,
+    privacyConfigSource: privacySource,
     status: new RoutedStatusSource(instance, linked !== null, options.forward),
     write
   };

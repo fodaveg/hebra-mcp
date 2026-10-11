@@ -16,6 +16,7 @@
  * el escritor que sea. Sin emparejar, `no_sync`.
  */
 import type { PrivacyConfig } from '../privacy/config';
+import { privacyWithMemory } from '../privacy/folder-memory';
 import {
   routeWrite,
   type ForwardOptions
@@ -104,7 +105,15 @@ function asRoundWait(value: unknown): RoundWait {
 
 export async function openWorkdirLibrary(options: OpenWorkdirLibraryOptions): Promise<WorkdirLibrary> {
   const { ctx, instance, linked, close } = await openServeContext(options);
-  const { privacyConfig } = ctx;
+  // Con la memoria de las carpetas privadas (A3 del audit de privacidad): una privada que se
+  // movió no sale en `checkout` ni se devuelve con `apply`, también en este proceso aparte.
+  let privacyConfig: PrivacyConfig;
+  try {
+    ({ config: privacyConfig } = await privacyWithMemory(ctx.port, ctx.privacyConfig));
+  } catch (error) {
+    await close();
+    throw error;
+  }
   // La ronda en local (este proceso es el escritor, o lo pasa a ser con el relevo).
   const local = localWriteContext(instance);
   const forward: ForwardOptions | undefined = options.forward;

@@ -1,6 +1,7 @@
 import type { HebraLibraryPort } from '../store/types';
-import { PrivacyFilter } from '../privacy/filter';
+import type { PrivacyFilter } from '../privacy/filter';
 import type { PrivacyConfig } from '../privacy/config';
+import { privacyWithMemory } from '../privacy/folder-memory';
 import type { StatusSource } from '../status/status-source';
 import type { WriteContext } from './write-context';
 
@@ -19,7 +20,12 @@ import type { WriteContext } from './write-context';
  */
 export interface ServerContext {
   port: HebraLibraryPort;
+  /** La configuración de privados; con `privacyConfigSource`, la del arranque. */
   privacyConfig: PrivacyConfig;
+  /** `serve` (M5 del audit de privacidad, 11 oct 2026): `config.json` releído cuando
+   *  cambia, en cada llamada (`src/privacy/config-source.ts`). Sin él (tests, ficheros de
+   *  trabajo), `privacyConfig` tal cual. */
+  privacyConfigSource?: { current(): Promise<PrivacyConfig> };
   status: StatusSource;
   write?: WriteContext;
 }
@@ -43,13 +49,18 @@ export interface ToolContext {
 
 /** `PrivacyFilter.build` es dos consultas al almacén (`foldersList()` +
  *  `notesVisibilityIndex()`, ambas O(1) ronda): barato de sobra para pagarlo en cada
- *  llamada de herramienta en vez de cachearlo. */
+ *  llamada de herramienta en vez de cachearlo. Antes, la configuración vigente (M5: un
+ *  `stat` de `config.json`; si no se puede aplicar, `PrivacyConfigUnreadable`) y la memoria
+ *  de las carpetas privadas (A3, `privacyWithMemory`: una lectura más, y una escritura solo
+ *  cuando una ruta resuelve a una carpeta nueva). La `privacyConfig` que sale lleva esa
+ *  memoria (`knownPrivateFolderIds`), y con ella viaja a las escrituras. */
 export async function resolveToolContext(ctx: ServerContext): Promise<ToolContext> {
-  const privacy = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
+  const current = ctx.privacyConfigSource ? await ctx.privacyConfigSource.current() : ctx.privacyConfig;
+  const { config, filter } = await privacyWithMemory(ctx.port, current);
   return {
     port: ctx.port,
-    privacy,
-    privacyConfig: ctx.privacyConfig,
+    privacy: filter,
+    privacyConfig: config,
     status: ctx.status,
     write: ctx.write
   };

@@ -43,6 +43,25 @@ export interface NoteVisibilityEntry {
   id: string;
   folderId: string;
   tags: string[];
+  /** Bloqueada (`notes.locked`): no deriva etiquetas, así que el filtro no puede saber si
+   *  llevaba una privada (A1 del audit de privacidad, 10 oct 2026). Ausente = no. */
+  locked?: boolean;
+  /** Solo si la carpeta GUARDADA de la nota no está viva (una lápida, o una fila que aún no
+   *  llegó por sync) y por eso `folderId` es la raíz: la guardada, para subir por las
+   *  lápidas como en la papelera (A2 del mismo audit). */
+  storedFolderId?: string;
+  /** Con `storedFolderId`: las filas de carpeta desde la guardada hacia arriba hasta la
+   *  primera viva (sin ella), tal como están. Se corta donde falta una fila o hay un ciclo:
+   *  la subida no resuelve y la nota queda oculta. */
+  folderTrail?: FolderRowFact[];
+}
+
+/** Una carpeta a la que resolvió una ruta privada configurada (A3 del audit de privacidad,
+ *  10 oct 2026): la ruta (`privacyPathKey`, minúsculas y NFC) y el id. hebra-mcp las recuerda
+ *  para seguir ocultando una carpeta privada que se movió y cuya ruta ocupa otra. */
+export interface RememberedPrivateFolder {
+  pathKey: string;
+  folderId: string;
 }
 
 /** Una nota de la papelera tal como la necesita el filtro de privados de la papelera
@@ -58,6 +77,8 @@ export interface TrashedNoteEntry {
   tags: string[];
   /** Epoch ms, la clave del cursor de `notesPage({kind: 'trash'})`. */
   trashedAt: number;
+  /** Bloqueada (`notes.locked`), como en `NoteVisibilityEntry`. Ausente = no. */
+  locked?: boolean;
 }
 
 /** Una fila de `folders`, VIVA O LÁPIDA, con su padre GUARDADO (no el efectivo). */
@@ -182,6 +203,21 @@ export interface HebraLibraryPort {
    *  `hebra_trash_file` y `hebra_restore_file` (D10). Sin filtro: lo aplica
    *  `FileFilter`. */
   filesIndex(): Promise<FilesIndex>;
+  /** Por cada SHA-256 (en minúsculas), las notas (no lápidas, vivas o de la papelera) que
+   *  enlazan esos bytes: `links` de tipo `blob` o `note_blob_refs` (`./file-sql.ts`). En UN
+   *  turno de la cola y en el mismo orden. Para no servir como adjunto los bytes de lo
+   *  oculto (M6 del audit de privacidad). Sin filtro: lo aplica quien llama. */
+  notesLinkingBlobs(sha256s: readonly string[]): Promise<BlobNoteRef[][]>;
+  /** Las carpetas a las que resolvió alguna vez una ruta privada (A3): las de la tabla
+   *  propia `hebra_mcp_private_folders` y las que este proceso anotó sin poder escribirla
+   *  (un lector). Sin filtrar por la configuración: lo hace `privacyWithMemory`. */
+  rememberedPrivateFolders(): Promise<RememberedPrivateFolder[]>;
+  /** Anota `fresh` y olvida las de las rutas que ya no están en `configured` (claves
+   *  `privacyPathKey`). En memoria siempre; en la tabla, solo el escritor. */
+  rememberPrivateFolders(
+    fresh: readonly RememberedPrivateFolder[],
+    configured: readonly string[]
+  ): Promise<void>;
   /** «Versiones anteriores» LOCALES de una nota (`noteVersionsList` del motor), de la
    *  más reciente a la más antigua, sin cuerpo. Sin filtro: lo aplica la herramienta. */
   noteVersionsList(noteId: string): Promise<NoteVersionsList>;

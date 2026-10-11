@@ -32,13 +32,16 @@ export interface McpDevice {
   logged: Array<{ event: SyncLogEventName; fields: SyncLogFields }>;
 }
 
-/** `blobs`: el relé en memoria también como transporte de Blob V2 (adjuntos). */
+/** `blobs`: el relé en memoria también como transporte de Blob V2 (adjuntos).
+ *  `beforeRound`: lo que hace el escritor antes de cada ronda (`beforeSyncRound` de
+ *  `serve`, A3 del audit de privacidad), con este puerto. */
 export async function mcpDevice(
   relay: InMemoryLibraryRelay,
-  options: { blobs?: boolean } = {}
+  options: { blobs?: boolean; beforeRound?: (port: NodeLibraryPort) => Promise<void> } = {}
 ): Promise<McpDevice> {
   const port = await openNodeLibraryPort({ sqlitePath: ':memory:', deviceLabel: 'Claude' });
   const logged: McpDevice['logged'] = [];
+  const beforeRound = options.beforeRound;
   const runner = await SyncRunner.create({
     port: port.syncStorePort(),
     transport: relay,
@@ -46,7 +49,8 @@ export async function mcpDevice(
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
     intervalMs: null,
-    emit: (event, fields) => logged.push({ event, fields })
+    emit: (event, fields) => logged.push({ event, fields }),
+    ...(beforeRound ? { beforeRound: () => beforeRound(port) } : {})
   });
   const writer = new NoteWriter(port, { onWritten: () => void runner.requestRound() });
   return { port, runner, writer, logged };

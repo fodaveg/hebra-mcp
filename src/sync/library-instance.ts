@@ -72,12 +72,14 @@ import {
 import type { PrivacyConfig } from '../privacy/config';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
 import type {
+  BlobNoteRef,
   FilesIndex,
   HebraLibraryPort,
   NoteAttachmentRow,
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  RememberedPrivateFolder,
   TrashIndex
 } from '../store/types';
 import {
@@ -147,6 +149,12 @@ export interface OpenLibraryInstanceOptions {
    *  en cada fallo seguido, hasta `SUBSTRING_RETRY_MAX_MS`). Por defecto,
    *  `SUBSTRING_RETRY_BASE_MS`; los tests la ponen a 0. */
   substringIndexRetryMs?: number;
+  /**
+   * Antes de cada ronda de sync de este escritor, con su puerto: `serve` anota aquí las
+   * carpetas privadas (A3 del audit de privacidad, `privacyWithMemory`). Ver
+   * `SyncRunnerOptions.beforeRound`.
+   */
+  beforeSyncRound?: (port: HebraLibraryPort) => Promise<void>;
 }
 
 export interface InstanceStatus extends SyncStatusSnapshot {
@@ -285,9 +293,11 @@ export class LibraryInstance implements NoteWriteTarget {
     this.current = port;
     if (previous) await previous.closeWhenIdle();
     if (this.options.sync) {
+      const beforeSyncRound = this.options.beforeSyncRound;
       const runner = await SyncRunner.create({
         emitAttachment: (outcome) => logEvent({ event: 'attachment.fetch', outcome }),
         ...this.options.sync,
+        ...(beforeSyncRound ? { beforeRound: () => beforeSyncRound(port) } : {}),
         port: port.syncStorePort()
       });
       runner.onConflictCopy((copy) => {
@@ -649,6 +659,14 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
     filesIndex: (): Promise<FilesIndex> => current().filesIndex(),
+    notesLinkingBlobs: (sha256s: readonly string[]): Promise<BlobNoteRef[][]> =>
+      current().notesLinkingBlobs(sha256s),
+    rememberedPrivateFolders: (): Promise<RememberedPrivateFolder[]> =>
+      current().rememberedPrivateFolders(),
+    rememberPrivateFolders: (
+      fresh: readonly RememberedPrivateFolder[],
+      configured: readonly string[]
+    ): Promise<void> => current().rememberPrivateFolders(fresh, configured),
     noteVersionsList: (noteId: string): Promise<NoteVersionsList> =>
       current().noteVersionsList(noteId),
     noteVersionRead: (versionId: number): Promise<NoteVersion | null> =>

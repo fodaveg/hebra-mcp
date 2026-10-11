@@ -28,6 +28,11 @@
  *     adjuntan por `sha256:`, y los dibujos son ficheros sueltos incrustados por nombre.
  *     Sin esta parte, el adjunto de una nota privada saldría por aquí con su nombre.
  *     Coste asumido en D10: con homónimos oculta de más.
+ *     Variante de las notas bloqueadas (A1 del audit de privacidad, opción cerrada decidida
+ *     el 10 oct 2026): de una bloqueada no queda el NOMBRE de lo que incrustaba (va cifrado
+ *     y no deriva enlaces), así que, mientras exista alguna bloqueada oculta (viva o de la
+ *     papelera), se ocultan todos los ficheros que se pueden incrustar por su nombre
+ *     (`linkableByName`). Coste asumido: con una sola, dejan de verse casi todos.
  *
  * Cerrado ante la duda también con las instantáneas: una nota que enlaza un fichero y que
  * el filtro de su estado (vivo o papelera) no conoce cuenta como oculta.
@@ -35,10 +40,22 @@
  * Igual que los otros dos filtros, es una instantánea del almacén: se construye en cada
  * llamada (`build`) o dentro del turno del escritor (`fromSnapshot`), nunca se guarda.
  */
+import { parseLinkRef } from '../hebra';
 import type { FileEntry, FilesIndex, HebraLibraryPort } from '../store/types';
 import type { PrivacyConfig } from './config';
 import type { PrivacyFilter } from './filter';
 import { TrashFilter } from './trash-filter';
+
+/**
+ * ¿Se puede incrustar este fichero por su nombre (`![[plano.pdf]]`)? Es lo que hace
+ * `parseLinkRef` de Hebra con el nombre: un enlace de tipo `file` cuyo destino es ese mismo
+ * nombre (una extensión con alguna letra que no sea `.md`). Uno sin extensión, un `.md`, o
+ * con `#`, `|` o espacios en los extremos no se puede enlazar por nombre.
+ */
+function linkableByName(name: string): boolean {
+  const query = parseLinkRef(name);
+  return query?.targetKind === 'file' && query.target === name;
+}
 
 /** Lo que se enseña de un fichero suelto visible. Sin el SHA-256 de sus bytes y sin su
  *  carpeta guardada. */
@@ -61,6 +78,10 @@ export class FileFilter {
   private readonly hiddenByReference = new Set<string>();
   private readonly trash: TrashFilter;
 
+  /** Hay una nota bloqueada oculta, viva o de la papelera (variante de A1): se ocultan los
+   *  ficheros que se pueden incrustar por su nombre. */
+  private readonly lockedHidden: boolean;
+
   private constructor(
     private readonly live: PrivacyFilter,
     index: FilesIndex,
@@ -71,6 +92,19 @@ export class FileFilter {
     for (const ref of index.refs) {
       if (this.isHiddenReference(ref)) this.hiddenByReference.add(ref.fileId);
     }
+    this.lockedHidden = live.hasHiddenLockedNote() || this.trash.hasHiddenLockedNote();
+  }
+
+  /**
+   * ¿Hay algún fichero suelto oculto (vivo o de la papelera) con estos bytes? Para no
+   * servirlos como adjunto de una nota visible que los vuelva a enlazar por su SHA-256 (M6
+   * del audit de privacidad, 10 oct 2026). `sha256` en minúsculas.
+   */
+  hidesContent(sha256: string): boolean {
+    for (const file of this.files.values()) {
+      if (file.sha256.toLowerCase() === sha256 && !this.visibleOf(file)) return true;
+    }
+    return false;
   }
 
   /** `true` si la nota que enlaza (viva o de la papelera) no se ve: la que hace oculto al
@@ -131,6 +165,7 @@ export class FileFilter {
 
   private visibleOf(file: FileEntry): VisibleFile | undefined {
     if (this.hiddenByReference.has(file.id)) return undefined;
+    if (this.lockedHidden && linkableByName(file.name)) return undefined;
     const folderId = this.trash.restoreFolderOf(file.folderId);
     if (folderId === undefined) return undefined;
     return {

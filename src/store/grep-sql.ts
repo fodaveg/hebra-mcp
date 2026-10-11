@@ -10,6 +10,7 @@ import { SUBSTRING_INDEX_VERSION, type FoldersList } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { logEvent } from '../log/logger';
+import { VISIBILITY_COLUMNS, visibilityEntries } from './privacy-sql';
 
 /** Una nota viva (ni papelera ni lápida), sin su cuerpo: lo que `hebra_grep` necesita para
  *  decidir qué recorre. `rowid` es la clave del índice de subcadena. */
@@ -251,10 +252,11 @@ export function grepVisibleBodies(
     );
     const current =
       session && session.signature === signature ? session : { signature, folders: foldersList() };
+    // Las columnas del filtro (`VISIBILITY_COLUMNS`), con la carpeta guardada de una nota
+    // cuya carpeta ya no está viva, para subir por las lápidas (A2 del audit de privacidad).
     const rows = db
       .prepare(
-        `SELECT n.rowid AS rid, n.id AS id, n.body AS body,
-                CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
+        `SELECT n.rowid AS rid, n.id AS id, n.body AS body, ${VISIBILITY_COLUMNS},
                 (SELECT GROUP_CONCAT(t.tag, char(10)) FROM note_tags AS t WHERE t.note_id = n.id) AS tags
          FROM json_each(?) AS wanted
          CROSS JOIN notes AS n ON n.rowid = wanted.value
@@ -266,17 +268,11 @@ export function grepVisibleBodies(
       id: string;
       body: string | null;
       folder_id: string;
+      stored_folder_id: string | null;
+      locked: number | bigint | null;
       tags: string | null;
     }>;
-    const filter = PrivacyFilter.fromSnapshot(
-      current.folders,
-      rows.map((row) => ({
-        id: String(row.id),
-        folderId: String(row.folder_id),
-        tags: row.tags ? row.tags.split('\n') : []
-      })),
-      privacy
-    );
+    const filter = PrivacyFilter.fromSnapshot(current.folders, visibilityEntries(db, rows), privacy);
     const bodies = new Map<number, string>();
     if (!filter.unresolved) {
       for (const row of rows) {

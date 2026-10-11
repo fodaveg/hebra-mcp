@@ -95,7 +95,7 @@ describe('hebra_read_note con lines (D13)', () => {
   });
 
   it('nota bloqueada: note_locked; oculta: not_found', async () => {
-    test = await buildTestContext();
+    test = await buildTestContext(undefined, { lockedNote: true });
     const ctx = test.ctx;
     await expect(
       runReadNote(ctx, { id: test.library.attachmentsNoteId, lines: { from: 1 } })

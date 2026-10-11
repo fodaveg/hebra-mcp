@@ -164,7 +164,12 @@ export async function runReadNote(
       bodySha256: note.bodySha256
     })
   };
-  if (note.conflictOf !== null) output.conflictOf = note.conflictOf;
+  // Solo si el original se ve (M3 del audit de privacidad, 10 oct 2026): la copia de
+  // conflicto de una nota oculta puede ser visible (escrita sin la etiqueta en otro
+  // dispositivo), y su `conflictOf` daba el id del original. `isConflictCopy` sigue.
+  if (note.conflictOf !== null && ctx.privacy.visibleMeta(note.conflictOf)) {
+    output.conflictOf = note.conflictOf;
+  }
   if (section !== undefined) {
     output.section = section;
     output.totalChars = note.body.length;

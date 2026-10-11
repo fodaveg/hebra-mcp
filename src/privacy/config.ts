@@ -14,6 +14,15 @@ export interface PrivacyConfig {
   /** Etiquetas ya canonicalizadas (`canonicalTag`); las que no canonicalizan a nada
    *  (vacías tras normalizar) se ignoran. */
   privateTags: string[];
+  /**
+   * No sale de `config.json`: lo añade `privacyWithMemory` (`./folder-memory.ts`) en cada
+   * llamada. Carpetas a las que resolvió antes alguna ruta de `privateFolders` todavía
+   * configurada (A3 del audit de privacidad, 10 oct 2026): el filtro las oculta, con su
+   * subárbol, aunque la ruta nombre hoy otra carpeta. Viaja con la configuración hasta el
+   * escritor (que la aplica en su turno) y no cuenta para la huella de un plan de
+   * `hebra_replace_in_notes` (`privacyFingerprint`), que solo mira las dos listas de arriba.
+   */
+  knownPrivateFolderIds?: string[];
 }
 
 const EMPTY_CONFIG: PrivacyConfig = { privateFolders: [], privateTags: [] };
@@ -40,6 +49,11 @@ export async function loadPrivacyConfig(dataDir: string): Promise<PrivacyConfig>
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return EMPTY_CONFIG;
     throw error;
   }
+  return parsePrivacyConfig(text);
+}
+
+/** El texto de `config.json` ya leído. Lanza si no es JSON. */
+export function parsePrivacyConfig(text: string): PrivacyConfig {
   const raw = JSON.parse(text) as RawConfig;
   const privateFolders = Array.isArray(raw.privateFolders)
     ? raw.privateFolders.filter((entry): entry is string => typeof entry === 'string')

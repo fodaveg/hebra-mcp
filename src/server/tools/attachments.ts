@@ -14,7 +14,9 @@
  *
  * Privacidad: la nota tiene que ser visible (viva, ni oculta ni en la papelera) y el
  * adjunto, suyo; si no, `not_found`, igual que uno inexistente. Una nota bloqueada da
- * `note_locked` (sus adjuntos van cifrados con ella).
+ * `note_locked` (sus adjuntos van cifrados con ella). Y los bytes no pueden ser también de
+ * algo oculto (M6 del audit de privacidad, `hiddenContent`): si lo son, se tratan como
+ * unos que no están.
  *
  * Bytes: si este dispositivo no los tiene, los baja el ESCRITOR por la vía del motor
  * (`readBlob` de Blob V2: descifra, verifica el hash y los guarda en su almacén de
@@ -63,6 +65,7 @@ import {
   TEXT_TYPE_BY_EXTENSION
 } from '../../store/attachment-content';
 import type { NoteAttachmentRow } from '../../store/types';
+import { FileFilter } from '../../privacy/file-filter';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
@@ -111,6 +114,34 @@ function attachmentNames(body: string): Map<string, string> {
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
+/**
+ * De `sha256s`, los bytes que son también de algo OCULTO: los enlaza una nota oculta (viva o
+ * de la papelera, por `links` o `note_blob_refs`: la regla (b) de D10) o un fichero suelto
+ * oculto tiene ese contenido. M6 del audit de privacidad (10 oct 2026): una nota visible
+ * puede volver a enlazar el hash de un adjunto privado (`hebra_append_to_note` con
+ * `![[sha256:H|x]]`), y la lectura servía sus bytes; sola era un oráculo de «¿está este
+ * contenido en la biblioteca?». Esos bytes se tratan como si no estuvieran: en la lista,
+ * sin tamaño ni tipo guardado; al leer, `attachment_unavailable` sin bajarlos. Es lo mismo
+ * que responde un hash que no existe en ninguna parte, así que no se distingue. Coste
+ * asumido, el de D10: unos bytes que una nota visible comparte de verdad con una oculta
+ * tampoco se leen por la visible. Los filtros se construyen siempre que hay adjuntos, haya
+ * o no acierto.
+ */
+async function hiddenContent(ctx: ToolContext, sha256s: readonly string[]): Promise<Set<string>> {
+  const hidden = new Set<string>();
+  if (sha256s.length === 0) return hidden;
+  const [refs, files] = await Promise.all([
+    ctx.port.notesLinkingBlobs(sha256s),
+    FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)
+  ]);
+  for (const [index, sha256] of sha256s.entries()) {
+    if (refs[index]!.some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256)) {
+      hidden.add(sha256);
+    }
+  }
+  return hidden;
+}
+
 /** La nota visible (si no, `not_found`) y no bloqueada (si no, `note_locked`), con sus
  *  adjuntos y los nombres de su cuerpo. */
 async function visibleNoteAttachments(
@@ -142,13 +173,16 @@ export async function runListAttachments(
 ): Promise<{ id: string; attachments: ListedAttachment[]; nextCursor: string | null }> {
   const limit = effectiveLimit(input.limit, LIMITS.listAttachments);
   const { rows, names } = await visibleNoteAttachments(ctx, input.id);
+  const hidden = await hiddenContent(ctx, rows.map((row) => row.sha256));
   const all: ListedAttachment[] = rows.map((row) => {
     const name = names.get(row.sha256) ?? null;
+    // Bytes de algo oculto (M6): como unos que no están, sin lo que dice su fila.
+    const known = !hidden.has(row.sha256);
     return {
       attachmentId: row.sha256,
       name,
-      mimeType: listedType(row.mime, name),
-      byteLength: row.byteLength
+      mimeType: listedType(known ? row.mime : null, name),
+      byteLength: known ? row.byteLength : null
     };
   });
   const page = slicePage(all, 'a1', {
@@ -244,6 +278,9 @@ export async function runReadAttachment(
   const { rows, names } = await visibleNoteAttachments(ctx, input.id);
   const row = rows.find((entry) => entry.sha256 === sha256);
   if (!row) throw new ToolError('not_found');
+  // Bytes de algo oculto (M6): lo mismo que unos que no están en ninguna parte, sin
+  // mirar su tamaño ni pedírselos al escritor.
+  if ((await hiddenContent(ctx, [sha256])).size > 0) throw new ToolError('attachment_unavailable');
   if (row.byteLength !== null && row.byteLength > ATTACHMENT_MAX_BYTES) {
     throw tooLarge(row.byteLength);
   }

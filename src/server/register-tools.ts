@@ -18,6 +18,7 @@
  */
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
+import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { resolveToolContext, type ServerContext, type ToolContext } from './context';
 import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
@@ -143,7 +144,15 @@ async function runTool(
   name: string,
   run: (toolCtx: ToolContext) => Promise<unknown>
 ): Promise<ReturnType<typeof toOkResult>> {
-  const toolCtx = await resolveToolContext(ctx);
+  let toolCtx: ToolContext;
+  try {
+    toolCtx = await resolveToolContext(ctx);
+  } catch (error) {
+    // `config.json` cambió y no se puede aplicar (M5): nada sale hasta que se arregle.
+    if (!(error instanceof PrivacyConfigUnreadable)) throw error;
+    logToolError(name, 'privacy_config_unresolved');
+    return toErrorResult(new ToolError('privacy_config_unresolved'));
+  }
   if (toolCtx.privacy.unresolved) {
     logToolError(name, 'privacy_config_unresolved');
     return toErrorResult(new ToolError('privacy_config_unresolved'));

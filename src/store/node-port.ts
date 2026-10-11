@@ -68,15 +68,19 @@ import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { blobNoteRefRows } from './file-sql';
+import { noteVisibilityRows, trashIndexRows } from './privacy-sql';
+import { ensurePrivateFoldersTable, readPrivateFolders, writePrivateFolders } from './private-folders';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
+  BlobNoteRef,
   FilesIndex,
   HebraLibraryPort,
   NoteAttachmentRow,
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  RememberedPrivateFolder,
   TrashIndex
 } from './types';
 import type { NoteWriteStore, NoteWriteTarget } from './writes';
@@ -161,6 +165,8 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensureReplacePlanTables(db);
   // Contenido anterior de los ficheros sueltos reemplazados (D15, `./file-previous.ts`).
   if (mode === 'readWrite') ensureFilePreviousTable(db);
+  // Memoria de las carpetas privadas (A3 del audit de privacidad, `./private-folders.ts`).
+  if (mode === 'readWrite') ensurePrivateFoldersTable(db);
   return new NodeLibraryPort(engine, db, mode);
 }
 
@@ -203,6 +209,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** `meta.library_id`: lo escribe `bootstrapLibraryId` al abrir y nada lo cambia
    *  mientras la conexión vive (`libraryReset` solo borra `binding` y `since_seq`). */
   private libraryIdCache: string | null = null;
+  /** Carpetas privadas que este proceso anotó (A3): un lector no puede escribirlas en la
+   *  tabla, y las recuerda mientras viva este puerto. Clave `ruta\0id`. */
+  private readonly privateFoldersInProcess = new Map<string, RememberedPrivateFolder>();
 
   constructor(
     private readonly engine: SqliteLibraryEngine,
@@ -334,77 +343,49 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   /**
-   * Carpeta efectiva y etiquetas de cada nota viva, en UNA consulta (§ comentario de
-   * `./types.ts`). Carpeta efectiva: la propia `folder_id` si esa carpeta existe y no
-   * es lápida, si no la raíz (`root`) — misma regla que `rowToNote`/`notesPageQuery` de
-   * `sqlite-engine.ts`, aquí en SQL para no leer nota a nota. Etiquetas: `GROUP_CONCAT`
-   * con `\n` como separador (una etiqueta canónica nunca lleva salto de línea) en vez de
-   * una subconsulta por nota; `GROUP_CONCAT` de cero filas es `NULL`, de ahí el `?? ''`.
-   * SQL propio de hebra-mcp sobre las tablas de `schema.sql` (`notes`, `folders`,
-   * `note_tags`), no un método de Hebra: pasa por `this.db` (el mismo `DatabaseSync` del
-   * adaptador, `./sqlite-conn-node.ts`) y por la cola serie como cualquier otra lectura.
+   * Carpeta efectiva (y la guardada, si no está viva), si está bloqueada y etiquetas de cada
+   * nota viva, en UNA consulta (comentario de `./types.ts`). SQL propio de hebra-mcp en
+   * `./privacy-sql.ts`, sobre `this.db` (el mismo `DatabaseSync` del adaptador) y por la
+   * cola serie como cualquier otra lectura.
    */
   async notesVisibilityIndex(): Promise<NoteVisibilityEntry[]> {
-    return this.read(() => this.visibilityRows());
+    return this.read(() => noteVisibilityRows(this.db));
   }
 
-  /** La consulta de `notesVisibilityIndex`, sin cola: también la usa `writeExclusive`
-   *  dentro de su turno. */
-  private visibilityRows(): NoteVisibilityEntry[] {
-    const rows = this.prepared(
-        `SELECT n.id AS id,
-                CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
-                GROUP_CONCAT(t.tag, char(10)) AS tags
-         FROM notes n
-         LEFT JOIN folders f ON f.id = n.folder_id
-         LEFT JOIN note_tags t ON t.note_id = n.id
-         WHERE n.deleted = 0 AND n.trashed_at IS NULL
-         GROUP BY n.id`
-    ).all() as Array<{ id: string; folder_id: string; tags: string | null }>;
-    return rows.map((row) => ({
-      id: row.id,
-      folderId: row.folder_id,
-      tags: row.tags ? row.tags.split('\n') : []
-    }));
-  }
-
+  /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`). */
   async trashIndex(): Promise<TrashIndex> {
-    return this.read(() => this.trashRows());
+    return this.read(() => trashIndexRows(this.db));
   }
 
-  /**
-   * La consulta de `trashIndex`, sin cola (también la usa `writeExclusive`). SQL propio
-   * de hebra-mcp sobre `notes`, `note_tags` y `folders` de `schema.sql`, igual que
-   * `visibilityRows`, pero con la carpeta GUARDADA de cada nota (no la efectiva) y todas
-   * las filas de carpeta, lápidas incluidas: `folderTrash` de Hebra deja las carpetas
-   * como lápida (`deleted = 1`, con su nombre y su padre) y manda sus notas a la
-   * papelera sin tocar su `folder_id`, así que solo subiendo por esas filas se sabe si
-   * una nota de la papelera venía de una carpeta privada (`src/privacy/trash-filter.ts`).
-   */
-  private trashRows(): TrashIndex {
-    const notes = this.prepared(
-        `SELECT n.id AS id, coalesce(n.folder_id, 'root') AS folder_id,
-                n.trashed_at AS trashed_at, GROUP_CONCAT(t.tag, char(10)) AS tags
-         FROM notes n
-         LEFT JOIN note_tags t ON t.note_id = n.id
-         WHERE n.deleted = 0 AND n.trashed_at IS NOT NULL
-         GROUP BY n.id`
-    ).all() as Array<{ id: string; folder_id: string; trashed_at: number; tags: string | null }>;
-    const folders = this.prepared('SELECT id, parent_id, name, deleted FROM folders').all() as Array<{ id: string; parent_id: string | null; name: string | null; deleted: number }>;
-    return {
-      notes: notes.map((row) => ({
-        id: row.id,
-        folderId: row.folder_id,
-        tags: row.tags ? row.tags.split('\n') : [],
-        trashedAt: Number(row.trashed_at)
-      })),
-      folders: folders.map((row) => ({
-        id: row.id,
-        parentId: row.parent_id,
-        name: row.name,
-        deleted: Number(row.deleted) !== 0
-      }))
-    };
+  async notesLinkingBlobs(sha256s: readonly string[]): Promise<BlobNoteRef[][]> {
+    return this.read(() => sha256s.map((sha256) => blobNoteRefRows(this.db, sha256.toLowerCase())));
+  }
+
+  /** La tabla (si existe) y lo que este proceso anotó sin poder escribirla, sin repetir. */
+  async rememberedPrivateFolders(): Promise<RememberedPrivateFolder[]> {
+    return this.read(() => {
+      const all = new Map<string, RememberedPrivateFolder>();
+      for (const entry of [...readPrivateFolders(this.db), ...this.privateFoldersInProcess.values()]) {
+        all.set(`${entry.pathKey}\u0000${entry.folderId}`, entry);
+      }
+      return [...all.values()];
+    });
+  }
+
+  async rememberPrivateFolders(
+    fresh: readonly RememberedPrivateFolder[],
+    configured: readonly string[]
+  ): Promise<void> {
+    const keep = new Set(configured);
+    for (const [key, entry] of this.privateFoldersInProcess) {
+      if (!keep.has(entry.pathKey)) this.privateFoldersInProcess.delete(key);
+    }
+    for (const entry of fresh) {
+      if (keep.has(entry.pathKey)) this.privateFoldersInProcess.set(`${entry.pathKey}\u0000${entry.folderId}`, entry);
+    }
+    // El escritor la deja también en la tabla; un lector no puede, y se queda con lo suyo.
+    if (!this.writable) return;
+    await this.write(() => writePrivateFolders(this.db, fresh, configured, Date.now()));
   }
 
   async filesIndex(): Promise<FilesIndex> {
@@ -414,7 +395,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /**
    * La consulta de `filesIndex`, sin cola (también la usa `writeExclusive`). SQL propio de
    * hebra-mcp sobre `files`, `blobs`, `links`, `note_blob_refs` y `notes` de `schema.sql`,
-   * como `trashRows`,
+   * como `trashIndexRows` (`./privacy-sql.ts`),
    * y no `filesPage` ni `filesFindByName` del motor: esos no paginan con un cursor que
    * se pueda usar desde fuera y su aviso de que quedan más delataría una cola de ficheros
    * ocultos (D10, SPEC.md §5 y §6.3).
@@ -496,7 +477,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteId: String(row.note_id),
         noteTrashed: Number(row.note_trashed) !== 0
       })),
-      trash: this.trashRows()
+      trash: trashIndexRows(this.db)
     };
   }
 
@@ -669,8 +650,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         },
         libraryId: () => this.libraryIdSync(),
         foldersList: () => this.engine.foldersList(),
-        notesVisibilityIndex: () => this.visibilityRows(),
-        trashIndex: () => this.trashRows(),
+        notesVisibilityIndex: () => noteVisibilityRows(this.db),
+        trashIndex: () => trashIndexRows(this.db),
         filesIndex: () => this.filesRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),

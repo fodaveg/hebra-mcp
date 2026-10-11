@@ -410,7 +410,11 @@ function privacyOf(value: unknown): PrivacyConfig {
     throw new InvalidRequest();
   }
   if (!isStringArray(privateTags)) throw new InvalidRequest();
-  return { privateFolders, privateTags };
+  // La memoria de las carpetas privadas del lector (A3 del audit de privacidad), opcional.
+  const { knownPrivateFolderIds } = value;
+  if (knownPrivateFolderIds === undefined) return { privateFolders, privateTags };
+  if (!isStringArray(knownPrivateFolderIds)) throw new InvalidRequest();
+  return { privateFolders, privateTags, knownPrivateFolderIds };
 }
 
 /** `operationId` y `expectedRevision` de `editNote` y `restoreVersion`. */

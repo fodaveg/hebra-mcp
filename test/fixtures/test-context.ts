@@ -28,7 +28,7 @@ import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import type { ServerContext, ToolContext } from '../../src/server/context';
 import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
-import { buildTestLibrary, type TestLibrary } from './test-library';
+import { buildTestLibrary, type TestLibrary, type TestLibraryOptions } from './test-library';
 
 const DEFAULT_PRIVACY_CONFIG: PrivacyConfig = {
   privateFolders: [['diario']],
@@ -44,8 +44,9 @@ export interface TestContext {
   close(): Promise<void>;
 }
 
-/** `WriteContext` sin sync, sobre `port`: sin ronda que pedir (`sync: "not_linked"`). */
-function testWriteContext(port: NodeLibraryPort): WriteContext {
+/** `WriteContext` sin sync, sobre `port`: sin ronda que pedir (`sync: "not_linked"`).
+ *  También lo usa el arnés de las sondas del audit de privacidad (`test/privacy/`). */
+export function testWriteContext(port: NodeLibraryPort): WriteContext {
   const writer = new NoteWriter(port);
   // `hebra_replace_in_notes` (D14): el lote sobre el mismo puerto, que lee y escribe.
   const replace = new ReplaceBatch(port, port);
@@ -78,11 +79,12 @@ function testWriteContext(port: NodeLibraryPort): WriteContext {
 }
 
 export async function buildTestContext(
-  privacyConfig: PrivacyConfig = DEFAULT_PRIVACY_CONFIG
+  privacyConfig: PrivacyConfig = DEFAULT_PRIVACY_CONFIG,
+  libraryOptions: TestLibraryOptions = {}
 ): Promise<TestContext> {
   const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-test-'));
   const sqlitePath = join(dataDir, 'library.sqlite');
-  const library = await buildTestLibrary(sqlitePath);
+  const library = await buildTestLibrary(sqlitePath, libraryOptions);
 
   const port: NodeLibraryPort = await openNodeLibraryPort({ sqlitePath, dataDir });
   const status = new UnlinkedStatusSource();

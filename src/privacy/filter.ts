@@ -14,22 +14,43 @@
  * lo hacen barato de sobra para pagarlo en cada llamada: medido en
  * `test/store/notes-visibility-index.node.test.ts` (milisegundos de un dígito con
  * 5 000 notas).
+ *
+ * Audit de privacidad adversarial del 10 oct 2026 (D16, `test/privacy/`): una nota
+ * bloqueada se oculta mientras haya etiquetas privadas (A1), una nota viva cuya carpeta
+ * guardada no está viva se juzga subiendo por las lápidas (A2, `./tombstones.ts`), y las
+ * carpetas que una ruta privada resolvió antes siguen ocultas (A3, `knownPrivateFolderIds`,
+ * que añade `./folder-memory.ts`).
  */
 import { ROOT_FOLDER_ID, type FoldersList } from '../hebra';
-import type { HebraLibraryPort, NoteVisibilityEntry } from '../store/types';
+import type {
+  FolderRowFact,
+  HebraLibraryPort,
+  NoteVisibilityEntry,
+  RememberedPrivateFolder
+} from '../store/types';
 import type { PrivacyConfig } from './config';
-import { FolderIndex } from './folder-index';
+import { FolderIndex, privacyPathKey } from './folder-index';
 import { LibraryIndex } from './library-index';
+import { climbFolder, type LiveFolders } from './tombstones';
 
 /** Lo que el filtro lee del almacén: carpetas y carpeta/etiquetas de cada nota viva. */
 export type PrivacySource = Pick<HebraLibraryPort, 'foldersList' | 'notesVisibilityIndex'>;
 
-export class PrivacyFilter {
+export class PrivacyFilter implements LiveFolders {
   readonly unresolved: boolean;
   private readonly hiddenFolderIds: Set<string>;
   private readonly privateTags: Set<string>;
   /** Las rutas de `privateFolders` tal cual están configuradas (ya en minúsculas). */
   private readonly privateFolderPaths: readonly (readonly string[])[];
+  /** Las mismas, como `privacyPathKey`, para subir por las lápidas. */
+  private readonly privatePathKeys: ReadonlySet<string>;
+  /** Las carpetas de las que cuelga lo privado: las que la configuración resuelve AHORA y
+   *  las que resolvió antes (`knownPrivateFolderIds`, A3), vivas o ya lápidas. */
+  private readonly privateRootIds: Set<string>;
+  /** A qué carpetas resuelve ahora cada ruta configurada, para anotarlo (A3). */
+  private readonly resolvedNow: RememberedPrivateFolder[] = [];
+  /** Las lápidas por encima de las notas vivas cuya carpeta guardada no está viva (A2). */
+  private readonly trailRows = new Map<string, FolderRowFact>();
 
   private constructor(
     private readonly folders: FolderIndex,
@@ -38,8 +59,9 @@ export class PrivacyFilter {
   ) {
     this.privateTags = new Set(config.privateTags);
     this.privateFolderPaths = config.privateFolders;
+    this.privatePathKeys = new Set(config.privateFolders.map((segments) => privacyPathKey(segments)));
     let unresolved = false;
-    const hidden = new Set<string>();
+    const roots = new Set<string>();
     for (const segments of config.privateFolders) {
       // TODAS las carpetas con esa ruta, no una: el sync puede traer hermanas homónimas
       // (`Privado` y `privado`, o la misma con la tilde compuesta y descompuesta), y
@@ -49,12 +71,27 @@ export class PrivacyFilter {
         unresolved = true;
         continue;
       }
+      const pathKey = privacyPathKey(segments);
       for (const folderId of folderIds) {
-        for (const id of folders.subtree(folderId)) hidden.add(id);
+        roots.add(folderId);
+        this.resolvedNow.push({ pathKey, folderId });
       }
+    }
+    // A3: las que resolvió antes una ruta aún configurada, aunque hoy esté en otra ruta.
+    for (const folderId of config.knownPrivateFolderIds ?? []) {
+      if (folderId !== ROOT_FOLDER_ID) roots.add(folderId);
+    }
+    const hidden = new Set<string>();
+    for (const root of roots) {
+      if (!folders.has(root)) continue;
+      for (const id of folders.subtree(root)) hidden.add(id);
+    }
+    for (const [, entry] of library.entries()) {
+      for (const row of entry.folderTrail ?? []) this.trailRows.set(row.id, row);
     }
     this.unresolved = unresolved;
     this.hiddenFolderIds = hidden;
+    this.privateRootIds = roots;
   }
 
   static async build(port: PrivacySource, config: PrivacyConfig): Promise<PrivacyFilter> {
@@ -86,21 +123,60 @@ export class PrivacyFilter {
     return false;
   }
 
-  /** `true` si la nota no debe salir por NINGUNA herramienta: en una carpeta privada (o
-   *  subcarpeta), con una etiqueta privada (o descendiente), o desconocida para el
-   *  índice (cerrado ante la duda). */
+  /** ¿Hay etiquetas privadas configuradas? Con ellas, una nota bloqueada se oculta (A1). */
+  hasPrivateTags(): boolean {
+    return this.privateTags.size > 0;
+  }
+
+  /**
+   * `true` si la nota no debe salir por NINGUNA herramienta: en una carpeta privada (o
+   * subcarpeta, también una a la que la ruta resolvió antes, A3), con una etiqueta privada
+   * (o descendiente), bloqueada con etiquetas privadas configuradas (A1: una nota bloqueada
+   * no deriva etiquetas y el MCP no puede leer su cuerpo para saber si llevaba una), con su
+   * carpeta guardada ya borrada debajo de una privada o sin poder subir hasta una viva (A2,
+   * la regla de la papelera, `climbFolder`), o desconocida para el índice (cerrado ante la
+   * duda).
+   */
   isHiddenNote(id: string): boolean {
     const entry = this.library.get(id);
     if (!entry) return true;
+    if (entry.locked && this.privateTags.size > 0) return true;
     if (this.hiddenFolderIds.has(entry.folderId)) return true;
+    if (
+      entry.storedFolderId !== undefined &&
+      climbFolder(entry.storedFolderId, this.trailRows, this, this.privatePathKeys) === undefined
+    ) {
+      return true;
+    }
     for (const tag of entry.tags) {
       if (this.privateTags.has(tag)) return true;
     }
     return false;
   }
 
+  /** ¿Hay alguna nota viva BLOQUEADA y oculta? Para la variante de A1 de los ficheros
+   *  sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado. */
+  hasHiddenLockedNote(): boolean {
+    for (const [id, entry] of this.library.entries()) {
+      if (entry.locked && this.isHiddenNote(id)) return true;
+    }
+    return false;
+  }
+
   isFolderHidden(folderId: string): boolean {
     return this.hiddenFolderIds.has(folderId);
+  }
+
+  /** ¿Es (viva o lápida) una carpeta de la que cuelga lo privado? Para la subida por las
+   *  lápidas (`climbFolder`): una privada movida (A3) y después borrada sigue ocultando. */
+  isPrivateFolderId(folderId: string): boolean {
+    return this.privateRootIds.has(folderId);
+  }
+
+  /** A qué carpetas resuelve AHORA cada ruta configurada (`privacyPathKey`, id), para que
+   *  `privacyWithMemory` las anote (A3). */
+  resolvedPrivateFolders(): readonly RememberedPrivateFolder[] {
+    return this.resolvedNow;
   }
 
   isTagHidden(tag: string): boolean {
@@ -160,13 +236,21 @@ export class PrivacyFilter {
     return this.folders.subtree(folderId);
   }
 
-  /** ¿Hay alguna carpeta oculta (una privada configurada o debajo de una) en el subárbol
-   *  de `folderId`, sin contarla a ella? Renombrarla cambiaría la ruta por la que se
-   *  oculta (D9). */
-  hasHiddenFolderBelow(folderId: string): boolean {
-    return this.folders
-      .subtree(folderId)
-      .some((id) => id !== folderId && this.hiddenFolderIds.has(id));
+  /**
+   * ¿Hay alguna ruta privada CONFIGURADA estrictamente por debajo de `segments` (en
+   * minúsculas, como `isPrivateFolderPath`)? Renombrar esa carpeta cambiaría la ruta por la
+   * que se resuelve (D9). Solo mira la configuración, nunca el almacén (M4 del audit de
+   * privacidad, 10 oct 2026): antes se miraba si había una carpeta oculta debajo, y
+   * renombrar una carpeta a su mismo nombre decía cuál de las visibles (también entre
+   * homónimas) tenía una privada dentro.
+   */
+  isPrivatePathPrefix(segments: readonly string[]): boolean {
+    const wanted = segments.map((segment) => segment.normalize('NFC'));
+    return this.privateFolderPaths.some(
+      (path) =>
+        path.length > wanted.length &&
+        wanted.every((segment, index) => path[index]!.normalize('NFC') === segment)
+    );
   }
 
   /** Id de la carpeta que corresponde a una ruta escrita por la persona (`folder?` de

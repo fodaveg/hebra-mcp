@@ -27,7 +27,7 @@ import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import type { PrivacyFilter } from '../../privacy/filter';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
-import type { NoteVersion } from '../../store/types';
+import type { NoteVersion, NoteVersionSummary } from '../../store/types';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 import type { ToolContext } from '../context';
@@ -82,13 +82,30 @@ export async function runListVersions(
   requireVisibleNote(ctx, input.id);
   const { items } = await ctx.port.noteVersionsList(input.id);
 
+  const readBodies = ctx.privacyConfig.privateTags.length > 0;
+  /** Cuáles de `chunk` no pueden salir: cuerpo con etiqueta privada, bloqueado, ya no
+   *  existe o es de otra nota. */
+  const hiddenOf = async (chunk: readonly NoteVersionSummary[]): Promise<boolean[]> => {
+    const ids = chunk.map((item) => item.id);
+    return readBodies
+      ? (await ctx.port.noteVersionsRead(ids)).map(
+          (version) =>
+            !version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)
+        )
+      : (await ctx.port.noteVersionsLocked(ids)).map(
+          (locked, index) => locked !== false || chunk[index]!.noteId !== input.id
+        );
+  };
+
   let position = 0;
   if (after !== null) {
     const index = items.findIndex((item) => item.id === after);
-    if (index < 0) throw new ToolError('invalid_input');
+    // Un cursor solo puede llevar una versión ya devuelta, así que una oculta es tan
+    // inválida como una que no existe (M2 del audit de privacidad, 10 oct 2026): antes
+    // daba una página vacía, y recorriendo ids se sabía cuántas privadas tuvo y dónde.
+    if (index < 0 || (await hiddenOf([items[index]!]))[0]) throw new ToolError('invalid_input');
     position = index + 1;
   }
-  const readBodies = ctx.privacyConfig.privateTags.length > 0;
 
   const visible: ListedVersion[] = [];
   let lastId: number | undefined;
@@ -97,15 +114,7 @@ export async function runListVersions(
     // Lo que falta para la página más la de mirar por delante, de una vez.
     const chunk = items.slice(position, position + (limit - visible.length + 1));
     position += chunk.length;
-    const ids = chunk.map((item) => item.id);
-    const hidden = readBodies
-      ? (await ctx.port.noteVersionsRead(ids)).map(
-          (version) =>
-            !version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)
-        )
-      : (await ctx.port.noteVersionsLocked(ids)).map(
-          (locked, index) => locked !== false || chunk[index]!.noteId !== input.id
-        );
+    const hidden = await hiddenOf(chunk);
     for (const [index, item] of chunk.entries()) {
       if (hidden[index]) continue;
       if (visible.length >= limit) {

@@ -106,6 +106,14 @@ export interface SyncRunnerOptions {
   /** Cada cuánto hay ronda periódica; `null` la desactiva (tests). */
   intervalMs?: number | null;
   now?: () => number;
+  /**
+   * Antes de cada ronda, con el almacén aún como lo dejó la anterior. El escritor anota aquí
+   * a qué carpetas resuelven las rutas privadas (A3 del audit de privacidad, 10 oct 2026:
+   * `privacyWithMemory`), para que una ronda que trae la carpeta privada movida y otra con
+   * su nombre no la destape aunque nadie haya llamado a una herramienta entre medias. Un
+   * fallo aquí no para la ronda.
+   */
+  beforeRound?: () => Promise<void>;
 }
 
 function isRevocation(result: LibrarySyncResultCode): boolean {
@@ -290,6 +298,12 @@ export class SyncRunner implements SyncStatusSource {
 
   private async execute(): Promise<SyncRoundResult | null> {
     let round: SyncRoundResult | null = null;
+    try {
+      await this.options.beforeRound?.();
+    } catch {
+      // Anotar es para después de la ronda; sin ello, la ronda sigue (cerrado ante la duda
+      // lo hace el filtro con lo que ya hubiera anotado).
+    }
     try {
       round = await this.engine.runRound();
     } catch {

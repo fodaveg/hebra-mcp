@@ -86,9 +86,12 @@ export interface TestLibrary {
   /** En `Diario/2026` (privada): un adjunto de texto con `BAIT_FOLDER` en nombre y bytes. */
   privateAttachmentNoteId: string;
   privateAttachmentSha: string;
-  /** En `Diario/2026` (privada) y BLOQUEADA: su cabecera adjunta `lockedAttachmentSha`.
-   *  Una nota bloqueada no deriva enlaces (`links` queda vacía) ni etiquetas; sus
-   *  adjuntos solo constan en `note_blob_refs`. */
+  /** En `Diario/2026` (privada) y, con `lockedNote: true`, BLOQUEADA: su cabecera adjunta
+   *  `lockedAttachmentSha`. Una nota bloqueada no deriva enlaces (`links` queda vacía) ni
+   *  etiquetas; sus adjuntos solo constan en `note_blob_refs`. Sin la opción (por defecto),
+   *  la misma nota sin bloquear, que adjunta esos bytes con `![[sha256:…]]`: una bloqueada
+   *  y oculta oculta todos los ficheros que se pueden incrustar por nombre (variante de A1
+   *  del audit de privacidad, 10 oct 2026), y los tests de los visibles no la quieren. */
   lockedPrivateNoteId: string;
   lockedAttachmentSha: string;
   /** Dos notas VIVAS con el mismo título, en carpetas distintas (para `ambiguous_title`). */
@@ -235,7 +238,15 @@ async function saveBody(engine: SqliteLibraryEngine, id: string, body: string): 
   });
 }
 
-export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary> {
+export interface TestLibraryOptions {
+  /** La nota `lockedPrivateNoteId` BLOQUEADA (por defecto, no: ver su campo). */
+  lockedNote?: boolean;
+}
+
+export async function buildTestLibrary(
+  sqlitePath: string,
+  options: TestLibraryOptions = {}
+): Promise<TestLibrary> {
   const { db, conn } = openNodeSqliteConn(sqlitePath);
   // Los bytes de los adjuntos en el MISMO sitio que usará el puerto (`<dataDir>/blobs`).
   const engine = await SqliteLibraryEngine.open(conn, 'test-fixture', {
@@ -445,7 +456,9 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
   );
   // Una nota BLOQUEADA en la carpeta privada que adjunta un PDF, y un fichero suelto con
   // esos mismos bytes en la raíz (carpeta visible). `deriveNote` de una nota bloqueada no
-  // da enlaces: la referencia solo queda en `note_blob_refs`.
+  // da enlaces: la referencia solo queda en `note_blob_refs`. El fichero no tiene extensión
+  // (no se puede incrustar por nombre): así solo lo oculta esa referencia, y no la variante
+  // de A1 que oculta los que sí se pueden mientras haya una bloqueada oculta.
   const lockedAttachment = (
     await engine.blobPut(new TextEncoder().encode(`${BAIT_FOLDER} contrato de una nota bloqueada\n`), {
       mime: 'application/pdf'
@@ -454,10 +467,12 @@ export async function buildTestLibrary(sqlitePath: string): Promise<TestLibrary>
   const lockedPrivateNote = await createNote(
     engine,
     diario2026.id,
-    lockedBody('Contrato bloqueado', [lockedAttachment])
+    options.lockedNote
+      ? lockedBody('Contrato bloqueado', [lockedAttachment])
+      : `# Contrato bloqueado\n${BAIT_FOLDER}\n\n![[sha256:${lockedAttachment}|contrato.pdf]]\n`
   );
   const fileReferencedByLockedNote = (
-    await engine.fileCreate(null, `${BAIT_FOLDER}-contrato.pdf`, lockedAttachment)
+    await engine.fileCreate(null, `${BAIT_FOLDER}-contrato`, lockedAttachment)
   ).id;
   const fileTrashed = await createFile(engine, null, FILE_NAMES.trashed, 'borrador tirado');
   await engine.fileTrash(fileTrashed);

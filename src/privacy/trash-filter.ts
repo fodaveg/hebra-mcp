@@ -10,17 +10,14 @@
  * sueltos (D10, 9 oct 2026; `./file-filter.ts`), que parte de la carpeta guardada del
  * fichero igual que aquí se parte de la de la nota.
  *
- * Oculta, como en §6.3, si tiene una etiqueta privada (o descendiente) o si su carpeta
- * es privada (o subcarpeta). Lo nuevo es la carpeta: `folderTrash` de Hebra deja la
+ * Oculta, como en §6.3, si tiene una etiqueta privada (o descendiente), si está bloqueada
+ * y hay etiquetas privadas configuradas (A1 del audit de privacidad, 10 oct 2026), o si su
+ * carpeta es privada (o subcarpeta). Lo nuevo es la carpeta: `folderTrash` de Hebra deja la
  * carpeta como LÁPIDA (con su nombre y su padre) y manda sus notas a la papelera sin
  * tocar su `folder_id`, y al restaurarlas Hebra las deja en la raíz (la carpeta efectiva
  * de una lápida). Así que para una nota cuya carpeta ya no está viva se sube por las
- * filas de carpeta, lápidas incluidas, hasta una carpeta viva o la raíz:
- * - si esa carpeta viva es privada, oculta;
- * - si alguna ruta intermedia (la de la carpeta viva más los nombres de las lápidas, en
- *   minúsculas) es una ruta privada configurada, oculta: una carpeta privada borrada y
- *   vuelta a crear con el mismo nombre no destapa las notas de la vieja;
- * - cerrado ante la duda: una fila que falta, un nombre vacío o un ciclo, oculta.
+ * filas de carpeta, lápidas incluidas, hasta una carpeta viva o la raíz, con la regla de
+ * `./tombstones.ts` (`climbFolder`), que desde A2 usan también las notas vivas.
  *
  * Restaurar deja la nota en su carpeta si sigue viva y, si no, en la raíz (lo mismo que
  * `rowToNote` de Hebra). Con esta regla, una nota de la papelera visible aquí queda
@@ -29,11 +26,11 @@
  * Igual que `PrivacyFilter`, es una instantánea del almacén: se construye en cada
  * llamada (`build`) o dentro del turno del escritor (`fromSnapshot`), nunca se guarda.
  */
-import { ROOT_FOLDER_ID } from '../hebra';
 import type { HebraLibraryPort, TrashIndex, TrashedNoteEntry, FolderRowFact } from '../store/types';
 import type { PrivacyConfig } from './config';
 import type { PrivacyFilter } from './filter';
 import { privacyPathKey } from './folder-index';
+import { climbFolder } from './tombstones';
 
 /** Lo que se enseña de una nota de la papelera visible. */
 export interface TrashedNoteMeta {
@@ -78,12 +75,24 @@ export class TrashFilter {
     return this.visibleMeta(id) !== undefined;
   }
 
+  /** ¿Hay en la papelera alguna nota BLOQUEADA que no se ve? Para la variante de A1 de los
+   *  ficheros sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado. */
+  hasHiddenLockedNote(): boolean {
+    for (const note of this.notes.values()) {
+      if (note.locked && !this.isVisible(note.id)) return true;
+    }
+    return false;
+  }
+
   /** Carpeta de restauración, etiquetas y fecha de una nota de la papelera VISIBLE;
    *  `undefined` si está oculta o no está en la papelera (las dos cosas, igual). */
   visibleMeta(id: string): TrashedNoteMeta | undefined {
     const note = this.notes.get(id);
     if (!note) return undefined;
     if (this.live.hidesAnyTag(note.tags)) return undefined;
+    // Bloqueada: no deriva etiquetas, así que con etiquetas privadas configuradas no se sabe
+    // si llevaba una (A1 del audit de privacidad, como en `PrivacyFilter.isHiddenNote`).
+    if (note.locked && this.live.hasPrivateTags()) return undefined;
     const folderId = this.restoreFolderOf(note.folderId);
     if (folderId === undefined) return undefined;
     const tags = note.tags.filter(
@@ -97,37 +106,6 @@ export class TrashFilter {
    *  nota de la papelera o de un fichero suelto (`FileFilter`): el resultado es siempre
    *  una carpeta viva y visible o la raíz. */
   restoreFolderOf(folderId: string): string | undefined {
-    if (folderId === ROOT_FOLDER_ID) return ROOT_FOLDER_ID;
-    if (this.live.folderExists(folderId)) {
-      return this.live.isFolderHidden(folderId) ? undefined : folderId;
-    }
-    // Carpeta borrada: subir por las lápidas hasta una carpeta viva o la raíz.
-    const tombstoneNames: string[] = [];
-    const seen = new Set<string>();
-    let current: string = folderId;
-    let anchorPath: string[];
-    for (;;) {
-      if (current === ROOT_FOLDER_ID) {
-        anchorPath = [];
-        break;
-      }
-      if (this.live.folderExists(current)) {
-        if (this.live.isFolderHidden(current)) return undefined;
-        const path = this.live.folderPath(current);
-        anchorPath = path.length === 0 ? [] : path.split('/');
-        break;
-      }
-      const row = this.rows.get(current);
-      const name = row?.name?.trim().toLowerCase();
-      if (!row || !name || seen.has(current)) return undefined;
-      seen.add(current);
-      tombstoneNames.unshift(name);
-      current = row.parentId ?? ROOT_FOLDER_ID;
-    }
-    const full = [...anchorPath, ...tombstoneNames];
-    for (let length = 1; length <= full.length; length += 1) {
-      if (this.privatePaths.has(privacyPathKey(full.slice(0, length)))) return undefined;
-    }
-    return ROOT_FOLDER_ID;
+    return climbFolder(folderId, this.rows, this.live, this.privatePaths);
   }
 }
