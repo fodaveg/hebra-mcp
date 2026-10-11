@@ -149,13 +149,8 @@ describe('hebra_add_attachment con heading (D11)', () => {
       ).code
     ).toBe('invalid_input');
     expect(await bodyOf(id)).toBe(BODY);
-    // Sin blob huérfano: ninguna de las cuatro llegó a guardar nada.
-    const db = new DatabaseSync(test!.sqlitePath);
-    const refs = db.prepare('SELECT COUNT(*) AS n FROM note_blob_refs WHERE note_id = ?').get(id) as {
-      n: number | bigint;
-    };
-    db.close();
-    expect(Number(refs.n)).toBe(0);
+    // Sin blob huérfano: ninguna de las cuatro llegó a guardar nada (almacén de blobs).
+    expect(await test!.ctx.port.blobRead(PNG_SHA)).toBeNull();
   });
 
   it('nota bloqueada: note_locked, también con heading', async () => {
@@ -199,7 +194,25 @@ describe('hebra_add_attachment con heading (D11)', () => {
     const { id, ctx } = await create('# A\n\ntexto\n\n```js\ncodigo');
     const result = await runAddAttachment(ctx, { ...base(id), heading: 'A', operationId: opId() });
     expect(result.attachmentId).toBe(PNG_SHA);
-    expect(await bodyOf(id)).toBe(`# A\n\ntexto\n\n\`\`\`js\ncodigo\n\n\`\`\`\n\n${REF}`);
+    expect(await bodyOf(id)).toBe(`# A\n\ntexto\n\n\`\`\`js\ncodigo\n\`\`\`\n\n${REF}`);
+  });
+
+  it('M1: con apartados detrás, un bloque sin cerrar no se cierra a mitad de la nota: invalid_input sin escribir', async () => {
+    const text = '# A\n```\ncode\n\t```\n# B\nb';
+    const { id, ctx } = await create(text);
+    expect(
+      (await rejection(runAddAttachment(ctx, { ...base(id), heading: 'A', operationId: opId() }))).code
+    ).toBe('invalid_input');
+    expect(await bodyOf(id)).toBe(text);
+    expect(await test!.ctx.port.blobRead(PNG_SHA)).toBeNull();
+  });
+
+  it('B2: una referencia previa al mismo blob no hace que cuente la nueva dentro de un bloque de código', async () => {
+    const { id, ctx } = await create(`# A\n${REF}\n# B\n\`\`\`\ncode`);
+    const result = await runAddAttachment(ctx, { ...base(id), heading: 'B', operationId: opId() });
+    // La nueva queda fuera del código (el bloque se cierra antes), nunca dentro.
+    expect(await bodyOf(id)).toBe(`# A\n${REF}\n# B\n\`\`\`\ncode\n\`\`\`\n\n${REF}`);
+    expect(result.placed).toEqual({ line: 8, heading: 'B' });
   });
 
   it('sin heading: igual que siempre, sin placed', async () => {

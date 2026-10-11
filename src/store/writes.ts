@@ -556,30 +556,38 @@ function bodyReferencing(
   markdown: string,
   sha256: string,
   section?: HeadingInfo
-): { body: string; derived: ReturnType<typeof deriveNote>; line: number } | null {
+): { body: string; derived: ReturnType<typeof deriveNote>; referenceStart: number } | null {
   for (const closer of ['', ...FENCE_CLOSERS]) {
     let candidate: string;
     let referenceStart: number;
-    if (section) {
-      // Al final del apartado (D11), con la regla de `appendToNote`; si el apartado
-      // acaba dentro de un bloque sin cerrar, el cierre va delante de la referencia.
-      const insertion = insertIntoSection(
-        body,
-        section,
-        closer ? `${closer}${APPEND_SEPARATOR}${markdown}` : markdown
-      );
+    if (section && !closer) {
+      // Al final del apartado (D11), con la regla de `appendToNote`.
+      const insertion = insertIntoSection(body, section, markdown);
       candidate = insertion.body;
       referenceStart = insertion.end - markdown.length;
     } else {
+      // Cerrar un bloque sin cerrar solo es seguro al final de la nota: a mitad, la marca
+      // de cierre quedaría entre apartados y convertiría en Markdown vivo lo que seguía.
+      if (section && closer && section.end !== body.length) return null;
       candidate = closer
         ? `${body}\n${closer}${APPEND_SEPARATOR}${markdown}`
         : `${body}${APPEND_SEPARATOR}${markdown}`;
       referenceStart = candidate.length - markdown.length;
     }
     const derived = deriveNote(candidate);
-    if ((derived.blobRefs ?? []).includes(sha256)) {
-      return { body: candidate, derived, line: lineAt(candidate, referenceStart) };
+    if (!(derived.blobRefs ?? []).includes(sha256)) continue;
+    // Con apartado, la referencia NUEVA es la que tiene que contar: si la nota ya citaba
+    // ese blob en otro sitio, el hash en `blobRefs` no lo prueba. Se cambia la nueva por
+    // una de otro blob y se mira si esa cuenta.
+    if (section) {
+      const probe = '0'.repeat(64);
+      const probed =
+        candidate.slice(0, referenceStart) +
+        attachmentMarkdown(probe, 'x') +
+        candidate.slice(referenceStart + markdown.length);
+      if (!(deriveNote(probed).blobRefs ?? []).includes(probe)) continue;
     }
+    return { body: candidate, derived, referenceStart };
   }
   return null;
 }
@@ -1403,10 +1411,16 @@ export class NoteWriter {
           ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
           : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
       log.finish(input.operationId, outcome);
-      const placed: AttachmentPlacement | undefined =
-        section && saved.outcome === 'saved'
-          ? { line: withAttachment.line, heading: capHeading(section.heading) }
-          : undefined;
+      let placed: AttachmentPlacement | undefined;
+      if (section && saved.outcome === 'saved') {
+        // Como en `appendToNote`: la línea sale del cuerpo GUARDADO (se vuelve a leer en
+        // este turno), no del candidato.
+        const row = await store.noteRead(input.id);
+        placed = {
+          line: lineAt(row?.body ?? body, withAttachment.referenceStart),
+          heading: capHeading(section.heading)
+        };
+      }
       return { result: { ...added(outcome), ...(placed ? { placed } : {}) }, wrote: true };
     });
     if (wrote) this.written();
