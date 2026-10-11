@@ -52,6 +52,7 @@ import {
 } from './file-content';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import {
+  hiddenOperationTarget,
   priorOperation,
   privacyInTurn,
   type LocalWrite,
@@ -250,7 +251,13 @@ export async function replaceFileText(
     async (store): Promise<LocalWrite<ReplaceFileTextSaved>> => {
       const now = Date.now();
       const log = store.operations;
-      const previous = priorOperation(log, input.operationId, fingerprint, now);
+      const previous = priorOperation(
+        log,
+        input.operationId,
+        fingerprint,
+        now,
+        hiddenOperationTarget(store, privacyInTurn(store, input.privacy), input.privacy)
+      );
       store.looseFilePrevious.purgeExpired(now);
       const { files, content } = visibleLiveFile(store, input.id, input.privacy);
       const { file } = content;

@@ -57,6 +57,7 @@ import {
   grepNoteRows,
   grepSubstringCandidates,
   grepVisibleBodies,
+  inReadTransaction,
   substringFillPageSize,
   type GrepBodiesResult,
   type GrepBodiesSession,
@@ -68,7 +69,7 @@ import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { blobNoteRefRows } from './file-sql';
-import { noteVisibilityRows, trashIndexRows } from './privacy-sql';
+import { noteStamps, noteVisibilityRows, trashIndexRows } from './privacy-sql';
 import { ensurePrivateFoldersTable, readPrivateFolders, writePrivateFolders } from './private-folders';
 import { SerialQueue } from './serial-queue';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
@@ -80,6 +81,7 @@ import type {
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  PrivacyRecheckSnapshot,
   RememberedPrivateFolder,
   TrashIndex
 } from './types';
@@ -350,6 +352,18 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    */
   async notesVisibilityIndex(): Promise<NoteVisibilityEntry[]> {
     return this.read(() => noteVisibilityRows(this.db));
+  }
+
+  /** Árbol de carpetas, índice de visibilidad y sellos de `ids`, en una transacción de
+   *  lectura dentro de un turno de la cola (`./privacy-sql.ts`). */
+  async privacyRecheck(ids: readonly string[]): Promise<PrivacyRecheckSnapshot> {
+    return this.read(() =>
+      inReadTransaction(this.db, () => ({
+        folders: this.engine.foldersList(),
+        notes: noteVisibilityRows(this.db),
+        stamps: noteStamps(this.db, ids)
+      }))
+    );
   }
 
   /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`). */

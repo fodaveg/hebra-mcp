@@ -35,6 +35,7 @@ import { randomUUID } from 'node:crypto';
 import { canonicalTag, deriveNote, reorderToggledTasks } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
+import { TrashFilter } from '../privacy/trash-filter';
 import { replaceBodyInTurn, trashConflictCopiesInTurn, type ReplaceBodyTestHooks } from './body-writes';
 import { writeRejected } from './errors';
 import { compileGrepPattern, trigramMatch } from './grep';
@@ -73,6 +74,8 @@ import { capHeading } from './sections';
 import type { HebraLibraryPort } from './types';
 import {
   LOCKED_BODY_PREFIX,
+  hiddenOperationTarget,
+  priorOperation,
   privacyInTurn,
   REPLACE_BODY_MAX_LENGTH,
   type NoteWriteStore,
@@ -283,7 +286,7 @@ export interface ReplaceBatchOptions {
 /** Lo que la simulación lee del almacén (fuera del turno de escritura). */
 export type ReplaceReadPort = Pick<
   HebraLibraryPort,
-  'grepNotes' | 'grepCandidates' | 'grepBodies' | 'foldersList' | 'notesVisibilityIndex'
+  'grepNotes' | 'grepCandidates' | 'grepBodies' | 'foldersList' | 'notesVisibilityIndex' | 'trashIndex'
 >;
 
 /** Una nota que la simulación metería en el plan. */
@@ -785,7 +788,10 @@ export class ReplaceBatch {
     for (const [index, entry] of views.entries()) {
       const size = JSON.stringify(entry.view).length;
       if (notes.length >= limit || (notes.length > 0 && chars + size > REPLACE_RESPONSE_MAX_CHARS)) {
-        return { notes, nextCursor: wrap('rp1', [planId, views[index]!.position]) };
+        // Justo detrás de la última DEVUELTA, no la posición de la siguiente visible: entre
+        // las dos puede haber notas del plan que ya son ocultas, y el hueco las contaba (C9
+        // de la revisión de Codex). La página siguiente empieza ahí y se salta las ocultas.
+        return { notes, nextCursor: wrap('rp1', [planId, views[index - 1]!.position + 1]) };
       }
       chars += size;
       notes.push(entry.view);
@@ -845,9 +851,15 @@ export class ReplaceBatch {
       const now = Date.now();
       store.replacePlans.purgeExpired(now);
       // El registro compartido: un `operationId` de otra escritura no vale para aplicar.
-      store.operations.purgeExpired(now);
-      const previous = store.operations.lookup(request.operationId);
-      if (previous && previous.fingerprint !== fingerprint) throw writeRejected('operation_id_reused');
+      // Uno de una nota (o fichero) que ya no se ve cuenta como inexistente (C12 de la revisión
+      // de Codex, `priorOperation`).
+      const previous = priorOperation(
+        store.operations,
+        request.operationId,
+        fingerprint,
+        now,
+        hiddenOperationTarget(store, privacyInTurn(store, request.privacy), request.privacy)
+      );
       const plan = requirePlan(store, request.planId, request.privacy, true);
       if (plan.applyOperationId === null) {
         if (now - plan.createdAt > PLAN_APPLY_TTL_MS) throw writeRejected('plan_expired');
@@ -987,7 +999,8 @@ export class ReplaceBatch {
     privacy: PrivacyConfig,
     replayed: boolean
   ): Promise<ReplaceApplyReport> {
-    const { rows: visible } = await this.visibleNow(privacy);
+    const { filter, rows: visible } = await this.visibleNow(privacy);
+    const copyShown = await this.copyVisibility(filter, visible, privacy);
     const notes: ReplaceReportNote[] = [];
     for (const row of rows) {
       if (row.outcome === 'unavailable') continue;
@@ -999,7 +1012,7 @@ export class ReplaceBatch {
         outcome: row.outcome ?? 'pending'
       };
       if (row.proof) Object.assign(entry, this.proofFields(plan, row.noteId, row.proof));
-      if (row.copyId !== null) entry.copyId = row.copyId;
+      if (row.copyId !== null && copyShown(row.copyId)) entry.copyId = row.copyId;
       notes.push(entry);
     }
     const undone = plan.state === 'undoing' || plan.state === 'undone';
@@ -1014,6 +1027,21 @@ export class ReplaceBatch {
     if (undone) report.undone = true;
     if (replayed) report.replayed = true;
     return report;
+  }
+
+  /**
+   * ¿Se puede nombrar esta copia de conflicto en un informe? Solo si se ve AHORA, viva o en la
+   * papelera (deshacer las manda allí). C5 de la revisión de Codex (11 oct 2026): el informe
+   * filtraba el original pero no la copia, y una copia que pasó a privada seguía saliendo
+   * con su id.
+   */
+  private async copyVisibility(
+    filter: PrivacyFilter,
+    visible: ReadonlyMap<string, GrepNoteRow>,
+    privacy: PrivacyConfig
+  ): Promise<(copyId: string) => boolean> {
+    const trash = await TrashFilter.build(this.port, filter, privacy);
+    return (copyId) => visible.has(copyId) || trash.isVisible(copyId);
   }
 
   private proofFields(
@@ -1076,7 +1104,8 @@ export class ReplaceBatch {
       if (plan.applyOperationId !== null && done) store.replacePlans.setState(plan.planId, 'undone');
       return now;
     });
-    const { rows: visible } = await this.visibleNow(request.privacy);
+    const { filter, rows: visible } = await this.visibleNow(request.privacy);
+    const copyShown = await this.copyVisibility(filter, visible, request.privacy);
     const notes: ReplaceUndoNote[] = [];
     for (const row of rows) {
       if (!touched(row)) continue;
@@ -1087,7 +1116,7 @@ export class ReplaceBatch {
       if (!processed) entry.outcome = 'pending';
       else if (row.undoOutcome !== null && row.undoOutcome !== 'unavailable') entry.outcome = row.undoOutcome;
       if (row.undoProof) Object.assign(entry, this.proofFields(plan, row.noteId, row.undoProof));
-      if (row.copyId !== null && row.undoCopy !== null) {
+      if (row.copyId !== null && row.undoCopy !== null && copyShown(row.copyId)) {
         entry.copyId = row.copyId;
         entry.copyOutcome = row.undoCopy;
       }

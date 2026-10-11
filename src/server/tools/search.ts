@@ -34,6 +34,7 @@ import {
 import { headingOfSnippet } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
+import { recheck, type Recheck } from '../recheck';
 
 export interface SearchResult {
   id: string;
@@ -95,24 +96,33 @@ export async function runSearch(
       : { kind: 'folder', folderId: resolved };
   }
 
+  // Cada página del almacén con un filtro de DESPUÉS de leerla, y cada resultado solo si su
+  // nota sigue siendo la que dio el fragmento (C1 de la revisión de Codex, `../recheck.ts`).
+  let check: Recheck | undefined;
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor, want) =>
-      ctx.port.search(
+    fetch: async (cursor, want) => {
+      const read = await ctx.port.search(
         input.query,
         cursor,
         storePageSize(want),
         tagFilter ? { tags: [tagFilter] } : null,
         scope
-      ),
+      );
+      check = await recheck(
+        ctx,
+        read.items.map((hit) => ({ id: hit.id, updatedAt: hit.updatedAt }))
+      );
+      return read;
+    },
     accept: (hit) => {
-      const meta = ctx.privacy.visibleMeta(hit.id);
-      if (!meta) return undefined;
+      if (!check!.visible({ id: hit.id, updatedAt: hit.updatedAt })) return undefined;
+      const meta = check!.filter.visibleMeta(hit.id)!;
       const result: SearchResult = {
         id: hit.id,
         title: hit.title,
-        folderPath: ctx.privacy.folderPath(meta.folderId),
+        folderPath: check!.filter.folderPath(meta.folderId),
         tags: meta.tags,
         snippet: hit.snippet,
         heading: null,
@@ -130,7 +140,10 @@ export async function runSearch(
   if (wantsHeading) {
     for (const result of page.items) {
       const note = await ctx.port.noteRead(result.id);
+      // Solo del cuerpo que dio el resultado ya recomprobado (mismo `updated_at`): si cambió
+      // desde entonces, sin apartado.
       if (!note || note.body.startsWith(LOCKED_BODY_PREFIX)) continue;
+      if (new Date(note.updatedAt).toISOString() !== result.updatedAt) continue;
       result.heading = headingOfSnippet(note.body, result.snippet);
     }
   }

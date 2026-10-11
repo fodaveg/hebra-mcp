@@ -33,6 +33,7 @@ import {
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
+import { recheck } from '../recheck';
 import { resolveNoteId } from './note-ref';
 
 export interface ReadNoteOutput {
@@ -109,10 +110,16 @@ export async function runReadNote(
   requireValidHeadingInput(input);
   requireValidLinesInput(input);
   const id = await resolveNoteId(ctx, input);
-  const meta = ctx.privacy.visibleMeta(id);
-  if (!meta) throw new ToolError('not_found');
+  if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
+  // La fila leída, y el original de una copia, con el filtro de DESPUÉS de leer (C1 de la
+  // revisión de Codex, `../recheck.ts`): antes de `note_locked`, que de una que ya es oculta
+  // diría que existe.
+  const read = { id: note.id, localSeq: note.localSeq };
+  const check = await recheck(ctx, note.conflictOf !== null ? [read, { id: note.conflictOf }] : [read]);
+  if (!check.visible(read)) throw new ToolError('not_found');
+  const meta = check.filter.visibleMeta(id)!;
   const libraryId = await ctx.port.libraryId();
 
   let body = note.body;
@@ -166,8 +173,9 @@ export async function runReadNote(
   };
   // Solo si el original se ve (M3 del audit de privacidad, 10 oct 2026): la copia de
   // conflicto de una nota oculta puede ser visible (escrita sin la etiqueta en otro
-  // dispositivo), y su `conflictOf` daba el id del original. `isConflictCopy` sigue.
-  if (note.conflictOf !== null && ctx.privacy.visibleMeta(note.conflictOf)) {
+  // dispositivo), y su `conflictOf` daba el id del original. `isConflictCopy` sigue. Con el
+  // filtro de después de leer.
+  if (note.conflictOf !== null && check.visible(note.conflictOf)) {
     output.conflictOf = note.conflictOf;
   }
   if (section !== undefined) {

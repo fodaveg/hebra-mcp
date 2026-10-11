@@ -259,6 +259,11 @@ export async function runGrep(
   let session: GrepBodiesSession | null = null;
   let skipped: GrepOutput['skipped'];
   let stop: { cursor: string | null; cutoff: GrepOutput['cutoff'] } | null = null;
+  /** La última nota recorrida (leída y visible en el turno de su lote). Un corte por tiempo
+   *  ENTRE lotes sigue detrás de ella (`[id, 0]`: esa nota ya no se vuelve a mirar), nunca
+   *  en una nota que no se ha leído. */
+  let lastScanned: string | null = null;
+  const afterLastScanned = (): string | null => (lastScanned === null ? null : cursorAt(lastScanned, 0));
   // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
   const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re);
@@ -267,7 +272,10 @@ export async function runGrep(
     for (let first = 0; first < pending.length && !stop; first += GREP_BATCH_NOTES) {
       const batch = pending.slice(first, first + GREP_BATCH_NOTES);
       if (progressed && Date.now() >= deadline) {
-        stop = { cursor: cursorAt(batch[0]!.id, batch[0]!.fromLine), cutoff: 'time' };
+        // Detrás de la última recorrida, no en la primera del lote que no se ha leído: esa
+        // pudo pasar a oculta desde `grepNotes`, y su id no puede salir (C6 de la revisión
+        // de Codex). `progressed` asegura que hay una.
+        stop = { cursor: afterLastScanned(), cutoff: 'time' };
         break;
       }
       const read = await ctx.port.grepBodies(
@@ -289,6 +297,7 @@ export async function runGrep(
       const onNote: OnNote = (index, result) => {
         progressed = true;
         const note = notes[index]!;
+        lastScanned = note.id;
         const body = scanNotes[index]!.body;
         let starts: number[] | null = null;
         let headings: HeadingInfo[] | null = null;
@@ -349,19 +358,24 @@ export async function runGrep(
         ? await worker.scan(scanNotes, maxHits, deadline, onNote)
         : scanLiteral(pattern, scanNotes, maxHits, deadline, () => progressed, onNote);
       if (outcome.status === 'time') {
-        // `next` es la primera nota del lote sin recorrer; si el lote se acabó justo, la
-        // siguiente a él.
-        const next = notes[outcome.next] ?? pending[first + GREP_BATCH_NOTES];
-        stop = next ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' } : null;
+        // `next` es la primera nota del lote sin recorrer (leída en el turno de este lote,
+        // visible); si el lote se acabó justo, detrás de la última recorrida: la del lote
+        // siguiente no se ha leído y pudo pasar a oculta (C6 de la revisión de Codex).
+        const next = notes[outcome.next];
+        stop = next
+          ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' }
+          : pending.length > first + GREP_BATCH_NOTES
+            ? { cursor: afterLastScanned(), cutoff: 'time' }
+            : null;
         break;
       }
       if (outcome.status === 'interrupted') {
         const stuck = notes[outcome.next];
         if (!stuck) {
           // Todas las del lote terminadas y el plazo llegó antes del aviso de fin: se sigue
-          // en la siguiente, como un corte entre notas.
-          const next = pending[first + GREP_BATCH_NOTES];
-          stop = next ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' } : null;
+          // detrás de la última recorrida, como un corte entre notas (C6, arriba).
+          stop =
+            pending.length > first + GREP_BATCH_NOTES ? { cursor: afterLastScanned(), cutoff: 'time' } : null;
           break;
         }
         if (progressed) {

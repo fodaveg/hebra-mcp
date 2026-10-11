@@ -51,7 +51,7 @@ export function grepNoteRows(db: DatabaseSync): GrepNoteRow[] {
  * sentencia tiene la suya, y en un lector el escritor de otro proceso puede confirmar entre
  * dos de ellas.
  */
-function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
+export function inReadTransaction<T>(db: DatabaseSync, fn: () => T): T {
   db.exec('BEGIN');
   try {
     const result = fn();

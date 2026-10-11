@@ -34,6 +34,7 @@ import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
 import { requireValidOperationId, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
+import { requireStillVisible } from '../recheck';
 
 export interface ListedVersion {
   versionId: number;
@@ -129,6 +130,8 @@ export async function runListVersions(
       lastId = item.id;
     }
   }
+  // La nota, con el filtro de DESPUÉS de leer sus versiones (C1 de la revisión de Codex).
+  await requireStillVisible(ctx, { id: input.id });
   return {
     id: input.id,
     versions: visible,
@@ -147,6 +150,8 @@ export async function runReadVersion(
   if (!version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)) {
     throw new ToolError('not_found');
   }
+  // La nota, con el filtro de DESPUÉS de leer la versión (C1 de la revisión de Codex).
+  await requireStillVisible(ctx, { id: input.id });
   return { id: input.id, ...listed(version), body: version.body };
 }
 
@@ -179,5 +184,8 @@ export async function runRestoreVersion(
     sync: result.sync,
     replayed: result.replayed === true
   });
+  // Tras la ronda, la nota puede haber pasado a oculta: la respuesta de una que no existe
+  // (C3 de la revisión de Codex; la escritura ya está hecha).
+  await requireStillVisible(ctx, { id: input.id });
   return result;
 }

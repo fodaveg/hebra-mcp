@@ -38,6 +38,7 @@
  */
 import { createHash } from 'node:crypto';
 import type { PrivacyConfig } from '../privacy/config';
+import type { PrivacyFilter } from '../privacy/filter';
 import { TrashFilter } from '../privacy/trash-filter';
 import {
   LOCKED_BODY_PREFIX,
@@ -114,13 +115,17 @@ function sha256Hex(text: string): string {
   return createHash('sha256').update(text, 'utf8').digest('hex');
 }
 
-/** Copia viva de `originalId` con ese cuerpo, si la hay (para no crear otra). */
+/** Copia viva y VISIBLE de `originalId` con ese cuerpo, si la hay (para no crear otra). Una
+ *  oculta (movida a una carpeta privada, o con una etiqueta privada) no se reutiliza ni se
+ *  nombra (C4 de la revisión de Codex, 11 oct 2026): se crea otra, visible. */
 async function findCopy(
   store: NoteWriteStore,
+  filter: PrivacyFilter,
   originalId: string,
   bodySha256: string
 ): Promise<string | null> {
   for (const copyId of store.conflictCopyIds(originalId)) {
+    if (filter.isHiddenNote(copyId)) continue;
     const copy = await store.noteRead(copyId);
     if (copy && copy.trashedAt === null && copy.conflictOf === originalId && copy.bodySha256 === bodySha256) {
       return copyId;
@@ -155,7 +160,7 @@ export async function replaceBodyInTurn(
     return { result: { outcome: 'conflict_rejected' }, wrote: false };
   }
   if (changedUnderneath) {
-    const existing = await findCopy(store, note.id, editedSha);
+    const existing = await findCopy(store, filter, note.id, editedSha);
     if (existing) return { result: { outcome: 'conflict_copy', copyId: existing, reused: true }, wrote: false };
   }
   // Base del guardado: la actual si el cuerpo sigue siendo la base (solo cambiaron

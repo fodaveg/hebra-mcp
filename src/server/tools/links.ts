@@ -22,6 +22,7 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
+import { recheck } from '../recheck';
 import { scanOutgoingRefs } from './link-scan';
 
 export interface OutgoingLink {
@@ -149,6 +150,24 @@ export async function runLinks(
     backlinks.push(...page.items);
     if (page.lastCursor !== null) nextBacklinks = page.lastCursor;
   }
+
+  // Todo con el filtro de DESPUÉS de leer (C1 de la revisión de Codex, `../recheck.ts`): la
+  // nota (los enlaces salen de su cuerpo tal como se leyó), las que resuelve y las que la
+  // enlazan. La nota, si ya no es visible o cambió, `not_found`; las demás, si ya no se ven,
+  // como un enlace sin resolver o fuera de la lista.
+  const read = { id: note.id, localSeq: note.localSeq };
+  const check = await recheck(ctx, [
+    read,
+    ...outgoing.flatMap((link) => (link.resolvedId !== undefined ? [{ id: link.resolvedId }] : [])),
+    ...backlinks.map((item) => ({ id: item.id }))
+  ]);
+  if (!check.visible(read)) throw new ToolError('not_found');
+  for (const [index, link] of outgoing.entries()) {
+    if (link.resolvedId !== undefined && !check.visible(link.resolvedId)) outgoing[index] = { ref: link.ref };
+  }
+  const shown = backlinks.filter((item) => check.visible(item.id));
+  backlinks.length = 0;
+  backlinks.push(...shown);
 
   if (nextOutgoing === undefined && nextBacklinks === undefined) {
     return { outgoing, backlinks, nextCursor: null };

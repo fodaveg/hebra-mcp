@@ -111,6 +111,36 @@ export function noteVisibilityRows(db: DatabaseSync): NoteVisibilityEntry[] {
 }
 
 /**
+ * El sello de cada nota de `ids` que sigue viva (ni papelera ni lápida): `local_seq` (sube con
+ * cada guardado de la fila) y `updated_at`. Lo que mira la recomprobación de las
+ * herramientas (`src/server/recheck.ts`) para saber que la fila que va a devolver es la misma
+ * que acaba de juzgar visible. Una que no está viva no sale.
+ */
+export function noteStamps(
+  db: DatabaseSync,
+  ids: readonly string[]
+): Map<string, { localSeq: number; updatedAt: number }> {
+  const stamps = new Map<string, { localSeq: number; updatedAt: number }>();
+  if (ids.length === 0) return stamps;
+  const rows = db
+    .prepare(
+      `SELECT n.id AS id, n.local_seq AS local_seq, n.updated_at AS updated_at
+       FROM json_each(?) AS wanted
+       JOIN notes AS n ON n.id = wanted.value
+       WHERE n.deleted = 0 AND n.trashed_at IS NULL`
+    )
+    .all(JSON.stringify([...new Set(ids)])) as Array<{
+    id: string;
+    local_seq: number | bigint;
+    updated_at: number | bigint;
+  }>;
+  for (const row of rows) {
+    stamps.set(String(row.id), { localSeq: Number(row.local_seq), updatedAt: Number(row.updated_at) });
+  }
+  return stamps;
+}
+
+/**
  * El índice de la papelera: sus notas con la carpeta GUARDADA (no la efectiva), si están
  * bloqueadas, y TODAS las filas de carpeta, lápidas incluidas. `folderTrash` de Hebra deja
  * las carpetas como lápida (`deleted = 1`, con su nombre y su padre) y manda sus notas a la

@@ -56,6 +56,16 @@ export interface NoteVisibilityEntry {
   folderTrail?: FolderRowFact[];
 }
 
+/** Lo que lee la recomprobación de las herramientas (C1 y C2 de la revisión de Codex, 11 oct
+ *  2026; `src/server/recheck.ts`), todo en UNA transacción de lectura: el árbol de carpetas y
+ *  el índice de visibilidad, como `PrivacyFilter.build`, y el sello de las notas pedidas
+ *  (`local_seq`, `updated_at`; solo las vivas). */
+export interface PrivacyRecheckSnapshot {
+  folders: FoldersList;
+  notes: NoteVisibilityEntry[];
+  stamps: Map<string, { localSeq: number; updatedAt: number }>;
+}
+
 /** Una carpeta a la que resolvió una ruta privada configurada (A3 del audit de privacidad,
  *  10 oct 2026): la ruta (`privacyPathKey`, minúsculas y NFC) y el id. hebra-mcp las recuerda
  *  para seguir ocultando una carpeta privada que se movió y cuya ruta ocupa otra. */
@@ -194,6 +204,10 @@ export interface HebraLibraryPort {
    *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
    *  mientras el proceso vive). */
   notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
+  /** La recomprobación de antes de responder (`PrivacyRecheckSnapshot`): en UN turno de la
+   *  cola y en una transacción de lectura, para que el filtro y los sellos sean del mismo
+   *  instante del almacén. */
+  privacyRecheck(ids: readonly string[]): Promise<PrivacyRecheckSnapshot>;
   /** Notas de la papelera (sin lápidas) y TODAS las filas de carpeta, lápidas incluidas,
    *  en un solo turno de la cola: para `hebra_list_trash` y `hebra_restore_note`
    *  (ampliación de D2 del 30 sep 2026). */

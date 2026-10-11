@@ -5,21 +5,32 @@
  * Antes se leía una vez al arrancar: un `serve` arrancado antes de configurar una carpeta
  * privada la seguía sirviendo hasta reiniciarlo, y como el escritor aplica la configuración
  * que le manda cada lector (§8), también escribía con la vieja. Ahora `serve` mira en cada
- * llamada de herramienta (y antes de cada ronda de sync) el `mtime`, el tamaño y el inodo del
- * fichero, que es una llamada a `stat`, y lo vuelve a leer solo si cambió: la configuración
- * nueva se aplica en esa misma llamada.
+ * llamada de herramienta (y antes de cada ronda de sync) la huella del fichero (`mtime`,
+ * `ctime`, tamaño e inodo, un `stat`) y que se puede leer (`access` con `R_OK`), y lo vuelve
+ * a leer solo si la huella cambió: la configuración nueva se aplica en esa misma llamada.
  *
- * Cerrado ante la duda: si el fichero existe pero no se puede leer o no es JSON (a medio
- * escribir, o con un error), `current()` lanza `PrivacyConfigUnreadable` y las herramientas
- * responden `privacy_config_unresolved` hasta que se arregle, en vez de seguir con la
- * configuración de antes. Si el fichero no existe, ninguna carpeta ni etiqueta privada, igual
- * que al arrancar.
+ * Revisión de Codex del 11 oct 2026:
+ * - C7, recargas a la vez: hay UNA recarga en vuelo y las llamadas que llegan mientras tanto
+ *   esperan esa misma promesa; la huella nueva solo se publica cuando la configuración nueva
+ *   ya está instalada. Antes la primera publicaba la huella antes de leer, y una segunda
+ *   llamada simultánea usaba la configuración vieja con la huella nueva.
+ * - C8, una entrada que existe y no se lee: si `config.json` existe como entrada (`lstat`) y
+ *   no se puede leer (un enlace sin destino, sin permiso, un directorio), es
+ *   `PrivacyConfigUnreadable`, nunca «sin configuración». Solo si la entrada no existe en
+ *   absoluto se toma la configuración vacía, como siempre.
+ * - Permisos sin cambio de huella: `chmod` cambia `ctime`, que va en la huella, y además
+ *   cada llamada comprueba `R_OK`: un `config.json` que deja de poderse leer bloquea en la
+ *   misma llamada, aunque su contenido siga cacheado.
  *
- * Límite: un cambio que deja el mismo tamaño dentro del mismo instante del `mtime` (la
- * resolución del sistema de ficheros: nanosegundos en APFS y ext4) no se ve hasta el
- * siguiente cambio.
+ * Cerrado ante la duda: con `PrivacyConfigUnreadable` las herramientas responden
+ * `privacy_config_unresolved` hasta que se arregle, en vez de seguir con la configuración de
+ * antes. Si el fichero no existe, ninguna carpeta ni etiqueta privada, igual que al arrancar.
+ *
+ * Límite: un cambio que no altera ni `mtime` ni `ctime` ni tamaño ni inodo (resolución de
+ * nanosegundos en APFS y ext4) no se ve hasta el siguiente.
  */
-import { readFile, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parsePrivacyConfig, type PrivacyConfig } from './config';
 
@@ -33,20 +44,43 @@ export class PrivacyConfigUnreadable extends Error {
   }
 }
 
+/** La huella del fichero, `null` si la entrada no existe; lanza `PrivacyConfigUnreadable`
+ *  si existe y no se puede leer. */
+async function stampOf(path: string): Promise<string | null> {
+  try {
+    await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new PrivacyConfigUnreadable();
+  }
+  try {
+    // `stat` sigue un enlace: uno sin destino falla aquí (C8), y no cuenta como ausente.
+    const info = await stat(path, { bigint: true });
+    if (!info.isFile()) throw new PrivacyConfigUnreadable();
+    await access(path, constants.R_OK);
+    return `${info.mtimeNs}:${info.ctimeNs}:${info.size}:${info.ino}`;
+  } catch {
+    throw new PrivacyConfigUnreadable();
+  }
+}
+
 export class PrivacyConfigSource {
   private readonly path: string;
-  /** Huella del fichero de lo último leído (`null`: no existía). */
+  /** Huella de la configuración INSTALADA (`null`: no existía el fichero). */
   private stamp: string | null;
+  /** La instalada; `null` si la última lectura no se pudo aplicar. */
   private config: PrivacyConfig | null;
+  /** La recarga en vuelo, si la hay (C7): una sola, y las demás llamadas la esperan. */
+  private reloading: Promise<void> | null = null;
 
-  /** `initial` es lo que ya se leyó al arrancar; `initialStamp`, la huella de entonces. */
   private constructor(dataDir: string, initial: PrivacyConfig, initialStamp: string | null) {
     this.path = join(dataDir, 'config.json');
     this.config = initial;
     this.stamp = initialStamp;
   }
 
-  /** Lee `config.json` como al arrancar: si no es JSON, lanza (el proceso no arranca). */
+  /** Lee `config.json` como al arrancar: si existe y no se lee o no es JSON, lanza (el
+   *  proceso no arranca). */
   static async open(dataDir: string): Promise<PrivacyConfigSource> {
     const path = join(dataDir, 'config.json');
     const stamp = await stampOf(path);
@@ -54,46 +88,46 @@ export class PrivacyConfigSource {
     return new PrivacyConfigSource(dataDir, config, stamp);
   }
 
-  /** La de arrancar (o la última leída), sin mirar el fichero. */
+  /** La de arrancar (o la última instalada), sin mirar el fichero. */
   get initial(): PrivacyConfig {
     return this.config ?? EMPTY;
   }
 
   /** La configuración vigente, releída si el fichero cambió. */
   async current(): Promise<PrivacyConfig> {
-    let stamp: string | null;
-    try {
-      stamp = await stampOf(this.path);
-    } catch {
-      this.config = null;
-      throw new PrivacyConfigUnreadable();
+    for (;;) {
+      // Mientras otra llamada recarga, se espera a que termine (y se vuelve a mirar).
+      if (this.reloading) {
+        await this.reloading;
+        continue;
+      }
+      // Si no se puede leer AHORA, lanza: bloquea aunque haya una configuración cacheada.
+      const stamp = await stampOf(this.path);
+      if (this.reloading) continue;
+      if (stamp === this.stamp) {
+        if (this.config === null) throw new PrivacyConfigUnreadable();
+        return this.config;
+      }
+      this.reloading = this.reload(stamp).finally(() => {
+        this.reloading = null;
+      });
     }
-    if (stamp === this.stamp) {
-      if (this.config === null) throw new PrivacyConfigUnreadable();
-      return this.config;
-    }
-    this.stamp = stamp;
+  }
+
+  /** Lee e instala la configuración de `stamp`; la huella se publica a la vez que ella. */
+  private async reload(stamp: string | null): Promise<void> {
     if (stamp === null) {
       this.config = EMPTY;
-      return EMPTY;
+      this.stamp = null;
+      return;
     }
+    let parsed: PrivacyConfig | null;
     try {
-      this.config = parsePrivacyConfig(await readFile(this.path, 'utf8'));
+      parsed = parsePrivacyConfig(await readFile(this.path, 'utf8'));
     } catch {
-      this.config = null;
-      throw new PrivacyConfigUnreadable();
+      parsed = null;
     }
-    return this.config;
-  }
-}
-
-/** `mtime` (ns), tamaño e inodo; `null` si el fichero no existe. */
-async function stampOf(path: string): Promise<string | null> {
-  try {
-    const info = await stat(path, { bigint: true });
-    return `${info.mtimeNs}:${info.size}:${info.ino}`;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
+    this.config = parsed;
+    this.stamp = stamp;
   }
 }

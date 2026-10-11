@@ -654,14 +654,49 @@ export function priorOperation(
   log: OperationStore,
   operationId: string,
   fingerprint: string,
-  now: number
+  now: number,
+  isHiddenTarget: (id: string) => boolean = () => false
 ): OperationRecord | null {
   log.purgeExpired(now);
   const previous = log.lookup(operationId);
   if (previous && previous.fingerprint !== fingerprint) {
+    // Un registro de algo que ya no se ve se trata como si no existiera (C12 de la revisión
+    // de Codex, 11 oct 2026): `operation_id_reused` delataba que ese `operationId` escribió
+    // en una nota (o fichero) hoy oculta. La escritura nueva sigue como con un `operationId`
+    // nunca usado y, al empezar, su registro SUSTITUYE al viejo (`begin` es INSERT OR
+    // REPLACE): un reintento de la operación vieja ya no se reconoce. Con la nota oculta da
+    // igual (responde `not_found`); si volviera a verse antes de caducar el registro (24 h),
+    // ese reintento escribiría otra vez. Con la misma huella, el registro es de la misma
+    // nota que se pide, y esa decide sola (oculta, `not_found`).
+    if (isHiddenTarget(previous.noteId)) return null;
     throw writeRejected('operation_id_reused');
   }
   return previous;
+}
+
+/**
+ * Para `priorOperation`: ¿es `id` una nota (viva o de la papelera) o un fichero suelto que con
+ * la configuración de quien pide NO se ve? Lo que no es ni una cosa ni otra (un plan de
+ * `hebra_replace_in_notes`, que comparte el registro) no cuenta como oculto.
+ */
+export function hiddenOperationTarget(
+  store: NoteWriteStore,
+  filter: PrivacyFilter,
+  privacy: PrivacyConfig
+): (id: string) => boolean {
+  return (id) => {
+    if (filter.visibleMeta(id)) return false;
+    const trash = store.trashIndex();
+    if (trash.notes.some((note) => note.id === id)) {
+      return !TrashFilter.fromSnapshot(filter, trash, privacy).isVisible(id);
+    }
+    if (store.notesVisibilityIndex().some((note) => note.id === id)) return true;
+    const files = store.filesIndex();
+    if (files.files.some((file) => file.id === id)) {
+      return !FileFilter.fromSnapshot(filter, files, privacy).isVisible(id);
+    }
+    return false;
+  };
 }
 
 /** Igual que `editFingerprint`: comparten registro, así que la operación va en la huella
@@ -804,11 +839,11 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
+      const filter = privacyInTurn(store, input.privacy);
       const previous =
         operationId === undefined || fingerprint === null
           ? null
-          : priorOperation(log, operationId, fingerprint, now);
-      const filter = privacyInTurn(store, input.privacy);
+          : priorOperation(log, operationId, fingerprint, now, hiddenOperationTarget(store, filter, input.privacy));
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null) throw new LibraryError('note_not_found');
       if (filter.isHiddenNote(note.id)) throw writeRejected('not_found');
@@ -926,8 +961,14 @@ export class NoteWriter {
       const now = Date.now();
       const log = store.operations;
       const fingerprint = editFingerprint(input);
-      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
+      const previous = priorOperation(
+        log,
+        input.operationId,
+        fingerprint,
+        now,
+        hiddenOperationTarget(store, filter, input.privacy)
+      );
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
         throw writeRejected('not_found');
@@ -1043,8 +1084,14 @@ export class NoteWriter {
       const now = Date.now();
       const log = store.operations;
       const fingerprint = restoreVersionFingerprint(input);
-      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
+      const previous = priorOperation(
+        log,
+        input.operationId,
+        fingerprint,
+        now,
+        hiddenOperationTarget(store, filter, input.privacy)
+      );
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
         throw writeRejected('not_found');
@@ -1342,8 +1389,14 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      const previous = priorOperation(log, input.operationId, fingerprint, now);
       const filter = privacyInTurn(store, input.privacy);
+      const previous = priorOperation(
+        log,
+        input.operationId,
+        fingerprint,
+        now,
+        hiddenOperationTarget(store, filter, input.privacy)
+      );
       const note = await store.noteRead(input.id);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
         throw writeRejected('not_found');

@@ -48,6 +48,7 @@ import type { AddAttachmentOutcome } from '../write-context';
 import { requireValidOperationId, requireVisibleNote } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
+import { requireStillVisible } from '../recheck';
 
 export async function runAddAttachment(
   ctx: ToolContext,
@@ -121,5 +122,7 @@ export async function runAddAttachment(
     replayed: result.replayed === true,
     ...(input.heading !== undefined ? { heading: true } : {})
   });
+  // Tras la ronda, la nota puede haber pasado a oculta (C3 de la revisión de Codex).
+  await requireStillVisible(ctx, { id: input.id });
   return result;
 }

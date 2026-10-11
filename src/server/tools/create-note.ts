@@ -21,6 +21,7 @@ import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import { CREATE_BODY_MAX_LENGTH as BODY_MAX_LENGTH } from '../../store/writes';
 import { mapWriteError } from './write-errors';
+import { requireStillVisible } from '../recheck';
 
 export interface CreateNoteOutput {
   id: string;
@@ -52,9 +53,12 @@ export async function runCreateNote(
 
   logEvent({ event: 'note.create', id: result.id });
 
+  // Tras la ronda, con el filtro de AHORA: si la nota nueva ya no se ve (su carpeta pasó a
+  // privada), la respuesta de una que no existe (C3 de la revisión de Codex).
+  const check = await requireStillVisible(ctx, { id: result.id });
   return {
     id: result.id,
     title: result.title,
-    folderPath: ctx.privacy.folderPath(result.folderId)
+    folderPath: check.filter.folderPath(check.filter.visibleMeta(result.id)!.folderId)
   };
 }

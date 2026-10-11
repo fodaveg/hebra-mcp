@@ -37,6 +37,7 @@ import { appendAndAwaitRound } from '../write-context';
 import { requireValidOperationId, requireVisibleNote } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
+import { requireStillVisible } from '../recheck';
 
 export interface AppendToNoteOutput {
   id: string;
@@ -97,6 +98,11 @@ export async function runAppendToNote(
     ...(input.operationId !== undefined ? { replayed: result.replayed === true } : {})
   });
 
+  // Tras la ronda (que puede traer de otro dispositivo una etiqueta privada o una mudanza a
+  // una carpeta privada), con el filtro de AHORA: si la nota ya no se ve, la respuesta es la
+  // de una nota que no existe, aunque el texto se haya añadido (C3 de la revisión de Codex,
+  // SPEC.md §6.3).
+  await requireStillVisible(ctx, { id: input.id });
   const output: AppendToNoteOutput = { id: input.id, outcome };
   if (copyId !== undefined) output.copyId = copyId;
   if (result.outcome === 'saved') {
