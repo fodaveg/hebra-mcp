@@ -26,7 +26,12 @@ export interface ServerContext {
   /** `serve` (M5 del audit de privacidad, 11 oct 2026): `config.json` releído cuando
    *  cambia, en cada llamada (`src/privacy/config-source.ts`). Sin él (tests, ficheros de
    *  trabajo), `privacyConfig` tal cual. */
-  privacyConfigSource?: { current(): Promise<PrivacyConfig> };
+  privacyConfigSource?: {
+    current(): Promise<PrivacyConfig>;
+    /** Síncrono: ¿sigue el fichero siendo el de la configuración instalada? (la puerta final
+     *  lo mira dentro de su transacción). */
+    isInstalledNow?(): boolean;
+  };
   status: StatusSource;
   write?: WriteContext;
 }

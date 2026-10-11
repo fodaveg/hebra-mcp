@@ -223,6 +223,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** Carpetas privadas que este proceso anotó (A3): un lector no puede escribirlas en la
    *  tabla, y las recuerda mientras viva este puerto. Clave `ruta\0id`. */
   private readonly privateFoldersInProcess = new Map<string, RememberedPrivateFolder>();
+  /** Vaciados de la biblioteca (`libraryReset`) hechos por esta conexión: parte de la época
+   *  de privacidad (`epochRow`). */
+  private resets = 0;
 
   constructor(
     private readonly engine: SqliteLibraryEngine,
@@ -375,8 +378,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           folders: this.engine.foldersList(),
           notes: noteVisibilityRows(this.db),
           remembered,
-          epoch: privacyEpochOf(this.db, remembered),
-          stamps: noteStamps(this.db, request.notes)
+          epoch: this.epochRow(remembered),
+          stamps: noteStamps(this.db, request.notes),
+          check: request.check ? request.check() : true
         };
         if (request.files || request.blobs.length > 0) snapshot.files = this.filesRows();
         else if (request.trash) snapshot.trash = trashIndexRows(this.db);
@@ -391,7 +395,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** La época de privacidad (`privacyEpochOf`, `./privacy-sql.ts`), en una transacción de
    *  lectura dentro de un turno de la cola. */
   async privacyEpoch(): Promise<string> {
-    return this.read(() => inReadTransaction(this.db, () => privacyEpochOf(this.db, this.rememberedRows())));
+    return this.read(() => inReadTransaction(this.db, () => this.epochRow(this.rememberedRows())));
+  }
+
+  /** La época (`privacyEpochOf`) con lo que solo sabe este puerto: los vaciados de la
+   *  biblioteca que hizo esta conexión (`libraryReset` del sync), que dejan las sumas como
+   *  estaban si se vuelve a bajar lo mismo. Los de otra conexión los ve `data_version`. */
+  private epochRow(remembered: readonly RememberedPrivateFolder[]): string {
+    return `${privacyEpochOf(this.db, remembered)}:${this.resets}`;
   }
 
   /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`),
@@ -764,7 +775,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
 
   /** La vista `LibraryPort` del motor de sync (`./sync-port.ts`). Una por puerto. */
   syncStorePort(): SyncStorePort {
-    this.syncView ??= createSyncStorePort(this.engine, this.queue, () => this.writable);
+    this.syncView ??= createSyncStorePort(
+      this.engine,
+      this.queue,
+      () => this.writable,
+      () => {
+        this.resets += 1;
+      }
+    );
     return this.syncView;
   }
 

@@ -831,17 +831,25 @@ El dispositivo acumula tres secretos:
      `notes` (vivas, de la papelera y lápidas: la fila lleva su carpeta, etiquetas y bloqueo),
      `folders` (vivas y lápidas) y `files`, que sube con cualquier guardado de cualquier fila
      (también los del sync), y la memoria de carpetas privadas entera (tabla y proceso); lo que
-     anota la propia llamada al empezar no cuenta (se toma otra vez tras anotarlo). Con un
+     anota la propia llamada al empezar no cuenta (se toma otra vez tras anotarlo). Además,
+     `PRAGMA data_version` de SQLite, que cambia con cada escritura que confirma OTRA conexión
+     (otro proceso; el escritor, visto desde un lector): cubre lo que las sumas no ven, como
+     reindexar etiquetas sin subir `local_seq` o vaciar la biblioteca y volver a importar lo
+     mismo (R4-2 y R4-3 de la 4.ª revisión de Codex); cuenta de más, nunca de menos. Y los
+     vaciados (`libraryReset` del sync) que hace la propia conexión, que el puerto cuenta. Con un
      índice propio de hebra-mcp sobre `local_seq` en esas tres tablas (lo crea el escritor al
      abrir, como sus tablas), la suma no recorre las filas: 0,07 ms con 3 000 notas, frente a
-     6,6 ms sin él. Lo que no cubre: lo que el motor reescribe sin subir `local_seq` al abrir una
-     biblioteca de una versión anterior (las derivadas de una versión nueva de `deriveNote`), que
-     no pasa con el proceso sirviendo. Y la configuración tiene que ser la MISMA en la llamada,
-     en el paso 1 y justo después de la transacción (se vuelve a mirar su huella; se comparan las
-     rutas y etiquetas configuradas, no la memoria de carpetas, que el paso 2 rehace): cambia lo
-     que la llamada pudo enseñar sin tocar ninguna fila (el cuerpo de una versión antigua con una
-     etiqueta que acaba de ser privada, R3-3; una etiqueta de un recuento, R3-7; lo que cambió
-     entre el paso 1 y la transacción, R3-5; el nombre con el que choca un renombrado).
+     6,6 ms sin él. Lo que no cubre: lo que la propia conexión reescribe sin subir `local_seq` al
+     abrir una biblioteca de una versión anterior (las derivadas de una versión nueva de
+     `deriveNote`), antes de servir nada. Y la configuración tiene que ser la MISMA en la
+     llamada, en el paso 1 y DENTRO de la transacción (la huella de `config.json` se vuelve a
+     mirar ahí, síncrona, para que después de la transacción no quede ninguna espera antes de
+     responder: R4-1; se comparan las rutas y etiquetas configuradas, no la memoria de carpetas,
+     que el paso 2 rehace): cambia lo que la llamada pudo enseñar sin tocar ninguna fila (el
+     cuerpo de una versión antigua con una etiqueta que acaba de ser privada, R3-3; una etiqueta
+     de un recuento, R3-7; lo que cambió entre el paso 1 y la transacción, R3-5; el nombre con el
+     que choca un renombrado). Después de la transacción la puerta ya no espera nada: lo que
+     cambie a partir de ahí es posterior a la respuesta.
   5. Si algo no se cumple en una LECTURA, no se poda la respuesta (podar dejaba huecos en
      cursores, recuentos y resoluciones calculados con ello): se REPITE la llamada entera, también
      si dio un error, con un filtro y una época nuevos, hasta 3 veces (`GATE_ATTEMPTS`). Si la
@@ -869,8 +877,9 @@ El dispositivo acumula tres secretos:
   confirmar que ese objeto se siga viendo), es `not_found`; en crear y renombrar carpetas,
   `folder_unavailable` (el error único de D9), salvo que lo que ya no se ve sea la carpeta de la
   que se parte (`not_found`). Solo los errores que no dicen nada de ningún objeto
-  (`invalid_input`, `busy_other_instance`, `writer_outdated`, `privacy_config_unresolved`) salen
-  tal cual. Coste asumido: un error de una escritura con una ronda de sync en marcha puede ser
+  (`busy_other_instance`, `writer_outdated`, `privacy_config_unresolved`, e `invalid_input` si se
+  dio antes de usar ninguno: el escritor también lo da tras elegir la nota, con una revisión de
+  otra nota, y entonces dice que existía, R4-4) salen tal cual. Coste asumido: un error de una escritura con una ronda de sync en marcha puede ser
   `not_found` aunque la nota se siga viendo. **Repeticiones medidas**
   (`test/perf/gate-repeats.perf.ts`, `gateStats`; 3 000 notas, 300 llamadas de cada herramienta,
   escrituras de otra conexión, como una ronda de sync, intercaladas a mitad de llamada cada cierto
@@ -1704,7 +1713,11 @@ de Hebra (`docs/sondas/opcion-d-contrato.md`, en `59b5d403`) y de la aceptación
   la carpeta (sin metadatos) y con otro contenido tampoco se pisa sin `--forzar`.
   - Qué sale lo decide un filtro de privados hecho DESPUÉS de leer las notas, con la fila leída
     (carpeta efectiva y etiquetas de su cuerpo): una ronda de sync que vuelve privada una nota a
-    mitad del `checkout` no la deja en disco.
+    mitad del `checkout` no la deja en disco. Y con la época de privacidad de la puerta final
+    (§6.3): se toma antes de leer y se compara después del filtro, con la configuración releída;
+    si cambió (una fila pudo leerse en un estado privado que el filtro ya no ve), se vuelve a
+    leer todo, como mucho tres veces, y si no se queda quieta no se saca nada (error, «repite
+    checkout»).
   - Cada `checkout` repasa lo sacado antes: una nota que ya no puede salir (privada, en la
     papelera, bloqueada, archivada o borrada) se retira (fichero, base y metadatos) si su fichero
     no está editado; si lo está, se avisa con una cifra, sin nombrarla, y no se toca.
@@ -1811,9 +1824,12 @@ sale como copia de conflicto en el paso 5.
 el almacén de después y la configuración de AHORA (releída si `config.json` cambió, como en
 `serve`; la que se usó al abrir solo vale para escribir), una nota devuelta que ya no se ve (ni
 viva ni en la papelera) no sale en lo que se imprime: ni su ruta, ni su resultado, ni su diff, ni
-en los recuentos del resumen, ni en el aviso de que la ronda trajo otra versión; y de una copia de
-conflicto que ya no se ve no sale el id. Con una configuración que ya no se lee o no resuelve,
-ninguna sale. No se repite nada (ya se escribió), y el diario, `cambios.diff` y los ficheros del
+en los recuentos del resumen, ni en el aviso de que la ronda trajo otra versión (que se lee ANTES
+de la puerta: R4-1), ni en los avisos de las que no se devolvieron (base dañada, en conflicto de
+antes, demasiado grande: R4-6); y de una copia de conflicto que ya no se ve no sale el id. Con una
+configuración que ya no se lee o no resuelve, ninguna sale. Lo mismo el informe de `undo` (§13.5):
+lo que dice de una copia de conflicto (a la papelera, cambiada) solo sale si esa copia también se
+ve, y si el diario no sabe su id, no sale (R4-7). No se repite nada (ya se escribió), y el diario, `cambios.diff` y los ficheros del
 lote, escritos antes, no se tocan: son de quien tiene la carpeta de trabajo.
 
 **Excepción a D2.** Es la única vía de hebra-mcp que reescribe el cuerpo entero, y solo existe

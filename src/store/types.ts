@@ -74,6 +74,10 @@ export interface PrivacyRecheckRequest {
   trash: boolean;
   files: boolean;
   blobs: readonly string[];
+  /** Lo que la puerta comprueba fuera del almacén DENTRO de la misma transacción, síncrono
+   *  (que `config.json` siga siendo el de la configuración instalada): su resultado sale en
+   *  `PrivacyRecheckSnapshot.check`. Así, después de la transacción no queda ninguna espera. */
+  check?: () => boolean;
 }
 
 /** Lo que lee la puerta final (`src/server/privacy-gate.ts`), todo en UNA transacción de
@@ -87,6 +91,8 @@ export interface PrivacyRecheckSnapshot {
   remembered: RememberedPrivateFolder[];
   /** La época de privacidad del almacén en esta misma transacción (`privacyEpoch`). */
   epoch: string;
+  /** El resultado de `PrivacyRecheckRequest.check`, dentro de la transacción (`true` sin él). */
+  check: boolean;
   stamps: Map<string, NoteStamp>;
   trash?: TrashIndex;
   files?: FilesIndex;

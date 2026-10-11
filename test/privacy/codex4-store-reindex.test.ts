@@ -123,7 +123,10 @@ it('read_note no devuelve el cuerpo privado de una reimportación ABA con el mis
   });
   try {
     const raced = await h.call('hebra_read_note', { id });
-    expect(await h.port.privacyEpoch()).toBe(initialEpoch);
+    // Ajustado en la 3.ª vuelta de d64e187e: la época incluye ahora `data_version`, que cambia
+    // con cada escritura de otra conexión, así que el vaciado y la reimportación ya la mueven
+    // (lo que fijaba esta línea era la colisión, que ya no existe).
+    expect(await h.port.privacyEpoch()).not.toBe(initialEpoch);
     expect((await h.call('hebra_read_note', { id })).json.body).toBe(publicBody);
     expect(raced.raw, 'La puerta aceptó un cuerpo privado con id, local_seq y época iguales a los de la nota pública')
       .not.toContain('CEBO_RESET_ABA_PRIVADO');

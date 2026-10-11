@@ -159,9 +159,11 @@ export function noteStamps(db: DatabaseSync, ids: readonly string[]): Map<string
  * cualquier cambio de cualquier fila (y el número, con una fila nueva o purgada): `notes`
  * (vivas, de la papelera y lápidas, con sus etiquetas, carpeta y bloqueo, que se guardan con
  * la fila), `folders` (vivas y lápidas: nombre y padre) y `files`. Y la memoria de las carpetas
- * privadas (A3), la de la tabla y la del proceso (`remembered`), entera. Lo que no cubre: lo
- * que el motor reescribe sin subir `local_seq` al abrir una biblioteca de una versión anterior
- * (las derivadas de `deriveVersion`), que no ocurre con el proceso sirviendo.
+ * privadas (A3), la de la tabla y la del proceso (`remembered`), entera. Y `data_version` de
+ * SQLite, que cambia con cada escritura que confirma OTRA conexión. Lo que no cubre: lo que
+ * esta misma conexión reescribe sin subir `local_seq` (al abrir una biblioteca de una versión
+ * anterior, las derivadas de `deriveVersion`, antes de servir nada; vaciar la biblioteca lo
+ * cuenta el puerto, `NodeLibraryPort.epochRow`).
  */
 /**
  * Índices propios de hebra-mcp para la época (`privacyEpochOf`): con `local_seq` en un índice,
@@ -184,8 +186,19 @@ export function privacyEpochOf(db: DatabaseSync, remembered: readonly Remembered
               (SELECT count(*) || '.' || coalesce(sum(local_seq), 0) FROM files) AS files`
     )
     .get() as { notes: string; folders: string; files: string };
+  // Y cualquier escritura confirmada por OTRA conexión (otro proceso, el escritor visto desde
+  // un lector): cubre lo que las sumas no ven, como reindexar etiquetas sin subir `local_seq`
+  // o vaciar y volver a importar lo mismo (R4-2 y R4-3 de la 4.ª revisión de Codex). Cuenta
+  // de más (también lo que no toca la privacidad), nunca de menos.
+  const dataVersion = (db.prepare('PRAGMA data_version').get() as { data_version: number | bigint }).data_version;
   const memory = remembered.map((entry) => `${entry.pathKey}\u0000${entry.folderId}`).sort();
-  return JSON.stringify([String(sums.notes), String(sums.folders), String(sums.files), memory]);
+  return JSON.stringify([
+    String(sums.notes),
+    String(sums.folders),
+    String(sums.files),
+    String(dataVersion),
+    memory
+  ]);
 }
 
 /**

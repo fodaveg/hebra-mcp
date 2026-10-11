@@ -29,7 +29,7 @@
  * Límite: un cambio que no altera ni `mtime` ni `ctime` ni tamaño ni inodo (resolución de
  * nanosegundos en APFS y ext4) no se ve hasta el siguiente.
  */
-import { constants } from 'node:fs';
+import { accessSync, constants, lstatSync, statSync } from 'node:fs';
 import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parsePrivacyConfig, type PrivacyConfig } from './config';
@@ -64,6 +64,25 @@ async function stampOf(path: string): Promise<string | null> {
   }
 }
 
+/** `stampOf` sin esperar a nada: lo usa la puerta final DENTRO de su transacción de lectura
+ *  (`src/server/privacy-gate.ts`), para que después de ella no quede ninguna espera. */
+function stampOfSync(path: string): string | null {
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new PrivacyConfigUnreadable();
+  }
+  try {
+    const info = statSync(path, { bigint: true });
+    if (!info.isFile()) throw new PrivacyConfigUnreadable();
+    accessSync(path, constants.R_OK);
+    return `${info.mtimeNs}:${info.ctimeNs}:${info.size}:${info.ino}`;
+  } catch {
+    throw new PrivacyConfigUnreadable();
+  }
+}
+
 export class PrivacyConfigSource {
   private readonly path: string;
   /** Huella de la configuración INSTALADA (`null`: no existía el fichero). */
@@ -86,6 +105,20 @@ export class PrivacyConfigSource {
     const stamp = await stampOf(path);
     const config = stamp === null ? EMPTY : parsePrivacyConfig(await readFile(path, 'utf8'));
     return new PrivacyConfigSource(dataDir, config, stamp);
+  }
+
+  /**
+   * ¿Sigue `config.json` siendo el de la configuración instalada? Síncrono (un `lstat`, un
+   * `stat` y un `access`), para la transacción de la puerta final: `false` si la huella
+   * cambió, hay una recarga en vuelo o ya no se puede leer.
+   */
+  isInstalledNow(): boolean {
+    if (this.reloading || this.config === null) return false;
+    try {
+      return stampOfSync(this.path) === this.stamp;
+    } catch {
+      return false;
+    }
   }
 
   /** La de arrancar (o la última instalada), sin mirar el fichero. */

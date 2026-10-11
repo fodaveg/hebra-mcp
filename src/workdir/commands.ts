@@ -664,12 +664,17 @@ async function applyLocked(
   const toApply = candidates.filter((entry) => entry.edited!.length <= REPLACE_BODY_MAX_LENGTH);
   let unclean = damaged.length > 0 || stillConflicted.length > 0 || tooLarge.length > 0;
 
-  const reportSide = (): void => {
-    for (const entry of damaged) io.out(`  ${shown(io, workdir, entry.ruta)}  base dañada: no se devuelve (checkout --forzar)`);
-    for (const entry of stillConflicted) {
+  // `hidden`: tras abrir la biblioteca, las notas que la puerta final ya no deja nombrar
+  // (R4-6 de la 4.ª revisión de Codex); sin abrirla (`--simular`, nada que devolver), ninguna.
+  const reportSide = (hidden: ReadonlySet<string> = new Set()): void => {
+    const shownSide = (list: readonly ScanEntry[]): ScanEntry[] => list.filter((entry) => !hidden.has(entry.id));
+    for (const entry of shownSide(damaged)) {
+      io.out(`  ${shown(io, workdir, entry.ruta)}  base dañada: no se devuelve (checkout --forzar)`);
+    }
+    for (const entry of shownSide(stillConflicted)) {
       io.out(`  ${shown(io, workdir, entry.ruta)}  en conflicto de antes: no se devuelve hasta otro checkout`);
     }
-    for (const entry of tooLarge) io.out(`  ${shown(io, workdir, entry.ruta)}  demasiado grande para devolverla`);
+    for (const entry of shownSide(tooLarge)) io.out(`  ${shown(io, workdir, entry.ruta)}  demasiado grande para devolverla`);
     const missing = entries.filter((entry) => entry.state === 'falta');
     if (missing.length > 0) io.out(`  ${missing.length} faltan (renombradas o borradas): no se devuelven`);
     if (untracked.length > 0) io.out(`  ${untracked.length} sin seguimiento: D no crea notas desde ficheros`);
@@ -764,27 +769,31 @@ async function applyLocked(
     }
 
     const round = await syncRoundQuietly(lib);
+    // La ronda pudo traer otra versión de una nota recién devuelta (alguien la editó en
+    // otro dispositivo a la vez): el motor la resuelve con una copia de conflicto en Hebra.
+    // Se lee ANTES de la puerta final, que es lo último que mira el almacén.
+    const changedIds = new Set<string>();
+    for (const item of written) {
+      if (item.name !== 'aplicada' && item.name !== 'ya_estaba') continue;
+      const row = await lib.port.noteRead(item.entry.id);
+      if (!row || row.bodySha256 !== item.sha) changedIds.add(item.entry.id);
+    }
     // El informe, por la puerta final tras la ronda (`../server/privacy-gate.ts`), con la
     // configuración de AHORA: una nota que la ronda dejó oculta no sale (ni su ruta, ni su
-    // resultado, ni su diff, ni en los recuentos: R3-8 de la 3.ª revisión de Codex), y de una
-    // copia de conflicto oculta no sale el id (C4 cubría reutilizarla; esto, lo que se
-    // imprime). El diario y los ficheros del lote, escritos antes, no se tocan.
-    const hidden = await hiddenAfterRound(lib, written);
+    // resultado, ni su diff, ni en los recuentos, ni en el aviso de otra versión, ni en los
+    // avisos de las que no se devolvieron: R3-8 y R4-6 de la revisión de Codex), y de una copia
+    // de conflicto oculta no sale el id (C4 cubría reutilizarla; esto, lo que se imprime). El
+    // diario y los ficheros del lote, escritos antes, no se tocan.
+    const side = [...damaged, ...stillConflicted, ...tooLarge].map((entry) => ({ entry: { id: entry.id } }));
+    const hidden = await hiddenAfterRound(lib, [...written, ...side]);
     const reported = written.filter((item) => !hidden.has(item.entry.id));
     for (const item of reported) {
       if (item.copyId !== undefined && hidden.has(item.copyId)) delete item.copyId;
     }
     const reportedCounts = new Map<ApplyOutcomeName, number>();
     for (const item of reported) reportedCounts.set(item.name, (reportedCounts.get(item.name) ?? 0) + 1);
-    // La ronda pudo traer otra versión de una nota recién devuelta (alguien la editó en
-    // otro dispositivo a la vez): el motor la resuelve con una copia de conflicto en Hebra.
-    const changedBySync: string[] = [];
-    for (const item of reported) {
-      if (item.name !== 'aplicada' && item.name !== 'ya_estaba') continue;
-      const row = await lib.port.noteRead(item.entry.id);
-      if (!row || row.bodySha256 !== item.sha) changedBySync.push(item.entry.ruta);
-    }
-    if (changedBySync.length > 0) unclean = true;
+    const changedBySync = reported.filter((item) => changedIds.has(item.entry.id)).map((item) => item.entry.ruta);
+    if (changedIds.size > 0) unclean = true;
 
     const summary = [...reportedCounts]
       .map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`)
@@ -806,7 +815,7 @@ async function applyLocked(
     for (const ruta of changedBySync) {
       io.out(`  ${shown(io, workdir, ruta)}  la ronda de sync trajo otra versión: revisa las copias de conflicto en Hebra`);
     }
-    reportSide();
+    reportSide(hidden);
     if (failure) {
       io.out(`Cortado: ${failure}. Lo hecho consta en el diario; repite apply para completar lo pendiente.`);
       unclean = true;
@@ -1035,8 +1044,25 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
     const round = await syncRoundQuietly(lib);
     // El informe, por la puerta final tras la ronda, como el de `apply` (§13.4): una nota que
     // la ronda dejó oculta no se nombra. El diario del lote ya lo anotó todo.
-    const hidden = await hiddenAfterRound(lib, results.map((result) => ({ entry: { id: result.id } })));
-    const reported = results.filter((result) => !hidden.has(result.id));
+    // Lo que dice de la copia de conflicto, solo si la copia también se ve (R4-7 de la 4.ª
+    // revisión de Codex); una de la que el diario no sabe el id no se puede confirmar, y no
+    // sale (cerrado ante la duda).
+    const copyOf = new Map<string, string | undefined>();
+    for (const item of items.values()) copyOf.set(item.id, item.copyId);
+    const aboutCopy = (name: UndoOutcomeName): boolean => name === 'copia_a_la_papelera' || name === 'copia_cambiada';
+    const hidden = await hiddenAfterRound(
+      lib,
+      results.map((result) => {
+        const copyId = aboutCopy(result.name) ? copyOf.get(result.id) : undefined;
+        return copyId === undefined ? { entry: { id: result.id } } : { entry: { id: result.id }, copyId };
+      })
+    );
+    const reported = results.filter((result) => {
+      if (hidden.has(result.id)) return false;
+      if (!aboutCopy(result.name)) return true;
+      const copyId = copyOf.get(result.id);
+      return copyId !== undefined && !hidden.has(copyId);
+    });
     io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round, lib.role)}).`);
     for (const { ruta, name } of reported) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
     if (reported.length === 0) io.out('  Nada que deshacer.');

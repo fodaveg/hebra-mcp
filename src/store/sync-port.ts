@@ -38,7 +38,9 @@ export type SyncStorePort = LibraryPort;
 export function createSyncStorePort(
   engine: SqliteLibraryEngine,
   queue: SerialQueue,
-  writable: () => boolean
+  writable: () => boolean,
+  /** Tras un `libraryReset`: la época de privacidad de la puerta final lo cuenta. */
+  onReset: () => void = () => {}
 ): SyncStorePort {
   const read = <T>(operation: () => T | Promise<T>): Promise<T> => queue.run(operation);
   const write = <T>(operation: () => T | Promise<T>): Promise<T> =>
@@ -73,6 +75,15 @@ export function createSyncStorePort(
     // ni botón de ajustes que lo dispare): existe solo para que `SyncStorePort` siga
     // implementando el interfaz completo. D2 no lo prohíbe (`FORBIDDEN_NAME` de
     // `test/store/surface.node.test.ts` no incluye `libraryReset`).
-    libraryReset: () => write(() => engine.libraryReset())
+    // Vaciar y volver a bajar puede dejar las sumas de la época como estaban (filas nuevas con
+    // `local_seq` 1): se cuenta aparte (`NodeLibraryPort.epochRow`).
+    libraryReset: () =>
+      write(async () => {
+        try {
+          await engine.libraryReset();
+        } finally {
+          onReset();
+        }
+      })
   };
 }

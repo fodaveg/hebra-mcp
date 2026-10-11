@@ -379,7 +379,7 @@ async function runTool(
       // Una escritura no se repite. Su informe, reducido a lo que resiste el filtro nuevo; un
       // error ligado a un objeto que no se puede confirmar visible, el de algo que no existe.
       if (outcome.ok) return accept((policy.redact ?? redactWhole)(outcome, verdict));
-      if (isObjectFreeError(outcome.error)) return accept(outcome);
+      if (isObjectFreeError(outcome.error, usage)) return accept(outcome);
       return accept(policy.staleError?.(outcome.error, verdict) ?? NOT_FOUND_OUTCOME());
     }
     gateStats.repeats += 1;

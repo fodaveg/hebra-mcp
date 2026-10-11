@@ -278,7 +278,7 @@ export async function passGate(
   port: HebraLibraryPort,
   config: PrivacyConfig,
   usage: GateUsage,
-  options: { seals: boolean; epoch?: string }
+  options: { seals: boolean; epoch?: string; configStillInstalled?: () => boolean }
 ): Promise<GateVerdict> {
   const used = usage.declared();
   // Siempre la transacción entera, aunque no haya nada declarado (R3-6 de la 3.ª revisión de
@@ -293,7 +293,8 @@ export async function passGate(
     notes: [...sealed, ...used.operationTargets],
     trash: needsTrash,
     files: used.files.size > 0 || used.operationTargets.size > 0,
-    blobs: [...used.blobs]
+    blobs: [...used.blobs],
+    ...(options.configStillInstalled ? { check: options.configStillInstalled } : {})
   });
   const now = withRememberedFolders(config, snapshot.remembered);
   const live = PrivacyFilter.fromSnapshot(snapshot.folders, snapshot.notes, now);
@@ -357,10 +358,11 @@ export async function passGate(
     failedBlobs.size === 0 &&
     failedTags.size === 0;
   const epochChanged = options.epoch !== undefined && options.epoch !== snapshot.epoch;
+  const configChanged = !snapshot.check;
   return {
-    passed: declaredPassed && !epochChanged,
+    passed: declaredPassed && !epochChanged && !configChanged,
     declaredPassed,
-    configChanged: false,
+    configChanged,
     epochChanged,
     failedNotes,
     failedFiles,
@@ -384,9 +386,16 @@ export async function finalGate(
   options: { seals: boolean }
 ): Promise<GateVerdict> {
   const before = await gateConfig(server);
-  const verdict = await passGate(port, before, usage, { ...options, epoch: call.epoch });
-  const after = await gateConfig(server);
-  if (samePrivacyConfig(before, call.config) && samePrivacyConfig(before, after)) return verdict;
+  // `config.json` se mira otra vez DENTRO de la transacción, síncrono: después de ella no queda
+  // ninguna espera antes de responder (R4-1 de la 4.ª revisión de Codex: la segunda lectura de
+  // la huella, asíncrona y posterior, dejaba un hueco en el que podía cambiar el almacén).
+  const source = server.privacyConfigSource;
+  const verdict = await passGate(port, before, usage, {
+    ...options,
+    epoch: call.epoch,
+    ...(source?.isInstalledNow ? { configStillInstalled: () => source.isInstalledNow!() } : {})
+  });
+  if (samePrivacyConfig(before, call.config)) return verdict;
   return { ...verdict, passed: false, configChanged: true };
 }
 
@@ -419,20 +428,23 @@ export type GatePolicy =
     };
 
 /**
- * Los errores que no dependen de ningún objeto de la biblioteca (la entrada, el escritor, la
+ * Los errores que no dependen de ningún objeto de la biblioteca (el escritor, la
  * configuración): una escritura los devuelve tal cual aunque la puerta no pase. Todos los
  * demás (`no_match`, `ambiguous_heading`, `note_locked`, `operation_id_reused`,
  * `folder_name_taken`, `revision_conflict`…) dicen algo de una nota, carpeta o fichero.
+ * `invalid_input` es de la entrada solo si se dio ANTES de usar ningún objeto: el escritor
+ * también lo da después de haber elegido la nota (una revisión de otra nota, R4-4 de la 4.ª
+ * revisión de Codex), y entonces dice que esa nota existía.
  */
 const OBJECT_FREE_ERRORS: ReadonlySet<ToolErrorCode> = new Set<ToolErrorCode>([
-  'invalid_input',
   'busy_other_instance',
   'writer_outdated',
   'privacy_config_unresolved'
 ]);
 
-/** ¿Un error que no dice nada de ningún objeto? */
-export function isObjectFreeError(error: ToolError): boolean {
+/** ¿Un error que no dice nada de ningún objeto, con lo que la llamada usó hasta darlo? */
+export function isObjectFreeError(error: ToolError, usage: GateUsage): boolean {
+  if (error.code === 'invalid_input') return usage.empty;
   return OBJECT_FREE_ERRORS.has(error.code);
 }
 
