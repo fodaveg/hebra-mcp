@@ -37,10 +37,12 @@
  * - `createFolder` `{parentId, name, privacy}` y `renameFolder` `{id, name, privacy}` (D9,
  *   3 oct 2026) → `FolderOutcome` (`{id, changed, sync, syncError?}`), con la ronda ya
  *   esperada. Sin acciones de mover ni borrar carpetas.
- * - `addAttachment` `{id, name, dataBase64, mimeType, heading?, headingOccurrence?,
- *   operationId, privacy}` (D9; `heading` desde el 11 oct 2026) → `AddAttachmentOutcome`
- *   (más `headingHonored: true` si vino `heading`: un escritor anterior lo ignora sin
- *   decirlo y el lector lo avisa con `headingIgnored`), con la ronda ya esperada. Los bytes van en base64 del lector
+ * - `addAttachment` `{id, name, dataBase64, mimeType, operationId, privacy}` (D9) y
+ *   `addAttachmentInSection` (11 oct 2026), lo mismo más `heading` y `headingOccurrence?`
+ *   → `AddAttachmentOutcome` (con `placed` en la segunda), con la ronda ya esperada. Son
+ *   dos ops para fallar cerrado: `addAttachment` con `heading` es `invalid_request`, y un
+ *   escritor anterior, que no conoce la segunda, la rechaza en `parseEnvelope` antes de
+ *   escribir (el lector lo traduce a `writer_outdated`). Los bytes van en base64 del lector
  *   al escritor, nunca de vuelta, y el escritor los decodifica con la misma regla
  *   estricta que la herramienta.
  * - `organizeFile` `{action, id, privacy}` (D10, 9 oct 2026) → `FileOutcome`
@@ -202,6 +204,7 @@ export type WriterSocketOp =
   | 'createFolder'
   | 'renameFolder'
   | 'addAttachment'
+  | 'addAttachmentInSection'
   | 'organizeFile'
   | 'replaceInNotes'
   | 'fetchFile'
@@ -223,6 +226,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'createFolder',
   'renameFolder',
   'addAttachment',
+  'addAttachmentInSection',
   'organizeFile',
   'replaceInNotes',
   'replaceBody',
@@ -382,20 +386,7 @@ function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
   const privacy = privacyOf(params.privacy);
   const idempotency =
     operationId === undefined ? {} : { operationId: operationIdOf(operationId) };
-  if (heading === undefined) {
-    if (headingOccurrence !== undefined) throw new InvalidRequest();
-    return { id, text, ...idempotency, privacy };
-  }
-  if (typeof heading !== 'string' || heading.length > HEADING_MAX_LENGTH) throw new InvalidRequest();
-  if (headingOccurrence === undefined) return { id, text, heading, ...idempotency, privacy };
-  if (
-    typeof headingOccurrence !== 'number' ||
-    !Number.isSafeInteger(headingOccurrence) ||
-    headingOccurrence < 1
-  ) {
-    throw new InvalidRequest();
-  }
-  return { id, text, heading, headingOccurrence, ...idempotency, privacy };
+  return { id, text, ...headingFieldsOf(heading, headingOccurrence), ...idempotency, privacy };
 }
 
 /** Un `operationId`: texto de 1 a `OPERATION_ID_MAX_LENGTH` caracteres. */
@@ -463,9 +454,15 @@ function renameFolderInputOf(params: Record<string, unknown>): RenameFolderInput
  *  herramienta (`decodeAttachmentBase64`); uno mal formado es `invalid_request`, y uno
  *  de más de 5 MiB, `attachment_too_large` (el rechazo de siempre del escritor). Nombre,
  *  tipo y tamaño los vuelve a comprobar `NoteWriter.addAttachment`. */
-function addAttachmentInputOf(params: Record<string, unknown>): AddAttachmentInput {
+function addAttachmentInputOf(
+  params: Record<string, unknown>,
+  inSection: boolean
+): AddAttachmentInput {
   const { id, name, dataBase64, mimeType, operationId, heading, headingOccurrence } = params;
   if (!isId(id) || !isName(name) || typeof dataBase64 !== 'string') throw new InvalidRequest();
+  // Falla cerrado: `addAttachment` no admite apartado (un escritor anterior lo ignoraría y
+  // pondría la referencia al final de la nota) y `addAttachmentInSection` lo exige.
+  if (inSection !== (heading !== undefined)) throw new InvalidRequest();
   const section = headingFieldsOf(heading, headingOccurrence);
   if (
     mimeType !== null &&
@@ -955,7 +952,10 @@ export class WriterSocketServer {
           result = await handlers.renameFolder(renameFolderInputOf(envelope.params));
           break;
         case 'addAttachment':
-          result = await handlers.addAttachment(addAttachmentInputOf(envelope.params));
+          result = await handlers.addAttachment(addAttachmentInputOf(envelope.params, false));
+          break;
+        case 'addAttachmentInSection':
+          result = await handlers.addAttachment(addAttachmentInputOf(envelope.params, true));
           break;
         case 'organizeFile':
           result = await handlers.organizeFile(organizeFileInputOf(envelope.params));

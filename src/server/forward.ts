@@ -45,11 +45,13 @@
 import {
   isWriterUnavailable,
   requestWriter,
+  WriterRemoteError,
   type WriterSocketHandlers,
   type WriterSocketOp,
   type WriterSyncStatus
 } from '../ipc/writer-socket';
 import { logEvent } from '../log/logger';
+import { ToolError } from './errors';
 import type { HebraStatus, StatusSource } from '../status/status-source';
 import type {
   ReplaceBodyInput,
@@ -118,6 +120,7 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   renameFolder: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Hasta 7 MB de petición, el `blobPut` (con `fsync`) y la ronda.
   addAttachment: AWAIT_ROUND_TIMEOUT_MS + 30_000,
+  addAttachmentInSection: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   organizeFile: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // `hebra_replace_in_notes` (D14): aplicar tiene un plazo de 20 s y espera una ronda al
   // final; la simulación, un hueco para su hilo y 2 s de recorrido.
@@ -717,9 +720,15 @@ export function buildRoutedWriteContext(
     // Los bytes viajan en base64 (el escritor los vuelve a validar). Como una edición, si
     // la conexión se corta tras enviarla no se repite: el agente reintenta con el mismo
     // `operationId` sin duplicar la referencia.
-    addAttachment: (input: AddAttachmentInput) =>
-      routed(
-        'addAttachment',
+    //
+    // Con `heading`, op propia (`addAttachmentInSection`, 11 oct 2026): un escritor anterior
+    // no la conoce y la rechaza antes de escribir (`invalid_request`), en vez de ignorar el
+    // apartado y poner la referencia al final de la nota. Eso se traduce a
+    // `writer_outdated`: la nota queda sin tocar y el cliente sabe por qué.
+    addAttachment: (input: AddAttachmentInput) => {
+      const inSection = input.heading !== undefined;
+      return routed(
+        inSection ? 'addAttachmentInSection' : 'addAttachment',
         {
           id: input.id,
           name: input.name,
@@ -732,22 +741,15 @@ export function buildRoutedWriteContext(
           operationId: input.operationId,
           privacy: input.privacy
         },
-        (value) => {
-          const result = asAttachmentOutcome(value, input.id);
-          // Un escritor de una versión anterior ignora `heading` sin decirlo: la referencia
-          // fue al final de la nota. El actual devuelve `headingHonored`; si no vuelve, ya
-          // está guardado (no se puede rechazar), así que se avisa en la salida y en el log.
-          if (
-            input.heading !== undefined &&
-            (!isRecord(value) || value.headingHonored !== true)
-          ) {
-            logEvent({ event: 'forward.heading_ignored', op: 'addAttachment' });
-            return { ...result, headingIgnored: true as const };
-          }
-          return result;
-        },
+        (value) => asAttachmentOutcome(value, input.id),
         () => local.addAttachment(input)
-      ),
+      ).catch((error: unknown) => {
+        if (inSection && error instanceof WriterRemoteError && error.code === 'invalid_request') {
+          throw new ToolError('writer_outdated');
+        }
+        throw error;
+      });
+    },
     // Ficheros sueltos (D10): como `organize`, todo en el escritor y con la privacidad de
     // ESTE lector. Solo viajan la acción y el id.
     organizeFile: (input: OrganizeFileInput) =>
@@ -878,12 +880,7 @@ export function writerSocketHandlers(
     fetchAttachment: (input) => local.fetchAttachment(input),
     createFolder: (input) => local.createFolder(input),
     renameFolder: (input) => local.renameFolder(input),
-    // Devuelve `headingHonored` con `heading`: así el lector sabe que este escritor lo
-    // entiende (uno anterior lo ignoraría y pondría la referencia al final de la nota).
-    addAttachment: async (input) => {
-      const result = await local.addAttachment(input);
-      return input.heading === undefined ? result : { ...result, headingHonored: true as const };
-    },
+    addAttachment: (input) => local.addAttachment(input),
     organizeFile: (input) => local.organizeFile(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();

@@ -11,6 +11,9 @@ export type ToolErrorCode =
   | 'privacy_config_unresolved'
   | 'invalid_input'
   | 'busy_other_instance'
+  // Adjunto en un apartado (11 oct 2026): el escritor es de una versión anterior que no
+  // conoce la op; se rechaza antes de escribir.
+  | 'writer_outdated'
   // Edición y organización (D2 ampliada, 28 sep 2026; `src/store/errors.ts`).
   | 'revision_conflict'
   | 'no_match'

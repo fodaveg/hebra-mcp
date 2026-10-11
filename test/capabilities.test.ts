@@ -109,6 +109,8 @@ describe('capacidades', () => {
   it('las `instructions` explican cómo leer y escribir por apartados (D11)', () => {
     expect(SERVER_INSTRUCTIONS).toContain('hebra_note_outline');
     expect(SERVER_INSTRUCTIONS).toContain('`heading`');
+    // Un adjunto también va a un apartado.
+    expect(SERVER_INSTRUCTIONS).toMatch(/hebra_add_attachment con `heading`/);
     expect(SERVER_INSTRUCTIONS).toContain('appended.tail');
   });
 

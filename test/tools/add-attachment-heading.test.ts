@@ -184,6 +184,10 @@ describe('hebra_add_attachment con heading (D11)', () => {
     expect((await rejection(runAddAttachment(ctx, { ...input, heading: 'Uno.a' }))).code).toBe(
       'operation_id_reused'
     );
+    // La huella compara el heading tal cual: otras mayúsculas son otra petición (B7).
+    expect((await rejection(runAddAttachment(ctx, { ...input, heading: 'uno' }))).code).toBe(
+      'operation_id_reused'
+    );
     // Sin heading también es otra petición.
     const { heading: _heading, ...withoutHeading } = input;
     expect((await rejection(runAddAttachment(ctx, withoutHeading))).code).toBe('operation_id_reused');

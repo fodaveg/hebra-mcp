@@ -381,8 +381,6 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
       body.replace('texto uno\n\n## Dos', `texto uno\n\n${ref}\n\n## Dos`)
     );
     expect(saved.value).toMatchObject({ outcome: 'saved', markdown: ref, placed: { line: 6, heading: 'Uno' } });
-    expect(saved.value).not.toHaveProperty('headingIgnored');
-    expect(saved.value).not.toHaveProperty('headingHonored');
 
     // Reintento: lo sirve el registro del escritor; con otro apartado, operation_id_reused.
     const retry = await call(client, 'hebra_add_attachment', { ...args, heading: 'uno' });
@@ -405,7 +403,6 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     const second = await call(client, 'hebra_add_attachment', { ...other, heading: 'Dos', headingOccurrence: 2 });
     expect(second.value).toMatchObject({ outcome: 'saved', placed: { heading: 'Dos' } });
     expect((await writer.port.noteRead(created.id))!.body.endsWith(`otro\n\n${ref}\n`)).toBe(true);
-    expect(stderrText()).not.toContain('forward.heading_ignored');
     expect(stderrText()).not.toContain('"heading":"');
   });
 
@@ -1367,11 +1364,22 @@ describe('protocolo de writer.sock', () => {
       operationId: 'op-1',
       privacy: OPEN
     };
+    const inSection = { ...valid, heading: 'Uno', headingOccurrence: 2 };
+    expect(await requestWriter(path, 'addAttachmentInSection', inSection, 2_000)).toMatchObject({
+      outcome: 'saved'
+    });
     expect(
-      await requestWriter(path, 'addAttachment', { ...valid, heading: 'Uno', headingOccurrence: 2 }, 2_000)
+      await requestWriter(path, 'addAttachmentInSection', { ...valid, heading: 'Uno' }, 2_000)
     ).toMatchObject({ outcome: 'saved' });
+    // Falla cerrado: `addAttachment` no acepta apartado y la op nueva lo exige.
+    await expect(requestWriter(path, 'addAttachment', inSection, 2_000)).rejects.toMatchObject({
+      code: 'invalid_request'
+    });
+    await expect(requestWriter(path, 'addAttachmentInSection', valid, 2_000)).rejects.toMatchObject({
+      code: 'invalid_request'
+    });
     for (const extra of [
-      { headingOccurrence: 1 },
+      { headingOccurrence: 1, heading: undefined },
       { heading: 7 },
       { heading: 'x'.repeat(1_025) },
       { heading: 'Uno', headingOccurrence: 0 },
@@ -1379,7 +1387,7 @@ describe('protocolo de writer.sock', () => {
       { heading: 'Uno', headingOccurrence: '2' }
     ]) {
       await expect(
-        requestWriter(path, 'addAttachment', { ...valid, ...extra }, 2_000)
+        requestWriter(path, 'addAttachmentInSection', { ...valid, ...extra }, 2_000)
       ).rejects.toMatchObject({ code: 'invalid_request' });
     }
   });
@@ -1523,7 +1531,9 @@ describe('lector: qué hace cuando el escritor no responde', () => {
   }
 
   /** `WriteContext` local de mentira que cuenta cuántas notas «creó». */
-  function localSpy(): WriteContext & { readonly created: number } {
+  function localSpy(
+    overrides: Partial<Parameters<typeof buildWriteContext>[0]> = {}
+  ): WriteContext & { readonly created: number } {
     const counter = { created: 0 };
     const write = buildWriteContext({
       createNote: async () => {
@@ -1565,7 +1575,8 @@ describe('lector: qué hace cuando el escritor no responde', () => {
       looseFileDirty: async () => null,
       onConflictCopy: () => () => undefined,
       isLinked: () => false,
-      requestRound: async () => null
+      requestRound: async () => null,
+      ...overrides
     });
     // `defineProperty`, no `Object.assign`: este copiaría el valor del getter una vez.
     return Object.defineProperty(write, 'created', { get: () => counter.created }) as WriteContext & {
@@ -1684,23 +1695,72 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     );
   });
 
-  it('escritor de una versión anterior que ignora el heading de un adjunto: se avisa en la salida y en el log', async () => {
+  it('escritor de una versión anterior que no conoce la op de adjunto con apartado: error claro, sin escribir ni tomar el relevo', async () => {
     const dataDir = tempDataDir();
     const path = join(dataDir, WRITER_SOCKET_FILE);
-    const received: Array<Record<string, unknown>> = [];
-    // Un escritor anterior: pone la referencia donde sabe y no devuelve `headingHonored`.
+    const ops: string[] = [];
+    // Un escritor anterior: su `parseEnvelope` rechaza la op desconocida ANTES de escribir.
+    const old = createServer((socket) => {
+      socket.once('data', (chunk) => {
+        ops.push((JSON.parse(String(chunk)) as { op: string }).op);
+        socket.end(`${JSON.stringify({ id: null, ok: false, error: 'invalid_request' })}\n`);
+      });
+    });
+    servers.push(old);
+    await new Promise<void>((resolve) => old.listen(path, resolve));
+    let written = 0;
+    const local = localSpy({
+      addAttachment: async (input) => {
+        written += 1;
+        return {
+          result: {
+            note: { id: input.id, outcome: 'saved' as const, revision: 'r1.x' },
+            attachmentId: 'a'.repeat(64),
+            markdown: ''
+          },
+          wrote: true
+        };
+      }
+    });
+    const instance = fakeInstance(path, 'other_instance');
+    const write = buildRoutedWriteContext(instance, local);
+    const input = {
+      id: 'n1',
+      name: 'x.txt',
+      bytes: new TextEncoder().encode('hola'),
+      mimeType: 'text/plain',
+      operationId: 'op-viejo-att',
+      privacy: OPEN
+    };
+    const error = await write
+      .addAttachment({ ...input, heading: 'Uno', headingOccurrence: 2 })
+      .catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'writer_outdated' });
+    expect(ops).toEqual(['addAttachmentInSection']);
+    expect(written).toBe(0);
+    expect(instance.checkWriter).not.toHaveBeenCalled();
+    expect(stderrText()).not.toContain('"n1"');
+  });
+
+  it('adjunto sin heading sigue por addAttachment; con heading, por addAttachmentInSection', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const seen: Array<{ heading?: string; headingOccurrence?: number }> = [];
     const server = await WriterSocketServer.listen({
       path,
       handlers: {
         ...writerSocketHandlers(localSpy(), fakeInstance(path, 'this')),
         addAttachment: async (input) => {
-          received.push({ heading: input.heading, headingOccurrence: input.headingOccurrence });
+          seen.push({ heading: input.heading, headingOccurrence: input.headingOccurrence });
           return {
             id: input.id,
             outcome: 'saved',
             revision: 'r1.x',
             attachmentId: 'a'.repeat(64),
             markdown: '![[sha256:a|x]]',
+            ...(input.heading !== undefined
+              ? { placed: { line: 3, heading: input.heading } }
+              : {}),
             sync: 'not_linked'
           };
         }
@@ -1713,33 +1773,44 @@ describe('lector: qué hace cuando el escritor no responde', () => {
       name: 'x.txt',
       bytes: new TextEncoder().encode('hola'),
       mimeType: 'text/plain',
-      operationId: 'op-viejo-att',
+      operationId: 'op-att-ruta',
       privacy: OPEN
     };
-    const withHeading = await write.addAttachment({ ...input, heading: 'Uno', headingOccurrence: 2 });
-    expect(received).toEqual([{ heading: 'Uno', headingOccurrence: 2 }]);
-    expect(withHeading).toMatchObject({ outcome: 'saved', headingIgnored: true });
-    expect(stderrText()).toContain('"event":"forward.heading_ignored","op":"addAttachment"');
-    expect(stderrText()).not.toContain('"n1"');
-
-    // Sin heading no hay nada que avisar.
-    const plain = await write.addAttachment({ ...input, operationId: 'op-viejo-att-2' });
-    expect(plain).not.toHaveProperty('headingIgnored');
-    expect(stderrText().split('forward.heading_ignored').length - 1).toBe(1);
+    expect(await write.addAttachment(input)).not.toHaveProperty('placed');
+    expect(await write.addAttachment({ ...input, heading: 'Uno', headingOccurrence: 2 })).toMatchObject({
+      placed: { line: 3, heading: 'Uno' }
+    });
+    expect(seen).toEqual([
+      { heading: undefined, headingOccurrence: undefined },
+      { heading: 'Uno', headingOccurrence: 2 }
+    ]);
   });
 
-  it('el escritor actual devuelve headingHonored en un adjunto con heading, y el socket valida heading', async () => {
-    const handlers = writerSocketHandlers(localSpy(), fakeInstance('', 'this'));
+  it('placed solo sale en un guardado nuevo: ni con replayed ni con copia de conflicto', async () => {
+    const placed = { line: 3, heading: 'Uno' };
     const input = {
       id: 'n1',
       name: 'x.txt',
       bytes: new TextEncoder().encode('hola'),
       mimeType: 'text/plain',
-      operationId: 'op-eco-att',
+      operationId: 'op-placed',
+      heading: 'Uno',
       privacy: OPEN
     };
-    expect(await handlers.addAttachment({ ...input, heading: 'Uno' })).toMatchObject({ headingHonored: true });
-    expect(await handlers.addAttachment(input)).not.toHaveProperty('headingHonored');
+    const stub = (note: Record<string, unknown>) =>
+      localSpy({
+        addAttachment: async () => ({
+          result: { note: { id: 'n1', ...note } as never, attachmentId: 'a'.repeat(64), markdown: '', placed },
+          wrote: false
+        })
+      });
+    expect(await stub({ outcome: 'saved', revision: 'r1.x' }).addAttachment(input)).toMatchObject({ placed });
+    expect(
+      await stub({ outcome: 'saved', revision: 'r1.x', replayed: true }).addAttachment(input)
+    ).not.toHaveProperty('placed');
+    expect(
+      await stub({ outcome: 'conflict_copy', copyId: 'c1' }).addAttachment(input)
+    ).not.toHaveProperty('placed');
   });
 
   it('sin escritor: toma el relevo y escribe en local', async () => {

@@ -164,9 +164,6 @@ export type AddAttachmentOutcome = EditNoteOutcome & {
   markdown: string;
   /** Con `heading` y un guardado nuevo: la línea de la referencia y el apartado. */
   placed?: AttachmentPlacement;
-  /** Solo en un lector: el escritor era de una versión que no conoce `heading` y la
-   *  referencia fue al final de la nota. Nunca sale con `heading` aplicado. */
-  headingIgnored?: true;
 };
 
 /** `hebra_replace_in_notes` (D14): la simulación (o una página del plan) tal cual, y el
@@ -548,7 +545,10 @@ export function buildWriteContext(
         ...outcome,
         attachmentId: added!.attachmentId,
         markdown: added!.markdown,
-        ...(added!.placed ? { placed: added!.placed } : {})
+        // Como `appended` en `appendAndAwaitRound`: solo de un guardado nuevo en la nota.
+        ...(added!.placed && outcome.outcome === 'saved' && outcome.replayed !== true
+          ? { placed: added!.placed }
+          : {})
       };
     },
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {

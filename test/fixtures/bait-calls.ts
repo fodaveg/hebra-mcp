@@ -65,6 +65,18 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       name: 'hebra_append_to_note',
       arguments: { id: library.privateFolderNoteId, text: BAIT_TAG, heading: BAIT_FOLDER }
     },
+    // Adjunto en un apartado (D11): sobre una nota oculta, `not_found` y el cebo como
+    // título de apartado no sale en ninguna salida ni log.
+    {
+      name: 'hebra_add_attachment',
+      arguments: {
+        id: library.privateFolderNoteId,
+        name: 'a.png',
+        dataBase64: Buffer.from(ATTACHMENT_PNG).toString('base64'),
+        heading: BAIT_FOLDER,
+        operationId: 'bait-heading-1'
+      }
+    },
     { name: 'hebra_list_tags', arguments: {} },
     { name: 'hebra_list_folders', arguments: {} },
     { name: 'hebra_links', arguments: { id: library.publicNoteId } },
