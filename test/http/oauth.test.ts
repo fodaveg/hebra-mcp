@@ -717,52 +717,53 @@ describe('caché de la introspección positiva', () => {
 
   it('dos introspecciones simultáneas no aceptan el positivo llegado tras la baja de su familia', async () => {
     const issued = await issuedTokens();
-    const firstBroker = deferred<Response>();
-    const secondBroker = deferred<Response>();
+    // Qué verificación llega antes al broker no está garantizado (cada una lee antes el almacén), así que
+    // las respuestas se reparten por orden de LLEGADA y no por orden de lanzamiento.
+    const brokers: Array<ReturnType<typeof deferred<Response>>> = [];
     const bothStarted = deferred<void>();
-    let calls = 0;
     introspectionResponse = () => {
-      calls += 1;
-      if (calls === 2) bothStarted.resolve();
-      return calls === 1 ? firstBroker.promise : secondBroker.promise;
+      const pending = deferred<Response>();
+      brokers.push(pending);
+      if (brokers.length === 2) bothStarted.resolve();
+      return pending.promise;
     };
-    const first = provider.verifyAccessToken(issued.access_token);
-    const second = provider.verifyAccessToken(issued.access_token);
-    const firstRejected = expect(first).rejects.toThrow();
-    const secondOutcome = second.then(() => 'accepted', () => 'rejected');
+    const outcomes = [0, 1].map(() =>
+      provider.verifyAccessToken(issued.access_token).then(() => 'accepted', () => 'rejected'));
     await bothStarted.promise;
-    firstBroker.resolve(response({ active: false }));
-    await firstRejected;
-    secondBroker.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
+    brokers[0]!.resolve(response({ active: false }));
+    // Solo puede terminar la que recibió la baja: la otra sigue esperando su respuesta.
+    await Promise.race(outcomes);
+    brokers[1]!.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
       scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault,
       opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt }));
-    const outcome = await secondOutcome;
+    const settled = await Promise.all(outcomes);
     expect(cachedIntrospections().size).toBe(0);
     expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
-    expect(outcome).toBe('rejected');
+    expect(settled).toEqual(['rejected', 'rejected']);
   });
 
   it('dar de baja una familia no rechaza la introspección en vuelo de otra', async () => {
     const removed = await issuedTokens();
     const surviving = await issuedTokens();
-    const firstBroker = deferred<Response>();
-    const secondBroker = deferred<Response>();
+    // Las respuestas se reparten por orden de llegada al broker, que no es el de lanzamiento.
+    const brokers: Array<ReturnType<typeof deferred<Response>>> = [];
     const bothStarted = deferred<void>();
-    let calls = 0;
     introspectionResponse = () => {
-      calls += 1;
-      if (calls === 2) bothStarted.resolve();
-      return calls === 1 ? firstBroker.promise : secondBroker.promise;
+      const pending = deferred<Response>();
+      brokers.push(pending);
+      if (brokers.length === 2) bothStarted.resolve();
+      return pending.promise;
     };
-    const first = expect(provider.verifyAccessToken(removed.access_token)).rejects.toThrow();
-    const second = expect(provider.verifyAccessToken(surviving.access_token)).resolves.toMatchObject({ clientId: DCR_CLIENT_ID });
+    const outcomes = [removed, surviving].map((issued) =>
+      provider.verifyAccessToken(issued.access_token).then(() => 'accepted', () => 'rejected'));
     await bothStarted.promise;
-    firstBroker.resolve(response({ active: false }));
-    await first;
-    secondBroker.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
+    brokers[0]!.resolve(response({ active: false }));
+    await Promise.race(outcomes);
+    brokers[1]!.resolve(response({ active: true, credentialId: GRANT_ID, clientId, resource,
       scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: brokerPair, syncVaultId: brokerVault,
       opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt }));
-    await second;
+    // Una familia cae y la otra sigue en pie, sea cual sea la que recibió la baja.
+    expect((await Promise.all(outcomes)).sort()).toEqual(['accepted', 'rejected']);
     expect(cachedIntrospections().size).toBe(1);
   });
 
