@@ -1465,6 +1465,14 @@ Comando `hebra-mcp pair`, interactivo en terminal:
   escritor (§5). Las rondas no los bajan. Sí suben los que añade `hebra_add_attachment`: la ronda
   de después de la escritura sube los blobs referenciados, presentes y sin subir de este
   dispositivo, con el transporte de blobs del `SyncRunner`.
+  **Tope y 429** (tarea de Lumbre 342a931c; el 5 oct 2026 mcp.hebra.pro lanzó unos 253 GET de
+  Blob V2 en paralelo y el relé respondió 429 a casi todos): `SyncRunner.readBlob` baja como
+  mucho 4 a la vez y el resto espera en cola FIFO (la subida ya tenía su tope en el motor,
+  `BLOB_UPLOAD_CONCURRENCY = 3`). Un 429 se reintenta hasta 3 veces, tras esperar el
+  `Retry-After` (como mucho 30 s) o, sin él, 2, 4 y 8 s; agotados, la herramienta responde lo
+  mismo que ante cualquier otro fallo del relé (`attachment_unavailable` en
+  `hebra_read_attachment`). La que espera conserva su plaza: un 429 es del relé, no del objeto, y
+  soltarla dejaría pasar la cola entera mientras el relé rechaza.
 - **Índice de subcadena de Hebra** (`notes_trigram`, H5 del audit de buscadores de Hebra;
   submódulo desde `aea2181c`): el motor crea la tabla al abrir, pero en una biblioteca que
   ya tenía notas la deja vacía y sin la marca de completo (`docs/FACHADA-NODE.md` §3 del

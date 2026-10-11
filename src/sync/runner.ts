@@ -24,9 +24,11 @@
  * llavero son L2.
  */
 import {
+  BlobRelayV2Error,
   HttpBlobRelayV2,
   HttpLibraryTransport,
   LibrarySyncEngine,
+  ReadBlobStageError,
   type BlobRelayConnectionProviderV2,
   type LibraryBlobTransport,
   type LibrarySyncEvent,
@@ -39,6 +41,64 @@ import type { SyncStorePort } from '../store/sync-port';
 
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
+
+/**
+ * Descargas de adjuntos (`readBlob`) a la vez, como mucho; el resto espera en cola, por
+ * orden de llegada (tarea de Lumbre 342a931c). El 5 oct 2026 mcp.hebra.pro lanzó unos 253
+ * GET de Blob V2 en paralelo en 20 s y el relé respondió 429 a casi todos. La subida ya
+ * tenía su tope en el motor (`BLOB_UPLOAD_CONCURRENCY = 3`, `sync-engine.ts` de Hebra).
+ */
+export const BLOB_DOWNLOAD_CONCURRENCY = 4;
+/** Reintentos de una descarga que recibe 429, después del primer intento. */
+export const BLOB_DOWNLOAD_RETRIES = 3;
+/** Espera antes de cada reintento si el 429 no trae `Retry-After`. */
+export const BLOB_DOWNLOAD_BACKOFF_MS: readonly number[] = [2_000, 4_000, 8_000];
+/** Tope de la espera que pide un `Retry-After`. */
+export const BLOB_RETRY_AFTER_MAX_MS = 30_000;
+
+/** Semáforo con cola FIFO: `acquire` resuelve con la función que libera la plaza. */
+class FifoSemaphore {
+  private active = 0;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  acquire(): Promise<() => void> {
+    return new Promise((resolve) => {
+      const grant = () => {
+        this.active += 1;
+        let released = false;
+        resolve(() => {
+          if (released) return;
+          released = true;
+          this.active -= 1;
+          this.waiting.shift()?.();
+        });
+      };
+      if (this.active < this.limit) grant();
+      else this.waiting.push(grant);
+    });
+  }
+}
+
+/** ¿El relé respondió 429 al bajar el objeto? El motor envuelve el fallo de `getObject`
+ *  en `ReadBlobStageError` y el transporte lo da como `BlobRelayV2Error` con el estado HTTP
+ *  y, si vino, el `Retry-After` ya en ms. */
+function rateLimitOf(error: unknown): { retryAfterMs: number | undefined } | null {
+  if (!(error instanceof ReadBlobStageError) || error.stage !== 'getObject') return null;
+  const cause = error.cause;
+  if (!(cause instanceof BlobRelayV2Error)) return null;
+  if (cause.httpStatus !== 429 && cause.code !== 'rate_limited') return null;
+  return { retryAfterMs: cause.retryAfterMs };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    // Una espera no mantiene vivo el proceso.
+    timer.unref?.();
+  });
+}
 
 /** Los eventos del catálogo cerrado de §6.4. `sync.blob_unreadable` llegó con el
  *  submódulo en `59b5d403`: un adjunto pendiente sin bytes válidos, solo su tamaño. */
@@ -160,6 +220,7 @@ export class SyncRunner implements SyncStatusSource {
   private readonly firstRound: Promise<void>;
   private resolveFirstRound!: () => void;
   private readonly conflictListeners = new Set<(copy: SyncConflictCopy) => void>();
+  private readonly downloads = new FifoSemaphore(BLOB_DOWNLOAD_CONCURRENCY);
 
   private constructor(
     private readonly engine: LibrarySyncEngine,
@@ -327,18 +388,43 @@ export class SyncRunner implements SyncStatusSource {
    * quedaron en el disco. Nunca lanza: sin transporte de blobs, revocado, sin red o si el
    * relé no lo tiene, `false`. Log cerrado `attachment.fetch` con el resultado, sin hash
    * ni nombre.
+   *
+   * Como mucho `BLOB_DOWNLOAD_CONCURRENCY` a la vez; las demás esperan su turno en cola
+   * FIFO. Un 429 del relé se reintenta hasta `BLOB_DOWNLOAD_RETRIES` veces, tras esperar el
+   * `Retry-After` (con tope `BLOB_RETRY_AFTER_MAX_MS`) o, sin él, 2, 4 y 8 s; agotados,
+   * `error`, como cualquier otro fallo. La descarga que espera CONSERVA su plaza: un 429 es
+   * del relé, no de ese objeto, y las de la cola recibirían otro; si la soltara, la cola
+   * entera pasaría por el relé mientras rechaza y gastaría sus reintentos, que es lo que
+   * pasó el 5 oct. Así, mientras dura la espera, nadie más baja nada.
    */
   async readBlob(sha256: string): Promise<boolean> {
     let outcome: 'ok' | 'missing' | 'error' | 'revoked' = 'revoked';
+    const release = await this.downloads.acquire();
     try {
-      if (this.stopped || this.revokedFlag) return false;
-      const bytes = await this.engine.readBlob(sha256);
-      outcome = bytes ? 'ok' : 'missing';
-      return bytes !== null;
-    } catch {
-      outcome = 'error';
-      return false;
+      for (let retry = 0; ; retry += 1) {
+        if (this.stopped || this.revokedFlag) {
+          outcome = 'revoked';
+          return false;
+        }
+        try {
+          const bytes = await this.engine.readBlob(sha256);
+          outcome = bytes ? 'ok' : 'missing';
+          return bytes !== null;
+        } catch (error) {
+          const limited = rateLimitOf(error);
+          if (!limited || retry >= BLOB_DOWNLOAD_RETRIES) {
+            outcome = 'error';
+            return false;
+          }
+          await sleep(
+            limited.retryAfterMs !== undefined
+              ? Math.min(Math.max(limited.retryAfterMs, 0), BLOB_RETRY_AFTER_MAX_MS)
+              : BLOB_DOWNLOAD_BACKOFF_MS[retry]!
+          );
+        }
+      }
     } finally {
+      release();
       try {
         this.options.emitAttachment?.(outcome);
       } catch {
