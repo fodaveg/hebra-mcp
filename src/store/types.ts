@@ -74,6 +74,8 @@ export interface PrivacyRecheckRequest {
   trash: boolean;
   files: boolean;
   blobs: readonly string[];
+  /** Ids del registro que pueden ser planes; se resuelven junto al filtro final. */
+  operationTargets?: readonly string[];
   /** Lo que la puerta comprueba fuera del almacén DENTRO de la misma transacción, síncrono
    *  (que `config.json` siga siendo el de la configuración instalada): su resultado sale en
    *  `PrivacyRecheckSnapshot.check`. Así, después de la transacción no queda ninguna espera. */
@@ -97,6 +99,8 @@ export interface PrivacyRecheckSnapshot {
   trash?: TrashIndex;
   files?: FilesIndex;
   blobRefs?: BlobNoteRef[][];
+  /** Planes existentes del registro, o ausencia. Leídos dentro de la misma transacción. */
+  operationPlans?: Map<string, { privacySha256: string; noteIds: string[] }>;
 }
 
 /** Una carpeta a la que resolvió una ruta privada configurada (A3 del audit de privacidad,

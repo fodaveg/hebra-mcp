@@ -48,10 +48,12 @@ import {
   type NotesScope,
   type SearchFilters,
   type SearchPage,
+  type SqliteConn,
   type TagsList,
   type TitleCandidates
 } from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
+import { safeTextSearch } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
   grepNoteRows,
@@ -178,7 +180,7 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensurePrivateFoldersTable(db);
   // Índices de la época de privacidad de la puerta final (`./privacy-sql.ts`).
   if (mode === 'readWrite') ensurePrivacyEpochIndexes(db);
-  return new NodeLibraryPort(engine, db, mode);
+  return new NodeLibraryPort(engine, db, mode, conn);
 }
 
 /**
@@ -230,7 +232,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   constructor(
     private readonly engine: SqliteLibraryEngine,
     private readonly db: DatabaseSync,
-    readonly mode: NodeSqliteMode = 'readWrite'
+    readonly mode: NodeSqliteMode = 'readWrite',
+    private readonly conn?: SqliteConn
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -319,9 +322,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     filters?: SearchFilters | null,
     scope?: NotesScope | null
   ): Promise<SearchPage> {
-    return this.read(() =>
-      cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null, scope ?? null))
-    );
+    return this.read(() => cleanSearchPage(
+      safeTextSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null, this.conn, this.writable)
+    ));
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
@@ -382,6 +385,19 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           stamps: noteStamps(this.db, request.notes),
           check: request.check ? request.check() : true
         };
+        if (request.operationTargets?.length) {
+          const plans = new Map<string, { privacySha256: string; noteIds: string[] }>();
+          if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hebra_mcp_replace_plans'").get()) {
+            const store = this.replacePlanStore ??= sqliteReplacePlanStore(this.db);
+            for (const id of request.operationTargets) {
+              const plan = store.plan(id);
+              if (plan && plan.libraryId === this.libraryIdSync() && plan.state !== 'expired') {
+                plans.set(id, { privacySha256: plan.privacySha256, noteIds: store.notes(id).map((note) => note.noteId) });
+              }
+            }
+          }
+          snapshot.operationPlans = plans;
+        }
         if (request.files || request.blobs.length > 0) snapshot.files = this.filesRows();
         else if (request.trash) snapshot.trash = trashIndexRows(this.db);
         if (request.blobs.length > 0) {

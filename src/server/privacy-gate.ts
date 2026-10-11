@@ -65,6 +65,7 @@ import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { FileFilter } from '../privacy/file-filter';
 import { PrivacyFilter } from '../privacy/filter';
+import { privacyFingerprint } from '../store/replace';
 import { withRememberedFolders } from '../privacy/folder-memory';
 import { TrashFilter } from '../privacy/trash-filter';
 import type { ToolErrorCode } from '../log/logger';
@@ -151,9 +152,8 @@ export class GateUsage {
     this.anyState.add(id);
   }
 
-  /** Lo que nombra el registro de un `operationId` que decidió `operation_id_reused` (R3-2 de
-   *  la 3.ª revisión): una nota (viva o de la papelera) o un fichero suelto que tiene que
-   *  seguir viéndose; otra cosa (un plan de `hebra_replace_in_notes`) vale siempre. */
+  /** Lo que nombra el registro de un `operationId` que decidió `operation_id_reused` (R3-2):
+   *  nota, fichero o plan. El plan solo se ve si todas sus notas siguen visibles. */
   operationTarget(id: string): void {
     this.operationTargets.add(id);
   }
@@ -294,6 +294,7 @@ export async function passGate(
     trash: needsTrash,
     files: used.files.size > 0 || used.operationTargets.size > 0,
     blobs: [...used.blobs],
+    operationTargets: [...used.operationTargets],
     ...(options.configStillInstalled ? { check: options.configStillInstalled } : {})
   });
   const now = withRememberedFolders(config, snapshot.remembered);
@@ -328,7 +329,13 @@ export async function passGate(
       ? stamp.trashed
         ? trash?.isVisible(id) === true
         : live.visibleMeta(id) !== undefined
-      : files?.sealOf(id) === undefined || files.isVisible(id);
+      : files?.sealOf(id) !== undefined
+        ? files.isVisible(id)
+        : (() => {
+            const plan = snapshot.operationPlans?.get(id);
+            return plan !== undefined && plan.privacySha256 === privacyFingerprint(now) &&
+              plan.noteIds.length > 0 && plan.noteIds.every((noteId) => live.visibleMeta(noteId) !== undefined);
+          })();
     if (!visible) failedNotes.add(id);
   }
   const failedFiles = new Set<string>();
@@ -338,9 +345,10 @@ export async function passGate(
   const failedFolders = new Set<string>();
   for (const [id, use] of used.folders) {
     if (id === ROOT_FOLDER_ID) continue;
-    // La ruta enseñada cuenta como su sello: en una escritura, solo la visibilidad.
+    // La ruta enseñada cuenta incluso en una escritura: puede quedar privada tras mover
+    // la carpeta a una ruta aún visible y crear otra bajo la ruta antigua.
     const visible = live.folderExists(id) && !live.isFolderHidden(id);
-    const samePath = !options.seals || (!use.conflict && (use.path === undefined || live.folderPath(id) === use.path));
+    const samePath = !use.conflict && (use.path === undefined || live.folderPath(id) === use.path);
     if (!visible || !samePath) failedFolders.add(id);
   }
   const failedBlobs = new Set<string>();

@@ -8,6 +8,9 @@
  * es la clave `(updatedAt, id)` del último resultado devuelto, envuelta (`pagination.ts`):
  * reanuda exactamente tras él.
  *
+ * Solo se busca en título y cuerpo, incluidas subcadenas. El puerto excluye las ramas
+ * de nombres y texto de ficheros incrustados sin aplicar la privacidad de esos bytes (M6).
+ *
  * `heading` (D11): el título del apartado más interno que contiene el fragmento del
  * `snippet` (`headingOfSnippet`, `../../store/sections.ts`), o `null`. Se lee el cuerpo
  * (`noteRead`) solo de los resultados visibles que se devuelven y solo si `heading` está
@@ -104,7 +107,9 @@ export async function runSearch(
     limit,
     startCursor,
     fetch: (cursor, want) =>
-      ctx.port.search(input.query, cursor, storePageSize(want), tagFilter ? { tags: [tagFilter] } : null, scope),
+      ctx.port.search(input.query, cursor, storePageSize(want), {
+        ...(tagFilter ? { tags: [tagFilter] } : {})
+      }, scope),
     accept: (hit) => {
       const meta = ctx.privacy.visibleMeta(hit.id);
       if (!meta) return undefined;

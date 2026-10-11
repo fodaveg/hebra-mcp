@@ -220,44 +220,12 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
       throw new WorkdirError('esa carpeta de trabajo es de otra biblioteca');
     }
 
-    // Carpetas pedidas: visibles y existentes, con sus subcarpetas.
+    // Se seleccionan y leen las candidatas dentro de la misma época: un título, consulta o
+    // ruta privada que desaparece mientras se selecciona no debe sobrevivir en la siguiente
+    // tentativa y provocar una exportación desde una selección ya obsoleta.
     let allowed: Set<string> | null = null;
-    const folderIds: string[] = [];
-    for (const path of args.carpetas) {
-      const id = filter.folderIdForPath(path);
-      if (id === undefined || filter.isFolderHidden(id)) {
-        throw new WorkdirError(`no existe la carpeta «${path}»`);
-      }
-      folderIds.push(id);
-      allowed ??= new Set();
-      for (const sub of filter.folderSubtree(id)) allowed.add(sub);
-    }
-
-    const candidates: string[] = [];
-    const titleOf = new Map<string, string>();
-    if (args.all) {
-      candidates.push(...(await collectPages((cursor) => lib.port.notesPage(cursor, PAGE_SIZE, { kind: 'all' }))));
-    }
-    for (const query of args.consultas) {
-      candidates.push(...(await collectPages((cursor) => lib.port.search(query, cursor, PAGE_SIZE, null, null))));
-    }
-    for (const title of args.titulos) {
-      for (const item of (await lib.port.notesByExactTitle(title)).items) {
-        candidates.push(item.id);
-        if (!titleOf.has(item.id)) titleOf.set(item.id, title);
-      }
-    }
-    if (!args.all && args.consultas.length === 0 && args.titulos.length === 0) {
-      for (const folderId of folderIds) {
-        candidates.push(
-          ...(await collectPages((cursor) =>
-            lib.port.notesPage(cursor, PAGE_SIZE, { kind: 'folder', folderId, subfolders: true })
-          ))
-        );
-      }
-    }
-
-    // Se leen las candidatas; qué sale se decide DESPUÉS, con un filtro rehecho tras leer
+    let titleOf = new Map<string, string>();
+    // Qué sale se decide DESPUÉS, con un filtro rehecho tras leer
     // (una ronda de sync a mitad pudo volver privada alguna: `canLeave`). Y con la época de
     // privacidad de la puerta final (`../server/privacy-gate.ts`): si algo que puede cambiar lo
     // que es privado cambió entre antes de leer y después del filtro (también la configuración,
@@ -269,6 +237,38 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
     let settled: PrivacyFilter | null = null;
     for (let attempt = 1; attempt <= GATE_ATTEMPTS && settled === null; attempt += 1) {
       const epoch = await lib.port.privacyEpoch();
+      const selecting = await PrivacyFilter.build(lib.port, lib.privacyConfig);
+      if (selecting.unresolved) throw new WorkdirError('la configuración de privados no se puede aplicar: no se saca nada');
+      const selectedFolders: string[] = [];
+      let selectedAllowed: Set<string> | null = null;
+      for (const path of args.carpetas) {
+        const id = selecting.folderIdForPath(path);
+        if (id === undefined || selecting.isFolderHidden(id)) {
+          throw new WorkdirError(`no existe la carpeta «${path}»`);
+        }
+        selectedFolders.push(id);
+        selectedAllowed ??= new Set();
+        for (const sub of selecting.folderSubtree(id)) selectedAllowed.add(sub);
+      }
+      const candidates: string[] = [];
+      const selectedTitles = new Map<string, string>();
+      if (args.all) candidates.push(...(await collectPages((cursor) => lib.port.notesPage(cursor, PAGE_SIZE, { kind: 'all' }))));
+      for (const query of args.consultas) {
+        candidates.push(...(await collectPages((cursor) => lib.port.search(query, cursor, PAGE_SIZE, null, null))));
+      }
+      for (const title of args.titulos) {
+        for (const item of (await lib.port.notesByExactTitle(title)).items) {
+          candidates.push(item.id);
+          if (!selectedTitles.has(item.id)) selectedTitles.set(item.id, title);
+        }
+      }
+      if (!args.all && args.consultas.length === 0 && args.titulos.length === 0) {
+        for (const folderId of selectedFolders) {
+          candidates.push(...(await collectPages((cursor) =>
+            lib.port.notesPage(cursor, PAGE_SIZE, { kind: 'folder', folderId, subfolders: true })
+          )));
+        }
+      }
       read = [];
       seen = new Set<string>();
       for (const id of candidates) {
@@ -288,7 +288,14 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
           'la configuración de privados no se puede aplicar (una carpeta privada configurada no existe): no se saca nada'
         );
       }
-      if ((await lib.port.privacyEpoch()) === epoch && (await sameConfigAsOpened(lib))) settled = built;
+      // La lectura de config.json también espera I/O. Comprobamos la época DESPUÉS:
+      // una mudanza de carpeta durante esa espera invalidaría el filtro ya construido.
+      if ((await sameConfigAsOpened(lib)) && (await lib.port.privacyEpoch()) === epoch &&
+          (lib.configStillInstalled?.() ?? true)) {
+        settled = built;
+        allowed = selectedAllowed;
+        titleOf = selectedTitles;
+      }
     }
     if (settled === null) {
       throw new WorkdirError(
@@ -765,7 +772,6 @@ async function applyLocked(
         sha: editedSha,
         ...(result.outcome === 'conflict_copy' ? { copyId: result.copyId } : {})
       });
-      if (NOT_CLEAN.has(name)) unclean = true;
     }
 
     const round = await syncRoundQuietly(lib);
@@ -787,13 +793,15 @@ async function applyLocked(
     const side = [...damaged, ...stillConflicted, ...tooLarge].map((entry) => ({ entry: { id: entry.id } }));
     const hidden = await hiddenAfterRound(lib, [...written, ...side]);
     const reported = written.filter((item) => !hidden.has(item.entry.id));
+    unclean = [...damaged, ...stillConflicted, ...tooLarge].some((entry) => !hidden.has(entry.id)) ||
+      reported.some((item) => NOT_CLEAN.has(item.name));
     for (const item of reported) {
       if (item.copyId !== undefined && hidden.has(item.copyId)) delete item.copyId;
     }
     const reportedCounts = new Map<ApplyOutcomeName, number>();
     for (const item of reported) reportedCounts.set(item.name, (reportedCounts.get(item.name) ?? 0) + 1);
     const changedBySync = reported.filter((item) => changedIds.has(item.entry.id)).map((item) => item.entry.ruta);
-    if (changedIds.size > 0) unclean = true;
+    if (changedBySync.length > 0) unclean = true;
 
     const summary = [...reportedCounts]
       .map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`)
@@ -858,7 +866,14 @@ async function hiddenAfterRound(
   for (const id of ids) usage.noteInAnyState(id);
   try {
     const config = lib.currentPrivacyConfig ? await lib.currentPrivacyConfig() : lib.privacyConfig;
-    const verdict = await passGate(lib.port, config, usage, { seals: false });
+    const verdict = await passGate(lib.port, config, usage, {
+      seals: false,
+      ...(lib.configStillInstalled ? { configStillInstalled: lib.configStillInstalled } : {})
+    });
+    // En las bibliotecas inyectadas sin huella síncrona, una segunda lectura también
+    // detecta un cambio ocurrido mientras el puerto esperaba su transacción.
+    if (verdict.configChanged || (lib.currentPrivacyConfig &&
+        !samePrivacyConfig(await lib.currentPrivacyConfig(), config))) return new Set(ids);
     return new Set(verdict.failedNotes);
   } catch {
     return new Set(ids);
@@ -949,9 +964,6 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
     const record = (item: UndoItem, name: UndoOutcomeName): void => {
       workdir.appendJournal(args.lote, { paso: 'deshacer', id: item.id, resultado: name, en: at() });
       results.push({ id: item.id, ruta: item.ruta, name });
-      if (name === 'cambiada_despues' || name === 'no_disponible' || name === 'bloqueada' || name === 'copia_cambiada') {
-        unclean = true;
-      }
     };
     for (const item of items.values()) {
       const { resultado } = item;
@@ -1063,6 +1075,9 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
       const copyId = copyOf.get(result.id);
       return copyId !== undefined && !hidden.has(copyId);
     });
+    unclean = reported.some((result) =>
+      result.name === 'cambiada_despues' || result.name === 'no_disponible' ||
+      result.name === 'bloqueada' || result.name === 'copia_cambiada');
     io.out(`Deshecho el lote ${args.lote} (sync: ${describeRound(round, lib.role)}).`);
     for (const { ruta, name } of reported) io.out(`  ${shown(io, workdir, ruta)}  ${UNDO_LABEL[name]}`);
     if (reported.length === 0) io.out('  Nada que deshacer.');

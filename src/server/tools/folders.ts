@@ -43,8 +43,11 @@ export type RenameFolderOutput = { id: string; path: string; renamed: boolean } 
 async function pathAfter(ctx: ToolContext, id: string): Promise<string> {
   const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
   const visible = after.folderExists(id) && !after.isFolderHidden(id);
-  usageOf(ctx).folder(id);
-  return visible ? after.folderPath(id) : '';
+  const path = visible ? after.folderPath(id) : '';
+  // La ruta que sale es una lectura de la biblioteca, también en una escritura. Si
+  // cambia antes de la puerta, su visibilidad actual no valida la ruta anterior.
+  usageOf(ctx).folder(id, path);
+  return path;
 }
 
 /**

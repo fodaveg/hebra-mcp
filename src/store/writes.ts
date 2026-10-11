@@ -72,6 +72,7 @@ import { headingRejected, operationReused, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
 import type { ReplacePlanStore } from './replace-plans';
+import { privacyFingerprint } from './replace';
 import { decodeRevision, encodeRevision } from './revision';
 import {
   capHeading,
@@ -676,8 +677,9 @@ export function priorOperation(
 
 /**
  * Para `priorOperation`: ¿es `id` una nota (viva o de la papelera) o un fichero suelto que con
- * la configuración de quien pide NO se ve? Lo que no es ni una cosa ni otra (un plan de
- * `hebra_replace_in_notes`, que comparte el registro) no cuenta como oculto.
+ * la configuración de quien pide NO se ve? Los planes comparten el registro: se juzgan
+ * por TODAS sus notas y por la configuración con que fueron simulados. Un destino ya
+ * purgado se trata como oculto para no revelar que antes existió.
  */
 export function hiddenOperationTarget(
   store: NoteWriteStore,
@@ -695,7 +697,13 @@ export function hiddenOperationTarget(
     if (files.files.some((file) => file.id === id)) {
       return !FileFilter.fromSnapshot(filter, files, privacy).isVisible(id);
     }
-    return false;
+    const plan = store.replacePlans.plan(id);
+    if (plan) {
+      const notes = store.replacePlans.notes(id);
+      return plan.libraryId !== store.libraryId() || plan.privacySha256 !== privacyFingerprint(privacy) ||
+        plan.state === 'expired' || notes.length === 0 || notes.some((note) => !filter.visibleMeta(note.noteId));
+    }
+    return true;
   };
 }
 

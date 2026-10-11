@@ -46,6 +46,8 @@ export interface WorkdirLibrary {
    *  lee, lanza): la de la puerta final para el informe de `apply` tras la ronda. Sin él, la
    *  de abrir. */
   currentPrivacyConfig?(): Promise<PrivacyConfig>;
+  /** Comprobación síncrona de la huella instalada para cerrar la puerta dentro de SQLite. */
+  configStillInstalled?(): boolean;
   syncRound(): Promise<RoundWait>;
   replaceBody(input: Omit<ReplaceBodyInput, 'privacy'>): Promise<ReplaceBodyResult>;
   trashConflictCopies(
@@ -122,6 +124,7 @@ export async function openWorkdirLibrary(options: OpenWorkdirLibraryOptions): Pr
   // La ronda en local (este proceso es el escritor, o lo pasa a ser con el relevo).
   const local = localWriteContext(instance);
   const forward: ForwardOptions | undefined = options.forward;
+  const configSource = ctx.privacyConfigSource;
   return {
     get role() {
       return instance.role;
@@ -130,6 +133,7 @@ export async function openWorkdirLibrary(options: OpenWorkdirLibraryOptions): Pr
     port: ctx.port,
     privacyConfig,
     currentPrivacyConfig: () => gateConfig(ctx),
+    configStillInstalled: () => configSource?.isInstalledNow?.() ?? true,
     syncRound: () =>
       routeWrite(instance, 'syncRound', {}, asRoundWait, () => local.awaitRound(AWAIT_ROUND_TIMEOUT_MS), forward),
     replaceBody: (input) => {

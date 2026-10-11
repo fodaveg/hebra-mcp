@@ -212,7 +212,10 @@ describe('A1: una nota con etiqueta privada sigue oculta al bloquearla', () => {
         await saveBody(engine, h.extra.laterId, lockedBody('Se bloqueará', []));
       });
       const applied = capture(cwd);
-      expect(await applyCommand(applied.io, opener(h.dataDir), { dir: 'trabajo', conflicto: 'copia', simular: false })).toBe(1);
+      expect(await applyCommand(applied.io, opener(h.dataDir), { dir: 'trabajo', conflicto: 'copia', simular: false })).toBe(0);
+      expect(applied.text()).toContain('nada escrito');
+      expect(applied.text()).not.toContain(file!);
+      expect(applied.text()).not.toContain(h.extra.laterId);
       expect((await h.port.noteRead(h.extra.laterId))?.body.startsWith('hebra-locked:')).toBe(true);
     } finally {
       await h.close();

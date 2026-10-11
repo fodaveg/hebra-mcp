@@ -15,3 +15,13 @@
  * worker/OPFS de `web-port.ts`.
  */
 export * from '../vendor/hebra/src/lib/library/node';
+// El MCP combina la búsqueda de cuerpo de Hebra con su índice de subcadenas sin
+// consultar las ramas de dibujos y nombres de ficheros incrustados (privacidad M6).
+export {
+  flushSubstringPending,
+  sqliteResultCode,
+  SUBSTRING_INDEX_READY_SQL,
+  substringResidualSql,
+  substringSnippet
+} from '../vendor/hebra/src/lib/library/substring-search';
+export { SEARCH_MARK_START, SEARCH_MARK_END } from '../vendor/hebra/src/lib/library/types';
