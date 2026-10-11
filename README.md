@@ -68,7 +68,7 @@ Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 32 herram
   (hasta 5 MiB descifrados; imágenes PNG, JPEG, GIF, WebP, PDF, texto plano, Markdown, CSV y JSON;
   lectura de texto por tramos: offset, maxChars 1–100 000, def. 100 000), y
   `hebra_add_attachment` (D9: los mismos tipos y tope, en base64; queda como
-  `![[sha256:H|nombre]]` al final de la nota y sube con el sync). Sin cambiar ni borrar.
+  `![[sha256:H|nombre]]` al final de la nota, o de un apartado con `heading`, y sube con el sync). Sin cambiar ni borrar.
 - Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
   `folder_unavailable` para todo lo privado. Sin mover ni borrar.
 

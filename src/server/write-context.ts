@@ -22,6 +22,7 @@ import type {
 import type {
   AddAttachmentInput,
   AddAttachmentSaved,
+  AttachmentPlacement,
   AppendToNoteInput,
   AppendToNoteResult,
   CreateFolderInput,
@@ -158,7 +159,15 @@ export type ReplaceFileTextOutcome = ReplaceFileTextSaved & SyncFields;
 
 /** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
  *  estado de sync (`uploaded` exige además el blob ya subido). */
-export type AddAttachmentOutcome = EditNoteOutcome & { attachmentId: string; markdown: string };
+export type AddAttachmentOutcome = EditNoteOutcome & {
+  attachmentId: string;
+  markdown: string;
+  /** Con `heading` y un guardado nuevo: la línea de la referencia y el apartado. */
+  placed?: AttachmentPlacement;
+  /** Solo en un lector: el escritor era de una versión que no conoce `heading` y la
+   *  referencia fue al final de la nota. Nunca sale con `heading` aplicado. */
+  headingIgnored?: true;
+};
 
 /** `hebra_replace_in_notes` (D14): la simulación (o una página del plan) tal cual, y el
  *  informe de aplicar o deshacer con el estado de sync de lo escrito. */
@@ -535,7 +544,12 @@ export function buildWriteContext(
         // `dirty` solo se llama después de guardar, con `added` ya puesto.
         (id) => attachmentDirtyOf(added!.attachmentId)(id)
       );
-      return { ...outcome, attachmentId: added!.attachmentId, markdown: added!.markdown };
+      return {
+        ...outcome,
+        attachmentId: added!.attachmentId,
+        markdown: added!.markdown,
+        ...(added!.placed ? { placed: added!.placed } : {})
+      };
     },
     async organize(input: OrganizeInput): Promise<OrganizeOutcome> {
       const { result: saved, wrote } = await sources.organize(input);

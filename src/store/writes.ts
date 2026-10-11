@@ -80,6 +80,7 @@ import {
   lineAt,
   parseHeadings,
   selectSection,
+  type HeadingInfo,
   type Insertion
 } from './sections';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from './file-content';
@@ -441,16 +442,31 @@ export interface AddAttachmentInput {
   mimeType: string | null;
   /** Igual que en `EditNoteInput`: idempotencia, en el mismo registro. */
   operationId: string;
+  /** Apartado (D11, ampliado el 11 oct 2026): la referencia va al final de ese apartado,
+   *  subapartados incluidos, como `appendToNote`. Sin él, al final de la nota. */
+  heading?: string;
+  /** Aparición (1-based) entre los apartados con ese título; solo con `heading`. */
+  headingOccurrence?: number;
   /** Igual que `EditNoteInput.privacy`. */
   privacy: PrivacyConfig;
 }
 
+/** Dónde quedó la referencia, con `heading`: su línea (1-based, en el cuerpo guardado) y
+ *  el título del apartado, recortado. */
+export interface AttachmentPlacement {
+  line: number;
+  heading: string;
+}
+
 /** El guardado de la nota (como el de una edición: `revision` o copia de conflicto, y
- *  `replayed`) y el adjunto añadido: su SHA-256 y la referencia que quedó en el cuerpo. */
+ *  `replayed`) y el adjunto añadido: su SHA-256 y la referencia que quedó en el cuerpo.
+ *  `placed` solo con `heading` y un guardado nuevo (un reintento servido por el registro
+ *  no lo trae, como el `appended` de un append a medias). */
 export interface AddAttachmentSaved {
   note: EditNoteSaved;
   attachmentId: string;
   markdown: string;
+  placed?: AttachmentPlacement;
 }
 
 /**
@@ -538,14 +554,32 @@ const FENCE_CLOSERS = ['```', '~~~', '````', '~~~~', '`````', '~~~~~'] as const;
 function bodyReferencing(
   body: string,
   markdown: string,
-  sha256: string
-): { body: string; derived: ReturnType<typeof deriveNote> } | null {
+  sha256: string,
+  section?: HeadingInfo
+): { body: string; derived: ReturnType<typeof deriveNote>; line: number } | null {
   for (const closer of ['', ...FENCE_CLOSERS]) {
-    const candidate = closer
-      ? `${body}\n${closer}${APPEND_SEPARATOR}${markdown}`
-      : `${body}${APPEND_SEPARATOR}${markdown}`;
+    let candidate: string;
+    let referenceStart: number;
+    if (section) {
+      // Al final del apartado (D11), con la regla de `appendToNote`; si el apartado
+      // acaba dentro de un bloque sin cerrar, el cierre va delante de la referencia.
+      const insertion = insertIntoSection(
+        body,
+        section,
+        closer ? `${closer}${APPEND_SEPARATOR}${markdown}` : markdown
+      );
+      candidate = insertion.body;
+      referenceStart = insertion.end - markdown.length;
+    } else {
+      candidate = closer
+        ? `${body}\n${closer}${APPEND_SEPARATOR}${markdown}`
+        : `${body}${APPEND_SEPARATOR}${markdown}`;
+      referenceStart = candidate.length - markdown.length;
+    }
     const derived = deriveNote(candidate);
-    if ((derived.blobRefs ?? []).includes(sha256)) return { body: candidate, derived };
+    if ((derived.blobRefs ?? []).includes(sha256)) {
+      return { body: candidate, derived, line: lineAt(candidate, referenceStart) };
+    }
   }
   return null;
 }
@@ -559,7 +593,18 @@ function addAttachmentFingerprint(
   name: string,
   mimeType: string
 ): string {
-  return sha256Hex(JSON.stringify(['addAttachment', input.id, sha256, name, mimeType]));
+  // El apartado solo entra en la huella si viene: un registro anterior a esta ampliación
+  // (24 h) sigue valiendo para el reintento sin `heading`.
+  return sha256Hex(
+    JSON.stringify([
+      'addAttachment',
+      input.id,
+      sha256,
+      name,
+      mimeType,
+      ...(input.heading === undefined ? [] : [input.heading, input.headingOccurrence ?? null])
+    ])
+  );
 }
 
 /** Huella de la petición: el mismo `operationId` con otra petición es un error. */
@@ -1322,7 +1367,20 @@ export class NoteWriter {
       }
 
       if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('note_locked');
-      const withAttachment = bodyReferencing(note.body, markdown, attachmentId);
+      let section: HeadingInfo | undefined;
+      if (input.heading !== undefined) {
+        // Como en `appendToNote`: el apartado se resuelve AQUÍ, sobre el cuerpo de este turno.
+        const picked = selectSection(
+          parseHeadings(note.body),
+          input.heading,
+          input.headingOccurrence
+        );
+        if (!picked.ok) {
+          throw headingRejected(picked.code, picked.code === 'ambiguous_heading' ? picked.candidates : undefined);
+        }
+        section = picked.section;
+      }
+      const withAttachment = bodyReferencing(note.body, markdown, attachmentId, section);
       // Ni cerrando un bloque de código la referencia cuenta como adjunto (otra construcción
       // sin cerrar se la traga): no se guarda un blob que ninguna nota referenciaría.
       if (!withAttachment) throw writeRejected('invalid_input');
@@ -1345,7 +1403,11 @@ export class NoteWriter {
           ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
           : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
       log.finish(input.operationId, outcome);
-      return { result: added(outcome), wrote: true };
+      const placed: AttachmentPlacement | undefined =
+        section && saved.outcome === 'saved'
+          ? { line: withAttachment.line, heading: capHeading(section.heading) }
+          : undefined;
+      return { result: { ...added(outcome), ...(placed ? { placed } : {}) }, wrote: true };
     });
     if (wrote) this.written();
     return { result, wrote };

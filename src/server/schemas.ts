@@ -235,6 +235,11 @@ export const addAttachmentInputShape = {
   dataBase64: z
     .string()
     .describe('Contenido en base64 estándar (como mucho 5 MiB decodificados); se ignoran espacios y saltos de línea.'),
+  heading: z
+    .string()
+    .optional()
+    .describe('Título de un apartado (de hebra_note_outline): la referencia al adjunto va al final de ese apartado, subapartados incluidos. Sin él, al final de la nota.'),
+  headingOccurrence: headingOccurrenceField,
   mimeType: z
     .string()
     .optional()

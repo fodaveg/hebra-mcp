@@ -307,7 +307,23 @@ function asAttachmentOutcome(value: unknown, id: string): AddAttachmentOutcome {
   if (typeof record.attachmentId !== 'string' || typeof record.markdown !== 'string') {
     throw new Error('writer_protocol');
   }
-  return { ...edit, attachmentId: record.attachmentId, markdown: record.markdown };
+  const outcome: AddAttachmentOutcome = {
+    ...edit,
+    attachmentId: record.attachmentId,
+    markdown: record.markdown
+  };
+  if (record.placed !== undefined) {
+    const placed = record.placed;
+    if (
+      !isRecord(placed) ||
+      typeof placed.heading !== 'string' ||
+      placed.heading.length > HEADING_PROOF_MAX_CHARS
+    ) {
+      throw new Error('writer_protocol');
+    }
+    outcome.placed = { line: asCount(placed.line), heading: placed.heading };
+  }
+  return outcome;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -709,10 +725,27 @@ export function buildRoutedWriteContext(
           name: input.name,
           dataBase64: Buffer.from(input.bytes).toString('base64'),
           mimeType: input.mimeType,
+          ...(input.heading !== undefined ? { heading: input.heading } : {}),
+          ...(input.headingOccurrence !== undefined
+            ? { headingOccurrence: input.headingOccurrence }
+            : {}),
           operationId: input.operationId,
           privacy: input.privacy
         },
-        (value) => asAttachmentOutcome(value, input.id),
+        (value) => {
+          const result = asAttachmentOutcome(value, input.id);
+          // Un escritor de una versión anterior ignora `heading` sin decirlo: la referencia
+          // fue al final de la nota. El actual devuelve `headingHonored`; si no vuelve, ya
+          // está guardado (no se puede rechazar), así que se avisa en la salida y en el log.
+          if (
+            input.heading !== undefined &&
+            (!isRecord(value) || value.headingHonored !== true)
+          ) {
+            logEvent({ event: 'forward.heading_ignored', op: 'addAttachment' });
+            return { ...result, headingIgnored: true as const };
+          }
+          return result;
+        },
         () => local.addAttachment(input)
       ),
     // Ficheros sueltos (D10): como `organize`, todo en el escritor y con la privacidad de
@@ -845,7 +878,12 @@ export function writerSocketHandlers(
     fetchAttachment: (input) => local.fetchAttachment(input),
     createFolder: (input) => local.createFolder(input),
     renameFolder: (input) => local.renameFolder(input),
-    addAttachment: (input) => local.addAttachment(input),
+    // Devuelve `headingHonored` con `heading`: así el lector sabe que este escritor lo
+    // entiende (uno anterior lo ignoraría y pondría la referencia al final de la nota).
+    addAttachment: async (input) => {
+      const result = await local.addAttachment(input);
+      return input.heading === undefined ? result : { ...result, headingHonored: true as const };
+    },
     organizeFile: (input) => local.organizeFile(input),
     async status() {
       const { writer: _writer, ...sync } = await instance.status();

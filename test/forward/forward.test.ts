@@ -366,6 +366,49 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).toContain('"event":"write.forward","op":"appendToNote","outcome":"forwarded"');
   });
 
+  it('hebra_add_attachment con heading desde un lector: el apartado se resuelve en el escritor y los errores cruzan el socket', async () => {
+    const { writer, client } = await pair();
+    const body = '# Decisiones\n\n## Uno\ntexto uno\n\n## Dos\ntexto dos\n\n## Dos\notro\n';
+    const created = await writer.createNote({ body, privacy: OPEN });
+    const png =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+    const ref = `![[sha256:${createHash('sha256').update(Buffer.from(png, 'base64')).digest('hex')}|c.png]]`;
+    const args = { id: created.id, name: 'c.png', dataBase64: png, operationId: 'op-fwd-att-h' };
+
+    const saved = await call(client, 'hebra_add_attachment', { ...args, heading: 'uno' });
+    expect(saved.isError).toBe(false);
+    expect((await writer.port.noteRead(created.id))!.body).toBe(
+      body.replace('texto uno\n\n## Dos', `texto uno\n\n${ref}\n\n## Dos`)
+    );
+    expect(saved.value).toMatchObject({ outcome: 'saved', markdown: ref, placed: { line: 6, heading: 'Uno' } });
+    expect(saved.value).not.toHaveProperty('headingIgnored');
+    expect(saved.value).not.toHaveProperty('headingHonored');
+
+    // Reintento: lo sirve el registro del escritor; con otro apartado, operation_id_reused.
+    const retry = await call(client, 'hebra_add_attachment', { ...args, heading: 'uno' });
+    expect(retry.value).toMatchObject({ outcome: 'saved', replayed: true, markdown: ref });
+    const reused = await call(client, 'hebra_add_attachment', { ...args, heading: 'Dos', headingOccurrence: 1 });
+    expect(reused).toEqual({ isError: true, value: { error: 'operation_id_reused' } });
+
+    const other = { ...args, operationId: 'op-fwd-att-h2' };
+    expect(await call(client, 'hebra_add_attachment', { ...other, heading: 'Nada' })).toEqual({
+      isError: true,
+      value: { error: 'heading_not_found' }
+    });
+    const ambiguous = await call(client, 'hebra_add_attachment', { ...other, heading: 'Dos' });
+    expect(ambiguous.value.error).toBe('ambiguous_heading');
+    expect(ambiguous.value.candidates).toHaveLength(2);
+    expect(await call(client, 'hebra_add_attachment', { ...other, headingOccurrence: 1 })).toEqual({
+      isError: true,
+      value: { error: 'invalid_input' }
+    });
+    const second = await call(client, 'hebra_add_attachment', { ...other, heading: 'Dos', headingOccurrence: 2 });
+    expect(second.value).toMatchObject({ outcome: 'saved', placed: { heading: 'Dos' } });
+    expect((await writer.port.noteRead(created.id))!.body.endsWith(`otro\n\n${ref}\n`)).toBe(true);
+    expect(stderrText()).not.toContain('forward.heading_ignored');
+    expect(stderrText()).not.toContain('"heading":"');
+  });
+
   it('50 títulos repetidos de 6 000 caracteres: ambiguous_heading llega con candidatos de 200 como mucho (D11)', async () => {
     const { writer, client } = await pair();
     // Seis mil caracteres que se normalizan a 'T T' (espacios colapsados): el cliente puede
@@ -1312,6 +1355,35 @@ describe('protocolo de writer.sock', () => {
     ).rejects.toMatchObject({ code: 'attachment_too_large' });
   });
 
+  it('addAttachment por el socket con heading: se valida igual que en appendToNote', async () => {
+    const dataDir = tempDataDir();
+    await listen(dataDir);
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const valid = {
+      id: 'n1',
+      name: 'a.txt',
+      dataBase64: Buffer.from('hola').toString('base64'),
+      mimeType: 'text/plain',
+      operationId: 'op-1',
+      privacy: OPEN
+    };
+    expect(
+      await requestWriter(path, 'addAttachment', { ...valid, heading: 'Uno', headingOccurrence: 2 }, 2_000)
+    ).toMatchObject({ outcome: 'saved' });
+    for (const extra of [
+      { headingOccurrence: 1 },
+      { heading: 7 },
+      { heading: 'x'.repeat(1_025) },
+      { heading: 'Uno', headingOccurrence: 0 },
+      { heading: 'Uno', headingOccurrence: 1.5 },
+      { heading: 'Uno', headingOccurrence: '2' }
+    ]) {
+      await expect(
+        requestWriter(path, 'addAttachment', { ...valid, ...extra }, 2_000)
+      ).rejects.toMatchObject({ code: 'invalid_request' });
+    }
+  });
+
   it('una sola petición en vuelo por conexión: varias líneas seguidas se atienden en orden, de una en una', async () => {
     const dataDir = tempDataDir();
     const path = join(dataDir, WRITER_SOCKET_FILE);
@@ -1610,6 +1682,64 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     expect(await handlers.appendToNote({ id: 'n1', text: 'x', privacy: OPEN })).not.toHaveProperty(
       'operationId'
     );
+  });
+
+  it('escritor de una versión anterior que ignora el heading de un adjunto: se avisa en la salida y en el log', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const received: Array<Record<string, unknown>> = [];
+    // Un escritor anterior: pone la referencia donde sabe y no devuelve `headingHonored`.
+    const server = await WriterSocketServer.listen({
+      path,
+      handlers: {
+        ...writerSocketHandlers(localSpy(), fakeInstance(path, 'this')),
+        addAttachment: async (input) => {
+          received.push({ heading: input.heading, headingOccurrence: input.headingOccurrence });
+          return {
+            id: input.id,
+            outcome: 'saved',
+            revision: 'r1.x',
+            attachmentId: 'a'.repeat(64),
+            markdown: '![[sha256:a|x]]',
+            sync: 'not_linked'
+          };
+        }
+      }
+    });
+    servers.push(server);
+    const write = buildRoutedWriteContext(fakeInstance(path, 'other_instance'), localSpy());
+    const input = {
+      id: 'n1',
+      name: 'x.txt',
+      bytes: new TextEncoder().encode('hola'),
+      mimeType: 'text/plain',
+      operationId: 'op-viejo-att',
+      privacy: OPEN
+    };
+    const withHeading = await write.addAttachment({ ...input, heading: 'Uno', headingOccurrence: 2 });
+    expect(received).toEqual([{ heading: 'Uno', headingOccurrence: 2 }]);
+    expect(withHeading).toMatchObject({ outcome: 'saved', headingIgnored: true });
+    expect(stderrText()).toContain('"event":"forward.heading_ignored","op":"addAttachment"');
+    expect(stderrText()).not.toContain('"n1"');
+
+    // Sin heading no hay nada que avisar.
+    const plain = await write.addAttachment({ ...input, operationId: 'op-viejo-att-2' });
+    expect(plain).not.toHaveProperty('headingIgnored');
+    expect(stderrText().split('forward.heading_ignored').length - 1).toBe(1);
+  });
+
+  it('el escritor actual devuelve headingHonored en un adjunto con heading, y el socket valida heading', async () => {
+    const handlers = writerSocketHandlers(localSpy(), fakeInstance('', 'this'));
+    const input = {
+      id: 'n1',
+      name: 'x.txt',
+      bytes: new TextEncoder().encode('hola'),
+      mimeType: 'text/plain',
+      operationId: 'op-eco-att',
+      privacy: OPEN
+    };
+    expect(await handlers.addAttachment({ ...input, heading: 'Uno' })).toMatchObject({ headingHonored: true });
+    expect(await handlers.addAttachment(input)).not.toHaveProperty('headingHonored');
   });
 
   it('sin escritor: toma el relevo y escribe en local', async () => {

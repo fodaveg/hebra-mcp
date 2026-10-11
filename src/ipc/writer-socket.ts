@@ -37,8 +37,10 @@
  * - `createFolder` `{parentId, name, privacy}` y `renameFolder` `{id, name, privacy}` (D9,
  *   3 oct 2026) → `FolderOutcome` (`{id, changed, sync, syncError?}`), con la ronda ya
  *   esperada. Sin acciones de mover ni borrar carpetas.
- * - `addAttachment` `{id, name, dataBase64, mimeType, operationId, privacy}` (D9) →
- *   `AddAttachmentOutcome`, con la ronda ya esperada. Los bytes van en base64 del lector
+ * - `addAttachment` `{id, name, dataBase64, mimeType, heading?, headingOccurrence?,
+ *   operationId, privacy}` (D9; `heading` desde el 11 oct 2026) → `AddAttachmentOutcome`
+ *   (más `headingHonored: true` si vino `heading`: un escritor anterior lo ignora sin
+ *   decirlo y el lector lo avisa con `headingIgnored`), con la ronda ya esperada. Los bytes van en base64 del lector
  *   al escritor, nunca de vuelta, y el escritor los decodifica con la misma regla
  *   estricta que la herramienta.
  * - `organizeFile` `{action, id, privacy}` (D10, 9 oct 2026) → `FileOutcome`
@@ -350,6 +352,28 @@ function createInputOf(params: Record<string, unknown>): CreateNoteInput {
   return { body, folderId: folderId ?? null, privacy: privacyOf(params.privacy) };
 }
 
+/** `heading`/`headingOccurrence` de `appendToNote` y `addAttachment` (D11): sin `heading`,
+ *  `headingOccurrence` es `invalid_request`. */
+function headingFieldsOf(
+  heading: unknown,
+  headingOccurrence: unknown
+): { heading?: string; headingOccurrence?: number } {
+  if (heading === undefined) {
+    if (headingOccurrence !== undefined) throw new InvalidRequest();
+    return {};
+  }
+  if (typeof heading !== 'string' || heading.length > HEADING_MAX_LENGTH) throw new InvalidRequest();
+  if (headingOccurrence === undefined) return { heading };
+  if (
+    typeof headingOccurrence !== 'number' ||
+    !Number.isSafeInteger(headingOccurrence) ||
+    headingOccurrence < 1
+  ) {
+    throw new InvalidRequest();
+  }
+  return { heading, headingOccurrence };
+}
+
 function appendInputOf(params: Record<string, unknown>): AppendToNoteInput {
   const { id, text, heading, headingOccurrence, operationId } = params;
   if (!isId(id) || typeof text !== 'string' || text.length > APPEND_TEXT_MAX_LENGTH) {
@@ -440,8 +464,9 @@ function renameFolderInputOf(params: Record<string, unknown>): RenameFolderInput
  *  de más de 5 MiB, `attachment_too_large` (el rechazo de siempre del escritor). Nombre,
  *  tipo y tamaño los vuelve a comprobar `NoteWriter.addAttachment`. */
 function addAttachmentInputOf(params: Record<string, unknown>): AddAttachmentInput {
-  const { id, name, dataBase64, mimeType, operationId } = params;
+  const { id, name, dataBase64, mimeType, operationId, heading, headingOccurrence } = params;
   if (!isId(id) || !isName(name) || typeof dataBase64 !== 'string') throw new InvalidRequest();
+  const section = headingFieldsOf(heading, headingOccurrence);
   if (
     mimeType !== null &&
     mimeType !== undefined &&
@@ -461,6 +486,7 @@ function addAttachmentInputOf(params: Record<string, unknown>): AddAttachmentInp
     name,
     bytes: decoded.bytes,
     mimeType: mimeType ?? null,
+    ...section,
     operationId: validOperationId,
     privacy
   };

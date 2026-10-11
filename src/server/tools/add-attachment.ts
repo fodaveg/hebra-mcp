@@ -19,8 +19,16 @@
  * de privados, y guarda el blob y la referencia (`NoteWriter.addAttachmentLocal`); en un
  * lector, los bytes le llegan por `writer.sock`.
  *
+ * Por apartados (D9 ampliada el 11 oct 2026, tarea c106e726): con `heading` (y
+ * `headingOccurrence?`) la referencia va al final de ese apartado, subapartados incluidos,
+ * con la regla de `hebra_append_to_note`; el escritor lo resuelve dentro del turno
+ * (`heading_not_found`, `ambiguous_heading` con `candidates`). `headingOccurrence` sin
+ * `heading`, `invalid_input`. El `heading` entra en la huella del `operationId`.
+ *
  * Salida: la de una edición (`outcome`, `revision` o `copyId`, `replayed`, `sync`) más
- * `attachmentId` (el SHA-256 de los bytes) y `markdown` (la referencia añadida). La ronda
+ * `attachmentId` (el SHA-256 de los bytes) y `markdown` (la referencia añadida); con
+ * `heading` y un guardado nuevo, `placed` (`line` de la referencia y `heading` del
+ * apartado, leídos del cuerpo guardado). La ronda
  * de después sube el blob al relé con la nota; `sync: "uploaded"` exige los dos subidos.
  *
  * Logs (§6.4): `note.attachment` con el id de la nota, el resultado y el estado de sync.
@@ -38,14 +46,24 @@ import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { AddAttachmentOutcome } from '../write-context';
 import { requireValidOperationId, requireVisibleNote } from './guards';
+import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
 
 export async function runAddAttachment(
   ctx: ToolContext,
-  input: { id: string; name: string; dataBase64: string; mimeType?: string; operationId: string }
+  input: {
+    id: string;
+    name: string;
+    dataBase64: string;
+    mimeType?: string;
+    heading?: string;
+    headingOccurrence?: number;
+    operationId: string;
+  }
 ): Promise<AddAttachmentOutcome> {
   if (!ctx.write) throw new ToolError('invalid_input');
   requireValidOperationId(input.operationId);
+  requireValidHeadingInput(input);
   const name = validAttachmentName(input.name);
   if (name === null) throw new ToolError('invalid_input');
   const decoded = decodeAttachmentBase64(input.dataBase64);
@@ -78,6 +96,10 @@ export async function runAddAttachment(
       name: input.name,
       bytes: decoded.bytes,
       mimeType,
+      ...(input.heading !== undefined ? { heading: input.heading } : {}),
+      ...(input.headingOccurrence !== undefined
+        ? { headingOccurrence: input.headingOccurrence }
+        : {}),
       operationId: input.operationId,
       privacy: ctx.privacyConfig
     });
@@ -96,7 +118,8 @@ export async function runAddAttachment(
     id: input.id,
     outcome: result.outcome,
     sync: result.sync,
-    replayed: result.replayed === true
+    replayed: result.replayed === true,
+    ...(input.heading !== undefined ? { heading: true } : {})
   });
   return result;
 }
