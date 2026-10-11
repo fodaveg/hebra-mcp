@@ -19,7 +19,7 @@ import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
 import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
 import { LOCKED_BODY_PREFIX } from '../store/writes';
-import { GateUsage, passGate } from '../server/privacy-gate';
+import { GATE_ATTEMPTS, GateUsage, passGate, samePrivacyConfig } from '../server/privacy-gate';
 import type { RoundWait } from '../server/write-context';
 import type { WriterRole } from '../sync/library-instance';
 import { compactDiff, diffStat, unifiedDiff } from './diff';
@@ -258,26 +258,44 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
     }
 
     // Se leen las candidatas; qué sale se decide DESPUÉS, con un filtro rehecho tras leer
-    // (una ronda de sync a mitad pudo volver privada alguna: `canLeave`).
-    const read: NoteRow[] = [];
-    const seen = new Set<string>();
-    for (const id of candidates) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      const row = await lib.port.noteRead(id);
-      if (row) read.push(row);
+    // (una ronda de sync a mitad pudo volver privada alguna: `canLeave`). Y con la época de
+    // privacidad de la puerta final (`../server/privacy-gate.ts`): si algo que puede cambiar lo
+    // que es privado cambió entre antes de leer y después del filtro (también la configuración,
+    // releída), una fila leída pudo ser de un estado privado que ya no se ve en el filtro: se
+    // vuelve a leer todo, como mucho tres veces, y si no se queda quieta, no se saca nada.
+    let read: NoteRow[] = [];
+    let seen = new Set<string>();
+    let previous = new Map<string, NoteRow | null>();
+    let settled: PrivacyFilter | null = null;
+    for (let attempt = 1; attempt <= GATE_ATTEMPTS && settled === null; attempt += 1) {
+      const epoch = await lib.port.privacyEpoch();
+      read = [];
+      seen = new Set<string>();
+      for (const id of candidates) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const row = await lib.port.noteRead(id);
+        if (row) read.push(row);
+      }
+      // Y las sacadas antes que esta vez no se piden: por si ya no pueden estar en disco.
+      previous = new Map<string, NoteRow | null>();
+      for (const entry of existing?.notas ?? []) {
+        if (!seen.has(entry.id)) previous.set(entry.id, await lib.port.noteRead(entry.id));
+      }
+      const built = await PrivacyFilter.build(lib.port, lib.privacyConfig);
+      if (built.unresolved) {
+        throw new WorkdirError(
+          'la configuración de privados no se puede aplicar (una carpeta privada configurada no existe): no se saca nada'
+        );
+      }
+      if ((await lib.port.privacyEpoch()) === epoch && (await sameConfigAsOpened(lib))) settled = built;
     }
-    // Y las sacadas antes que esta vez no se piden: por si ya no pueden estar en disco.
-    const previous = new Map<string, NoteRow | null>();
-    for (const entry of existing?.notas ?? []) {
-      if (!seen.has(entry.id)) previous.set(entry.id, await lib.port.noteRead(entry.id));
-    }
-    const fresh = await PrivacyFilter.build(lib.port, lib.privacyConfig);
-    if (fresh.unresolved) {
+    if (settled === null) {
       throw new WorkdirError(
-        'la configuración de privados no se puede aplicar (una carpeta privada configurada no existe): no se saca nada'
+        'la biblioteca o la configuración de privados cambiaron mientras se sacaba (una ronda de sync en marcha): no se saca nada; repite checkout'
       );
     }
+    const fresh = settled;
 
     // Notas que salen: vivas, visibles, sin bloquear, no copias de conflicto ni archivadas.
     const rows: NoteRow[] = [];
@@ -798,6 +816,19 @@ async function applyLocked(
   } finally {
     workdir.removeLoteIfEmpty(lote);
     await lib.close();
+  }
+}
+
+/**
+ * ¿Sigue `config.json` como al abrir? La configuración de las órdenes es la de abrir (§13):
+ * si cambió (o ya no se lee), lo leído con ella no vale. Sin forma de releerla, sí.
+ */
+async function sameConfigAsOpened(lib: WorkdirLibrary): Promise<boolean> {
+  if (!lib.currentPrivacyConfig) return true;
+  try {
+    return samePrivacyConfig(await lib.currentPrivacyConfig(), lib.privacyConfig);
+  } catch {
+    return false;
   }
 }
 
