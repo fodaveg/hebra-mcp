@@ -79,6 +79,7 @@ import type {
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  PortSearchOptions,
   PrivacyRecheckRequest,
   PrivacyRecheckSnapshot,
   RememberedPrivateFolder,
@@ -652,8 +653,9 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       cursor: string | null,
       limit?: number,
       filters?: SearchFilters | null,
-      scope?: NotesScope | null
-    ): Promise<SearchPage> => current().search(q, cursor, limit, filters, scope),
+      scope?: NotesScope | null,
+      options?: PortSearchOptions
+    ): Promise<SearchPage> => current().search(q, cursor, limit, filters, scope, options),
     notesByTitlePrefix: (prefix: string, limit?: number): Promise<TitleCandidates> =>
       current().notesByTitlePrefix(prefix, limit),
     notesByExactTitle: (title: string): Promise<TitleCandidates> =>

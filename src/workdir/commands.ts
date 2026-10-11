@@ -15,6 +15,7 @@
 import { randomBytes } from 'node:crypto';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { deriveNote, type NoteRow } from '../hebra';
+import { hasPrivates } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
 import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
@@ -253,8 +254,13 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
       const candidates: string[] = [];
       const selectedTitles = new Map<string, string>();
       if (args.all) candidates.push(...(await collectPages((cursor) => lib.port.notesPage(cursor, PAGE_SIZE, { kind: 'all' }))));
+      // Por ficheros incrustados solo sin nada privado (§6.3, M6), con la configuración con
+      // la que se abrió: si cambia, `sameConfigAsOpened` descarta esta selección.
+      const embedded = !hasPrivates(lib.privacyConfig) && !selecting.unresolved;
       for (const query of args.consultas) {
-        candidates.push(...(await collectPages((cursor) => lib.port.search(query, cursor, PAGE_SIZE, null, null))));
+        candidates.push(...(await collectPages((cursor) =>
+          lib.port.search(query, cursor, PAGE_SIZE, null, null, { embedded })
+        )));
       }
       for (const title of args.titulos) {
         for (const item of (await lib.port.notesByExactTitle(title)).items) {

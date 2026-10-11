@@ -39,6 +39,20 @@ function parseFolderPath(raw: string): string[] {
     .filter((segment) => segment.length > 0);
 }
 
+/**
+ * ¿Hay algo privado configurado? Carpetas, etiquetas o la memoria de carpetas privadas
+ * (`knownPrivateFolderIds`, que solo existe con alguna ruta configurada). Sin nada, ninguna
+ * nota, carpeta ni fichero se oculta, y la búsqueda puede usar las ramas de ficheros
+ * incrustados del motor (`PortSearchOptions.embedded`, SPEC.md §6.3, M6).
+ */
+export function hasPrivates(config: PrivacyConfig): boolean {
+  return (
+    config.privateFolders.length > 0 ||
+    config.privateTags.length > 0 ||
+    (config.knownPrivateFolderIds?.length ?? 0) > 0
+  );
+}
+
 /** Sin `config.json`: ninguna carpeta ni etiqueta privada (biblioteca entera visible). */
 export async function loadPrivacyConfig(dataDir: string): Promise<PrivacyConfig> {
   const path = join(dataDir, 'config.json');

@@ -8,8 +8,11 @@
  * es la clave `(updatedAt, id)` del último resultado devuelto, envuelta (`pagination.ts`):
  * reanuda exactamente tras él.
  *
- * Solo se busca en título y cuerpo, incluidas subcadenas. El puerto excluye las ramas
- * de nombres y texto de ficheros incrustados sin aplicar la privacidad de esos bytes (M6).
+ * Con algo privado configurado (o la configuración sin resolver), solo se busca en título y
+ * cuerpo, incluidas subcadenas: el puerto excluye las ramas de nombres y texto de ficheros
+ * incrustados sin aplicar la privacidad de esos bytes (M6). Sin nada privado, la búsqueda
+ * entera del motor (`PortSearchOptions.embedded`), decidido con la configuración de ESTA
+ * llamada: si cambia antes de la puerta final, la puerta repite la llamada con la nueva.
  *
  * `heading` (D11): el título del apartado más interno que contiene el fragmento del
  * `snippet` (`headingOfSnippet`, `../../store/sections.ts`), o `null`. Se lee el cuerpo
@@ -34,6 +37,7 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
+import { hasPrivates } from '../../privacy/config';
 import { headingOfSnippet } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
@@ -103,13 +107,17 @@ export async function runSearch(
   // que se decidió que se veía, y si ya no se ve o cambió, repite la llamada (C1, y la 2.ª
   // revisión de Codex). El cursor sale de la última devuelta (`fillPage`).
   const used = usageOf(ctx);
+  // Ficheros incrustados solo sin nada privado: la configuración de la llamada es la que la
+  // puerta compara con la de ahora (`samePrivacyConfig`), así que un cambio a «con
+  // privados» a mitad repite la llamada, que ya busca sin ellos.
+  const embedded = !hasPrivates(ctx.privacyConfig) && !ctx.privacy.unresolved;
   const page = await fillPage({
     limit,
     startCursor,
     fetch: (cursor, want) =>
       ctx.port.search(input.query, cursor, storePageSize(want), {
         ...(tagFilter ? { tags: [tagFilter] } : {})
-      }, scope),
+      }, scope, { embedded }),
     accept: (hit) => {
       const meta = ctx.privacy.visibleMeta(hit.id);
       if (!meta) return undefined;

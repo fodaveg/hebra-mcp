@@ -66,6 +66,18 @@ export interface NoteStamp {
   trashed: boolean;
 }
 
+/** Opciones de `HebraLibraryPort.search` que no son del motor. */
+export interface PortSearchOptions {
+  /**
+   * `true`: la búsqueda entera del motor, que también encuentra una nota por el nombre o el
+   * texto extraído de un fichero que incrusta (dibujo, PDF, adjunto). Solo vale cuando la
+   * configuración de privados de la llamada no tiene ni carpetas ni etiquetas privadas
+   * (`hasPrivates`, SPEC.md §6.3, M6): con alguna, esos ficheros pueden ser privados aunque
+   * la nota se vea. Por defecto, `false`: solo título y cuerpo (`safeTextSearch`).
+   */
+  embedded?: boolean;
+}
+
 /** Lo que pide la puerta final (`src/server/privacy-gate.ts`): el sello de esas notas y,
  *  solo si la respuesta usó algo de eso, la papelera, los ficheros sueltos y quién enlaza
  *  esos bytes. */
@@ -228,12 +240,14 @@ export interface HebraLibraryPort {
   /** `resolveLink` de varias refs en UN turno de la cola, en el mismo orden. */
   resolveLinks(refs: readonly string[]): Promise<LinkResolution[]>;
   backlinks(id: string, cursor?: string | null, limit?: number): Promise<NotesPage>;
+  /** Sin `options.embedded`, solo título y cuerpo (el valor seguro, §6.3 M6). */
   search(
     q: string,
     cursor: string | null,
     limit?: number,
     filters?: SearchFilters | null,
-    scope?: NotesScope | null
+    scope?: NotesScope | null,
+    options?: PortSearchOptions
   ): Promise<SearchPage>;
   notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates>;
   /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50

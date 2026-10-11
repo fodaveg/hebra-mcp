@@ -1,7 +1,9 @@
 /**
- * Búsqueda MCP sobre texto de notas. El motor mezcla notas que casan por cuerpo con
- * notas que casan por dibujos, PDF o nombres de ficheros incrustados. Esos recursos
- * pueden ser privados aunque la nota que los enlaza sea visible (SPEC.md §6.3, M6).
+ * Búsqueda MCP sobre texto de notas, la que se usa con algo privado configurado (sin nada
+ * privado, `NodeLibraryPort.search` usa la del motor entera). El motor mezcla notas que
+ * casan por cuerpo con notas que casan por dibujos, PDF o nombres de ficheros incrustados.
+ * Esos recursos pueden ser privados aunque la nota que los enlaza sea visible (SPEC.md
+ * §6.3, M6).
  * Se usa su rama `bodyOnly` para FTS y se añade aquí la rama de subcadenas del MISMO
  * índice de Hebra, sin consultar ningún índice de contenido incrustado.
  */

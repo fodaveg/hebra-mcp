@@ -53,8 +53,8 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
-invalida la ruta anterior aunque la carpeta siga visible. `hebra_search` solo consulta el
-título y el cuerpo escritos en notas: las ramas del motor que indexan nombres y texto de
+invalida la ruta anterior aunque la carpeta siga visible. Con algo privado configurado,
+`hebra_search` solo consulta el título y el cuerpo escritos en notas: las ramas del motor que indexan nombres y texto de
 ficheros incrustados podían enseñar por una nota visible un fichero privado compartido por
 hash (M6), incluso como filtro negativo: un PDF privado no puede excluir una coincidencia
 del cuerpo público. El puerto combina el FTS de Hebra limitado a la nota con una consulta
@@ -62,10 +62,14 @@ propia a `notes_trigram`, su índice de subcadenas; conserva el orden, los filtr
 cursor de la búsqueda MCP sin leer los índices de contenido incrustado. Si el índice de
 subcadenas aún no está completo, la búsqueda usa solo FTS, igual que el motor. El escritor
 vacía su cola pendiente antes de esta consulta; los lectores siguen sin escribir.
-Coste funcional: `hebra_search` y `checkout --consulta` dejan de encontrar nombres y
-texto extraído de ficheros incrustados aunque esos ficheros sean visibles. La rama segura
-añade una consulta a `notes_trigram`; con filtros negativos puede leer páginas FTS
-adicionales para completar la página. No hay una nueva medición de rendimiento.
+Coste funcional, **solo con algo privado configurado** (carpetas o etiquetas, o la
+configuración sin resolver): `hebra_search` y `checkout --consulta` dejan de encontrar
+nombres y texto extraído de ficheros incrustados aunque esos ficheros sean visibles. La rama
+segura añade una consulta a `notes_trigram`; con filtros negativos puede leer páginas FTS
+adicionales para completar la página. No hay una nueva medición de rendimiento. Sin nada
+privado configurado (11 oct 2026), la búsqueda vuelve a ser la entera del motor, con
+incrustados: no hay nada privado que revelar (§6.3, «Coste de buscar sin contenido
+incrustado»).
 
 ## 4. Arquitectura
 
@@ -1113,11 +1117,18 @@ El dispositivo acumula tres secretos:
   biblioteca?». No es `not_found`, como proponía el audit, porque eso sí se distinguiría de un
   hash desconocido. Coste asumido, el de D10: unos bytes que una nota visible comparte de verdad
   con algo oculto tampoco se leen por la visible.
-  **Coste de buscar sin contenido incrustado** (M6): `hebra_search` y `checkout --consulta`
-  buscan solo el título y el cuerpo de las notas, incluidas sus subcadenas; dejan de encontrar
-  nombres y texto extraído de dibujos y PDF incrustados incluso cuando esos recursos son
-  visibles. Se añade una consulta a `notes_trigram`; un filtro negativo puede exigir páginas
-  FTS adicionales para rellenar una página. No se ha medido de nuevo el rendimiento.
+  **Coste de buscar sin contenido incrustado** (M6): **solo con algo privado configurado**
+  (alguna carpeta o etiqueta privada, o la configuración sin resolver), `hebra_search` y
+  `checkout --consulta` buscan solo el título y el cuerpo de las notas, incluidas sus
+  subcadenas; dejan de encontrar nombres y texto extraído de dibujos y PDF incrustados incluso
+  cuando esos recursos son visibles. Se añade una consulta a `notes_trigram`; un filtro negativo
+  puede exigir páginas FTS adicionales para rellenar una página. No se ha medido de nuevo el
+  rendimiento. **Sin nada privado** (11 oct 2026; `privacyConfigured: false`, como producción),
+  no hay nada que revelar y la búsqueda es la entera del motor, con las ramas de incrustados,
+  como antes de R6-1. Se decide con la configuración de la llamada (`hasPrivates`, y la opción
+  `embedded` de `HebraLibraryPort.search`, que por defecto es la segura): la puerta final la
+  compara con la de ahora, así que un cambio a «con privados» a mitad repite la llamada, que ya
+  busca sin incrustados; `checkout` usa la de abrir y descarta la selección si cambió.
 - **Versiones** (decisión 6 de D2): solo de una nota visible (viva; oculta, en la papelera o
   inexistente, `not_found`). Una versión cuyo cuerpo lleva una etiqueta privada (o descendiente),
   con las etiquetas de `deriveNote` (las que Hebra guardaría al restaurarla), no se lista, no se

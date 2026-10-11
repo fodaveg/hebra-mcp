@@ -89,6 +89,7 @@ import type {
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  PortSearchOptions,
   PrivacyRecheckRequest,
   PrivacyRecheckSnapshot,
   RememberedPrivateFolder,
@@ -315,13 +316,20 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => this.engine.backlinks(id, cursor, limit));
   }
 
+  /** Con `options.embedded`, la búsqueda entera del motor (también por ficheros
+   *  incrustados); si no, la de solo título y cuerpo (`./search-safe.ts`, M6). Quien llama
+   *  decide con la configuración de privados de la llamada (`hasPrivates`). */
   async search(
     q: string,
     cursor: string | null,
     limit?: number,
     filters?: SearchFilters | null,
-    scope?: NotesScope | null
+    scope?: NotesScope | null,
+    options?: PortSearchOptions
   ): Promise<SearchPage> {
+    if (options?.embedded === true) {
+      return this.read(() => cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null, scope ?? null)));
+    }
     return this.read(() => cleanSearchPage(
       safeTextSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null, this.conn, this.writable)
     ));
