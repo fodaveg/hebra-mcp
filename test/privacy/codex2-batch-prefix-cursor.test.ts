@@ -21,7 +21,10 @@ it('preview no cuenta una nota oculta anterior a la primera nota de la página',
     const result = await h.call('hebra_replace_in_notes', { mode: 'preview', planId, cursor, limit: 1 });
     expect(result.isError).toBe(false);
     expect(result.json.notes.map((note: { id: string }) => note.id)).toEqual([h.extra[1]]);
-    expect(JSON.parse(decodeCursor(result.json.nextCursor)!)[1],
-      'Tras 1 nota visible, el cursor cuenta además la nota oculta anterior').toBe(1);
+    // Desde la 2.ª vuelta de d64e187e el cursor de preview es la CLAVE de la última devuelta
+    // (`[planId, id]`): no cuenta la nota oculta de antes ni ninguna otra.
+    const decoded = JSON.parse(decodeCursor(result.json.nextCursor)!);
+    expect(decoded[1], 'El cursor no lleva más que la última nota devuelta').toBe(h.extra[1]);
+    expect(JSON.stringify(decoded)).not.toContain(h.extra[0]!);
   } finally { await h.close(); }
 });

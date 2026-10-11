@@ -31,7 +31,6 @@
  */
 import { logEvent } from '../../log/logger';
 import { FileFilter, type VisibleFile } from '../../privacy/file-filter';
-import { PrivacyFilter } from '../../privacy/filter';
 import type { OrganizeFileAction } from '../../store/writes';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
@@ -224,9 +223,15 @@ function usedFolderPath(ctx: ToolContext, folderId: string): string {
   return path;
 }
 
-async function organizeFile(ctx: ToolContext, action: OrganizeFileAction): Promise<FileOutcome> {
+/** Escribe, y devuelve con lo escrito lo que el filtro de la llamada sabía del fichero
+ *  (donde queda al restaurarlo: su carpeta si sigue viva, o la raíz). */
+async function organizeFile(
+  ctx: ToolContext,
+  action: OrganizeFileAction
+): Promise<{ outcome: FileOutcome; before: VisibleFile }> {
   const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
-  if (!filter.isVisible(action.id)) throw new ToolError('not_found');
+  const before = filter.visibleMeta(action.id);
+  if (!before) throw new ToolError('not_found');
   if (!ctx.write) throw new ToolError('invalid_input');
   let outcome: FileOutcome;
   try {
@@ -235,7 +240,7 @@ async function organizeFile(ctx: ToolContext, action: OrganizeFileAction): Promi
     throw mapWriteError(error);
   }
   logEvent({ event: 'file.organize', id: outcome.id, action: action.action, sync: outcome.sync });
-  return outcome;
+  return { outcome, before };
 }
 
 export type FileTrashOutput = { id: string; trashed: true } & SyncFields;
@@ -247,7 +252,7 @@ export async function runTrashFile(
   ctx: ToolContext,
   input: { id: string }
 ): Promise<FileTrashOutput> {
-  const outcome = await organizeFile(ctx, { action: 'trashFile', id: input.id });
+  const { outcome } = await organizeFile(ctx, { action: 'trashFile', id: input.id });
   // Tras la ronda, la puerta final mira que el fichero se siga viendo (en la papelera).
   usageOf(ctx).file(outcome.id);
   return { id: outcome.id, trashed: true, ...syncOf(outcome) };
@@ -257,24 +262,20 @@ export type FileRestoreOutput = { id: string; folderPath: string } & SyncFields;
 
 /** `hebra_restore_file`: saca un fichero suelto de la papelera, a su carpeta si sigue
  *  viva o a la raíz (como Hebra). Idempotente: uno vivo y visible se queda como está. La
- *  ruta de la salida sale de los filtros de DESPUÉS de escribir (paso 3 de la cabecera);
- *  si para entonces la configuración de privados no se pudiera aplicar, cerrado ante la
- *  duda: `privacy_config_unresolved` en vez de una ruta sin filtrar, y `not_found` si el
- *  fichero pasó a oculto. En los dos casos la escritura ya está hecha y registrada
+ *  ruta es la de la carpeta a la que vuelve. Después de escribir (y de la ronda) lo juzga la
+ *  puerta final (`../privacy-gate.ts`, paso 3 de la cabecera) con el almacén de ahora: si la
+ *  configuración de privados ya no se puede aplicar, cerrado ante la duda,
+ *  `privacy_config_unresolved` en vez de una ruta sin filtrar, y `not_found` si el fichero o
+ *  esa carpeta pasaron a ocultos. En los dos casos la escritura ya está hecha y registrada
  *  (`file.organize`, en `organizeFile`); la respuesta no da ruta. */
 export async function runRestoreFile(
   ctx: ToolContext,
   input: { id: string }
 ): Promise<FileRestoreOutput> {
-  const outcome = await organizeFile(ctx, { action: 'restoreFile', id: input.id });
-  const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  if (after.unresolved) throw new ToolError('privacy_config_unresolved');
-  const meta = (await FileFilter.build(ctx.port, after, ctx.privacyConfig)).visibleMeta(outcome.id);
-  if (!meta) throw new ToolError('not_found');
-  const folderPath = after.folderPath(meta.folderId);
-  // Y otra vez en la puerta final, con todo de una transacción.
+  const { outcome, before } = await organizeFile(ctx, { action: 'restoreFile', id: input.id });
+  const folderPath = ctx.privacy.folderPath(before.folderId);
   const used = usageOf(ctx);
   used.file(outcome.id);
-  used.folder(meta.folderId, folderPath);
+  used.folder(before.folderId, folderPath);
   return { id: outcome.id, folderPath, ...syncOf(outcome) };
 }

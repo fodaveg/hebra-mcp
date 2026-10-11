@@ -22,7 +22,11 @@ async function planWithFourNotes() {
   }
 }
 
-it('preview avanza desde el número de visibles devueltas aunque la primera se vuelva privada', async () => {
+// Ajustado en la 2.ª vuelta de d64e187e (revisión independiente, punto 4): el cursor de preview
+// pasó de contar visibles devueltas a llevar la clave de la última devuelta. Con eso ya no se
+// salta ni se repite una nota cuando otra cambia de visibilidad entre páginas, que era el
+// coste que estos dos controles fijaban; ahora fijan lo contrario.
+it('preview sigue detrás de la última devuelta aunque esa se vuelva privada (no se salta la siguiente)', async () => {
   const { h, planId, firstCursor } = await planWithFourNotes();
   try {
     await h.mutate((engine) => saveBody(engine, h.extra[0]!, '# Privada\nCODIGO_OFFSET\n#secreto\n'));
@@ -31,13 +35,13 @@ it('preview avanza desde el número de visibles devueltas aunque la primera se v
     });
     expect(page.isError).toBe(false);
     expect(page.json.notes.map((note: { id: string }) => note.id),
-      'Al desaparecer una nota ya devuelta, el offset visible salta la siguiente').toEqual([h.extra[2]]);
+      'Al desaparecer una nota ya devuelta, la página siguiente empieza en la que la seguía').toEqual([h.extra[1]]);
   } finally {
     await h.close();
   }
 });
 
-it('preview puede repetir una nota visible si reaparece otra antes de ella entre páginas', async () => {
+it('preview no repite una nota visible si reaparece otra antes de ella entre páginas', async () => {
   const { h, planId } = await planWithFourNotes();
   try {
     await h.mutate((engine) => saveBody(engine, h.extra[0]!, '# Privada\nCODIGO_OFFSET\n#secreto\n'));
@@ -53,7 +57,7 @@ it('preview puede repetir una nota visible si reaparece otra antes de ella entre
     });
     expect(second.isError).toBe(false);
     expect(second.json.notes.map((note: { id: string }) => note.id),
-      'Al reaparecer una nota anterior, el offset visible puede repetir la ya devuelta').toEqual([h.extra[1]]);
+      'Al reaparecer una nota anterior, la página siguiente sigue detrás de la ya devuelta').toEqual([h.extra[2]]);
   } finally {
     await h.close();
   }

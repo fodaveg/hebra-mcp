@@ -590,11 +590,13 @@ describe('ficheros sueltos por MCP', () => {
     }
   });
 
-  it('hebra_restore_file registra lo escrito aunque el filtro de después falle, y la respuesta no da ruta', async () => {
-    test = await buildTestContext();
-    const library = test.library;
-    const real = test.ctx.write!;
-    const writer = new NoteWriter(test.ctx.port as NodeLibraryPort);
+  // Desde la 2.ª vuelta de d64e187e lo de después de escribir lo juzga la puerta final común
+  // (`src/server/privacy-gate.ts`), no la herramienta: el test pasa por el MCP entero.
+  it('hebra_restore_file registra lo escrito aunque la puerta final falle, y la respuesta no da ruta', async () => {
+    await connect();
+    const library = test!.library;
+    const real = test!.serverContext.write!;
+    const writer = new NoteWriter(test!.ctx.port as NodeLibraryPort);
     // Lo que la ronda de después de escribir puede traer de otro dispositivo, hecho aquí
     // por un escritor sin privados justo tras la escritura: una nota privada que incrusta
     // el fichero (pasa a oculto) y el renombrado de la carpeta privada configurada (la
@@ -623,8 +625,7 @@ describe('ficheros sueltos por MCP', () => {
     ];
     for (const { id, code, afterWrite } of cases) {
       stderrSpy!.mockClear();
-      const ctx = await resolveToolContext(test.serverContext);
-      const write = {
+      test!.serverContext.write = {
         ...real,
         organizeFile: async (input: Parameters<typeof real.organizeFile>[0]) => {
           const outcome = await real.organizeFile(input);
@@ -632,13 +633,13 @@ describe('ficheros sueltos por MCP', () => {
           return outcome;
         }
       };
-      const error = await runRestoreFile({ ...ctx, write }, { id }).catch((caught: unknown) => caught);
-      expect(error, code).toBeInstanceOf(ToolError);
-      expect((error as ToolError).code).toBe(code);
+      const result = (await client!.callTool({ name: 'hebra_restore_file', arguments: { id } })) as CallToolResult;
+      test!.serverContext.write = real;
+      expect(result.isError, code).toBe(true);
       // La respuesta es solo el código: ni ruta ni nada más.
-      expect((error as ToolError).extra).toBeUndefined();
+      expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({ error: code });
       // La escritura quedó hecha...
-      expect(rawFiles(test.sqlitePath).find((row) => row.id === id)?.trashedAt).toBeNull();
+      expect(rawFiles(test!.sqlitePath).find((row) => row.id === id)?.trashedAt).toBeNull();
       // ...y registrada.
       expect(loggedLines().map((line) => JSON.parse(line) as Record<string, unknown>)).toContainEqual({
         event: 'file.organize',

@@ -49,12 +49,21 @@ export interface ToolContext {
   /** Lo que usa la respuesta, para la puerta final (`./privacy-gate.ts`): uno por intento.
    *  Opcional para los tests que llaman a una herramienta directamente, sin puerta. */
   usage?: GateUsage;
+  /** Lo que solo debe pasar si la puerta acepta ESTE intento (un log que no puede salir una
+   *  vez por intento repetido). Sin puerta, se hace en el acto (`afterGate`). */
+  deferred?: Array<() => void>;
 }
 
 /** `ctx.usage`, o uno suelto que nadie comprueba (una herramienta llamada sin puerta). */
 export function usageOf(ctx: ToolContext): GateUsage {
   ctx.usage ??= new GateUsage(ctx.privacy);
   return ctx.usage;
+}
+
+/** `run` cuando la puerta final acepte este intento; sin puerta, ya. */
+export function afterGate(ctx: ToolContext, run: () => void): void {
+  if (ctx.deferred) ctx.deferred.push(run);
+  else run();
 }
 
 /** `PrivacyFilter.build` es dos consultas al almacén (`foldersList()` +

@@ -14,6 +14,7 @@
 import type { NoteRow } from '../hebra';
 import type {
   ReplaceApplyReport,
+  ReplaceDiscardResult,
   ReplaceLocal,
   ReplacePlanView,
   ReplaceRequest,
@@ -171,7 +172,8 @@ export type AddAttachmentOutcome = EditNoteOutcome & {
 export type ReplaceOutcome =
   | ReplacePlanView
   | (ReplaceApplyReport & SyncFields)
-  | (ReplaceUndoReport & SyncFields);
+  | (ReplaceUndoReport & SyncFields)
+  | ReplaceDiscardResult;
 
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
@@ -447,7 +449,7 @@ export function buildWriteContext(
     request: ReplaceRequest
   ): Promise<ReplaceOutcome> {
     const { result: local, written } = await replace(request);
-    if (local.mode === 'simulate' || local.mode === 'preview') return local;
+    if (local.mode === 'simulate' || local.mode === 'preview' || local.mode === 'discard') return local;
     const result = local as ReplaceApplyReport | ReplaceUndoReport;
     const anyDirty = async (ids: Iterable<string>): Promise<boolean | null> => {
       let unknown = false;

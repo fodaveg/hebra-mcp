@@ -22,14 +22,13 @@
  *    igual que una que no existe, decisión 4).
  * 2. En el escritor, dentro del turno en que escribe y con esta misma configuración
  *    (`NoteWriter.organize`).
- * 3. Sobre el resultado: la ruta que se devuelve sale de un filtro recalculado DESPUÉS de
- *    escribir. Si para entonces el sync hubiera dejado oculta la nota, se responde
- *    `not_found` en vez de enseñar una ruta privada.
+ * 3. Sobre el resultado, en la puerta final (`../privacy-gate.ts`), con el almacén de
+ *    DESPUÉS de escribir: si para entonces el sync hubiera dejado oculta la nota o su
+ *    carpeta, se responde `not_found` en vez de enseñar una ruta privada.
  *
  * La salida lleva el estado de sync (`../write-context.ts`, `SyncFields`).
  */
 import { logEvent } from '../../log/logger';
-import { PrivacyFilter } from '../../privacy/filter';
 import { TrashFilter } from '../../privacy/trash-filter';
 import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
@@ -67,21 +66,20 @@ async function organize(ctx: ToolContext, action: OrganizeAction): Promise<Organ
   }
 }
 
-/** Filtro de DESPUÉS de escribir (paso 3 de la cabecera) y la salida con la ruta. */
-async function noteOutput(
+/** La salida con la ruta de la carpeta en la que quedó la nota. Que la nota y esa carpeta se
+ *  sigan viendo después de escribir (y de la ronda) lo decide la puerta final
+ *  (`../privacy-gate.ts`, paso 3 de la cabecera), con todo de una transacción: si no,
+ *  `not_found`. */
+function noteOutput(
   ctx: ToolContext,
   action: OrganizeAction['action'],
   outcome: OrganizeOutcome
-): Promise<NoteOrganizeOutput> {
-  const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  const meta = after.visibleMeta(outcome.id);
-  if (!meta) throw new ToolError('not_found');
+): NoteOrganizeOutput {
   logEvent({ event: 'note.organize', id: outcome.id, action, sync: outcome.sync });
-  // Y otra vez en la puerta final (`../privacy-gate.ts`), con todo de una transacción.
-  const folderPath = after.folderPath(meta.folderId);
+  const folderPath = ctx.privacy.folderPath(outcome.folderId);
   const used = usageOf(ctx);
   used.note(outcome.id);
-  used.folder(meta.folderId, folderPath);
+  used.folder(outcome.folderId, folderPath);
   return {
     id: outcome.id,
     folderPath,

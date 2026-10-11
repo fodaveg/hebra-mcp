@@ -27,9 +27,13 @@ export async function runListTags(
   // vuelve a juzgar, y si una ya no se ve (la única de una etiqueta), repite la llamada.
   usageOf(ctx).visibleNotes(visible.keys());
   const result: TagCount[] = [];
+  const used = usageOf(ctx);
   for (const entry of tags) {
     const count = visibleCounts.get(entry.tag) ?? 0;
-    if (count > 0) result.push({ tag: entry.tag, count });
+    if (count === 0) continue;
+    // Y cada etiqueta que sale, contra la configuración de ahora (R3-7 de la 3.ª revisión).
+    used.tag(entry.tag);
+    result.push({ tag: entry.tag, count });
   }
   const page = slicePage(result, 't1', {
     limit: effectiveLimit(input.limit, LIMITS.listTags),

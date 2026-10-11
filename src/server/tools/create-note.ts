@@ -20,7 +20,6 @@ import { logEvent } from '../../log/logger';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { CREATE_BODY_MAX_LENGTH as BODY_MAX_LENGTH } from '../../store/writes';
-import { PrivacyFilter } from '../../privacy/filter';
 import { mapWriteError } from './write-errors';
 
 export interface CreateNoteOutput {
@@ -53,15 +52,12 @@ export async function runCreateNote(
 
   logEvent({ event: 'note.create', id: result.id });
 
-  // Tras la ronda, con el filtro de AHORA: si la nota nueva ya no se ve (su carpeta pasó a
-  // privada), la respuesta de una que no existe (C3 de la revisión de Codex). Y otra vez en la
-  // puerta final (`../privacy-gate.ts`), con todo de una transacción.
-  const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  const meta = after.visibleMeta(result.id);
-  if (!meta) throw new ToolError('not_found');
-  const folderPath = after.folderPath(meta.folderId);
+  // Tras la ronda, la puerta final (`../privacy-gate.ts`) la juzga con el almacén de AHORA: si
+  // la nota nueva ya no se ve (su carpeta pasó a privada), la respuesta de una que no existe
+  // (C3 de la revisión de Codex). La carpeta es la que dice el escritor, visible al pedirla.
+  const folderPath = ctx.privacy.folderPath(result.folderId);
   const used = usageOf(ctx);
   used.note(result.id);
-  used.folder(meta.folderId, folderPath);
+  used.folder(result.folderId, folderPath);
   return { id: result.id, title: result.title, folderPath };
 }

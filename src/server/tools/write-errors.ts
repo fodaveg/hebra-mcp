@@ -29,9 +29,11 @@ export function mapWriteError(error: unknown): ToolError {
     if (error.code === 'ambiguous_heading' && error.candidates !== undefined) {
       return new ToolError(error.code, { candidates: error.candidates });
     }
-    return error.editIndex === undefined
-      ? new ToolError(error.code)
-      : new ToolError(error.code, { edit: error.editIndex });
+    const mapped =
+      error.editIndex === undefined ? new ToolError(error.code) : new ToolError(error.code, { edit: error.editIndex });
+    // Para la puerta final, nunca para la salida (R3-2 de la 3.ª revisión de Codex).
+    if (error.operationTarget !== undefined) mapped.operationTarget = error.operationTarget;
+    return mapped;
   }
   if (error instanceof LibraryError && NOT_FOUND_LIBRARY_CODES.has(error.code)) {
     return new ToolError('not_found');

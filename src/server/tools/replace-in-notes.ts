@@ -35,7 +35,7 @@ import {
   type ReplaceRequest,
   type ReplaceScope
 } from '../../store/replace-batch';
-import { usageOf, type ToolContext } from '../context';
+import { afterGate, usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import type { ReplaceOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
@@ -143,40 +143,52 @@ export async function runReplaceInNotes(
 ): Promise<ReplaceOutcome> {
   if (!ctx.write?.replaceInNotes) throw new ToolError('invalid_input');
   const request = requestOf(input, ctx);
-  let result: ReplaceOutcome;
+  let outcome: ReplaceOutcome;
   try {
-    result = await ctx.write.replaceInNotes(request);
+    outcome = await ctx.write.replaceInNotes(request);
   } catch (error) {
     throw mapWriteError(error);
   }
+  if (outcome.mode === 'discard') throw new ToolError('invalid_input');
+  const result = declareUsage(ctx, outcome);
   const event: Record<string, unknown> = { event: 'replace.batch', mode: result.mode, notes: result.notes.length };
   if (result.mode === 'apply') {
     event.complete = result.complete;
     event.replayed = result.replayed === true;
   }
   if ('sync' in result) event.sync = result.sync;
-  logEvent(event as { event: string });
-  declareUsage(ctx, result);
+  // Simular y ver una página se repiten si la puerta final no pasa: su log, solo del intento
+  // que sale. Aplicar y deshacer escribieron: el suyo, ya.
+  if (result.mode === 'simulate' || result.mode === 'preview') afterGate(ctx, () => logEvent(event as { event: string }));
+  else logEvent(event as { event: string });
   return result;
 }
 
 /**
- * Lo que nombra la respuesta, para la puerta final (`../privacy-gate.ts`): las notas de la
- * página, las saltadas y la de `continueAfter` (simular y ver una página: si alguna ya no se
- * ve o cambió, se repite), o las del informe y sus copias de conflicto (aplicar y deshacer,
- * tras su ronda: lo que ya no se ve sale del informe, `REPLACE_REPORT` de
- * `../register-tools.ts`).
+ * Lo que nombra la respuesta, para la puerta final (`../privacy-gate.ts`), y la respuesta sin
+ * lo interno (`gateNotes`): las notas de la página, las saltadas, la de `continueAfter` y las
+ * de `gateNotes` (todo el plan en `simulate`, de donde salen `planNotes` y `planMatches`; la
+ * siguiente visible en `preview`, que decide `nextCursor`): si alguna ya no se ve o cambió,
+ * se repite. O las del informe y sus copias de conflicto (aplicar y deshacer, tras su ronda:
+ * lo que ya no se ve sale del informe, `REPLACE_REPORT` de `../register-tools.ts`).
  */
-function declareUsage(ctx: ToolContext, result: ReplaceOutcome): void {
+function declareUsage(
+  ctx: ToolContext,
+  outcome: Exclude<ReplaceOutcome, { mode: 'discard' }>
+): Exclude<ReplaceOutcome, { mode: 'discard' }> {
   const used = usageOf(ctx);
-  for (const note of result.notes) {
+  for (const note of outcome.notes) {
     used.note(note.id);
     const copyId = 'copyId' in note ? note.copyId : undefined;
     if (copyId !== undefined) used.noteInAnyState(copyId);
   }
+  if (outcome.mode !== 'simulate' && outcome.mode !== 'preview') return outcome;
+  const { gateNotes, ...result } = outcome;
+  for (const id of gateNotes ?? []) used.note(id);
   if (result.mode === 'simulate') {
     for (const skipped of result.skipped ?? []) used.note(skipped.id);
     const after = result.continueAfter ? continueAfterId(result.continueAfter) : null;
     if (after !== null) used.note(after);
   }
+  return result;
 }

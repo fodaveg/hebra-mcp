@@ -22,9 +22,10 @@ export async function resolveIdByTitle(ctx: ToolContext, title: string): Promise
   const { items } = await ctx.port.notesByExactTitle(title);
   const candidates = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   if (candidates.length === 0) throw new ToolError('not_found');
-  // Todas las visibles deciden entre «una» y «ambigua»: la puerta final las vuelve a juzgar.
+  // Todas las visibles deciden entre «una» y «ambigua»: la puerta final las vuelve a juzgar,
+  // solo por estar visibles (el título que sale es el pedido; la elegida se sella al leerla).
   const used = usageOf(ctx);
-  for (const candidate of candidates) used.note(candidate.id);
+  for (const candidate of candidates) used.noteVisible(candidate.id);
   if (candidates.length > 1) {
     throw new ToolError('ambiguous_title', {
       candidates: candidates.slice(0, AMBIGUOUS_CANDIDATES_MAX).map((candidate) => {

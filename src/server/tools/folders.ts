@@ -34,14 +34,32 @@ import { mapWriteError } from './write-errors';
 export type CreateFolderOutput = { id: string; path: string; created: boolean } & SyncFields;
 export type RenameFolderOutput = { id: string; path: string; renamed: boolean } & SyncFields;
 
-/** La ruta de la carpeta con el filtro de DESPUÉS de escribir (paso 3 de la cabecera). */
-async function visiblePathAfter(ctx: ToolContext, id: string): Promise<string> {
+/**
+ * La ruta de la carpeta con el árbol de DESPUÉS de escribir: es nueva, o tiene otro nombre, y
+ * el filtro de la llamada no la sabe. Si ya no se ve, sin ruta: lo decide la puerta final
+ * (`../privacy-gate.ts`), que juzga la carpeta con todo de una transacción y responde
+ * `not_found` (no se lanza aquí: un error después de escribir no se podría repetir).
+ */
+async function pathAfter(ctx: ToolContext, id: string): Promise<string> {
   const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  if (!after.folderExists(id) || after.isFolderHidden(id)) throw new ToolError('not_found');
-  const path = after.folderPath(id);
-  // Y otra vez en la puerta final (`../privacy-gate.ts`), con todo de una transacción.
-  usageOf(ctx).folder(id, path);
-  return path;
+  const visible = after.folderExists(id) && !after.isFolderHidden(id);
+  usageOf(ctx).folder(id);
+  return visible ? after.folderPath(id) : '';
+}
+
+/**
+ * Lo que decide un plan de crear o renombrar, para la puerta final: la carpeta (o el padre)
+ * y sus hermanas visibles, con las que se mira el choque de nombres. Si una de ellas pasa a
+ * oculta antes de responder, `folder_name_taken` (o `created: false`) delataría una carpeta
+ * oculta: la puerta repite la llamada (R3-1 de la 3.ª revisión de Codex).
+ */
+function declarePlan(ctx: ToolContext, parentId: string, folderId?: string): void {
+  const used = usageOf(ctx);
+  used.folder(parentId, ctx.privacy.folderPath(parentId));
+  if (folderId !== undefined) used.folder(folderId);
+  for (const child of ctx.privacy.folderChildren(parentId)) {
+    if (!child.hidden) used.folder(child.id);
+  }
 }
 
 /** El padre: `parentId` (`"root"` es la raíz) o `parent` (ruta, como `path` de
@@ -67,6 +85,7 @@ export async function runCreateFolder(
   if (!ctx.write) throw new ToolError('invalid_input');
   const parentId = parentOf(ctx, input);
   const plan = planCreateFolder(ctx.privacy, parentId, input.name);
+  if (ctx.privacy.folderExists(parentId) && !ctx.privacy.isFolderHidden(parentId)) declarePlan(ctx, parentId);
   if (plan.kind === 'reject') throw new ToolError(plan.code);
 
   let outcome: FolderOutcome;
@@ -79,7 +98,7 @@ export async function runCreateFolder(
   } catch (error) {
     throw mapWriteError(error);
   }
-  const path = await visiblePathAfter(ctx, outcome.id);
+  const path = await pathAfter(ctx, outcome.id);
   logEvent({ event: 'folder.create', id: outcome.id, created: outcome.changed, sync: outcome.sync });
   return { id: outcome.id, path, created: outcome.changed, ...syncOf(outcome) };
 }
@@ -92,6 +111,9 @@ export async function runRenameFolder(
 ): Promise<RenameFolderOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
   const plan = planRenameFolder(ctx.privacy, input.folderId, input.name);
+  if (ctx.privacy.folderExists(input.folderId) && !ctx.privacy.isFolderHidden(input.folderId)) {
+    declarePlan(ctx, ctx.privacy.folderParent(input.folderId) ?? ROOT_FOLDER_ID, input.folderId);
+  }
   if (plan.kind === 'reject') throw new ToolError(plan.code);
 
   let outcome: FolderOutcome;
@@ -104,7 +126,7 @@ export async function runRenameFolder(
   } catch (error) {
     throw mapWriteError(error);
   }
-  const path = await visiblePathAfter(ctx, outcome.id);
+  const path = await pathAfter(ctx, outcome.id);
   logEvent({ event: 'folder.rename', id: outcome.id, renamed: outcome.changed, sync: outcome.sync });
   return { id: outcome.id, path, renamed: outcome.changed, ...syncOf(outcome) };
 }

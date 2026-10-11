@@ -82,10 +82,11 @@ async function visibleTitleTarget(
   const { items } = await ctx.port.notesByExactTitle(title);
   let visible = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   // Todas las visibles deciden entre «resuelto» y «ambiguo» (y la ruta de cada una, el
-  // desempate): la puerta final las vuelve a juzgar, y si una ya no se ve, repite la llamada
-  // en vez de dejar un ambiguo que solo lo era por ella.
+  // desempate): la puerta final las vuelve a juzgar, solo por estar visibles, y si una ya no
+  // se ve, repite la llamada en vez de dejar un ambiguo que solo lo era por ella. La que
+  // resuelve, además con su sello: su título sale en la respuesta.
   const used = usageOf(ctx);
-  for (const item of visible) used.note(item.id);
+  for (const item of visible) used.noteVisible(item.id);
   if (visible.length > 1 && targetPath) {
     const wanted = targetPath.split('/');
     const endsWithPath = (folderId: string): boolean => {
@@ -95,7 +96,9 @@ async function visibleTitleTarget(
     const narrowed = visible.filter((item) => endsWithPath(ctx.privacy.visibleMeta(item.id)!.folderId));
     if (narrowed.length > 0) visible = narrowed;
   }
-  return visible.length === 1 ? { id: visible[0]!.id, title: visible[0]!.title } : undefined;
+  if (visible.length !== 1) return undefined;
+  used.note(visible[0]!.id);
+  return { id: visible[0]!.id, title: visible[0]!.title };
 }
 
 export async function runLinks(

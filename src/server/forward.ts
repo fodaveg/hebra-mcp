@@ -71,7 +71,7 @@ import {
   type ReplaceUndoNote,
   type ReplaceUndoReport
 } from '../store/replace-batch';
-import type { ReplaceChange } from '../store/replace';
+import { REPLACE_MAX_NOTES, type ReplaceChange } from '../store/replace';
 import { HEADING_PROOF_MAX_CHARS } from '../store/sections';
 import { EDITS_MAX_COUNT, WRITE_PROOF_TAIL_CHARS, type AppliedEdit } from '../store/edits';
 import type {
@@ -414,6 +414,7 @@ function asReplaceOutcome(value: unknown): ReplaceOutcome {
         view.cutoff = record.cutoff === null ? null : oneOfValues(record.cutoff, ['maxNotes', 'time', 'size'] as const);
       }
       if (record.continueAfter !== undefined) view.continueAfter = asNullableString(record.continueAfter);
+      if (record.gateNotes !== undefined) view.gateNotes = asGateNotes(record.gateNotes);
       if (record.skipped !== undefined) {
         view.skipped = asArray(record.skipped).map((entry): ReplaceSkipped => {
           const skipped = asRecordValue(entry);
@@ -477,9 +478,21 @@ function asReplaceOutcome(value: unknown): ReplaceOutcome {
       };
       return report;
     }
+    case 'discard':
+      return { mode: 'discard', planId: asString(record.planId) };
     default:
       throw new Error('writer_protocol');
   }
+}
+
+/** Las notas internas de la puerta final (`gateNotes`): ids, como mucho las de un plan y una
+ *  más. */
+function asGateNotes(value: unknown): string[] {
+  const ids = asArray(value).map(asString);
+  if (ids.length > REPLACE_MAX_NOTES + 1 || ids.some((id) => id.length === 0 || id.length > 200)) {
+    throw new Error('writer_protocol');
+  }
+  return ids;
 }
 
 function asCreateResult(value: unknown): CreateNoteResult {

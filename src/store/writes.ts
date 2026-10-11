@@ -68,7 +68,7 @@ import {
   type AppliedEdit,
   type TextEdit
 } from './edits';
-import { headingRejected, writeRejected } from './errors';
+import { headingRejected, operationReused, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
 import type { ReplacePlanStore } from './replace-plans';
@@ -669,7 +669,7 @@ export function priorOperation(
     // ese reintento escribiría otra vez. Con la misma huella, el registro es de la misma
     // nota que se pide, y esa decide sola (oculta, `not_found`).
     if (isHiddenTarget(previous.noteId)) return null;
-    throw writeRejected('operation_id_reused');
+    throw operationReused(previous.noteId);
   }
   return previous;
 }

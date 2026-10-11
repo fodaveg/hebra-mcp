@@ -13,7 +13,11 @@ async function twoNotes(): Promise<AuditHarness<string[]>> {
 
 const SIMULATE = { mode: 'simulate', pattern: 'CODIGO_PLAN', replacement: 'CAMBIADO', limit: 1 } as const;
 
-it('simulate conserva los recuentos del turno que guardó el plan si después se oculta una nota fuera de página', async () => {
+// Ajustados en la 2.ª vuelta de d64e187e (revisión independiente, puntos 2 y 5): la puerta
+// final juzga ahora TODAS las notas del plan (de ellas salen `planNotes` y `planMatches`) y
+// borra el plan de un intento descartado. Estos dos controles fijaban lo de antes (recuentos
+// del turno que guardó el plan y un plan de más por repetición); ahora fijan lo contrario.
+it('simulate no conserva en los recuentos una nota que se oculta fuera de página antes de responder', async () => {
   const h = await twoNotes();
   const recheck = h.port.privacyRecheck.bind(h.port);
   let changed = false;
@@ -31,14 +35,14 @@ it('simulate conserva los recuentos del turno que guardó el plan si después se
     expect((await h.call('hebra_read_note', { id: h.extra[1] })).json).toEqual(NOT_FOUND);
     expect(result.isError).toBe(false);
     expect(result.json.notes.map((note: { id: string }) => note.id)).toEqual([h.extra[0]]);
-    expect([result.json.planNotes, result.json.planMatches]).toEqual([2, 2]);
+    expect([result.json.planNotes, result.json.planMatches]).toEqual([1, 1]);
   } finally {
     spy.mockRestore();
     await h.close();
   }
 });
 
-it('una simulación repetida por la puerta conserva el plan anterior no aplicado hasta su caducidad', async () => {
+it('una simulación repetida por la puerta no deja el plan del intento descartado', async () => {
   const h = await twoNotes();
   const recheck = h.port.privacyRecheck.bind(h.port);
   let changed = false;
@@ -59,8 +63,7 @@ it('una simulación repetida por la puerta conserva el plan anterior no aplicado
     const plans = await h.mutate(async (_engine, _library, db) =>
       (db.prepare('SELECT plan_id FROM hebra_mcp_replace_plans').all() as Array<{ plan_id: string }>).map((row) => row.plan_id)
     );
-    expect(plans).toHaveLength(2);
-    expect(plans).toContain(result.json.planId);
+    expect(plans).toEqual([result.json.planId]);
   } finally {
     spy.mockRestore();
     await h.close();

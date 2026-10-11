@@ -75,10 +75,12 @@
  *     `AWAIT_ROUND_TIMEOUT_MS` (antes de `checkout`, después de `apply` y `undo`).
  *   Un escritor sin estos manejadores (o de una versión anterior) responde
  *   `invalid_request`.
- * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?, candidates?}` con
- * un código cerrado (`WriterSocketErrorCode`), en los rechazos de una sustitución su
- * índice y, en `ambiguous_heading` (D11), los candidatos (títulos y posiciones).
- * Nunca viaja el mensaje de una excepción.
+ * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?, candidates?, target?}`
+ * con un código cerrado (`WriterSocketErrorCode`), en los rechazos de una sustitución su
+ * índice, en `ambiguous_heading` (D11) los candidatos (títulos y posiciones) y, en
+ * `operation_id_reused`, lo que nombra el registro (un id: la puerta final del lector lo
+ * juzga y no sale en ninguna respuesta; R3-2 de la 3.ª revisión de Codex). Nunca viaja el
+ * mensaje de una excepción.
  *
  * Seguridad:
  * - El directorio de datos ya es 0700; el socket queda además en 0600 (umask acotado a
@@ -318,6 +320,7 @@ type ResponseEnvelope =
       error: WriterSocketErrorCode;
       edit?: number;
       candidates?: readonly SectionRef[];
+      target?: string;
     };
 
 class InvalidRequest extends Error {
@@ -665,6 +668,9 @@ function replaceRequestOf(params: Record<string, unknown>): ReplaceRequest {
       };
     case 'undo':
       return { mode: 'undo', planId: boundedText(params.planId, PLAN_ID_MAX_LENGTH), privacy };
+    case 'discard':
+      // Interno: el plan de una simulación que la puerta final del lector descartó.
+      return { mode: 'discard', planId: boundedText(params.planId, PLAN_ID_MAX_LENGTH), privacy };
     default:
       throw new InvalidRequest();
   }
@@ -726,6 +732,11 @@ function editIndexOf(error: unknown): number | undefined {
 /** Candidatos de `ambiguous_heading`, si el rechazo los trae. */
 function candidatesOf(error: unknown): readonly SectionRef[] | undefined {
   return error instanceof StoreError ? error.candidates : undefined;
+}
+
+/** Lo que nombra el registro de `operation_id_reused`, si el rechazo lo trae. */
+function operationTargetOf(error: unknown): string | undefined {
+  return error instanceof StoreError ? error.operationTarget : undefined;
 }
 
 function errnoOf(error: unknown): string {
@@ -1008,9 +1019,11 @@ export class WriterSocketServer {
       const code = errorCodeOf(error);
       const edit = editIndexOf(error);
       const candidates = candidatesOf(error);
+      const target = operationTargetOf(error);
       response = { id: envelope.id, ok: false, error: code };
       if (edit !== undefined) response.edit = edit;
       if (candidates !== undefined) response.candidates = candidates;
+      if (target !== undefined) response.target = target;
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'error', code });
     }
     if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(response)}\n`);
@@ -1076,12 +1089,18 @@ export class WriterRemoteError extends Error {
 function remoteError(
   code: WriterSocketErrorCode,
   edit?: number,
-  candidates?: readonly SectionRef[]
+  candidates?: readonly SectionRef[],
+  target?: string
 ): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
   if (isWriteRejectionCode(code)) {
-    return new StoreError(code, edit, code === 'ambiguous_heading' ? candidates : undefined);
+    return new StoreError(
+      code,
+      edit,
+      code === 'ambiguous_heading' ? candidates : undefined,
+      code === 'operation_id_reused' ? target : undefined
+    );
   }
   return new WriterRemoteError(code);
 }
@@ -1196,11 +1215,16 @@ export function requestWriter(
         typeof response.edit === 'number' && Number.isSafeInteger(response.edit) && response.edit >= 0
           ? response.edit
           : undefined;
+      const target =
+        typeof response.target === 'string' && response.target.length > 0 && response.target.length <= MAX_ID_LENGTH
+          ? response.target
+          : undefined;
       finish({
         error: remoteError(
           KNOWN_ERROR_CODES.has(code) ? code : 'internal',
           edit,
-          sectionRefsOf(response.candidates)
+          sectionRefsOf(response.candidates),
+          target
         )
       });
     });

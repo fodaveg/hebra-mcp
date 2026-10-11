@@ -464,6 +464,38 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(mapWriteError(new StoreError('not_found', undefined, [{ heading: 'X', level: 1, line: 1, occurrence: 1 }])).extra).toBeUndefined();
   });
 
+  it('operation_id_reused trae por el socket lo que nombra su registro, solo para la puerta final', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, 'fake-target.sock');
+    const reply = (error: string) =>
+      createServer((socket) => {
+        socket.once('data', (chunk) => {
+          const request = JSON.parse(String(chunk)) as { id: number };
+          socket.write(`${JSON.stringify({ id: request.id, ok: false, error, target: 'nota-del-registro' })}\n`);
+        });
+      });
+    const reused = reply('operation_id_reused');
+    servers.push(reused);
+    await new Promise<void>((resolve) => reused.listen(path, resolve));
+    const error = (await requestWriter(path, 'appendToNote', { id: 'n', text: 'x', privacy: OPEN }, 2_000).catch(
+      (caught: unknown) => caught
+    )) as StoreError;
+    const mapped = mapWriteError(error);
+    expect(mapped.code).toBe('operation_id_reused');
+    expect(mapped.operationTarget).toBe('nota-del-registro');
+    // Nunca en la salida: solo el código.
+    expect(mapped.extra).toBeUndefined();
+    // Con otro código, el campo se descarta.
+    const otherPath = join(dataDir, 'fake-target-other.sock');
+    const other = reply('no_match');
+    servers.push(other);
+    await new Promise<void>((resolve) => other.listen(otherPath, resolve));
+    const otherError = (await requestWriter(otherPath, 'appendToNote', { id: 'n', text: 'x', privacy: OPEN }, 2_000).catch(
+      (caught: unknown) => caught
+    )) as StoreError;
+    expect(mapWriteError(otherError).operationTarget).toBeUndefined();
+  });
+
   it('hebra_edit_note desde un lector trae applied y totalChars del cuerpo guardado (D11)', async () => {
     const { writer, client } = await pair();
     const created = await writer.createNote({ body: '# Reenviada\n\nuno dos tres', privacy: OPEN });

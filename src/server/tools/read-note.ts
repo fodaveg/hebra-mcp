@@ -176,7 +176,7 @@ export async function runReadNote(
   // puerta final lo vuelve a juzgar antes de responder.
   if (note.conflictOf !== null && ctx.privacy.visibleMeta(note.conflictOf)) {
     output.conflictOf = note.conflictOf;
-    used.note(note.conflictOf);
+    used.noteVisible(note.conflictOf);
   }
   if (section !== undefined) {
     output.section = section;

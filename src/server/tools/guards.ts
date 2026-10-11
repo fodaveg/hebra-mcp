@@ -6,9 +6,16 @@ import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 
-/** La nota existe y es visible para el filtro de privados; si no, `not_found`. */
+/**
+ * La nota existe y es visible para el filtro de privados; si no, `not_found`. Visible, queda
+ * declarada para la puerta final (`../privacy-gate.ts`) desde YA, antes de escribir o de
+ * leerla: un error posterior que dependa de ella (`note_locked`, `ambiguous_heading` con sus
+ * candidatos, `no_match`…) también la necesita visible y sin cambios al salir (R3-1 de la 3.ª
+ * revisión de Codex).
+ */
 export function requireVisibleNote(ctx: ToolContext, id: string): void {
   if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
+  usageOf(ctx).note(id);
 }
 
 /**

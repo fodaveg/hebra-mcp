@@ -29,8 +29,8 @@ import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
   GATE_ATTEMPTS,
   NOT_FOUND_OUTCOME,
-  gateConfig,
-  passGate,
+  finalGate,
+  isRejection,
   redactWhole,
   type GatePolicy,
   type GateVerdict,
@@ -149,7 +149,7 @@ function countOf(result: unknown): number | undefined {
 
 /** Una lectura: se repite si no pasa la puerta; al agotar los intentos, `fresh` (la
  *  respuesta del estado fresco) o, sin él, `not_found`. */
-function read(fresh?: () => unknown): GatePolicy {
+function read(fresh?: () => unknown): Extract<GatePolicy, { kind: 'repeat' }> {
   return fresh ? { kind: 'repeat', fallback: () => ({ ok: true, value: fresh() }) } : { kind: 'repeat' };
 }
 
@@ -230,7 +230,10 @@ function replaceFresh(input: { mode?: unknown; planId?: unknown }): () => unknow
 
 /** Qué hace la puerta final con cada herramienta (`./privacy-gate.ts`). Una herramienta sin
  *  entrada aquí no se puede registrar (`gated` lanza). */
-const GATE_POLICIES: Record<string, GatePolicy | ((input: Record<string, unknown>) => GatePolicy)> = {
+const GATE_POLICIES: Record<
+  string,
+  GatePolicy | ((input: Record<string, unknown>, server: ServerContext) => GatePolicy)
+> = {
   hebra_search: read(emptyList('results')),
   hebra_grep: read(() => ({ matches: [], nextCursor: null, cutoff: null })),
   hebra_list_notes: read(emptyList('notes')),
@@ -262,9 +265,25 @@ const GATE_POLICIES: Record<string, GatePolicy | ((input: Record<string, unknown
   hebra_create_folder: WRITE,
   hebra_rename_folder: WRITE,
   hebra_add_attachment: WRITE_WITH_COPY,
-  hebra_replace_in_notes: (input) =>
-    input.mode === 'apply' || input.mode === 'undo' ? REPLACE_REPORT : read(replaceFresh(input))
+  hebra_replace_in_notes: (input, server) =>
+    input.mode === 'apply' || input.mode === 'undo'
+      ? REPLACE_REPORT
+      : { ...read(replaceFresh(input)), discard: (outcome) => discardPlan(server, outcome) }
 };
+
+/**
+ * El plan que dejó una simulación que la puerta final descartó (nadie vio su `planId`), fuera:
+ * si no, cada repetición ocupaba un sitio del tope de planes guardados y podía desalojar uno
+ * vivo. Sin escritor, o si falla, caduca como cualquiera.
+ */
+async function discardPlan(server: ServerContext, outcome: ToolOutcome): Promise<void> {
+  if (!outcome.ok || !server.write?.replaceInNotes) return;
+  const result = outcome.value as { mode?: unknown; planId?: unknown };
+  if (result.mode !== 'simulate' || typeof result.planId !== 'string') return;
+  await server.write
+    .replaceInNotes({ mode: 'discard', planId: result.planId, privacy: server.privacyConfig })
+    .catch(() => undefined);
+}
 
 /** Lo que hizo `run`: su valor, o el `ToolError` (cualquier otro fallo, `invalid_input`). */
 async function settle(run: () => Promise<unknown>): Promise<ToolOutcome> {
@@ -311,17 +330,32 @@ async function runTool(
       return unresolved();
     }
     if (toolCtx.privacy.unresolved) return unresolved();
+    toolCtx.deferred = [];
     const outcome = await settle(() => run(toolCtx));
+    const usage = usageOf(toolCtx);
+    // El registro de un `operationId` que decidió el rechazo (R3-2 de la 3.ª revisión).
+    if (!outcome.ok && outcome.error.operationTarget !== undefined) {
+      usage.operationTarget(outcome.error.operationTarget);
+    }
+    const reads = policy.kind === 'repeat' || isRejection(outcome);
     let verdict: GateVerdict;
     try {
-      const config = await gateConfig(ctx);
-      verdict = await passGate(ctx.port, config, usageOf(toolCtx), { seals: policy.kind === 'repeat' });
+      verdict = await finalGate(ctx, ctx.port, toolCtx.privacyConfig, usage, { seals: reads });
     } catch (error) {
       if (error instanceof ToolError) return finish({ ok: false, error });
       throw error;
     }
-    if (policy.kind === 'filter') return finish((policy.redact ?? redactWhole)(outcome, verdict));
-    if (verdict.passed) return finish(outcome);
+    const accept = (accepted: ToolOutcome): ReturnType<typeof toOkResult> => {
+      for (const deferred of toolCtx.deferred ?? []) deferred();
+      return finish(accepted);
+    };
+    if (verdict.passed) return accept(outcome);
+    // Un rechazo no escribió nada: se repite como una lectura, y si ningún intento pasa,
+    // `not_found` (abajo).
+    if (policy.kind === 'filter' && !isRejection(outcome)) {
+      return accept((policy.redact ?? redactWhole)(outcome, verdict));
+    }
+    if (policy.kind === 'repeat') await policy.discard?.(outcome);
   }
   // Ningún intento pasó: el estado fresco, nunca lo que se leyó.
   return finish(policy.kind === 'repeat' && policy.fallback ? policy.fallback() : NOT_FOUND_OUTCOME());
@@ -351,7 +385,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       runTool(
         ctx,
         name,
-        typeof policy === 'function' ? policy(input as Record<string, unknown>) : policy,
+        typeof policy === 'function' ? policy(input as Record<string, unknown>, ctx) : policy,
         (toolCtx) => run(toolCtx, input)
       );
   }

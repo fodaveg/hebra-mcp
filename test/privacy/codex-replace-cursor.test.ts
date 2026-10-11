@@ -23,6 +23,9 @@ it('preview no cuenta notas ahora ocultas en la posición del siguiente cursor',
     expect(result.isError).toBe(false);
     expect(result.json.notes).toHaveLength(1);
     const decoded = JSON.parse(Buffer.from(result.json.nextCursor.split('.')[1], 'base64url').toString());
-    expect(decoded[1], 'El cursor deja un hueco por una nota oculta: tras 1 visible anuncia posición 2').toBe(1);
+    // Desde la 2.ª vuelta de d64e187e el cursor de preview es la CLAVE de la última devuelta
+    // (`[planId, id]`), no una posición: no cuenta nada, y el hueco no se puede producir.
+    expect(decoded[1], 'El cursor no lleva más que la última nota devuelta').toBe(result.json.notes[0].id);
+    expect(JSON.stringify(decoded)).not.toContain(hiddenId);
   } finally { await h.close(); }
 });

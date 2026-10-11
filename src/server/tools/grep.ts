@@ -315,7 +315,9 @@ export async function runGrep(
           const column = result.hits[hit + 1]!;
           const last = matches[matches.length - 1];
           if (matches.length >= limit) {
-            // La de más: hay algo detrás de la página.
+            // La de más: hay algo detrás de la página. Su nota decide que HAYA cursor: la
+            // puerta final la juzga también (R3-4 de la 3.ª revisión de Codex).
+            used.note(note.id);
             stop = { cursor: usedCursor(last!.id, last!.line + 1), cutoff: null };
             return false;
           }

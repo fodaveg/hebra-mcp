@@ -9,6 +9,11 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { ToolErrorCode } from '../log/logger';
 
 export class ToolError extends Error {
+  /** Solo para la puerta final (`./privacy-gate.ts`), nunca en la salida: lo que nombra el
+   *  registro de un `operationId` que decidió `operation_id_reused` (R3-2 de la 3.ª revisión de
+   *  Codex). */
+  operationTarget?: string;
+
   constructor(
     readonly code: ToolErrorCode,
     readonly extra?: Record<string, unknown>

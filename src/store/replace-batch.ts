@@ -150,11 +150,20 @@ export interface ReplaceUndoRequest {
   privacy: PrivacyConfig;
 }
 
+/** Borrar el plan de una simulación que la puerta final descartó (nunca llegó a nadie): solo
+ *  si sigue sin aplicar y es de esta biblioteca. Interno: no es un `mode` de la herramienta. */
+export interface ReplaceDiscardRequest {
+  mode: 'discard';
+  planId: string;
+  privacy: PrivacyConfig;
+}
+
 export type ReplaceRequest =
   | ReplaceSimulateRequest
   | ReplacePreviewRequest
   | ReplaceApplyRequest
-  | ReplaceUndoRequest;
+  | ReplaceUndoRequest
+  | ReplaceDiscardRequest;
 
 export type ReplaceMode = ReplaceRequest['mode'];
 
@@ -199,6 +208,11 @@ export interface ReplacePlanView {
    *  simulación (`after`); `null` si se recorrió entero. */
   continueAfter?: string | null;
   skipped?: ReplaceSkipped[];
+  /** Interno, para la puerta final del lector, que lo quita antes de responder: las notas de
+   *  las que depende la respuesta sin enseñarlas (las del plan entero en `simulate`, de las
+   *  que salen `planNotes` y `planMatches`; la siguiente visible en `preview`, que decide si
+   *  hay `nextCursor`). */
+  gateNotes?: string[];
 }
 
 /** Una nota en el informe de `apply`, leído de lo guardado. */
@@ -254,7 +268,13 @@ export interface ReplaceUndoReport {
   notes: ReplaceUndoNote[];
 }
 
-export type ReplaceResult = ReplacePlanView | ReplaceApplyReport | ReplaceUndoReport;
+/** Lo que responde `discard` (interno). */
+export interface ReplaceDiscardResult {
+  mode: 'discard';
+  planId: string;
+}
+
+export type ReplaceResult = ReplacePlanView | ReplaceApplyReport | ReplaceUndoReport | ReplaceDiscardResult;
 
 /** Lo que devuelve el escritor: el resultado y las notas (o copias) que escribió, para el
  *  estado de sync (`src/server/write-context.ts`). */
@@ -343,18 +363,19 @@ export function continueAfterId(cursor: string): string | null {
   }
 }
 
-function parsePageCursor(cursor: string, planId: string): number {
+/**
+ * El cursor de una página de un plan (`rp1`): `[planId, id]`, el id de la última nota
+ * DEVUELTA (la página siguiente sigue detrás de su posición en el plan), o `[planId, 0]`,
+ * desde el principio. `null` para el principio.
+ */
+function parsePageCursor(cursor: string, planId: string): string | null {
   const value = unwrap('rp1', cursor);
-  if (
-    !Array.isArray(value) ||
-    value.length !== 2 ||
-    value[0] !== planId ||
-    !Number.isSafeInteger(value[1]) ||
-    (value[1] as number) < 0
-  ) {
+  if (!Array.isArray(value) || value.length !== 2 || value[0] !== planId) {
     throw writeRejected('invalid_input');
   }
-  return value[1] as number;
+  if (value[1] === 0) return null;
+  if (!isId(value[1])) throw writeRejected('invalid_input');
+  return value[1];
 }
 
 function validCount(value: number, max: number): boolean {
@@ -421,7 +442,22 @@ export class ReplaceBatch {
         return this.serialized(request.planId, () => this.apply(request, hooks));
       case 'undo':
         return this.serialized(request.planId, () => this.undo(request));
+      case 'discard':
+        return this.discard(request);
     }
+  }
+
+  /** `discard`: el plan de una simulación que la puerta final descartó, fuera, en un turno
+   *  corto; uno aplicado (o de otra biblioteca) no se toca. Nunca falla por no existir. */
+  private async discard(request: ReplaceDiscardRequest): Promise<ReplaceLocal> {
+    if (!isId(request.planId)) throw writeRejected('invalid_input');
+    await this.target.writeExclusive(async (store) => {
+      const plan = store.replacePlans.plan(request.planId);
+      if (plan && plan.libraryId === store.libraryId() && plan.applyOperationId === null) {
+        store.replacePlans.deleteUnapplied(plan.planId);
+      }
+    });
+    return { result: { mode: 'discard', planId: request.planId }, written: [] };
   }
 
   /**
@@ -763,7 +799,9 @@ export class ReplaceBatch {
         nextCursor: page.nextCursor,
         planNotes: kept.length,
         planMatches: kept.reduce((sum, entry) => sum + entry.matches, 0),
-        ...extra
+        ...extra,
+        // Los recuentos son de todo el plan: la puerta final juzga todas sus notas.
+        gateNotes: kept.map((entry) => entry.id)
       },
       written: []
     };
@@ -796,31 +834,32 @@ export class ReplaceBatch {
   }
 
   /**
-   * Una página de un plan: de `views` (las notas del plan que se ven AHORA, en su orden),
-   * desde la `from`-ésima: como mucho `limit` notas y `REPLACE_RESPONSE_MAX_CHARS` de JSON (la
-   * primera sale siempre), y `nextCursor` solo si queda otra detrás. El cursor cuenta solo
-   * notas visibles DEVUELTAS (`from` más las de esta página), no posiciones del plan: una
-   * posición dejaba ver cuántas notas del plan, antes o entre las devueltas, ya son ocultas
-   * (C9 de la revisión de Codex, y su variante de la 2.ª: un hueco ANTES de la primera de la
-   * página). La página siguiente se cuenta otra vez sobre las que se vean entonces.
+   * Una página de un plan: de `views` (las notas del plan que se ven AHORA y van detrás del
+   * cursor, en su orden): como mucho `limit` notas y `REPLACE_RESPONSE_MAX_CHARS` de JSON (la
+   * primera sale siempre), y `nextCursor` solo si queda otra detrás. El cursor es la CLAVE de
+   * la última devuelta (`[planId, id]`), no una posición ni un recuento: una posición dejaba
+   * ver cuántas notas del plan ya son ocultas (C9 de la revisión de Codex y su variante de la
+   * 2.ª, un hueco antes de la primera de la página), y un recuento de visibles saltaba o
+   * repetía una nota si otra cambiaba de visibilidad entre páginas (revisión independiente de
+   * la tarea d64e187e). `next` es la siguiente visible, la que decide que haya cursor: la
+   * juzga la puerta final (`gateNotes`).
    */
   private page(
     planId: string,
     views: readonly ReplacePlanNoteView[],
-    limit: number,
-    from = 0
-  ): { notes: ReplacePlanNoteView[]; nextCursor: string | null } {
+    limit: number
+  ): { notes: ReplacePlanNoteView[]; nextCursor: string | null; next: string | null } {
     const notes: ReplacePlanNoteView[] = [];
     let chars = 0;
-    for (const view of views.slice(from)) {
+    for (const view of views) {
       const size = JSON.stringify(view).length;
       if (notes.length >= limit || (notes.length > 0 && chars + size > REPLACE_RESPONSE_MAX_CHARS)) {
-        return { notes, nextCursor: wrap('rp1', [planId, from + notes.length]) };
+        return { notes, nextCursor: wrap('rp1', [planId, notes[notes.length - 1]!.id]), next: view.id };
       }
       chars += size;
       notes.push(view);
     }
-    return { notes, nextCursor: null };
+    return { notes, nextCursor: null, next: null };
   }
 
   // --- Páginas de un plan ----------------------------------------------------------------
@@ -833,10 +872,17 @@ export class ReplaceBatch {
       const found = requirePlan(store, request.planId, request.privacy, true);
       return { plan: found, rows: store.replacePlans.notes(request.planId) };
     });
-    // Solo las que siguen visibles ahora: una que pasó a oculta no se nombra ni se cuenta.
+    // Detrás de la última devuelta, por su posición en el plan (aunque ya sea oculta), y solo
+    // las que siguen visibles ahora: una que pasó a oculta no se nombra ni se cuenta.
+    let after = -1;
+    if (from !== null) {
+      const last = rows.find((row) => row.noteId === from);
+      if (!last) throw writeRejected('invalid_input');
+      after = last.position;
+    }
     const { rows: visible } = await this.visibleNow(request.privacy);
     const views = rows
-      .filter((row) => visible.has(row.noteId))
+      .filter((row) => row.position > after && visible.has(row.noteId))
       .map((row) => {
         const live = visible.get(row.noteId)!;
         return {
@@ -847,17 +893,16 @@ export class ReplaceBatch {
           changes: changesOf(row.preview)
         };
       });
-    const page = this.page(plan.planId, views, request.limit, from);
-    return {
-      result: {
-        mode: 'preview',
-        planId: plan.planId,
-        expiresAt: new Date(plan.createdAt + PLAN_APPLY_TTL_MS).toISOString(),
-        notes: page.notes,
-        nextCursor: page.nextCursor
-      },
-      written: []
+    const page = this.page(plan.planId, views, request.limit);
+    const result: ReplacePlanView = {
+      mode: 'preview',
+      planId: plan.planId,
+      expiresAt: new Date(plan.createdAt + PLAN_APPLY_TTL_MS).toISOString(),
+      notes: page.notes,
+      nextCursor: page.nextCursor
     };
+    if (page.next !== null) result.gateNotes = [page.next];
+    return { result, written: [] };
   }
 
   // --- Aplicar ---------------------------------------------------------------------------

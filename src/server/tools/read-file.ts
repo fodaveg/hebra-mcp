@@ -15,11 +15,11 @@
  * subcarpeta, también ya borrada; o enlazado desde una nota oculta, por nombre o por
  * SHA-256). Un fichero oculto, uno inexistente, una lápida, el id de una nota y uno de la
  * papelera responden el mismo `not_found` (de la papelera no se lee: como una nota de la
- * papelera, hay que sacarlo antes). Se comprueba antes de leer y OTRA VEZ después, con un
- * filtro recalculado: si entre medias el fichero pasó a oculto, `not_found`; si cambió su
- * contenido, se repite la lectura una vez (los bytes leídos son los del hash que se
- * comprobó, y un hash viejo podría ser el de un adjunto de una nota oculta) y, si vuelve a
- * cambiar, `file_unavailable`.
+ * papelera, hay que sacarlo antes). Se comprueba antes de leer y OTRA VEZ al responder, en
+ * la puerta final (`../privacy-gate.ts`), con el almacén de ahora y el sello de la fila: si
+ * entre medias el fichero pasó a oculto, o cambió (los bytes leídos son los del hash que se
+ * comprobó, y un hash viejo podría ser el de un adjunto de una nota oculta), se repite la
+ * llamada; si ningún intento pasa, `not_found`.
  *
  * Bytes: si este dispositivo no los tiene, los baja el ESCRITOR (`fetchFile` de
  * `writer.sock`, con el filtro de quien pide dentro del turno) y aquí se leen del disco
@@ -32,7 +32,6 @@
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { FileFilter } from '../../privacy/file-filter';
-import { PrivacyFilter } from '../../privacy/filter';
 import {
   detectFileType,
   FILE_READ_MAX_BYTES,
@@ -87,49 +86,38 @@ interface FileRead {
   updatedAt: number;
 }
 
-/** Una lectura: comprobar, traer los bytes y volver a comprobar. `null` si el contenido
- *  cambió entre medias (quien llama la repite). */
-async function readOnce(ctx: ToolContext, id: string): Promise<FileRead | null> {
-  const beforeFilter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
-  const before = beforeFilter.contentOf(id);
-  if (!before || before.file.trashedAt !== null) throw new ToolError('not_found');
-  const knownLength = before.file.byteLength;
-  if (knownLength !== null && knownLength > FILE_READ_MAX_BYTES) {
-    // El tamaño es de este fichero: la puerta final lo vuelve a juzgar antes de responder.
-    usageOf(ctx).file(id, beforeFilter.sealOf(id));
-    throw tooLarge(knownLength);
-  }
-
-  let bytes = await localBytes(ctx, before.sha256);
-  if (!bytes) {
-    // Su error puede llevar el tamaño de este fichero.
-    usageOf(ctx).file(id, beforeFilter.sealOf(id));
-    await fetchBytes(ctx, id, knownLength);
-    bytes = await localBytes(ctx, before.sha256);
-  }
-
-  // Otra vez, con el almacén de ahora: el sync pudo cambiar algo mientras se leía.
-  const live = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
-  if (live.unresolved) throw new ToolError('privacy_config_unresolved');
-  const afterFilter = await FileFilter.build(ctx.port, live, ctx.privacyConfig);
-  const after = afterFilter.contentOf(id);
-  if (!after || after.file.trashedAt !== null) throw new ToolError('not_found');
-  if (after.sha256 !== before.sha256) return null;
-  // Lo que sale de aquí (o el tamaño de un error) es de esta fila: la puerta final la vuelve
-  // a juzgar, con su carpeta, antes de responder.
-  const folderPath = live.folderPath(after.file.folderId);
+/**
+ * Comprobar y traer los bytes. Lo que sale (también el tamaño de un error) es de la fila del
+ * fichero con la que se decidió que se veía: la puerta final (`../privacy-gate.ts`) la vuelve
+ * a juzgar, con su carpeta y su sello (`local_seq`, que sube si cambia su contenido, su
+ * nombre o su carpeta), antes de responder, y si pasó a oculto o cambió repite la llamada.
+ * Los bytes son los del SHA-256 de esa fila (el almacén de blobs es por contenido).
+ */
+async function readFile(ctx: ToolContext, id: string): Promise<FileRead> {
+  const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
+  const content = filter.contentOf(id);
+  if (!content || content.file.trashedAt !== null) throw new ToolError('not_found');
+  const folderPath = ctx.privacy.folderPath(content.file.folderId);
   const used = usageOf(ctx);
-  used.file(id, afterFilter.sealOf(id));
-  used.folder(after.file.folderId, folderPath);
+  used.file(id, filter.sealOf(id));
+  used.folder(content.file.folderId, folderPath);
+  const knownLength = content.file.byteLength;
+  if (knownLength !== null && knownLength > FILE_READ_MAX_BYTES) throw tooLarge(knownLength);
+
+  let bytes = await localBytes(ctx, content.sha256);
+  if (!bytes) {
+    await fetchBytes(ctx, id, knownLength);
+    bytes = await localBytes(ctx, content.sha256);
+  }
   if (!bytes) throw new ToolError('file_unavailable');
   if (bytes.length > FILE_READ_MAX_BYTES) throw tooLarge(bytes.length);
   return {
     bytes,
-    sha256: after.sha256,
-    name: after.file.name,
-    mime: after.file.mime,
+    sha256: content.sha256,
+    name: content.file.name,
+    mime: content.file.mime,
     folderPath,
-    updatedAt: after.file.updatedAt
+    updatedAt: content.file.updatedAt
   };
 }
 
@@ -144,8 +132,7 @@ export async function runReadFile(
   if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > FILE_TEXT_CHUNK_MAX_CHARS) {
     throw new ToolError('invalid_input');
   }
-  const read = (await readOnce(ctx, input.id)) ?? (await readOnce(ctx, input.id));
-  if (!read) throw new ToolError('file_unavailable');
+  const read = await readFile(ctx, input.id);
 
   const detected = detectFileType(read.bytes, read.mime, read.name);
   if (!detected.allowed) {

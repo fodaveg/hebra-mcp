@@ -35,7 +35,7 @@ async function main(): Promise<void> {
       }
     }
   );
-  out(`salida ${result.notes.length}`);
+  out(`salida ${'notes' in result ? result.notes.length : 0}`);
   await instance.close();
   process.exit(0);
 }

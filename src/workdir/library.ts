@@ -21,6 +21,7 @@ import {
   routeWrite,
   type ForwardOptions
 } from '../server/forward';
+import { gateConfig } from '../server/privacy-gate';
 import { localWriteContext, openServeContext, type OpenServeOptions } from '../server/serve';
 import { AWAIT_ROUND_TIMEOUT_MS, type RoundWait } from '../server/write-context';
 import type {
@@ -41,6 +42,10 @@ export interface WorkdirLibrary {
   /** Lecturas (en un lector, la réplica en solo lectura). */
   readonly port: HebraLibraryPort;
   readonly privacyConfig: PrivacyConfig;
+  /** La configuración de privados de AHORA (`config.json` releído si cambió; si ya no se
+   *  lee, lanza): la de la puerta final para el informe de `apply` tras la ronda. Sin él, la
+   *  de abrir. */
+  currentPrivacyConfig?(): Promise<PrivacyConfig>;
   syncRound(): Promise<RoundWait>;
   replaceBody(input: Omit<ReplaceBodyInput, 'privacy'>): Promise<ReplaceBodyResult>;
   trashConflictCopies(
@@ -124,6 +129,7 @@ export async function openWorkdirLibrary(options: OpenWorkdirLibraryOptions): Pr
     linked,
     port: ctx.port,
     privacyConfig,
+    currentPrivacyConfig: () => gateConfig(ctx),
     syncRound: () =>
       routeWrite(instance, 'syncRound', {}, asRoundWait, () => local.awaitRound(AWAIT_ROUND_TIMEOUT_MS), forward),
     replaceBody: (input) => {

@@ -746,27 +746,34 @@ async function applyLocked(
     }
 
     const round = await syncRoundQuietly(lib);
-    // El informe, por la puerta final tras la ronda (`../server/privacy-gate.ts`): una copia
-    // de conflicto que la ronda dejó oculta no se nombra (C4 cubría reutilizarla; esto, el id
-    // que se imprime).
-    const hidden = await hiddenCopies(lib, written);
-    for (const item of written) {
+    // El informe, por la puerta final tras la ronda (`../server/privacy-gate.ts`), con la
+    // configuración de AHORA: una nota que la ronda dejó oculta no sale (ni su ruta, ni su
+    // resultado, ni su diff, ni en los recuentos: R3-8 de la 3.ª revisión de Codex), y de una
+    // copia de conflicto oculta no sale el id (C4 cubría reutilizarla; esto, lo que se
+    // imprime). El diario y los ficheros del lote, escritos antes, no se tocan.
+    const hidden = await hiddenAfterRound(lib, written);
+    const reported = written.filter((item) => !hidden.has(item.entry.id));
+    for (const item of reported) {
       if (item.copyId !== undefined && hidden.has(item.copyId)) delete item.copyId;
     }
+    const reportedCounts = new Map<ApplyOutcomeName, number>();
+    for (const item of reported) reportedCounts.set(item.name, (reportedCounts.get(item.name) ?? 0) + 1);
     // La ronda pudo traer otra versión de una nota recién devuelta (alguien la editó en
     // otro dispositivo a la vez): el motor la resuelve con una copia de conflicto en Hebra.
     const changedBySync: string[] = [];
-    for (const item of written) {
+    for (const item of reported) {
       if (item.name !== 'aplicada' && item.name !== 'ya_estaba') continue;
       const row = await lib.port.noteRead(item.entry.id);
       if (!row || row.bodySha256 !== item.sha) changedBySync.push(item.entry.ruta);
     }
     if (changedBySync.length > 0) unclean = true;
 
-    const summary = [...counts].map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`).join(', ');
+    const summary = [...reportedCounts]
+      .map(([name, count]) => `${count} ${name.replace(/_/gu, ' ')}`)
+      .join(', ');
     io.out(`Lote ${lote}: ${summary || 'nada escrito'} (sync: ${describeRound(round, lib.role)}).`);
     const budget = new CompactBudget(io);
-    for (const item of written) {
+    for (const item of reported) {
       const { added, removed } = diffStat(item.entry.base!, item.entry.edited!);
       const label = OUTCOME_LABEL[item.name];
       const copy = item.copyId ? ` (${item.copyId.slice(0, 8)})` : '';
@@ -795,24 +802,26 @@ async function applyLocked(
 }
 
 /**
- * De las copias de conflicto que dejó `apply`, las que ya no se ven (ni vivas ni en la
- * papelera) con la configuración y el almacén de DESPUÉS de la ronda: la puerta final
- * (`../server/privacy-gate.ts`), sin repetir nada (ya se escribió). Cerrado ante la duda: con
- * una configuración que ya no resuelve, ninguna.
+ * De las notas que devolvió `apply` y de sus copias de conflicto, las que ya no se ven (ni
+ * vivas ni en la papelera) con la configuración de AHORA (releída si cambió, como en `serve`)
+ * y el almacén de DESPUÉS de la ronda: la puerta final (`../server/privacy-gate.ts`), sin
+ * repetir nada (ya se escribió). Cerrado ante la duda: con una configuración que ya no se
+ * lee o no resuelve, todas.
  */
-async function hiddenCopies(
+async function hiddenAfterRound(
   lib: WorkdirLibrary,
-  written: ReadonlyArray<{ copyId?: string }>
+  written: ReadonlyArray<{ entry: { id: string }; copyId?: string }>
 ): Promise<Set<string>> {
-  const copies = written.flatMap((item) => (item.copyId === undefined ? [] : [item.copyId]));
-  if (copies.length === 0) return new Set();
+  const ids = written.flatMap((item) => (item.copyId === undefined ? [item.entry.id] : [item.entry.id, item.copyId]));
+  if (ids.length === 0) return new Set();
   const usage = new GateUsage();
-  for (const id of copies) usage.noteInAnyState(id);
+  for (const id of ids) usage.noteInAnyState(id);
   try {
-    const verdict = await passGate(lib.port, lib.privacyConfig, usage, { seals: false });
+    const config = lib.currentPrivacyConfig ? await lib.currentPrivacyConfig() : lib.privacyConfig;
+    const verdict = await passGate(lib.port, config, usage, { seals: false });
     return new Set(verdict.failedNotes);
   } catch {
-    return new Set(copies);
+    return new Set(ids);
   }
 }
 

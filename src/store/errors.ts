@@ -109,11 +109,20 @@ export class StoreError extends Error {
     readonly editIndex?: number,
     /** Candidatos de `ambiguous_heading` (D11): títulos y posiciones de los apartados,
      *  ya acotados; nunca texto de la nota. */
-    readonly candidates?: readonly SectionRef[]
+    readonly candidates?: readonly SectionRef[],
+    /** De `operation_id_reused`: lo que nombra el registro que lo decidió (una nota, un
+     *  fichero o un plan). No sale nunca en la respuesta: lo juzga la puerta final del lector
+     *  (R3-2 de la 3.ª revisión de Codex). */
+    readonly operationTarget?: string
   ) {
     super(code);
     this.name = 'StoreError';
   }
+}
+
+/** `operation_id_reused` sin haber escrito nada, con lo que nombra el registro. */
+export function operationReused(target: string): StoreError {
+  return new StoreError('operation_id_reused', undefined, undefined, target);
 }
 
 /**
