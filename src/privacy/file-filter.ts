@@ -140,6 +140,12 @@ export class FileFilter {
     return new FileFilter(live, index, config);
   }
 
+  /** `local_seq` de la fila del fichero con la que se construyó este filtro, el sello de la
+   *  puerta final (`src/server/privacy-gate.ts`). */
+  sealOf(id: string): number | undefined {
+    return this.files.get(id)?.localSeq;
+  }
+
   /** `true` si `id` es un fichero suelto, vivo o de la papelera, que el MCP puede ver. */
   isVisible(id: string): boolean {
     return this.visibleMeta(id) !== undefined;

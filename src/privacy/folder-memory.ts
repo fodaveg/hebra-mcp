@@ -18,10 +18,28 @@
  * el proceso parado y movida antes de la primera ronda) no tiene nada que recordar; la ruta
  * de ahora nombra la que el usuario ve hoy con ese nombre.
  */
-import type { HebraLibraryPort } from '../store/types';
+import type { HebraLibraryPort, RememberedPrivateFolder } from '../store/types';
 import type { PrivacyConfig } from './config';
 import { PrivacyFilter } from './filter';
 import { privacyPathKey } from './folder-index';
+
+/**
+ * `config` con `knownPrivateFolderIds`: las carpetas recordadas de las rutas que SIGUEN
+ * configuradas (las de una ruta que ya no está, fuera). Sin escribir nada: lo usa también la
+ * puerta final (`src/server/privacy-gate.ts`) con la memoria leída en su transacción.
+ */
+export function withRememberedFolders(
+  config: PrivacyConfig,
+  remembered: readonly RememberedPrivateFolder[]
+): PrivacyConfig {
+  const keys = new Set(config.privateFolders.map((segments) => privacyPathKey(segments)));
+  const known = new Set<string>();
+  for (const entry of remembered) {
+    if (keys.has(entry.pathKey)) known.add(entry.folderId);
+  }
+  const { knownPrivateFolderIds: _ignored, ...base } = config;
+  return known.size > 0 ? { ...base, knownPrivateFolderIds: [...known].sort() } : base;
+}
 
 /** Lo que necesita del almacén: el filtro y la memoria. */
 export type PrivacyMemoryPort = Pick<
@@ -39,18 +57,17 @@ export async function privacyWithMemory(
   config: PrivacyConfig
 ): Promise<{ config: PrivacyConfig; filter: PrivacyFilter }> {
   const configured = [...new Set(config.privateFolders.map((segments) => privacyPathKey(segments)))];
-  const keys = new Set(configured);
   const remembered = await port.rememberedPrivateFolders();
-  const known = new Set<string>();
   const seen = new Set<string>();
+  const keys = new Set(configured);
   let stale = false;
   for (const entry of remembered) {
     seen.add(`${entry.pathKey}\u0000${entry.folderId}`);
-    if (keys.has(entry.pathKey)) known.add(entry.folderId);
-    else stale = true;
+    if (!keys.has(entry.pathKey)) stale = true;
   }
+  const withMemory = withRememberedFolders(config, remembered);
+  const known = new Set(withMemory.knownPrivateFolderIds ?? []);
   const { knownPrivateFolderIds: _ignored, ...base } = config;
-  const withMemory: PrivacyConfig = known.size > 0 ? { ...base, knownPrivateFolderIds: [...known].sort() } : base;
   const filter = await PrivacyFilter.build(port, withMemory);
   const fresh = filter
     .resolvedPrivateFolders()

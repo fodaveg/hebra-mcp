@@ -33,7 +33,7 @@ import { logEvent } from '../../log/logger';
 import { FileFilter, type VisibleFile } from '../../privacy/file-filter';
 import { PrivacyFilter } from '../../privacy/filter';
 import type { OrganizeFileAction } from '../../store/writes';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, sliceAfterKey, unwrapCursor, wrapCursor } from '../pagination';
 import { syncOf, type FileOutcome, type SyncFields } from '../write-context';
@@ -184,11 +184,20 @@ export async function runListFiles(
     keyOf: (entry) => entry.key,
     compare: compareSortKeys
   });
+  // Cada fichero que sale (y el siguiente, que decide `nextCursor`) con el sello de su fila y
+  // la carpeta que se enseña: la puerta final (`../privacy-gate.ts`) los vuelve a juzgar con
+  // los ficheros, las notas que los enlazan y el árbol de ahora, y si uno ya no se ve o cambió
+  // (un nombre nuevo que solo enlaza una nota recién privada), repite la llamada.
+  const used = usageOf(ctx);
+  const first = page.items.length === 0 ? -1 : listed.indexOf(page.items[0]!);
+  const decided =
+    first < 0 ? [] : listed.slice(first, first + page.items.length + (page.lastKey === null ? 0 : 1));
+  for (const { file } of decided) used.file(file.id, filter.sealOf(file.id));
   return {
     files: page.items.map(({ file }) => ({
       id: file.id,
       name: file.name,
-      folderPath: ctx.privacy.folderPath(file.folderId),
+      folderPath: usedFolderPath(ctx, file.folderId),
       mimeType: file.mime,
       byteLength: file.byteLength,
       updatedAt: new Date(file.updatedAt).toISOString(),
@@ -208,6 +217,13 @@ export async function runListFiles(
  * (`privacy_config_unresolved` o `not_found`) con el fichero ya restaurado. Lo escrito
  * queda registrado aunque la respuesta sea un error.
  */
+/** La ruta que se enseña de una carpeta, anotada para la puerta final con esa ruta. */
+function usedFolderPath(ctx: ToolContext, folderId: string): string {
+  const path = ctx.privacy.folderPath(folderId);
+  usageOf(ctx).folder(folderId, path);
+  return path;
+}
+
 async function organizeFile(ctx: ToolContext, action: OrganizeFileAction): Promise<FileOutcome> {
   const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
   if (!filter.isVisible(action.id)) throw new ToolError('not_found');
@@ -232,6 +248,8 @@ export async function runTrashFile(
   input: { id: string }
 ): Promise<FileTrashOutput> {
   const outcome = await organizeFile(ctx, { action: 'trashFile', id: input.id });
+  // Tras la ronda, la puerta final mira que el fichero se siga viendo (en la papelera).
+  usageOf(ctx).file(outcome.id);
   return { id: outcome.id, trashed: true, ...syncOf(outcome) };
 }
 
@@ -253,5 +271,10 @@ export async function runRestoreFile(
   if (after.unresolved) throw new ToolError('privacy_config_unresolved');
   const meta = (await FileFilter.build(ctx.port, after, ctx.privacyConfig)).visibleMeta(outcome.id);
   if (!meta) throw new ToolError('not_found');
-  return { id: outcome.id, folderPath: after.folderPath(meta.folderId), ...syncOf(outcome) };
+  const folderPath = after.folderPath(meta.folderId);
+  // Y otra vez en la puerta final, con todo de una transacción.
+  const used = usageOf(ctx);
+  used.file(outcome.id);
+  used.folder(meta.folderId, folderPath);
+  return { id: outcome.id, folderPath, ...syncOf(outcome) };
 }

@@ -12,7 +12,7 @@
  */
 import { encodeCursor, parseLinkRef } from '../../hebra';
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import {
   LIMITS,
   effectiveLimit,
@@ -22,7 +22,6 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
-import { recheck } from '../recheck';
 import { scanOutgoingRefs } from './link-scan';
 
 export interface OutgoingLink {
@@ -82,6 +81,11 @@ async function visibleTitleTarget(
 ): Promise<{ id: string; title: string } | undefined> {
   const { items } = await ctx.port.notesByExactTitle(title);
   let visible = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
+  // Todas las visibles deciden entre «resuelto» y «ambiguo» (y la ruta de cada una, el
+  // desempate): la puerta final las vuelve a juzgar, y si una ya no se ve, repite la llamada
+  // en vez de dejar un ambiguo que solo lo era por ella.
+  const used = usageOf(ctx);
+  for (const item of visible) used.note(item.id);
   if (visible.length > 1 && targetPath) {
     const wanted = targetPath.split('/');
     const endsWithPath = (folderId: string): boolean => {
@@ -104,6 +108,13 @@ export async function runLinks(
   if (!meta) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(input.id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
+  // La nota (los enlaces salen de su cuerpo tal como se leyó), las que resuelve, las
+  // candidatas por título y las que la enlazan: la puerta final (`../privacy-gate.ts`) las
+  // vuelve a juzgar con el filtro de ahora y sus sellos antes de responder, y si alguna ya no
+  // se ve o cambió, repite la llamada entera: el cursor de los backlinks sale de la última
+  // DEVUELTA, que ella ha juzgado (C1, y la 2.ª revisión de Codex).
+  const used = usageOf(ctx);
+  used.note(note.id, note.localSeq);
 
   // Outgoing: la lista de refs sale del cuerpo entero; solo se resuelven los de la página.
   const outgoing: OutgoingLink[] = [];
@@ -128,6 +139,7 @@ export async function runLinks(
       const resolution = resolutions[engineIndex++]!;
       const candidate = resolution.status === 'resolved' ? resolution.candidates[0] : undefined;
       if (candidate && candidate.kind === 'note' && ctx.privacy.visibleMeta(candidate.id)) {
+        used.note(candidate.id);
         outgoing.push({ ref, resolvedId: candidate.id, title: candidate.title });
       } else {
         outgoing.push({ ref });
@@ -143,31 +155,17 @@ export async function runLinks(
       limit,
       startCursor: position.b,
       fetch: (cursor, want) => ctx.port.backlinks(input.id, cursor, storePageSize(want)),
-      accept: (item) =>
-        ctx.privacy.visibleMeta(item.id) ? { id: item.id, title: item.title } : undefined,
+      accept: (item) => {
+        if (!ctx.privacy.visibleMeta(item.id)) return undefined;
+        // También la de mirar por delante: decide si hay `nextCursor`.
+        used.note(item.id);
+        return { id: item.id, title: item.title };
+      },
       cursorAfter: (item) => encodeCursor([item.favorite ? 1 : 0, item.updatedAt], item.id)
     });
     backlinks.push(...page.items);
     if (page.lastCursor !== null) nextBacklinks = page.lastCursor;
   }
-
-  // Todo con el filtro de DESPUÉS de leer (C1 de la revisión de Codex, `../recheck.ts`): la
-  // nota (los enlaces salen de su cuerpo tal como se leyó), las que resuelve y las que la
-  // enlazan. La nota, si ya no es visible o cambió, `not_found`; las demás, si ya no se ven,
-  // como un enlace sin resolver o fuera de la lista.
-  const read = { id: note.id, localSeq: note.localSeq };
-  const check = await recheck(ctx, [
-    read,
-    ...outgoing.flatMap((link) => (link.resolvedId !== undefined ? [{ id: link.resolvedId }] : [])),
-    ...backlinks.map((item) => ({ id: item.id }))
-  ]);
-  if (!check.visible(read)) throw new ToolError('not_found');
-  for (const [index, link] of outgoing.entries()) {
-    if (link.resolvedId !== undefined && !check.visible(link.resolvedId)) outgoing[index] = { ref: link.ref };
-  }
-  const shown = backlinks.filter((item) => check.visible(item.id));
-  backlinks.length = 0;
-  backlinks.push(...shown);
 
   if (nextOutgoing === undefined && nextBacklinks === undefined) {
     return { outgoing, backlinks, nextCursor: null };

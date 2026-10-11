@@ -19,7 +19,7 @@
  * público sigue sin salir. Ausente o `false`: solo las notas directas, como siempre.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import {
   LIMITS,
   effectiveLimit,
@@ -30,7 +30,6 @@ import {
   wrapCursor
 } from '../pagination';
 import type { LIST_NOTES_FIELDS } from '../schemas';
-import { recheck, type Recheck } from '../recheck';
 
 export interface ListedNote {
   id: string;
@@ -103,32 +102,29 @@ export async function runListNotes(
   // Ámbito ya consumido por `scope`: el otro filtro, si lo hay, se aplica en JS.
   const extraTagFilter = scope.kind === 'folder' ? tagFilter : undefined;
 
-  // Cada página del almacén se juzga con un filtro de DESPUÉS de leerla, y cada fila solo
-  // si sigue siendo la que se leyó (C1 de la revisión de Codex, `../recheck.ts`): una que
-  // pasó a oculta mientras tanto no sale, y la página se sigue llenando con visibles.
-  let check: Recheck | undefined;
+  // Cada fila que sale, con su carpeta, para la puerta final (`../privacy-gate.ts`): antes de
+  // responder la vuelve a juzgar con el filtro de ahora y el sello de la fila con la que se
+  // decidió que se veía; si ya no se ve o cambió (también si se leyó privada y volvió a ser
+  // pública), repite la llamada (C1, y la 2.ª revisión de Codex).
+  const used = usageOf(ctx);
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: async (cursor, want) => {
-      const read = await ctx.port.notesPage(cursor, storePageSize(want), scope);
-      check = await recheck(
-        ctx,
-        read.items.map((item) => ({ id: item.id, updatedAt: item.updatedAt }))
-      );
-      return read;
-    },
+    fetch: (cursor, want) => ctx.port.notesPage(cursor, storePageSize(want), scope),
     accept: (item) => {
-      if (!check!.visible({ id: item.id, updatedAt: item.updatedAt })) return undefined;
-      const privacy = check!.filter;
-      const meta = privacy.visibleMeta(item.id)!;
-      if (extraTagFilter !== undefined && !privacy.hasTag(item.id, extraTagFilter)) {
+      const meta = ctx.privacy.visibleMeta(item.id);
+      if (!meta) return undefined;
+      if (extraTagFilter !== undefined && !ctx.privacy.hasTag(item.id, extraTagFilter)) {
         return undefined;
       }
+      // También la de mirar por delante: decide si hay `nextCursor`.
+      const folderPath = ctx.privacy.folderPath(meta.folderId);
+      used.note(item.id);
+      used.folder(meta.folderId, folderPath);
       const note: ListedNote = {
         id: item.id,
         title: item.title,
-        folderPath: privacy.folderPath(meta.folderId),
+        folderPath,
         tags: meta.tags,
         excerpt: item.excerpt,
         updatedAt: new Date(item.updatedAt).toISOString(),

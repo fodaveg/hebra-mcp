@@ -21,9 +21,8 @@ import { encodeRevision } from '../../store/revision';
 import { parseHeadings } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
-import { requireStillVisible } from '../recheck';
 import { resolveNoteId } from './note-ref';
 
 export interface OutlineSection {
@@ -71,9 +70,9 @@ export async function runNoteOutline(
   if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
-  // La fila leída, con el filtro de después de leerla (C1 de la revisión de Codex), y antes
-  // de `note_locked`.
-  await requireStillVisible(ctx, { id: note.id, localSeq: note.localSeq });
+  // La fila leída, también para `note_locked`: la puerta final (`../privacy-gate.ts`) la
+  // vuelve a juzgar con el filtro de ahora y su sello antes de responder.
+  usageOf(ctx).note(note.id, note.localSeq);
   if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw new ToolError('note_locked');
   const libraryId = await ctx.port.libraryId();
   const revision = encodeRevision({

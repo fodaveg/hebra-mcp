@@ -7,7 +7,7 @@
  * su cola y dentro del turno de escritura) y `hebra_grep` (`./grep-sql.ts`).
  */
 import type { DatabaseSync } from 'node:sqlite';
-import type { FolderRowFact, NoteVisibilityEntry, TrashIndex } from './types';
+import type { FolderRowFact, NoteStamp, NoteVisibilityEntry, TrashIndex } from './types';
 
 /** Todas las filas de carpeta, vivas y lápidas, con su padre GUARDADO. */
 export function folderRowFacts(db: DatabaseSync): FolderRowFact[] {
@@ -51,6 +51,7 @@ interface VisibilityRow {
   folder_id: string;
   stored_folder_id: string | null;
   locked: number | bigint | null;
+  local_seq?: number | bigint | null;
   tags: string | null;
 }
 
@@ -68,6 +69,7 @@ export function visibilityEntries(db: DatabaseSync, rows: readonly VisibilityRow
       tags: row.tags ? String(row.tags).split('\n') : []
     };
     if (row.locked !== null && Number(row.locked) !== 0) entry.locked = true;
+    if (row.local_seq !== undefined && row.local_seq !== null) entry.localSeq = Number(row.local_seq);
     if (row.stored_folder_id !== null) {
       folders ??= new Map(folderRowFacts(db).map((folder) => [folder.id, folder]));
       entry.storedFolderId = String(row.stored_folder_id);
@@ -83,11 +85,13 @@ export function visibilityEntries(db: DatabaseSync, rows: readonly VisibilityRow
  * lápida, si no la raíz — la misma regla que `rowToNote` de `sqlite-engine.ts` —; y, si no
  * es la viva, la guardada (`stored_folder_id`): una lápida (`folder_state = 'deleted'` del
  * motor) o una fila que aún no llegó (`'pending'`). La raíz es una fila fija y viva
- * (`'root'` de `schema.sql`), así que una nota de la raíz nunca lleva guardada.
+ * (`'root'` de `schema.sql`), así que una nota de la raíz nunca lleva guardada. Y
+ * `local_seq`, el sello de la fila con la que se decidió (la puerta final,
+ * `src/server/privacy-gate.ts`).
  */
 export const VISIBILITY_COLUMNS = `CASE WHEN f.id IS NOT NULL AND f.deleted = 0 THEN n.folder_id ELSE 'root' END AS folder_id,
        CASE WHEN f.id IS NULL OR f.deleted <> 0 THEN n.folder_id END AS stored_folder_id,
-       n.locked AS locked`;
+       n.locked AS locked, n.local_seq AS local_seq`;
 
 /**
  * Carpeta efectiva, carpeta guardada (si no está viva), si está bloqueada y etiquetas de
@@ -111,31 +115,31 @@ export function noteVisibilityRows(db: DatabaseSync): NoteVisibilityEntry[] {
 }
 
 /**
- * El sello de cada nota de `ids` que sigue viva (ni papelera ni lápida): `local_seq` (sube con
- * cada guardado de la fila) y `updated_at`. Lo que mira la recomprobación de las
- * herramientas (`src/server/recheck.ts`) para saber que la fila que va a devolver es la misma
- * que acaba de juzgar visible. Una que no está viva no sale.
+ * El sello de cada nota de `ids` que no es lápida, viva o de la papelera: `local_seq`, que
+ * sube con cada guardado de la fila (también los que trae el sync, y mover, bloquear o
+ * mandar a la papelera), y si está en la papelera. Lo que mira la puerta final
+ * (`src/server/privacy-gate.ts`) para saber que la fila que usó la respuesta es la misma que
+ * juzga ahora. `updated_at` no sirve (2.ª revisión de Codex,
+ * `test/privacy/codex2-updated-at-collision.test.ts`): tiene resolución de milisegundos, y dos
+ * guardados seguidos pueden compartirlo. Una lápida no sale.
  */
-export function noteStamps(
-  db: DatabaseSync,
-  ids: readonly string[]
-): Map<string, { localSeq: number; updatedAt: number }> {
-  const stamps = new Map<string, { localSeq: number; updatedAt: number }>();
+export function noteStamps(db: DatabaseSync, ids: readonly string[]): Map<string, NoteStamp> {
+  const stamps = new Map<string, NoteStamp>();
   if (ids.length === 0) return stamps;
   const rows = db
     .prepare(
-      `SELECT n.id AS id, n.local_seq AS local_seq, n.updated_at AS updated_at
+      `SELECT n.id AS id, n.local_seq AS local_seq, n.trashed_at IS NOT NULL AS trashed
        FROM json_each(?) AS wanted
        JOIN notes AS n ON n.id = wanted.value
-       WHERE n.deleted = 0 AND n.trashed_at IS NULL`
+       WHERE n.deleted = 0`
     )
     .all(JSON.stringify([...new Set(ids)])) as Array<{
     id: string;
     local_seq: number | bigint;
-    updated_at: number | bigint;
+    trashed: number | bigint;
   }>;
   for (const row of rows) {
-    stamps.set(String(row.id), { localSeq: Number(row.local_seq), updatedAt: Number(row.updated_at) });
+    stamps.set(String(row.id), { localSeq: Number(row.local_seq), trashed: Number(row.trashed) !== 0 });
   }
   return stamps;
 }
@@ -151,7 +155,8 @@ export function trashIndexRows(db: DatabaseSync): TrashIndex {
   const notes = db
     .prepare(
       `SELECT n.id AS id, coalesce(n.folder_id, 'root') AS folder_id, n.locked AS locked,
-              n.trashed_at AS trashed_at, GROUP_CONCAT(t.tag, char(10)) AS tags
+              n.trashed_at AS trashed_at, n.local_seq AS local_seq,
+              GROUP_CONCAT(t.tag, char(10)) AS tags
        FROM notes n
        LEFT JOIN note_tags t ON t.note_id = n.id
        WHERE n.deleted = 0 AND n.trashed_at IS NOT NULL
@@ -162,6 +167,7 @@ export function trashIndexRows(db: DatabaseSync): TrashIndex {
     folder_id: string;
     locked: number | bigint | null;
     trashed_at: number | bigint;
+    local_seq: number | bigint;
     tags: string | null;
   }>;
   return {
@@ -170,6 +176,7 @@ export function trashIndexRows(db: DatabaseSync): TrashIndex {
       folderId: String(row.folder_id),
       tags: row.tags ? String(row.tags).split('\n') : [],
       trashedAt: Number(row.trashed_at),
+      localSeq: Number(row.local_seq),
       ...(row.locked !== null && Number(row.locked) !== 0 ? { locked: true } : {})
     })),
     folders: folderRowFacts(db)

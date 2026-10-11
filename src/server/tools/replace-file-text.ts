@@ -26,7 +26,7 @@
 import { logEvent } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';
 import { encodeFileText, FILE_TEXT_REPLACE_MAX_BYTES } from '../../store/file-content';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import type { ReplaceFileTextOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
@@ -70,6 +70,9 @@ export async function runReplaceFileText(
     input.id
   );
   if (!content || content.file.trashedAt !== null) throw new ToolError('not_found');
+  // El informe (o el tamaño de un error) es de este fichero: tras la ronda, la puerta final
+  // (`../privacy-gate.ts`) mira que se siga viendo.
+  usageOf(ctx).file(input.id);
 
   let result: ReplaceFileTextOutcome;
   try {

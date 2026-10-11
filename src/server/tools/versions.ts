@@ -30,11 +30,10 @@ import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { NoteVersion, NoteVersionSummary } from '../../store/types';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
-import { requireValidOperationId, requireVisibleNote } from './guards';
+import { declareWriteUsage, requireValidOperationId, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
-import { requireStillVisible } from '../recheck';
 
 export interface ListedVersion {
   versionId: number;
@@ -130,8 +129,9 @@ export async function runListVersions(
       lastId = item.id;
     }
   }
-  // La nota, con el filtro de DESPUÉS de leer sus versiones (C1 de la revisión de Codex).
-  await requireStillVisible(ctx, { id: input.id });
+  // La nota: la puerta final (`../privacy-gate.ts`) la vuelve a juzgar con el filtro de
+  // ahora y su sello antes de responder (C1, y la 2.ª revisión de Codex).
+  usageOf(ctx).note(input.id);
   return {
     id: input.id,
     versions: visible,
@@ -150,8 +150,9 @@ export async function runReadVersion(
   if (!version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)) {
     throw new ToolError('not_found');
   }
-  // La nota, con el filtro de DESPUÉS de leer la versión (C1 de la revisión de Codex).
-  await requireStillVisible(ctx, { id: input.id });
+  // La nota: la puerta final la vuelve a juzgar antes de responder (C1 de la revisión de
+  // Codex).
+  usageOf(ctx).note(input.id);
   return { id: input.id, ...listed(version), body: version.body };
 }
 
@@ -185,7 +186,7 @@ export async function runRestoreVersion(
     replayed: result.replayed === true
   });
   // Tras la ronda, la nota puede haber pasado a oculta: la respuesta de una que no existe
-  // (C3 de la revisión de Codex; la escritura ya está hecha).
-  await requireStillVisible(ctx, { id: input.id });
+  // (C3 de la revisión de Codex; la escritura ya está hecha). Lo juzga la puerta final.
+  declareWriteUsage(ctx, result);
   return result;
 }

@@ -5,7 +5,7 @@
  * otra etiqueta, sale con recuento 0 y se omite. `limit`/`cursor` paginan esa lista ya
  * filtrada (cursor = la última etiqueta devuelta); sin `limit`, todas.
  */
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
 
 export interface TagCount {
@@ -19,9 +19,13 @@ export async function runListTags(
 ): Promise<{ tags: TagCount[]; nextCursor: string | null }> {
   const { tags } = await ctx.port.tagsList();
   const visibleCounts = new Map<string, number>();
-  for (const { tags: noteTags } of ctx.privacy.visibleNotes().values()) {
+  const visible = ctx.privacy.visibleNotes();
+  for (const { tags: noteTags } of visible.values()) {
     for (const tag of noteTags) visibleCounts.set(tag, (visibleCounts.get(tag) ?? 0) + 1);
   }
+  // Los recuentos salen de todas las visibles: la puerta final (`../privacy-gate.ts`) las
+  // vuelve a juzgar, y si una ya no se ve (la única de una etiqueta), repite la llamada.
+  usageOf(ctx).visibleNotes(visible.keys());
   const result: TagCount[] = [];
   for (const entry of tags) {
     const count = visibleCounts.get(entry.tag) ?? 0;

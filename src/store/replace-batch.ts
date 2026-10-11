@@ -333,6 +333,16 @@ function parseContinue(cursor: string): { id: string; inclusive: boolean } {
   return { id: value[0], inclusive: value[1] === 1 };
 }
 
+/** El id de nota de un `continueAfter` propio (`rc1`), o `null` si no es uno: lo que la
+ *  puerta final juzga de él (`src/server/tools/replace-in-notes.ts`). */
+export function continueAfterId(cursor: string): string | null {
+  try {
+    return parseContinue(cursor).id;
+  } catch {
+    return null;
+  }
+}
+
 function parsePageCursor(cursor: string, planId: string): number {
   const value = unwrap('rp1', cursor);
   if (
@@ -554,6 +564,13 @@ export class ReplaceBatch {
     let cutoff: ReplaceCutoff | null = null;
     let continueAt: { id: string; inclusive: boolean } | null = null;
     let progressed = false;
+    /** La última nota ya mirada entera (leída y visible en el turno de su lote). Un corte
+     *  sigue DETRÁS de ella, nunca en una que aún no se ha leído (o que se leyó pero no se
+     *  terminó): esa pudo pasar a oculta, y su id no puede salir (2.ª revisión de Codex, como
+     *  C6 en `hebra_grep`). */
+    let lastDone: string | null = null;
+    const afterLastDone = (fallback: { id: string; inclusive: boolean }): { id: string; inclusive: boolean } =>
+      lastDone === null ? fallback : { id: lastDone, inclusive: false };
     let session: GrepBodiesSession | null = null;
     const worker = pattern.literal ? null : await RegexReplaceWorker.start(re, parts);
     // El plazo cuenta desde el primer cuerpo leído, como en `hebra_grep`.
@@ -563,7 +580,7 @@ export class ReplaceBatch {
         const batch = pending.slice(first, first + SIMULATE_BATCH_NOTES);
         if (progressed && Date.now() >= deadline) {
           cutoff = 'time';
-          continueAt = { id: batch[0]!.id, inclusive: true };
+          continueAt = afterLastDone({ id: batch[0]!.id, inclusive: true });
           break;
         }
         const read = await this.port.grepBodies(
@@ -580,7 +597,7 @@ export class ReplaceBatch {
         const bodies = notes.map((note) => read.bodies.get(note.rowid)!);
         const nextAfterBatch = pending[first + SIMULATE_BATCH_NOTES];
 
-        const onNote = (index: number, result: ReplaceLinesResult): boolean => {
+        const judge = (index: number, result: ReplaceLinesResult): boolean => {
           progressed = true;
           const note = notes[index]!;
           const base = bodies[index]!;
@@ -610,12 +627,12 @@ export class ReplaceBatch {
           }
           if (entries.length >= request.maxNotes) {
             cutoff = 'maxNotes';
-            continueAt = { id: note.id, inclusive: true };
+            continueAt = afterLastDone({ id: note.id, inclusive: true });
             return false;
           }
           if (totalChars + body.length > PLAN_RESULT_MAX_CHARS) {
             cutoff = 'size';
-            continueAt = { id: note.id, inclusive: true };
+            continueAt = afterLastDone({ id: note.id, inclusive: true });
             return false;
           }
           totalChars += body.length;
@@ -631,6 +648,12 @@ export class ReplaceBatch {
           });
           return true;
         };
+        // Cada nota que se mira entera (la que corta no cuenta) es por donde seguiría un corte.
+        const onNote = (index: number, result: ReplaceLinesResult): boolean => {
+          const keepGoing = judge(index, result);
+          if (keepGoing) lastDone = notes[index]!.id;
+          return keepGoing;
+        };
 
         const outcome = worker
           ? await worker.replace(bodies, PREVIEW_CHANGES_PER_NOTE, REPLACE_BODY_MAX_LENGTH, deadline, onNote)
@@ -642,7 +665,7 @@ export class ReplaceBatch {
             // Todas las del lote terminadas y el plazo llegó antes del aviso de fin.
             if (nextAfterBatch) {
               cutoff = 'time';
-              continueAt = { id: nextAfterBatch.id, inclusive: true };
+              continueAt = afterLastDone({ id: nextAfterBatch.id, inclusive: true });
             }
             break;
           }
@@ -653,7 +676,7 @@ export class ReplaceBatch {
             skipped.push({ id: stuck.id, title: capHeading(stuck.title), reason: 'too_slow' });
             continueAt = { id: stuck.id, inclusive: false };
           } else {
-            continueAt = { id: stuck.id, inclusive: true };
+            continueAt = afterLastDone({ id: stuck.id, inclusive: true });
           }
           break;
         }
@@ -661,7 +684,7 @@ export class ReplaceBatch {
           const next = notes[outcome.next] ?? nextAfterBatch;
           if (next) {
             cutoff = 'time';
-            continueAt = { id: next.id, inclusive: true };
+            continueAt = afterLastDone({ id: next.id, inclusive: true });
           }
           break;
         }
@@ -723,15 +746,12 @@ export class ReplaceBatch {
       return keep;
     });
     if (kept.length === 0) return nothing(extra);
-    const views = kept.map((entry, position) => ({
-      position,
-      view: {
-        id: entry.id,
-        title: capHeading(entry.title),
-        isConflictCopy: entry.conflict,
-        matches: entry.matches,
-        changes: entry.changes
-      }
+    const views = kept.map((entry) => ({
+      id: entry.id,
+      title: capHeading(entry.title),
+      isConflictCopy: entry.conflict,
+      matches: entry.matches,
+      changes: entry.changes
     }));
     const page = this.page(planId, views, request.limit);
     return {
@@ -775,26 +795,30 @@ export class ReplaceBatch {
     return { status: 'done' };
   }
 
-  /** Una página de un plan desde `from`: como mucho `limit` notas y
-   *  `REPLACE_RESPONSE_MAX_CHARS` de JSON (la primera sale siempre), y `nextCursor` solo si
-   *  queda otra detrás. */
+  /**
+   * Una página de un plan: de `views` (las notas del plan que se ven AHORA, en su orden),
+   * desde la `from`-ésima: como mucho `limit` notas y `REPLACE_RESPONSE_MAX_CHARS` de JSON (la
+   * primera sale siempre), y `nextCursor` solo si queda otra detrás. El cursor cuenta solo
+   * notas visibles DEVUELTAS (`from` más las de esta página), no posiciones del plan: una
+   * posición dejaba ver cuántas notas del plan, antes o entre las devueltas, ya son ocultas
+   * (C9 de la revisión de Codex, y su variante de la 2.ª: un hueco ANTES de la primera de la
+   * página). La página siguiente se cuenta otra vez sobre las que se vean entonces.
+   */
   private page(
     planId: string,
-    views: ReadonlyArray<{ position: number; view: ReplacePlanNoteView }>,
-    limit: number
+    views: readonly ReplacePlanNoteView[],
+    limit: number,
+    from = 0
   ): { notes: ReplacePlanNoteView[]; nextCursor: string | null } {
     const notes: ReplacePlanNoteView[] = [];
     let chars = 0;
-    for (const [index, entry] of views.entries()) {
-      const size = JSON.stringify(entry.view).length;
+    for (const view of views.slice(from)) {
+      const size = JSON.stringify(view).length;
       if (notes.length >= limit || (notes.length > 0 && chars + size > REPLACE_RESPONSE_MAX_CHARS)) {
-        // Justo detrás de la última DEVUELTA, no la posición de la siguiente visible: entre
-        // las dos puede haber notas del plan que ya son ocultas, y el hueco las contaba (C9
-        // de la revisión de Codex). La página siguiente empieza ahí y se salta las ocultas.
-        return { notes, nextCursor: wrap('rp1', [planId, views[index - 1]!.position + 1]) };
+        return { notes, nextCursor: wrap('rp1', [planId, from + notes.length]) };
       }
       chars += size;
-      notes.push(entry.view);
+      notes.push(view);
     }
     return { notes, nextCursor: null };
   }
@@ -809,24 +833,21 @@ export class ReplaceBatch {
       const found = requirePlan(store, request.planId, request.privacy, true);
       return { plan: found, rows: store.replacePlans.notes(request.planId) };
     });
-    // Solo las que siguen visibles ahora: una que pasó a oculta no se nombra.
+    // Solo las que siguen visibles ahora: una que pasó a oculta no se nombra ni se cuenta.
     const { rows: visible } = await this.visibleNow(request.privacy);
     const views = rows
-      .filter((row) => row.position >= from && visible.has(row.noteId))
+      .filter((row) => visible.has(row.noteId))
       .map((row) => {
         const live = visible.get(row.noteId)!;
         return {
-          position: row.position,
-          view: {
-            id: row.noteId,
-            title: capHeading(live.title),
-            isConflictCopy: live.conflict,
-            matches: row.matches,
-            changes: changesOf(row.preview)
-          }
+          id: row.noteId,
+          title: capHeading(live.title),
+          isConflictCopy: live.conflict,
+          matches: row.matches,
+          changes: changesOf(row.preview)
         };
       });
-    const page = this.page(plan.planId, views, request.limit);
+    const page = this.page(plan.planId, views, request.limit, from);
     return {
       result: {
         mode: 'preview',

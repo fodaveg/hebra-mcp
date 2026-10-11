@@ -79,6 +79,7 @@ import type {
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  PrivacyRecheckRequest,
   PrivacyRecheckSnapshot,
   RememberedPrivateFolder,
   TrashIndex
@@ -658,7 +659,8 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesByExactTitle: (title: string): Promise<TitleCandidates> =>
       current().notesByExactTitle(title),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
-    privacyRecheck: (ids: readonly string[]): Promise<PrivacyRecheckSnapshot> => current().privacyRecheck(ids),
+    privacyRecheck: (request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> =>
+      current().privacyRecheck(request),
     trashIndex: (): Promise<TrashIndex> => current().trashIndex(),
     filesIndex: (): Promise<FilesIndex> => current().filesIndex(),
     notesLinkingBlobs: (sha256s: readonly string[]): Promise<BlobNoteRef[][]> =>

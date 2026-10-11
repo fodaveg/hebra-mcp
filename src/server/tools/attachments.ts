@@ -55,7 +55,7 @@
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { ToolContent, ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
 import {
   ATTACHMENT_MAX_BYTES,
@@ -66,8 +66,6 @@ import {
 } from '../../store/attachment-content';
 import type { NoteAttachmentRow } from '../../store/types';
 import { FileFilter } from '../../privacy/file-filter';
-import type { PrivacyFilter } from '../../privacy/filter';
-import { requireStillVisible, type ReturnedRow } from '../recheck';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
@@ -129,16 +127,12 @@ const SHA256_HEX = /^[0-9a-f]{64}$/;
  * tampoco se leen por la visible. Los filtros se construyen siempre que hay adjuntos, haya
  * o no acierto.
  */
-async function hiddenContent(
-  ctx: ToolContext,
-  sha256s: readonly string[],
-  live: PrivacyFilter = ctx.privacy
-): Promise<Set<string>> {
+async function hiddenContent(ctx: ToolContext, sha256s: readonly string[]): Promise<Set<string>> {
   const hidden = new Set<string>();
   if (sha256s.length === 0) return hidden;
   const [refs, files] = await Promise.all([
     ctx.port.notesLinkingBlobs(sha256s),
-    FileFilter.build(ctx.port, live, ctx.privacyConfig)
+    FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)
   ]);
   for (const [index, sha256] of sha256s.entries()) {
     if (refs[index]!.some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256)) {
@@ -153,15 +147,18 @@ async function hiddenContent(
 async function visibleNoteAttachments(
   ctx: ToolContext,
   id: string
-): Promise<{ rows: NoteAttachmentRow[]; names: Map<string, string>; read: ReturnedRow }> {
+): Promise<{ rows: NoteAttachmentRow[]; names: Map<string, string> }> {
   requireVisibleNote(ctx, id);
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
+  // Lo que sale de aquí en adelante, también `note_locked`, es de ESTA fila: la puerta final
+  // (`../privacy-gate.ts`) la vuelve a juzgar con el filtro de ahora y su sello antes de
+  // responder (C1 y C2, y la 2.ª revisión de Codex).
+  usageOf(ctx).note(note.id, note.localSeq);
   if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw new ToolError('note_locked');
   return {
     rows: await ctx.port.noteAttachments(id),
-    names: attachmentNames(note.body),
-    read: { id: note.id, localSeq: note.localSeq }
+    names: attachmentNames(note.body)
   };
 }
 
@@ -182,15 +179,16 @@ export async function runListAttachments(
   input: { id: string; limit?: number; cursor?: string }
 ): Promise<{ id: string; attachments: ListedAttachment[]; nextCursor: string | null }> {
   const limit = effectiveLimit(input.limit, LIMITS.listAttachments);
-  const { rows, names, read } = await visibleNoteAttachments(ctx, input.id);
-  // La nota, con el filtro de DESPUÉS de leerla (C1 de la revisión de Codex), y con él lo
-  // oculto de los bytes.
-  const check = await requireStillVisible(ctx, read);
-  const hidden = await hiddenContent(ctx, rows.map((row) => row.sha256), check.filter);
+  const { rows, names } = await visibleNoteAttachments(ctx, input.id);
+  const hidden = await hiddenContent(ctx, rows.map((row) => row.sha256));
+  const used = usageOf(ctx);
   const all: ListedAttachment[] = rows.map((row) => {
     const name = names.get(row.sha256) ?? null;
-    // Bytes de algo oculto (M6): como unos que no están, sin lo que dice su fila.
+    // Bytes de algo oculto (M6): como unos que no están, sin lo que dice su fila. De los
+    // demás sale lo que dice su fila: la puerta final mira que no sean también de algo que
+    // acaba de pasar a oculto.
     const known = !hidden.has(row.sha256);
+    if (known) used.blob(row.sha256);
     return {
       attachmentId: row.sha256,
       name,
@@ -288,12 +286,15 @@ export async function runReadAttachment(
   const raw = input.attachmentId.trim().toLowerCase();
   const sha256 = raw.startsWith('sha256:') ? raw.slice('sha256:'.length) : raw;
   if (!SHA256_HEX.test(sha256)) throw new ToolError('not_found');
-  const { rows, names, read } = await visibleNoteAttachments(ctx, input.id);
+  const { rows, names } = await visibleNoteAttachments(ctx, input.id);
   const row = rows.find((entry) => entry.sha256 === sha256);
   if (!row) throw new ToolError('not_found');
   // Bytes de algo oculto (M6): lo mismo que unos que no están en ninguna parte, sin
   // mirar su tamaño ni pedírselos al escritor.
   if ((await hiddenContent(ctx, [sha256])).size > 0) throw new ToolError('attachment_unavailable');
+  // Desde aquí sale algo de estos bytes (su tamaño, en `attachment_too_large`): la puerta
+  // final mira que no sean también de algo que acaba de pasar a oculto.
+  usageOf(ctx).blob(sha256);
   if (row.byteLength !== null && row.byteLength > ATTACHMENT_MAX_BYTES) {
     throw tooLarge(row.byteLength);
   }
@@ -304,11 +305,11 @@ export async function runReadAttachment(
     bytes = await localBytes(ctx, sha256);
     if (!bytes) throw new ToolError('attachment_unavailable');
   }
-  // Con los bytes ya en la mano, otra vez con el filtro de AHORA (C2 de la revisión de
-  // Codex): si la nota pasó a oculta (o cambió) mientras se leían, `not_found`; si los bytes
-  // pasaron a ser de algo oculto, como unos que no están.
-  const check = await requireStillVisible(ctx, read);
-  if ((await hiddenContent(ctx, [sha256], check.filter)).size > 0) {
+  // Con los bytes ya en la mano, otra vez quién los enlaza (C2 de la revisión de Codex): unos
+  // que pasaron a ser de algo oculto, como unos que no están. Que la nota se siga viendo, y
+  // que lo de esta consulta siga valiendo, lo decide la puerta final antes de responder: si
+  // no, repite la llamada.
+  if ((await hiddenContent(ctx, [sha256])).size > 0) {
     throw new ToolError('attachment_unavailable');
   }
   if (bytes.length > ATTACHMENT_MAX_BYTES) throw tooLarge(bytes.length);

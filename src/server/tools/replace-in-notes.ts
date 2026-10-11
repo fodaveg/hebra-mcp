@@ -29,12 +29,13 @@ import { logEvent } from '../../log/logger';
 import { compileGrepPattern } from '../../store/grep';
 import { compileReplacement, REPLACE_MAX_NOTES } from '../../store/replace';
 import {
+  continueAfterId,
   REPLACE_PAGE_DEFAULT,
   REPLACE_PAGE_MAX,
   type ReplaceRequest,
   type ReplaceScope
 } from '../../store/replace-batch';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import type { ReplaceOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
@@ -155,5 +156,27 @@ export async function runReplaceInNotes(
   }
   if ('sync' in result) event.sync = result.sync;
   logEvent(event as { event: string });
+  declareUsage(ctx, result);
   return result;
+}
+
+/**
+ * Lo que nombra la respuesta, para la puerta final (`../privacy-gate.ts`): las notas de la
+ * página, las saltadas y la de `continueAfter` (simular y ver una página: si alguna ya no se
+ * ve o cambió, se repite), o las del informe y sus copias de conflicto (aplicar y deshacer,
+ * tras su ronda: lo que ya no se ve sale del informe, `REPLACE_REPORT` de
+ * `../register-tools.ts`).
+ */
+function declareUsage(ctx: ToolContext, result: ReplaceOutcome): void {
+  const used = usageOf(ctx);
+  for (const note of result.notes) {
+    used.note(note.id);
+    const copyId = 'copyId' in note ? note.copyId : undefined;
+    if (copyId !== undefined) used.noteInAnyState(copyId);
+  }
+  if (result.mode === 'simulate') {
+    for (const skipped of result.skipped ?? []) used.note(skipped.id);
+    const after = result.continueAfter ? continueAfterId(result.continueAfter) : null;
+    if (after !== null) used.note(after);
+  }
 }

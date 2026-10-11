@@ -55,7 +55,7 @@ import {
   type ScanOutcome
 } from '../../store/regex-worker';
 import { headingAtLine, parseHeadings, type HeadingInfo } from '../../store/sections';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 
@@ -263,7 +263,16 @@ export async function runGrep(
    *  ENTRE lotes sigue detrás de ella (`[id, 0]`: esa nota ya no se vuelve a mirar), nunca
    *  en una nota que no se ha leído. */
   let lastScanned: string | null = null;
-  const afterLastScanned = (): string | null => (lastScanned === null ? null : cursorAt(lastScanned, 0));
+  // Lo que sale de una nota (una coincidencia, el id de un cursor o de `skipped`) lo vuelve a
+  // juzgar la puerta final (`../privacy-gate.ts`) con el filtro de ahora y el sello de la
+  // fila con la que se decidió que se veía: una que pasó a oculta mientras se leía o se
+  // recorría su lote hace repetir la llamada (2.ª revisión de Codex).
+  const used = usageOf(ctx);
+  const usedCursor = (id: string, line: number, failedOnce = false): string => {
+    used.note(id);
+    return cursorAt(id, line, failedOnce);
+  };
+  const afterLastScanned = (): string | null => (lastScanned === null ? null : usedCursor(lastScanned, 0));
   // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
   const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re);
@@ -307,7 +316,7 @@ export async function runGrep(
           const last = matches[matches.length - 1];
           if (matches.length >= limit) {
             // La de más: hay algo detrás de la página.
-            stop = { cursor: cursorAt(last!.id, last!.line + 1), cutoff: null };
+            stop = { cursor: usedCursor(last!.id, last!.line + 1), cutoff: null };
             return false;
           }
           starts ??= lineStarts(body);
@@ -344,10 +353,11 @@ export async function runGrep(
           }
           const size = JSON.stringify(found).length;
           if (matches.length > 0 && responseChars + size > GREP_RESPONSE_MAX_CHARS) {
-            stop = { cursor: cursorAt(last!.id, last!.line + 1), cutoff: 'size' };
+            stop = { cursor: usedCursor(last!.id, last!.line + 1), cutoff: 'size' };
             return false;
           }
           responseChars += size;
+          used.note(note.id);
           matches.push(found);
         }
         return true;
@@ -363,7 +373,7 @@ export async function runGrep(
         // siguiente no se ha leído y pudo pasar a oculta (C6 de la revisión de Codex).
         const next = notes[outcome.next];
         stop = next
-          ? { cursor: cursorAt(next.id, next.fromLine), cutoff: 'time' }
+          ? { cursor: usedCursor(next.id, next.fromLine), cutoff: 'time' }
           : pending.length > first + GREP_BATCH_NOTES
             ? { cursor: afterLastScanned(), cutoff: 'time' }
             : null;
@@ -380,19 +390,19 @@ export async function runGrep(
         }
         if (progressed) {
           // Lo encontrado vale; se sigue EN la nota interrumpida, marcada como ya fallida.
-          stop = { cursor: cursorAt(stuck.id, stuck.fromLine, true), cutoff: 'time' };
+          stop = { cursor: usedCursor(stuck.id, stuck.fromLine, true), cutoff: 'time' };
           break;
         }
         if (start?.failedOnce && start.id === stuck.id) {
           // Segunda vez seguida en la misma nota sin avanzar: se salta y se dice.
           skipped = { id: stuck.id, fromLine: stuck.fromLine };
-          stop = { cursor: cursorAt(stuck.id, 0), cutoff: 'time' };
+          stop = { cursor: usedCursor(stuck.id, 0), cutoff: 'time' };
           break;
         }
         // Ni una nota en todo el plazo: la expresión es demasiado cara. El cursor permite
         // reintentar esa nota una vez más y, si vuelve a fallar, saltarla.
         throw new ToolError('pattern_too_slow', {
-          nextCursor: cursorAt(stuck.id, stuck.fromLine, true)
+          nextCursor: usedCursor(stuck.id, stuck.fromLine, true)
         });
       }
     }

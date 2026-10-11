@@ -81,6 +81,7 @@ import type {
   NoteVersion,
   NoteVersionsList,
   NoteVisibilityEntry,
+  PrivacyRecheckRequest,
   PrivacyRecheckSnapshot,
   RememberedPrivateFolder,
   TrashIndex
@@ -354,21 +355,33 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => noteVisibilityRows(this.db));
   }
 
-  /** Árbol de carpetas, índice de visibilidad y sellos de `ids`, en una transacción de
-   *  lectura dentro de un turno de la cola (`./privacy-sql.ts`). */
-  async privacyRecheck(ids: readonly string[]): Promise<PrivacyRecheckSnapshot> {
+  /** Lo que lee la puerta final (`src/server/privacy-gate.ts`): árbol de carpetas, índice
+   *  de visibilidad, memoria de las carpetas privadas (la tabla y lo que este proceso anotó
+   *  sin poder escribirla), sellos y, si se piden, papelera, ficheros sueltos y quién enlaza
+   *  cada SHA-256, en una transacción de lectura dentro de un turno de la cola. */
+  async privacyRecheck(request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> {
     return this.read(() =>
-      inReadTransaction(this.db, () => ({
-        folders: this.engine.foldersList(),
-        notes: noteVisibilityRows(this.db),
-        stamps: noteStamps(this.db, ids)
-      }))
+      inReadTransaction(this.db, () => {
+        const snapshot: PrivacyRecheckSnapshot = {
+          folders: this.engine.foldersList(),
+          notes: noteVisibilityRows(this.db),
+          remembered: this.rememberedRows(),
+          stamps: noteStamps(this.db, request.notes)
+        };
+        if (request.files || request.blobs.length > 0) snapshot.files = this.filesRows();
+        else if (request.trash) snapshot.trash = trashIndexRows(this.db);
+        if (request.blobs.length > 0) {
+          snapshot.blobRefs = request.blobs.map((sha256) => blobNoteRefRows(this.db, sha256.toLowerCase()));
+        }
+        return snapshot;
+      })
     );
   }
 
-  /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`). */
+  /** Notas de la papelera y todas las filas de carpeta (`trashIndexRows`, `./privacy-sql.ts`),
+   *  de una misma transacción de lectura. */
   async trashIndex(): Promise<TrashIndex> {
-    return this.read(() => trashIndexRows(this.db));
+    return this.read(() => inReadTransaction(this.db, () => trashIndexRows(this.db)));
   }
 
   async notesLinkingBlobs(sha256s: readonly string[]): Promise<BlobNoteRef[][]> {
@@ -377,13 +390,16 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
 
   /** La tabla (si existe) y lo que este proceso anotó sin poder escribirla, sin repetir. */
   async rememberedPrivateFolders(): Promise<RememberedPrivateFolder[]> {
-    return this.read(() => {
-      const all = new Map<string, RememberedPrivateFolder>();
-      for (const entry of [...readPrivateFolders(this.db), ...this.privateFoldersInProcess.values()]) {
-        all.set(`${entry.pathKey}\u0000${entry.folderId}`, entry);
-      }
-      return [...all.values()];
-    });
+    return this.read(() => this.rememberedRows());
+  }
+
+  /** `rememberedPrivateFolders` sin cola (también la usa `privacyRecheck`). */
+  private rememberedRows(): RememberedPrivateFolder[] {
+    const all = new Map<string, RememberedPrivateFolder>();
+    for (const entry of [...readPrivateFolders(this.db), ...this.privateFoldersInProcess.values()]) {
+      all.set(`${entry.pathKey}\u0000${entry.folderId}`, entry);
+    }
+    return [...all.values()];
   }
 
   async rememberPrivateFolders(
@@ -402,8 +418,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     await this.write(() => writePrivateFolders(this.db, fresh, configured, Date.now()));
   }
 
+  /** Las tres consultas de `filesRows` en una misma transacción de lectura: ficheros,
+   *  referencias y papelera del mismo instante. */
   async filesIndex(): Promise<FilesIndex> {
-    return this.read(() => this.filesRows());
+    return this.read(() => inReadTransaction(this.db, () => this.filesRows()));
   }
 
   /**
@@ -442,7 +460,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         `SELECT fl.id AS id, fl.folder_id AS folder_id, fl.name AS name,
                 lower(fl.sha256) AS content_sha,
                 coalesce(fl.updated_at, fl.created_at, 0) AS updated_at,
-                fl.trashed_at AS trashed_at, b.byte_length AS byte_length, b.mime AS mime
+                fl.trashed_at AS trashed_at, b.byte_length AS byte_length, b.mime AS mime,
+                fl.local_seq AS local_seq
          FROM files fl
          LEFT JOIN blobs b ON b.sha256 = fl.sha256
          WHERE fl.deleted = 0`
@@ -455,6 +474,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       trashed_at: number | bigint | null;
       byte_length: number | bigint | null;
       mime: string | null;
+      local_seq: number | bigint;
     }>;
     const refs = this.prepared(
         `SELECT fl.id AS file_id, n.id AS note_id, n.trashed_at IS NOT NULL AS note_trashed
@@ -484,7 +504,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         byteLength: row.byte_length === null ? null : Number(row.byte_length),
         mime: row.mime ?? null,
         updatedAt: Number(row.updated_at),
-        trashedAt: row.trashed_at === null ? null : Number(row.trashed_at)
+        trashedAt: row.trashed_at === null ? null : Number(row.trashed_at),
+        localSeq: Number(row.local_seq)
       })),
       refs: refs.map((row) => ({
         fileId: String(row.file_id),

@@ -33,7 +33,7 @@ import { PrivacyFilter } from '../../privacy/filter';
 import { TrashFilter } from '../../privacy/trash-filter';
 import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { syncOf, type OrganizeOutcome, type SyncFields } from '../write-context';
 import { requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
@@ -77,9 +77,14 @@ async function noteOutput(
   const meta = after.visibleMeta(outcome.id);
   if (!meta) throw new ToolError('not_found');
   logEvent({ event: 'note.organize', id: outcome.id, action, sync: outcome.sync });
+  // Y otra vez en la puerta final (`../privacy-gate.ts`), con todo de una transacción.
+  const folderPath = after.folderPath(meta.folderId);
+  const used = usageOf(ctx);
+  used.note(outcome.id);
+  used.folder(meta.folderId, folderPath);
   return {
     id: outcome.id,
-    folderPath: after.folderPath(meta.folderId),
+    folderPath,
     favorite: outcome.favorite,
     archived: outcome.archived,
     ...syncOf(outcome)
@@ -129,6 +134,9 @@ export async function runTrashNote(
   await requireVisibleLiveOrTrashed(ctx, input.id);
   const outcome = await organize(ctx, { action: 'trashNote', id: input.id });
   logEvent({ event: 'note.organize', id: outcome.id, action: 'trashNote', sync: outcome.sync });
+  // Tras la ronda, la puerta final mira que se siga viendo (en la papelera, o viva si otro
+  // dispositivo la sacó).
+  usageOf(ctx).noteInAnyState(outcome.id);
   return { id: outcome.id, trashed: true, ...syncOf(outcome) };
 }
 

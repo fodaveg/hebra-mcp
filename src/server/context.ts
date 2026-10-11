@@ -3,6 +3,7 @@ import type { PrivacyFilter } from '../privacy/filter';
 import type { PrivacyConfig } from '../privacy/config';
 import { privacyWithMemory } from '../privacy/folder-memory';
 import type { StatusSource } from '../status/status-source';
+import { GateUsage } from './privacy-gate';
 import type { WriteContext } from './write-context';
 
 /**
@@ -45,6 +46,15 @@ export interface ToolContext {
   privacyConfig: PrivacyConfig;
   status: StatusSource;
   write?: WriteContext;
+  /** Lo que usa la respuesta, para la puerta final (`./privacy-gate.ts`): uno por intento.
+   *  Opcional para los tests que llaman a una herramienta directamente, sin puerta. */
+  usage?: GateUsage;
+}
+
+/** `ctx.usage`, o uno suelto que nadie comprueba (una herramienta llamada sin puerta). */
+export function usageOf(ctx: ToolContext): GateUsage {
+  ctx.usage ??= new GateUsage(ctx.privacy);
+  return ctx.usage;
 }
 
 /** `PrivacyFilter.build` es dos consultas al almacén (`foldersList()` +
@@ -62,6 +72,7 @@ export async function resolveToolContext(ctx: ServerContext): Promise<ToolContex
     privacy: filter,
     privacyConfig: config,
     status: ctx.status,
-    write: ctx.write
+    write: ctx.write,
+    usage: new GateUsage(filter)
   };
 }

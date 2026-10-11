@@ -801,12 +801,15 @@ describe('filesIndex: lo que el filtro lee del almacén', () => {
     );
     // Desde D15 (10 oct 2026) el índice trae el SHA-256 de los bytes, en minúsculas: lo
     // necesitan `hebra_read_file` y `hebra_replace_file_text` del MISMO turno que el filtro.
-    // `hebra_list_files` sigue sin enseñarlo (el test de la lista, arriba).
+    // `hebra_list_files` sigue sin enseñarlo (el test de la lista, arriba). Desde la puerta
+    // final (tarea d64e187e, 11 oct 2026), también `localSeq`, el sello de la fila: interno,
+    // como el hash.
     for (const file of index.files) {
       expect(Object.keys(file).sort()).toEqual(
-        ['byteLength', 'folderId', 'id', 'mime', 'name', 'sha256', 'trashedAt', 'updatedAt'].sort()
+        ['byteLength', 'folderId', 'id', 'localSeq', 'mime', 'name', 'sha256', 'trashedAt', 'updatedAt'].sort()
       );
       expect(file.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(Number.isSafeInteger(file.localSeq)).toBe(true);
     }
     // La carpeta es la GUARDADA: la de una carpeta ya borrada no es una carpeta viva.
     const live = new Set((await test.ctx.port.foldersList()).folders.map((folder) => folder.id));

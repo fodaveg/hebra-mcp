@@ -27,7 +27,7 @@ import { logEvent } from '../../log/logger';
 import { PrivacyFilter } from '../../privacy/filter';
 import { planCreateFolder, planRenameFolder } from '../../store/folders';
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { syncOf, type FolderOutcome, type SyncFields } from '../write-context';
 import { mapWriteError } from './write-errors';
 
@@ -38,7 +38,10 @@ export type RenameFolderOutput = { id: string; path: string; renamed: boolean } 
 async function visiblePathAfter(ctx: ToolContext, id: string): Promise<string> {
   const after = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
   if (!after.folderExists(id) || after.isFolderHidden(id)) throw new ToolError('not_found');
-  return after.folderPath(id);
+  const path = after.folderPath(id);
+  // Y otra vez en la puerta final (`../privacy-gate.ts`), con todo de una transacción.
+  usageOf(ctx).folder(id, path);
+  return path;
 }
 
 /** El padre: `parentId` (`"root"` es la raíz) o `parent` (ruta, como `path` de

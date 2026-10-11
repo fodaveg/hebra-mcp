@@ -27,6 +27,8 @@ export interface NoteIndexEntry {
    *  `NoteVisibilityEntry` en `src/store/types.ts`. */
   storedFolderId?: string;
   folderTrail?: readonly FolderRowFact[];
+  /** `notes.local_seq` de la fila leída, el sello de la puerta final. */
+  localSeq?: number;
 }
 
 export class LibraryIndex {
@@ -45,6 +47,7 @@ export class LibraryIndex {
     const notes = new Map<string, NoteIndexEntry>();
     for (const row of rows) {
       const entry: NoteIndexEntry = { folderId: row.folderId, tags: new Set(row.tags), locked: row.locked === true };
+      if (row.localSeq !== undefined) entry.localSeq = row.localSeq;
       if (row.storedFolderId !== undefined) {
         entry.storedFolderId = row.storedFolderId;
         entry.folderTrail = row.folderTrail ?? [];

@@ -19,6 +19,7 @@ import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
 import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
 import { LOCKED_BODY_PREFIX } from '../store/writes';
+import { GateUsage, passGate } from '../server/privacy-gate';
 import type { RoundWait } from '../server/write-context';
 import type { WriterRole } from '../sync/library-instance';
 import { compactDiff, diffStat, unifiedDiff } from './diff';
@@ -745,6 +746,13 @@ async function applyLocked(
     }
 
     const round = await syncRoundQuietly(lib);
+    // El informe, por la puerta final tras la ronda (`../server/privacy-gate.ts`): una copia
+    // de conflicto que la ronda dejó oculta no se nombra (C4 cubría reutilizarla; esto, el id
+    // que se imprime).
+    const hidden = await hiddenCopies(lib, written);
+    for (const item of written) {
+      if (item.copyId !== undefined && hidden.has(item.copyId)) delete item.copyId;
+    }
     // La ronda pudo traer otra versión de una nota recién devuelta (alguien la editó en
     // otro dispositivo a la vez): el motor la resuelve con una copia de conflicto en Hebra.
     const changedBySync: string[] = [];
@@ -783,6 +791,28 @@ async function applyLocked(
   } finally {
     workdir.removeLoteIfEmpty(lote);
     await lib.close();
+  }
+}
+
+/**
+ * De las copias de conflicto que dejó `apply`, las que ya no se ven (ni vivas ni en la
+ * papelera) con la configuración y el almacén de DESPUÉS de la ronda: la puerta final
+ * (`../server/privacy-gate.ts`), sin repetir nada (ya se escribió). Cerrado ante la duda: con
+ * una configuración que ya no resuelve, ninguna.
+ */
+async function hiddenCopies(
+  lib: WorkdirLibrary,
+  written: ReadonlyArray<{ copyId?: string }>
+): Promise<Set<string>> {
+  const copies = written.flatMap((item) => (item.copyId === undefined ? [] : [item.copyId]));
+  if (copies.length === 0) return new Set();
+  const usage = new GateUsage();
+  for (const id of copies) usage.noteInAnyState(id);
+  try {
+    const verdict = await passGate(lib.port, lib.privacyConfig, usage, { seals: false });
+    return new Set(verdict.failedNotes);
+  } catch {
+    return new Set(copies);
   }
 }
 

@@ -23,9 +23,8 @@ import { editsWithinLimits, type TextEdit } from '../../store/edits';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
-import { requireValidOperationId, requireVisibleNote } from './guards';
+import { declareWriteUsage, requireValidOperationId, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
-import { requireStillVisible } from '../recheck';
 
 export async function runEditNote(
   ctx: ToolContext,
@@ -55,7 +54,8 @@ export async function runEditNote(
     sync: result.sync,
     replayed: result.replayed === true
   });
-  // Tras la ronda, la nota puede haber pasado a oculta (C3 de la revisión de Codex).
-  await requireStillVisible(ctx, { id: input.id });
+  // Tras la ronda, la nota puede haber pasado a oculta (C3 de la revisión de Codex): lo juzga
+  // la puerta final (`../privacy-gate.ts`), también la copia de conflicto.
+  declareWriteUsage(ctx, result);
   return result;
 }

@@ -9,6 +9,11 @@
  * un fichero suelto y reemplazar el texto de uno. Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
+ * - La puerta final de privacidad (`./privacy-gate.ts`, tarea d64e187e): toda respuesta y
+ *   todo error pasan por ella antes de salir. Se registran con `gated`, que exige una
+ *   política (`GATE_POLICIES`) y anota la herramienta: `gatedTools` es lo que compara
+ *   `test/privacy/gate-registration.test.ts` con lo que anuncia el servidor, así que una
+ *   herramienta registrada sin la puerta hace fallar ese test.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, mueve ni borra carpetas, ni cambia ni borra
@@ -19,8 +24,18 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
-import { resolveToolContext, type ServerContext, type ToolContext } from './context';
+import { resolveToolContext, usageOf, type ServerContext, type ToolContext } from './context';
 import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
+import {
+  GATE_ATTEMPTS,
+  NOT_FOUND_OUTCOME,
+  gateConfig,
+  passGate,
+  redactWhole,
+  type GatePolicy,
+  type GateVerdict,
+  type ToolOutcome
+} from './privacy-gate';
 import {
   addAttachmentInputShape,
   appendToNoteInputShape,
@@ -132,43 +147,215 @@ function countOf(result: unknown): number | undefined {
   return undefined;
 }
 
+/** Una lectura: se repite si no pasa la puerta; al agotar los intentos, `fresh` (la
+ *  respuesta del estado fresco) o, sin él, `not_found`. */
+function read(fresh?: () => unknown): GatePolicy {
+  return fresh ? { kind: 'repeat', fallback: () => ({ ok: true, value: fresh() }) } : { kind: 'repeat' };
+}
+
+/** Una lista vacía y sin cursor bajo `key`: el estado fresco de un listado. */
+function emptyList(key: string): () => unknown {
+  return () => ({ [key]: [], nextCursor: null });
+}
+
+/** Una escritura: no se repite, y si algo de lo que nombra ya no se ve, `not_found`. */
+const WRITE: GatePolicy = { kind: 'filter' };
+
 /**
- * Reconstruye el `ToolContext` (filtro de privados incluido) DEL ALMACÉN, en esta
- * llamada: nunca el de una llamada anterior. Es lo que evita la fuga de §1 (una nota
- * que el sync movió a una carpeta privada, o le añadió una etiqueta privada, mientras
- * el proceso vive) y el fallo simétrico (una nota nueva del sync, invisible hasta
- * reiniciar).
+ * Una escritura sobre UNA nota que puede acabar en una copia de conflicto (`copyId`): si la
+ * nota ya no se ve, `not_found` (C3); si solo la copia, el informe sin su id.
+ */
+const WRITE_WITH_COPY: GatePolicy = {
+  kind: 'filter',
+  redact(outcome, verdict) {
+    if (verdict.passed || !outcome.ok) return redactWhole(outcome, verdict);
+    const value = outcome.value as { id?: unknown; copyId?: unknown };
+    const onlyCopy =
+      typeof value.copyId === 'string' &&
+      verdict.failedNotes.size === 1 &&
+      verdict.failedNotes.has(value.copyId) &&
+      verdict.failedFiles.size === 0 &&
+      verdict.failedFolders.size === 0 &&
+      verdict.failedBlobs.size === 0;
+    if (!onlyCopy) return NOT_FOUND_OUTCOME();
+    const { copyId: _hidden, ...rest } = value;
+    return { ok: true, value: rest };
+  }
+};
+
+/**
+ * El informe de aplicar o deshacer de `hebra_replace_in_notes` tras su ronda: sin las notas
+ * que ya no se ven y sin el `copyId` (ni lo que se hizo con ella) de una copia que ya no se
+ * ve, viva o en la papelera (C5, y ahora también lo que trae la ronda de después).
+ */
+const REPLACE_REPORT: GatePolicy = {
+  kind: 'filter',
+  redact(outcome, verdict) {
+    if (verdict.passed || !outcome.ok) return outcome;
+    type Entry = { id: string; outcome?: string; copyId?: string; copyOutcome?: unknown };
+    const report = outcome.value as { mode: string; complete: boolean; notes: Entry[] };
+    const notes = report.notes
+      .filter((note) => !verdict.failedNotes.has(note.id))
+      .map((note): Entry => {
+        if (note.copyId === undefined || !verdict.failedNotes.has(note.copyId)) return note;
+        const { copyId: _hidden, copyOutcome: _outcome, ...rest } = note;
+        return rest;
+      })
+      // Como el informe de `undo`: una nota de la que ya no queda nada que decir, fuera.
+      .filter((note) => report.mode !== 'undo' || note.outcome !== undefined || note.copyOutcome !== undefined);
+    // Como B7: lo pendiente que ya no se ve no cuenta. Todo lo pendiente visible iba en el
+    // informe, así que sin ninguna `pending` ya está completo.
+    const complete = report.complete || notes.every((note) => note.outcome !== 'pending');
+    return { ok: true, value: { ...report, complete, notes } };
+  }
+};
+
+/** El estado fresco de `hebra_replace_in_notes` en `simulate` y `preview`: nada que
+ *  enseñar (un plan vacío, o una página vacía del mismo plan). */
+function replaceFresh(input: { mode?: unknown; planId?: unknown }): () => unknown {
+  return input.mode === 'preview'
+    ? () => ({ mode: 'preview', planId: input.planId, expiresAt: null, notes: [], nextCursor: null })
+    : () => ({
+        mode: 'simulate',
+        planId: null,
+        expiresAt: null,
+        notes: [],
+        nextCursor: null,
+        planNotes: 0,
+        planMatches: 0,
+        cutoff: null,
+        continueAfter: null
+      });
+}
+
+/** Qué hace la puerta final con cada herramienta (`./privacy-gate.ts`). Una herramienta sin
+ *  entrada aquí no se puede registrar (`gated` lanza). */
+const GATE_POLICIES: Record<string, GatePolicy | ((input: Record<string, unknown>) => GatePolicy)> = {
+  hebra_search: read(emptyList('results')),
+  hebra_grep: read(() => ({ matches: [], nextCursor: null, cutoff: null })),
+  hebra_list_notes: read(emptyList('notes')),
+  hebra_read_note: read(),
+  hebra_note_outline: read(),
+  hebra_list_tags: read(emptyList('tags')),
+  hebra_list_folders: read(emptyList('folders')),
+  hebra_links: read(),
+  hebra_status: read(),
+  hebra_create_note: WRITE,
+  hebra_append_to_note: WRITE_WITH_COPY,
+  hebra_edit_note: WRITE_WITH_COPY,
+  hebra_move_note: WRITE,
+  hebra_set_favorite: WRITE,
+  hebra_set_archived: WRITE,
+  hebra_trash_note: WRITE,
+  hebra_restore_note: WRITE,
+  hebra_list_trash: read(emptyList('notes')),
+  hebra_list_files: read(emptyList('files')),
+  hebra_trash_file: WRITE,
+  hebra_restore_file: WRITE,
+  hebra_read_file: read(),
+  hebra_replace_file_text: WRITE,
+  hebra_list_versions: read(),
+  hebra_read_version: read(),
+  hebra_restore_version: WRITE_WITH_COPY,
+  hebra_list_attachments: read(),
+  hebra_read_attachment: read(),
+  hebra_create_folder: WRITE,
+  hebra_rename_folder: WRITE,
+  hebra_add_attachment: WRITE_WITH_COPY,
+  hebra_replace_in_notes: (input) =>
+    input.mode === 'apply' || input.mode === 'undo' ? REPLACE_REPORT : read(replaceFresh(input))
+};
+
+/** Lo que hizo `run`: su valor, o el `ToolError` (cualquier otro fallo, `invalid_input`). */
+async function settle(run: () => Promise<unknown>): Promise<ToolOutcome> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (error) {
+    return { ok: false, error: error instanceof ToolError ? error : new ToolError('invalid_input') };
+  }
+}
+
+/**
+ * Una llamada con la puerta final (`./privacy-gate.ts`). Cada intento reconstruye el
+ * `ToolContext` (filtro de privados incluido) DEL ALMACÉN: nunca el de una llamada anterior,
+ * que es lo que evita la fuga de §1 (una nota que el sync movió a una carpeta privada, o le
+ * añadió una etiqueta privada, mientras el proceso vive) y el fallo simétrico (una nota nueva
+ * del sync, invisible hasta reiniciar). Después, la puerta: una lectura que no pasa se repite
+ * entera, hasta `GATE_ATTEMPTS` veces, y si la última tampoco pasa sale el estado fresco; una
+ * escritura no se repite, su informe se filtra. Un solo log por llamada, del resultado final.
  */
 async function runTool(
   ctx: ServerContext,
   name: string,
+  policy: GatePolicy,
   run: (toolCtx: ToolContext) => Promise<unknown>
 ): Promise<ReturnType<typeof toOkResult>> {
-  let toolCtx: ToolContext;
-  try {
-    toolCtx = await resolveToolContext(ctx);
-  } catch (error) {
-    // `config.json` cambió y no se puede aplicar (M5): nada sale hasta que se arregle.
-    if (!(error instanceof PrivacyConfigUnreadable)) throw error;
-    logToolError(name, 'privacy_config_unresolved');
-    return toErrorResult(new ToolError('privacy_config_unresolved'));
+  const finish = (outcome: ToolOutcome): ReturnType<typeof toOkResult> => {
+    if (!outcome.ok) {
+      logToolError(name, outcome.error.code);
+      return toErrorResult(outcome.error);
+    }
+    logToolOk(name, countOf(outcome.value));
+    return outcome.value instanceof ToolContent ? outcome.value.result : toOkResult(outcome.value);
+  };
+  const unresolved = (): ReturnType<typeof toOkResult> =>
+    finish({ ok: false, error: new ToolError('privacy_config_unresolved') });
+
+  for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt += 1) {
+    let toolCtx: ToolContext;
+    try {
+      toolCtx = await resolveToolContext(ctx);
+    } catch (error) {
+      // `config.json` cambió y no se puede aplicar (M5): nada sale hasta que se arregle.
+      if (!(error instanceof PrivacyConfigUnreadable)) throw error;
+      return unresolved();
+    }
+    if (toolCtx.privacy.unresolved) return unresolved();
+    const outcome = await settle(() => run(toolCtx));
+    let verdict: GateVerdict;
+    try {
+      const config = await gateConfig(ctx);
+      verdict = await passGate(ctx.port, config, usageOf(toolCtx), { seals: policy.kind === 'repeat' });
+    } catch (error) {
+      if (error instanceof ToolError) return finish({ ok: false, error });
+      throw error;
+    }
+    if (policy.kind === 'filter') return finish((policy.redact ?? redactWhole)(outcome, verdict));
+    if (verdict.passed) return finish(outcome);
   }
-  if (toolCtx.privacy.unresolved) {
-    logToolError(name, 'privacy_config_unresolved');
-    return toErrorResult(new ToolError('privacy_config_unresolved'));
-  }
-  try {
-    const result = await run(toolCtx);
-    logToolOk(name, countOf(result));
-    return result instanceof ToolContent ? result.result : toOkResult(result);
-  } catch (error) {
-    const toolError = error instanceof ToolError ? error : new ToolError('invalid_input');
-    logToolError(name, toolError.code);
-    return toErrorResult(toolError);
-  }
+  // Ningún intento pasó: el estado fresco, nunca lo que se leyó.
+  return finish(policy.kind === 'repeat' && policy.fallback ? policy.fallback() : NOT_FOUND_OUTCOME());
+}
+
+/** Las herramientas que cada servidor registró por la puerta final (`gated`). */
+const gatedByServer = new WeakMap<McpServer, Set<string>>();
+
+/** Las herramientas de `server` registradas por la puerta final: el test de registro las
+ *  compara con las que anuncia el servidor. */
+export function gatedTools(server: McpServer): ReadonlySet<string> {
+  return gatedByServer.get(server) ?? new Set();
 }
 
 export function registerTools(server: McpServer, ctx: ServerContext, version = 'unknown'): void {
+  const gatedNames = new Set<string>();
+  gatedByServer.set(server, gatedNames);
+  /** El manejador de una herramienta, por la puerta final con su política. */
+  function gated<Input>(
+    name: string,
+    run: (toolCtx: ToolContext, input: Input) => Promise<unknown>
+  ): (input: Input) => Promise<ReturnType<typeof toOkResult>> {
+    const policy = GATE_POLICIES[name];
+    if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
+    gatedNames.add(name);
+    return (input) =>
+      runTool(
+        ctx,
+        name,
+        typeof policy === 'function' ? policy(input as Record<string, unknown>) : policy,
+        (toolCtx) => run(toolCtx, input)
+      );
+  }
+
   server.registerTool(
     'hebra_search',
     {
@@ -177,7 +364,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: searchInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_search', (toolCtx) => runSearch(toolCtx, input))
+    gated('hebra_search', (toolCtx, input) => runSearch(toolCtx, input))
   );
 
   server.registerTool(
@@ -189,7 +376,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: grepInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_grep', (toolCtx) => runGrep(toolCtx, input))
+    gated('hebra_grep', (toolCtx, input) => runGrep(toolCtx, input))
   );
 
   server.registerTool(
@@ -200,7 +387,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listNotesInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_list_notes', (toolCtx) => runListNotes(toolCtx, input))
+    gated('hebra_list_notes', (toolCtx, input) => runListNotes(toolCtx, input))
   );
 
   server.registerTool(
@@ -212,7 +399,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: readNoteInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_read_note', (toolCtx) => runReadNote(toolCtx, input))
+    gated('hebra_read_note', (toolCtx, input) => runReadNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -224,7 +411,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: noteOutlineInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_note_outline', (toolCtx) => runNoteOutline(toolCtx, input))
+    gated('hebra_note_outline', (toolCtx, input) => runNoteOutline(toolCtx, input))
   );
 
   server.registerTool(
@@ -235,7 +422,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listTagsInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_list_tags', (toolCtx) => runListTags(toolCtx, input))
+    gated('hebra_list_tags', (toolCtx, input) => runListTags(toolCtx, input))
   );
 
   server.registerTool(
@@ -246,8 +433,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listFoldersInputShape,
       annotations: READ_ONLY
     },
-    async (input) =>
-      runTool(ctx, 'hebra_list_folders', (toolCtx) => runListFolders(toolCtx, input))
+    gated('hebra_list_folders', (toolCtx, input) => runListFolders(toolCtx, input))
   );
 
   server.registerTool(
@@ -258,7 +444,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: linksInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_links', (toolCtx) => runLinks(toolCtx, input))
+    gated('hebra_links', (toolCtx, input) => runLinks(toolCtx, input))
   );
 
   server.registerTool(
@@ -269,7 +455,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
         'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.',
       annotations: READ_ONLY
     },
-    async () => runTool(ctx, 'hebra_status', (toolCtx) => runStatus(toolCtx, version))
+    gated('hebra_status', (toolCtx) => runStatus(toolCtx, version))
   );
 
   server.registerTool(
@@ -281,7 +467,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: createNoteInputShape,
       annotations: WRITE_NON_IDEMPOTENT
     },
-    async (input) => runTool(ctx, 'hebra_create_note', (toolCtx) => runCreateNote(toolCtx, input))
+    gated('hebra_create_note', (toolCtx, input) => runCreateNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -293,8 +479,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: appendToNoteInputShape,
       annotations: WRITE_NON_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_append_to_note', (toolCtx) => runAppendToNote(toolCtx, input))
+    gated('hebra_append_to_note', (toolCtx, input) => runAppendToNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -306,7 +491,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: editNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) => runTool(ctx, 'hebra_edit_note', (toolCtx) => runEditNote(toolCtx, input))
+    gated('hebra_edit_note', (toolCtx, input) => runEditNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -317,7 +502,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: moveNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) => runTool(ctx, 'hebra_move_note', (toolCtx) => runMoveNote(toolCtx, input))
+    gated('hebra_move_note', (toolCtx, input) => runMoveNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -328,8 +513,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: setFavoriteInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_set_favorite', (toolCtx) => runSetFavorite(toolCtx, input))
+    gated('hebra_set_favorite', (toolCtx, input) => runSetFavorite(toolCtx, input))
   );
 
   server.registerTool(
@@ -340,8 +524,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: setArchivedInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_set_archived', (toolCtx) => runSetArchived(toolCtx, input))
+    gated('hebra_set_archived', (toolCtx, input) => runSetArchived(toolCtx, input))
   );
 
   server.registerTool(
@@ -353,7 +536,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: trashNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) => runTool(ctx, 'hebra_trash_note', (toolCtx) => runTrashNote(toolCtx, input))
+    gated('hebra_trash_note', (toolCtx, input) => runTrashNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -365,8 +548,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: restoreNoteInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_restore_note', (toolCtx) => runRestoreNote(toolCtx, input))
+    gated('hebra_restore_note', (toolCtx, input) => runRestoreNote(toolCtx, input))
   );
 
   server.registerTool(
@@ -378,7 +560,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listTrashInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_list_trash', (toolCtx) => runListTrash(toolCtx, input))
+    gated('hebra_list_trash', (toolCtx, input) => runListTrash(toolCtx, input))
   );
 
   server.registerTool(
@@ -390,7 +572,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listFilesInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_list_files', (toolCtx) => runListFiles(toolCtx, input))
+    gated('hebra_list_files', (toolCtx, input) => runListFiles(toolCtx, input))
   );
 
   server.registerTool(
@@ -402,7 +584,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: trashFileInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) => runTool(ctx, 'hebra_trash_file', (toolCtx) => runTrashFile(toolCtx, input))
+    gated('hebra_trash_file', (toolCtx, input) => runTrashFile(toolCtx, input))
   );
 
   server.registerTool(
@@ -414,8 +596,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: restoreFileInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_restore_file', (toolCtx) => runRestoreFile(toolCtx, input))
+    gated('hebra_restore_file', (toolCtx, input) => runRestoreFile(toolCtx, input))
   );
 
   server.registerTool(
@@ -427,7 +608,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: readFileInputShape,
       annotations: READ_ONLY
     },
-    async (input) => runTool(ctx, 'hebra_read_file', (toolCtx) => runReadFile(toolCtx, input))
+    gated('hebra_read_file', (toolCtx, input) => runReadFile(toolCtx, input))
   );
 
   server.registerTool(
@@ -441,8 +622,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       // la vuelta atrás solo vive en una tabla local de este dispositivo, 7 días.
       annotations: WRITE_DESTRUCTIVE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_replace_file_text', (toolCtx) => runReplaceFileText(toolCtx, input))
+    gated('hebra_replace_file_text', (toolCtx, input) => runReplaceFileText(toolCtx, input))
   );
 
   server.registerTool(
@@ -454,8 +634,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listVersionsInputShape,
       annotations: READ_ONLY
     },
-    async (input) =>
-      runTool(ctx, 'hebra_list_versions', (toolCtx) => runListVersions(toolCtx, input))
+    gated('hebra_list_versions', (toolCtx, input) => runListVersions(toolCtx, input))
   );
 
   server.registerTool(
@@ -466,8 +645,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: readVersionInputShape,
       annotations: READ_ONLY
     },
-    async (input) =>
-      runTool(ctx, 'hebra_read_version', (toolCtx) => runReadVersion(toolCtx, input))
+    gated('hebra_read_version', (toolCtx, input) => runReadVersion(toolCtx, input))
   );
 
   server.registerTool(
@@ -479,8 +657,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: restoreVersionInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_restore_version', (toolCtx) => runRestoreVersion(toolCtx, input))
+    gated('hebra_restore_version', (toolCtx, input) => runRestoreVersion(toolCtx, input))
   );
 
   server.registerTool(
@@ -492,8 +669,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: listAttachmentsInputShape,
       annotations: READ_ONLY
     },
-    async (input) =>
-      runTool(ctx, 'hebra_list_attachments', (toolCtx) => runListAttachments(toolCtx, input))
+    gated('hebra_list_attachments', (toolCtx, input) => runListAttachments(toolCtx, input))
   );
 
   server.registerTool(
@@ -505,8 +681,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: readAttachmentInputShape,
       annotations: READ_ONLY
     },
-    async (input) =>
-      runTool(ctx, 'hebra_read_attachment', (toolCtx) => runReadAttachment(toolCtx, input))
+    gated('hebra_read_attachment', (toolCtx, input) => runReadAttachment(toolCtx, input))
   );
 
   server.registerTool(
@@ -518,8 +693,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: createFolderInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_create_folder', (toolCtx) => runCreateFolder(toolCtx, input))
+    gated('hebra_create_folder', (toolCtx, input) => runCreateFolder(toolCtx, input))
   );
 
   server.registerTool(
@@ -531,8 +705,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: renameFolderInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_rename_folder', (toolCtx) => runRenameFolder(toolCtx, input))
+    gated('hebra_rename_folder', (toolCtx, input) => runRenameFolder(toolCtx, input))
   );
 
   server.registerTool(
@@ -544,8 +717,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: addAttachmentInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_add_attachment', (toolCtx) => runAddAttachment(toolCtx, input))
+    gated('hebra_add_attachment', (toolCtx, input) => runAddAttachment(toolCtx, input))
   );
 
   server.registerTool(
@@ -557,7 +729,6 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: replaceInNotesInputShape,
       annotations: WRITE_IDEMPOTENT
     },
-    async (input) =>
-      runTool(ctx, 'hebra_replace_in_notes', (toolCtx) => runReplaceInNotes(toolCtx, input))
+    gated('hebra_replace_in_notes', (toolCtx, input) => runReplaceInNotes(toolCtx, input))
   );
 }

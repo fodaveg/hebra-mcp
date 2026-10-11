@@ -21,7 +21,7 @@
  * sus notas).
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import {
   LIMITS,
   effectiveLimit,
@@ -34,7 +34,6 @@ import {
 import { headingOfSnippet } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
-import { recheck, type Recheck } from '../recheck';
 
 export interface SearchResult {
   id: string;
@@ -96,33 +95,27 @@ export async function runSearch(
       : { kind: 'folder', folderId: resolved };
   }
 
-  // Cada página del almacén con un filtro de DESPUÉS de leerla, y cada resultado solo si su
-  // nota sigue siendo la que dio el fragmento (C1 de la revisión de Codex, `../recheck.ts`).
-  let check: Recheck | undefined;
+  // Cada resultado que sale, con su carpeta, para la puerta final (`../privacy-gate.ts`):
+  // antes de responder lo vuelve a juzgar con el filtro de ahora y el sello de la fila con la
+  // que se decidió que se veía, y si ya no se ve o cambió, repite la llamada (C1, y la 2.ª
+  // revisión de Codex). El cursor sale de la última devuelta (`fillPage`).
+  const used = usageOf(ctx);
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: async (cursor, want) => {
-      const read = await ctx.port.search(
-        input.query,
-        cursor,
-        storePageSize(want),
-        tagFilter ? { tags: [tagFilter] } : null,
-        scope
-      );
-      check = await recheck(
-        ctx,
-        read.items.map((hit) => ({ id: hit.id, updatedAt: hit.updatedAt }))
-      );
-      return read;
-    },
+    fetch: (cursor, want) =>
+      ctx.port.search(input.query, cursor, storePageSize(want), tagFilter ? { tags: [tagFilter] } : null, scope),
     accept: (hit) => {
-      if (!check!.visible({ id: hit.id, updatedAt: hit.updatedAt })) return undefined;
-      const meta = check!.filter.visibleMeta(hit.id)!;
+      const meta = ctx.privacy.visibleMeta(hit.id);
+      if (!meta) return undefined;
+      // También la de mirar por delante: decide si hay `nextCursor`.
+      const folderPath = ctx.privacy.folderPath(meta.folderId);
+      used.note(hit.id);
+      used.folder(meta.folderId, folderPath);
       const result: SearchResult = {
         id: hit.id,
         title: hit.title,
-        folderPath: check!.filter.folderPath(meta.folderId),
+        folderPath,
         tags: meta.tags,
         snippet: hit.snippet,
         heading: null,
@@ -135,15 +128,14 @@ export async function runSearch(
   });
 
   // El cuerpo solo se lee de los resultados VISIBLES que se devuelven (`accept` ya
-  // descartó los ocultos) y solo si `heading` está entre los campos pedidos (D11).
+  // descartó los ocultos) y solo si `heading` está entre los campos pedidos (D11). Con su
+  // sello: si no es la fila que dio el fragmento, la puerta repite la llamada.
   const wantsHeading = input.fields === undefined || input.fields.includes('heading');
   if (wantsHeading) {
     for (const result of page.items) {
       const note = await ctx.port.noteRead(result.id);
-      // Solo del cuerpo que dio el resultado ya recomprobado (mismo `updated_at`): si cambió
-      // desde entonces, sin apartado.
       if (!note || note.body.startsWith(LOCKED_BODY_PREFIX)) continue;
-      if (new Date(note.updatedAt).toISOString() !== result.updatedAt) continue;
+      used.note(note.id, note.localSeq);
       result.heading = headingOfSnippet(note.body, result.snippet);
     }
   }

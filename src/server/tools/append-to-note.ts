@@ -32,12 +32,11 @@
 import { logEvent } from '../../log/logger';
 import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH, type AppendedProof } from '../../store/writes';
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
 import { requireValidOperationId, requireVisibleNote } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
-import { requireStillVisible } from '../recheck';
 
 export interface AppendToNoteOutput {
   id: string;
@@ -99,10 +98,13 @@ export async function runAppendToNote(
   });
 
   // Tras la ronda (que puede traer de otro dispositivo una etiqueta privada o una mudanza a
-  // una carpeta privada), con el filtro de AHORA: si la nota ya no se ve, la respuesta es la
-  // de una nota que no existe, aunque el texto se haya añadido (C3 de la revisión de Codex,
-  // SPEC.md §6.3).
-  await requireStillVisible(ctx, { id: input.id });
+  // una carpeta privada), la puerta final (`../privacy-gate.ts`) la juzga con el filtro de
+  // AHORA: si la nota ya no se ve, la respuesta es la de una nota que no existe, aunque el
+  // texto se haya añadido (C3 de la revisión de Codex, SPEC.md §6.3); si solo la copia de
+  // conflicto, sin su id.
+  const used = usageOf(ctx);
+  used.note(input.id);
+  if (copyId !== undefined) used.noteInAnyState(copyId);
   const output: AppendToNoteOutput = { id: input.id, outcome };
   if (copyId !== undefined) output.copyId = copyId;
   if (result.outcome === 'saved') {

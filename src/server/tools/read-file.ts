@@ -38,7 +38,7 @@ import {
   FILE_READ_MAX_BYTES,
   FILE_TEXT_CHUNK_MAX_CHARS
 } from '../../store/file-content';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import { ToolContent, ToolError } from '../errors';
 import { textChunk } from './attachments';
 import { mapWriteError } from './write-errors';
@@ -90,13 +90,20 @@ interface FileRead {
 /** Una lectura: comprobar, traer los bytes y volver a comprobar. `null` si el contenido
  *  cambió entre medias (quien llama la repite). */
 async function readOnce(ctx: ToolContext, id: string): Promise<FileRead | null> {
-  const before = (await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)).contentOf(id);
+  const beforeFilter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
+  const before = beforeFilter.contentOf(id);
   if (!before || before.file.trashedAt !== null) throw new ToolError('not_found');
   const knownLength = before.file.byteLength;
-  if (knownLength !== null && knownLength > FILE_READ_MAX_BYTES) throw tooLarge(knownLength);
+  if (knownLength !== null && knownLength > FILE_READ_MAX_BYTES) {
+    // El tamaño es de este fichero: la puerta final lo vuelve a juzgar antes de responder.
+    usageOf(ctx).file(id, beforeFilter.sealOf(id));
+    throw tooLarge(knownLength);
+  }
 
   let bytes = await localBytes(ctx, before.sha256);
   if (!bytes) {
+    // Su error puede llevar el tamaño de este fichero.
+    usageOf(ctx).file(id, beforeFilter.sealOf(id));
     await fetchBytes(ctx, id, knownLength);
     bytes = await localBytes(ctx, before.sha256);
   }
@@ -104,9 +111,16 @@ async function readOnce(ctx: ToolContext, id: string): Promise<FileRead | null> 
   // Otra vez, con el almacén de ahora: el sync pudo cambiar algo mientras se leía.
   const live = await PrivacyFilter.build(ctx.port, ctx.privacyConfig);
   if (live.unresolved) throw new ToolError('privacy_config_unresolved');
-  const after = (await FileFilter.build(ctx.port, live, ctx.privacyConfig)).contentOf(id);
+  const afterFilter = await FileFilter.build(ctx.port, live, ctx.privacyConfig);
+  const after = afterFilter.contentOf(id);
   if (!after || after.file.trashedAt !== null) throw new ToolError('not_found');
   if (after.sha256 !== before.sha256) return null;
+  // Lo que sale de aquí (o el tamaño de un error) es de esta fila: la puerta final la vuelve
+  // a juzgar, con su carpeta, antes de responder.
+  const folderPath = live.folderPath(after.file.folderId);
+  const used = usageOf(ctx);
+  used.file(id, afterFilter.sealOf(id));
+  used.folder(after.file.folderId, folderPath);
   if (!bytes) throw new ToolError('file_unavailable');
   if (bytes.length > FILE_READ_MAX_BYTES) throw tooLarge(bytes.length);
   return {
@@ -114,7 +128,7 @@ async function readOnce(ctx: ToolContext, id: string): Promise<FileRead | null> 
     sha256: after.sha256,
     name: after.file.name,
     mime: after.file.mime,
-    folderPath: live.folderPath(after.file.folderId),
+    folderPath,
     updatedAt: after.file.updatedAt
   };
 }

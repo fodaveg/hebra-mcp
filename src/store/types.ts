@@ -54,16 +54,41 @@ export interface NoteVisibilityEntry {
    *  primera viva (sin ella), tal como están. Se corta donde falta una fila o hay un ciclo:
    *  la subida no resuelve y la nota queda oculta. */
   folderTrail?: FolderRowFact[];
+  /** `notes.local_seq` de la fila con la que se decidió (sube con cada guardado, también de
+   *  sync): el sello de la puerta final (`src/server/privacy-gate.ts`). Ausente en filas
+   *  construidas a mano (tests). */
+  localSeq?: number;
 }
 
-/** Lo que lee la recomprobación de las herramientas (C1 y C2 de la revisión de Codex, 11 oct
- *  2026; `src/server/recheck.ts`), todo en UNA transacción de lectura: el árbol de carpetas y
- *  el índice de visibilidad, como `PrivacyFilter.build`, y el sello de las notas pedidas
- *  (`local_seq`, `updated_at`; solo las vivas). */
+/** El sello de una nota (viva o de la papelera) en el instante de la puerta final. */
+export interface NoteStamp {
+  localSeq: number;
+  trashed: boolean;
+}
+
+/** Lo que pide la puerta final (`src/server/privacy-gate.ts`): el sello de esas notas y,
+ *  solo si la respuesta usó algo de eso, la papelera, los ficheros sueltos y quién enlaza
+ *  esos bytes. */
+export interface PrivacyRecheckRequest {
+  notes: readonly string[];
+  trash: boolean;
+  files: boolean;
+  blobs: readonly string[];
+}
+
+/** Lo que lee la puerta final (`src/server/privacy-gate.ts`), todo en UNA transacción de
+ *  lectura: el árbol de carpetas y el índice de visibilidad, como `PrivacyFilter.build`, la
+ *  memoria de las carpetas privadas (A3), el sello de las notas pedidas (vivas o de la
+ *  papelera) y, si se piden, la papelera, los ficheros sueltos y las notas que enlazan cada
+ *  SHA-256 (en el orden de `blobs`). */
 export interface PrivacyRecheckSnapshot {
   folders: FoldersList;
   notes: NoteVisibilityEntry[];
-  stamps: Map<string, { localSeq: number; updatedAt: number }>;
+  remembered: RememberedPrivateFolder[];
+  stamps: Map<string, NoteStamp>;
+  trash?: TrashIndex;
+  files?: FilesIndex;
+  blobRefs?: BlobNoteRef[][];
 }
 
 /** Una carpeta a la que resolvió una ruta privada configurada (A3 del audit de privacidad,
@@ -89,6 +114,8 @@ export interface TrashedNoteEntry {
   trashedAt: number;
   /** Bloqueada (`notes.locked`), como en `NoteVisibilityEntry`. Ausente = no. */
   locked?: boolean;
+  /** `notes.local_seq`, el sello de la puerta final, como en `NoteVisibilityEntry`. */
+  localSeq?: number;
 }
 
 /** Una fila de `folders`, VIVA O LÁPIDA, con su padre GUARDADO (no el efectivo). */
@@ -128,6 +155,9 @@ export interface FileEntry {
   updatedAt: number;
   /** Epoch ms, o `null` si está vivo. */
   trashedAt: number | null;
+  /** `files.local_seq`, el sello de la puerta final (`src/server/privacy-gate.ts`). Ausente
+   *  en filas construidas a mano (tests). */
+  localSeq?: number;
 }
 
 /** Una nota que enlaza un fichero suelto: por su nombre o por el SHA-256 de sus bytes en
@@ -204,10 +234,10 @@ export interface HebraLibraryPort {
    *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
    *  mientras el proceso vive). */
   notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
-  /** La recomprobación de antes de responder (`PrivacyRecheckSnapshot`): en UN turno de la
-   *  cola y en una transacción de lectura, para que el filtro y los sellos sean del mismo
-   *  instante del almacén. */
-  privacyRecheck(ids: readonly string[]): Promise<PrivacyRecheckSnapshot>;
+  /** Lo que lee la puerta final antes de responder (`PrivacyRecheckSnapshot`): en UN turno
+   *  de la cola y en una transacción de lectura, para que el filtro, la memoria de las
+   *  carpetas privadas y los sellos sean del mismo instante del almacén. */
+  privacyRecheck(request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot>;
   /** Notas de la papelera (sin lápidas) y TODAS las filas de carpeta, lápidas incluidas,
    *  en un solo turno de la cola: para `hebra_list_trash` y `hebra_restore_note`
    *  (ampliación de D2 del 30 sep 2026). */

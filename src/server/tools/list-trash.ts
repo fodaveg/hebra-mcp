@@ -15,7 +15,7 @@
  */
 import { encodeCursor } from '../../hebra';
 import { TrashFilter } from '../../privacy/trash-filter';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 import {
   LIMITS,
   effectiveLimit,
@@ -45,6 +45,11 @@ export async function runListTrash(
   const startCursor = input.cursor === undefined ? null : unwrapCursor('r1', input.cursor);
   const trash = await TrashFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
 
+  // Cada nota que sale (también la de mirar por delante, que decide `nextCursor`) con el
+  // sello de la fila con la que se juzgó y la carpeta a la que volvería: la puerta final
+  // (`../privacy-gate.ts`) los vuelve a juzgar con la papelera de ahora, y si una ya no se ve
+  // o cambió (el título y el extracto se leen después del filtro), repite la llamada.
+  const used = usageOf(ctx);
   const page = await fillPage({
     limit,
     startCursor,
@@ -52,10 +57,13 @@ export async function runListTrash(
     accept: (item): TrashedNote | undefined => {
       const meta = trash.visibleMeta(item.id);
       if (!meta) return undefined;
+      const folderPath = ctx.privacy.folderPath(meta.folderId);
+      used.trashedNote(item.id, trash.sealOf(item.id));
+      used.folder(meta.folderId, folderPath);
       return {
         id: item.id,
         title: item.title,
-        folderPath: ctx.privacy.folderPath(meta.folderId),
+        folderPath,
         tags: meta.tags,
         excerpt: item.excerpt,
         trashedAt: new Date(meta.trashedAt).toISOString(),

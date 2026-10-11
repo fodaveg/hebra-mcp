@@ -9,7 +9,7 @@
  * (SPEC.md §6.3: «igual que una inexistente»).
  */
 import { ToolError } from '../errors';
-import type { ToolContext } from '../context';
+import { usageOf, type ToolContext } from '../context';
 
 /** Candidatas que enseña `ambiguous_title`: acotadas, pero DESPUÉS de filtrar las ocultas,
  *  así que ni su número ni cuáles salen dependen de cuántas notas ocultas comparten título. */
@@ -22,11 +22,16 @@ export async function resolveIdByTitle(ctx: ToolContext, title: string): Promise
   const { items } = await ctx.port.notesByExactTitle(title);
   const candidates = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   if (candidates.length === 0) throw new ToolError('not_found');
+  // Todas las visibles deciden entre «una» y «ambigua»: la puerta final las vuelve a juzgar.
+  const used = usageOf(ctx);
+  for (const candidate of candidates) used.note(candidate.id);
   if (candidates.length > 1) {
     throw new ToolError('ambiguous_title', {
       candidates: candidates.slice(0, AMBIGUOUS_CANDIDATES_MAX).map((candidate) => {
         const meta = ctx.privacy.visibleMeta(candidate.id)!;
-        return { id: candidate.id, title: candidate.title, folderPath: ctx.privacy.folderPath(meta.folderId) };
+        const folderPath = ctx.privacy.folderPath(meta.folderId);
+        used.folder(meta.folderId, folderPath);
+        return { id: candidate.id, title: candidate.title, folderPath };
       })
     });
   }

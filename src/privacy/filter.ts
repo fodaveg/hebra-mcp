@@ -154,6 +154,13 @@ export class PrivacyFilter implements LiveFolders {
     return false;
   }
 
+  /** `local_seq` de la fila de la nota con la que se construyó este filtro (`undefined` si
+   *  no la conoce o la fila no lo trae): el sello por defecto de la puerta final
+   *  (`src/server/privacy-gate.ts`). */
+  sealOf(id: string): number | undefined {
+    return this.library.get(id)?.localSeq;
+  }
+
   /** ¿Hay alguna nota viva BLOQUEADA y oculta? Para la variante de A1 de los ficheros
    *  sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado. */
   hasHiddenLockedNote(): boolean {

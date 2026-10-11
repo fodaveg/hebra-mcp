@@ -11,7 +11,7 @@ describe('ronda 2: grep después de leer un lote y mientras trabaja el hilo', ()
       id: (await createNote(engine, null, body)).id
     }));
     const scan = RegexScanWorker.prototype.scan;
-    const spy = vi.spyOn(RegexScanWorker.prototype, 'scan').mockImplementationOnce(async function (...args) {
+    const spy = vi.spyOn(RegexScanWorker.prototype, 'scan').mockImplementationOnce(async function (this: RegexScanWorker, ...args) {
       // El cuerpo se leyó en el turno del puerto. El hilo usa esos bytes mientras
       // otra ronda puede cambiar la privacidad; el spy solo fija esa intercalación.
       await h.mutate(async (engine) => saveBody(engine, h.extra.id, `${body}\n#secreto\n`));

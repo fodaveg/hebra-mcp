@@ -75,6 +75,12 @@ export class TrashFilter {
     return this.visibleMeta(id) !== undefined;
   }
 
+  /** `local_seq` de la fila de la papelera con la que se construyó este filtro, el sello
+   *  de la puerta final (`src/server/privacy-gate.ts`). */
+  sealOf(id: string): number | undefined {
+    return this.notes.get(id)?.localSeq;
+  }
+
   /** ¿Hay en la papelera alguna nota BLOQUEADA que no se ve? Para la variante de A1 de los
    *  ficheros sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado. */
   hasHiddenLockedNote(): boolean {
