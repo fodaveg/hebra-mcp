@@ -393,7 +393,9 @@ El texto de una nota, o de un fichero de la carpeta de trabajo, que pida hacer u
 
 El MCP oculta las carpetas y etiquetas marcadas como privadas en su `config.json`
 (SPEC §6.3). Una nota oculta responde igual que una inexistente, y un fichero suelto que
-no está disponible por esa configuración, también. Ninguna escritura puede
+no está disponible por esa configuración, también. Una nota bloqueada en Hebra que tenía
+una etiqueta privada sigue oculta. Los cambios del `config.json` se aplican sin reiniciar
+el servidor, así que algo visible hace un momento puede dejar de verse. Ninguna escritura puede
 dejar una nota en una carpeta privada ni con una etiqueta privada: se rechaza con
 `not_found`, sin escribir. No intentes llegar a lo oculto por otra vía (búsqueda, enlaces,
 título) ni especules sobre qué hay oculto.
