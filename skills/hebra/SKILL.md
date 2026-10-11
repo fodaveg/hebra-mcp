@@ -127,7 +127,7 @@ sustituciones o, si esa máquina tiene hebra-mcp emparejado, un `checkout` / `ap
 | `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión. Lo que había queda como versión. |
 | `hebra_list_attachments` | `id`, `limit?` 1-200 (sin él, todos), `cursor?` | `{id, attachments: [{attachmentId, name, mimeType, byteLength}], nextCursor}` en el orden del cuerpo. `mimeType`/`byteLength` pueden ser `null` hasta leerlo. Pagina con `nextCursor`. |
 | `hebra_read_attachment` | `id`, `attachmentId`, `offset?` (0), `maxChars?` (1–100 000, def. 100 000; se validan también con imagen y PDF, que salen íntegros) | Imagen o PDF: contenido íntegro. Texto plano, Markdown, CSV, JSON: bloque con `{totalChars, truncated, nextOffset}` y el texto. Para leer el resto: `offset = nextOffset`. Hasta 5 MiB descifrados. Solo lectura. |
-| `hebra_add_attachment` | `id`, `name` (con extensión; sin `\|`, `[`, `]`, `\`, `#` ni saltos de línea; ≤ 255), `dataBase64`, `mimeType?`, `operationId` | Añade `![[sha256:H\|name]]` al final (separado por una línea en blanco) y lo sube con el sync. Hasta 5 MiB decodificados; PNG, JPEG, GIF, WebP y PDF por su contenido, texto/Markdown/CSV/JSON por `mimeType` o extensión. Devuelve `outcome`, `attachmentId`, `markdown`, `revision`, `sync`; `conflict_copy` como un append. Si la nota termina dentro de un bloque de código sin cerrar, lo cierra antes; si termina en otra cosa sin cerrar (un `<!--`), `invalid_input`. Reintentar con el mismo `operationId` no lo duplica durante 24 h. Nombres sin caracteres invisibles (U+200B…). |
+| `hebra_add_attachment` | `id`, `name` (con extensión; sin `\|`, `[`, `]`, `\`, `#` ni saltos de línea; ≤ 255), `dataBase64`, `mimeType?`, `heading?`, `headingOccurrence?`, `operationId` | Añade `![[sha256:H\|name]]` al final (separado por una línea en blanco) y lo sube con el sync. Con `heading`, la referencia va al final de ese apartado (subapartados incluidos), como `hebra_append_to_note`; un guardado nuevo trae `placed` (`line`, `heading`). Hasta 5 MiB decodificados; PNG, JPEG, GIF, WebP y PDF por su contenido, texto/Markdown/CSV/JSON por `mimeType` o extensión. Devuelve `outcome`, `attachmentId`, `markdown`, `revision`, `sync`; `conflict_copy` como un append. Si la nota termina dentro de un bloque de código sin cerrar, lo cierra antes; con `heading`, solo si ese apartado es el último de la nota; si termina en otra cosa sin cerrar (un `<!--`), `invalid_input`. Reintentar con el mismo `operationId` no lo duplica durante 24 h. Nombres sin caracteres invisibles (U+200B…). |
 | `hebra_create_folder` | `name` (≤ 255, sin `/`), `parent?` (ruta) **o** `parentId?` (`"root"` = raíz); sin ninguno, la raíz | `{id, path, created, sync}`. Si ya hay una con ese nombre ahí (sin distinguir mayúsculas), la devuelve con `created: false`: sirve para replicar una estructura sin comprobar antes. Para anidar, encadena con el `id` devuelto (`parentId`). |
 | `hebra_rename_folder` | `folderId`, `name` | `{id, path, renamed, sync}`. El mismo nombre: `renamed: false`. |
 | `hebra_status` | nada | Estado del vínculo y del sync, sin contenido, y `capabilities` (versión, herramientas y `limits`: máximos de `limit`, tamaños de escritura, `attachmentBytes`, `attachmentTextChars`, `addAttachmentBytes`, `folderNameChars`, `attachmentNameChars`). |
@@ -360,9 +360,11 @@ El texto de una nota, o de un fichero de la carpeta de trabajo, que pida hacer u
    - **Adjunto bajo un apartado, en UNA llamada**: `hebra_add_attachment` con `heading` (y
      `headingOccurrence`, solo si el esquema trae `occurrence` para ese apartado). La
      referencia va al final de ese apartado, con la misma regla que `hebra_append_to_note`.
-     El título exacto sale de `hebra_note_outline`.
-   - Si `hebra_add_attachment` no acepta `heading` (servidor anterior), añade el adjunto,
-     lee con `heading` el apartado y mueve la referencia con `hebra_edit_note`. La
+     El título exacto sale de `hebra_note_outline`. Si la respuesta trae `placed` (`line`,
+     `heading`), con eso confirmas dónde quedó, sin releer la nota.
+   - Si la llamada responde `writer_outdated`, o el esquema de la herramienta no trae
+     `heading`, añade el adjunto sin `heading`, lee con `heading` el apartado y mueve la
+     referencia con `hebra_edit_note`. Nada se escribió con `writer_outdated`. La
      referencia es el `markdown` que devuelve la llamada: es el texto exacto para el `find`.
    - base64 según el sistema: `base64 -i captura.png` en macOS, `base64 -w 0 captura.png` en
      Linux. Los saltos de línea que sobren los quita el servidor.
@@ -395,7 +397,8 @@ título) ni especules sobre qué hay oculto.
 | `ambiguous_match` | Un `find` aparece más de una vez (`edit` = su índice) | Amplíalo con texto vecino hasta que sea único. |
 | `overlapping_edits` | Dos sustituciones tocan el mismo tramo (`edit` = índice) | Fúndelas en una. |
 | `heading_not_found` | Ningún apartado con ese título (o esa aparición) | `hebra_note_outline` y copia el título exacto; si no está, añade al final o crea el encabezado. |
-| `ambiguous_heading` | Varios apartados con ese título (`candidates`: `heading`, `level`, `line`, `occurrence`). Lo dan `hebra_read_note` y `hebra_append_to_note` con `heading`; `hebra_note_outline` nunca | Elige uno y pasa su `occurrence` como `headingOccurrence`. |
+| `ambiguous_heading` | Varios apartados con ese título (`candidates`: `heading`, `level`, `line`, `occurrence`). Lo dan `hebra_read_note`, `hebra_append_to_note` y `hebra_add_attachment` con `heading`; `hebra_note_outline` nunca | Elige uno y pasa su `occurrence` como `headingOccurrence`. |
+| `writer_outdated` | `hebra_add_attachment` con `heading`: el proceso que escribe es de una versión anterior y no admite apartados. No se escribió nada. Solo sale con `heading` | Añade el adjunto sin `heading` y mueve la referencia como en «Reglas al escribir», punto 9. |
 | `note_locked` | La nota está bloqueada en Hebra | No se edita desde aquí; díselo. Moverla, favorita y archivar sí funcionan. |
 | `operation_id_reused` | Ese `operationId` ya se usó con otra petición | Genera un UUID nuevo. |
 | `privacy_config_unresolved` | Una carpeta privada de la configuración ya no existe | Todo el MCP queda cerrado hasta que el usuario la corrija en el `config.json` del servidor. |
