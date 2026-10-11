@@ -264,6 +264,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
   it('el filtro de privados del LECTOR se aplica antes de reenviar', async () => {
     const { writer, reader } = await pair();
     const hidden = await writer.createNote({ body: '# Secreta\n\n#privado', privacy: OPEN });
+    await writer.syncRunner!.requestRound();
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [], privateTags: ['privado'] },
@@ -414,6 +415,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     const short = 'T T';
     const body = Array.from({ length: 50 }, () => `## ${long}\ntexto\n`).join('\n');
     const created = await writer.createNote({ body, privacy: OPEN });
+    await writer.syncRunner!.requestRound();
     const result = await call(client, 'hebra_append_to_note', { id: created.id, text: 'x', heading: short });
     expect(result.isError).toBe(true);
     expect(result.value.error).toBe('ambiguous_heading');
@@ -862,6 +864,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
   it('la configuración de privados del LECTOR la aplica el escritor dentro de la escritura', async () => {
     const { writer, reader } = await pair();
     const created = await writer.createNote({ body: '# Visible\n\ntexto', privacy: OPEN });
+    await writer.syncRunner!.requestRound();
     const ctx: ServerContext = {
       port: reader.port,
       privacyConfig: { privateFolders: [], privateTags: ['privado'] },
