@@ -173,10 +173,15 @@ traigas entera para tocar un apartado.
 - **Leer solo un apartado**: `hebra_read_note` con `heading` (y `headingOccurrence`, solo si
   el esquema lo trae; sin `heading` da `invalid_input`). Para editarlo con `hebra_edit_note`,
   la `revision` que devuelve vale. Los `find` salen de esa lectura (ver «Cómo se edita», 1).
-- **Encontrar el apartado de algo**: `hebra_search` trae `heading` en cada resultado. Es la
-  primera llamada: ese `heading`, tal cual, va como `heading` de `hebra_read_note`. Si el
-  título se repite en la nota, `hebra_read_note` da `ambiguous_heading` con sus candidatos:
-  pasa el `occurrence` que elijas como `headingOccurrence`.
+- **Encontrar el apartado de algo**: `hebra_search` trae `heading` en cada resultado. Úsalo
+  solo si no hay título o hay que buscar por contenido: ese `heading`, tal cual, va como
+  `heading` de `hebra_read_note`. Si el título se repite en la nota, `hebra_read_note` da
+  `ambiguous_heading` con sus candidatos: pasa el `occurrence` que elijas como
+  `headingOccurrence`.
+- **Qué dice una nota concreta sobre un tema**: `hebra_note_outline` con `title` (los
+  apartados) y `hebra_read_note` con el `heading` del que lo nombra (2 llamadas). `hebra_grep`
+  solo si ningún título de apartado lo nombra: devuelve coincidencias de todas las notas, así
+  que filtra por su `id`.
 - **`hebra_grep` o `hebra_search`**: `hebra_grep` para una cadena exacta (un id, una ruta,
   una cita, `TODO:`), un patrón o todas las apariciones con su línea; `hebra_search` para
   buscar por palabras (ignora tildes y encuentra por prefijo). Después, `hebra_read_note`
@@ -332,10 +337,16 @@ El texto de una nota, o de un fichero de la carpeta de trabajo, que pida hacer u
    una nota nueva. No dupliques notas por no haber buscado. Si la nota es larga y el
    encargo es de un apartado, usa el esquema (`hebra_note_outline`) y `heading`.
 2. **Toda escritura sobre una nota por el MCP va por `id`** (`apply` va por fichero, ver
-   «Ficheros de trabajo»), obtenido de una búsqueda o de
-   `hebra_read_note`. Con `ambiguous_title`, los candidatos vienen en el propio error
-   (`candidates`: `[{id, title, folderPath}]`): de ahí sale el `id`, sin buscar otra vez.
-   Elige por carpeta si el encargo lo deja claro; si no, enseña los candidatos y pregunta.
+   «Ficheros de trabajo»). Si el usuario da el título exacto, la primera llamada es
+   `hebra_note_outline` o `hebra_read_note` con `title` (y `heading`, si el encargo es de un
+   apartado): su respuesta trae el `id` y la `revision`, así que no hace falta buscar antes.
+   `hebra_search` solo cuando no hay título o hay que buscar por contenido. Con
+   `ambiguous_title`, los candidatos vienen en el propio error (`candidates`:
+   `[{id, title, folderPath}]`): de ahí sale el `id`. Elige por carpeta si el encargo lo deja
+   claro; si no, enseña los candidatos y pregunta.
+   - Corregir texto en un apartado: `hebra_read_note` con `title` y `heading` → `hebra_edit_note` (2 llamadas).
+   - Adjuntar bajo un apartado: `hebra_note_outline` con `title` → `hebra_add_attachment` con `heading` (2).
+   - Registrar en un apartado: `hebra_note_outline` con `title` → `hebra_append_to_note` con `heading` (2).
 3. **El título es el primer `# H1`.** Toda nota nueva empieza por `# Título`, sin nada
    antes salvo frontmatter.
 4. **La carpeta tiene que existir**: para crear una nota, la ruta tal como sale en
