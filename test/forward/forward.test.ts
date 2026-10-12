@@ -436,7 +436,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     // La lectura directa no cruza el socket: `section.heading` sale entero.
     const read = await call(client, 'hebra_read_note', { id: created.id, heading: short, headingOccurrence: 1 });
     expect((read.value.section as { heading: string }).heading).toBe(long);
-  });
+  }, 30_000); // 50 notas de 6 000 caracteres y una ronda de sync: unos 5,6 s en el Mac (12 oct 2026).
 
   it('candidates solo se adjunta a ambiguous_heading: con otro código se descartan (D11)', async () => {
     const dataDir = tempDataDir();
