@@ -49,8 +49,8 @@
  *   (`{id, folderId, trashed, sync, syncError?}`), con la ronda ya esperada: mandar un
  *   fichero suelto a la papelera (`trashFile`) o sacarlo (`restoreFile`). Es una op
  *   propia y no una acción de `organize`, que solo admite acciones de nota. Ninguna otra
- *   acción de ficheros existe (purgar, crear, renombrar, mover, reemplazar): una acción
- *   desconocida es `invalid_request`.
+ *   acción cabe aquí (purgar no existe; reemplazar, crear, renombrar, mover y duplicar
+ *   tienen sus propias ops): una acción desconocida es `invalid_request`.
  * - `replaceInNotes` `{mode, …, privacy}` (D14, 10 oct 2026) → el resultado de
  *   `hebra_replace_in_notes`: `simulate` `{pattern, regex, caseSensitive, replacement,
  *   scope, maxNotes, after?, limit}`, `preview` `{planId, cursor, limit}`, `apply`
@@ -64,6 +64,12 @@
  *   fichero suelto de texto, con la base comprobada en el turno del escritor. El texto va
  *   del lector al escritor, nunca de vuelta. Un escritor sin ellas responde
  *   `invalid_request`.
+ * - `looseFileWrite` `{action, …, operationId, privacy}` (D17, 12 oct 2026) →
+ *   `LooseFileOutcome`, con la ronda ya esperada: `createFile` `{folderId, name, text}`,
+ *   `renameFile` `{id, name}`, `moveFile` `{id, folderId}` o `duplicateFile`
+ *   `{id, name, folderId?}`. Ninguna otra acción (purgar no existe): `invalid_request`. Un
+ *   `file_exists` vuelve con el id del fichero que choca (`existing`). Un escritor sin
+ *   ella (o de una versión anterior) responde `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -75,7 +81,8 @@
  *     `AWAIT_ROUND_TIMEOUT_MS` (antes de `checkout`, después de `apply` y `undo`).
  *   Un escritor sin estos manejadores (o de una versión anterior) responde
  *   `invalid_request`.
- * Respuesta: `{id, ok: true, result}` o `{id, ok: false, error, edit?, candidates?, target?}`
+ * Respuesta: `{id, ok: true, result}` o
+ * `{id, ok: false, error, edit?, candidates?, target?, existing?}`
  * con un código cerrado (`WriterSocketErrorCode`), en los rechazos de una sustitución su
  * índice, en `ambiguous_heading` (D11) los candidatos (títulos y posiciones) y, en
  * `operation_id_reused`, lo que nombra el registro (un id: la puerta final del lector lo
@@ -111,6 +118,7 @@ import type {
   EditNoteOutcome,
   FileOutcome,
   FolderOutcome,
+  LooseFileOutcome,
   OrganizeOutcome,
   ReplaceFileTextOutcome,
   ReplaceOutcome,
@@ -141,6 +149,7 @@ import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
 import { REVISION_MAX_LENGTH } from '../store/revision';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from '../store/file-content';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
+import type { LooseFileWriteInput } from '../store/file-verbs';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
@@ -193,6 +202,11 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 /** Longitud máxima de un id de nota o de carpeta (son UUID; el margen es de sobra). */
 const MAX_ID_LENGTH = 200;
 
+/** Longitud máxima, SIN recortar, del nombre de un fichero suelto que llega por el socket
+ *  (D17). El escritor lo recorta y lo valida (255 caracteres como mucho, `invalid_input`):
+ *  aquí solo se acota lo que se acepta leer. */
+const MAX_FILE_NAME_LENGTH = 4_096;
+
 /** Copias que un `trashConflictCopies` puede excluir (las de otros lotes de esa nota). */
 const MAX_EXCLUDED_COPIES = 1_000;
 
@@ -211,6 +225,7 @@ export type WriterSocketOp =
   | 'replaceInNotes'
   | 'fetchFile'
   | 'replaceFileText'
+  | 'looseFileWrite'
   | 'replaceBody'
   | 'trashConflictCopies'
   | 'syncRound'
@@ -219,6 +234,7 @@ export type WriterSocketOp =
 const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'fetchFile',
   'replaceFileText',
+  'looseFileWrite',
   'createNote',
   'appendToNote',
   'editNote',
@@ -292,6 +308,9 @@ export interface WriterSocketHandlers {
    *  escritor sin ellos responde `invalid_request`. */
   fetchFile?(input: FetchFileInput): Promise<{ available: boolean }>;
   replaceFileText?(input: ReplaceFileTextInput): Promise<ReplaceFileTextOutcome>;
+  /** Crear, renombrar, mover o duplicar un fichero suelto (D17, 12 oct 2026), con la ronda
+   *  ya esperada. Opcional: un escritor sin él responde `invalid_request`. */
+  looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
   /**
    * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
    * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
@@ -321,6 +340,7 @@ type ResponseEnvelope =
       edit?: number;
       candidates?: readonly SectionRef[];
       target?: string;
+      existing?: string;
     };
 
 class InvalidRequest extends Error {
@@ -584,6 +604,46 @@ function replaceFileTextInputOf(params: Record<string, unknown>): ReplaceFileTex
     return { id, expectedSha256, undoOperationId: operationIdOf(undoOperationId), operationId, privacy };
   }
   throw new InvalidRequest();
+}
+
+/**
+ * `looseFileWrite` (D17): una de las cuatro acciones, con sus campos y nada más (otra
+ * acción, de purga incluida, es `invalid_request`). El escritor vuelve a comprobar el
+ * nombre, la extensión y el texto con las mismas reglas que la herramienta.
+ */
+function looseFileWriteInputOf(params: Record<string, unknown>): LooseFileWriteInput {
+  const privacy = privacyOf(params.privacy);
+  const operationId = operationIdOf(params.operationId);
+  const { id, name, folderId, text } = params;
+  const nameOf = (value: unknown): string => {
+    if (typeof value !== 'string' || value.length > MAX_FILE_NAME_LENGTH) throw new InvalidRequest();
+    return value;
+  };
+  switch (params.action) {
+    case 'createFile':
+      if (!isId(folderId)) throw new InvalidRequest();
+      // Unidades UTF-16: nunca más que los bytes UTF-8 del tope.
+      if (typeof text !== 'string' || text.length > FILE_TEXT_REPLACE_MAX_BYTES) throw new InvalidRequest();
+      return { action: 'createFile', folderId, name: nameOf(name), text, operationId, privacy };
+    case 'renameFile':
+      if (!isId(id)) throw new InvalidRequest();
+      return { action: 'renameFile', id, name: nameOf(name), operationId, privacy };
+    case 'moveFile':
+      if (!isId(id) || !isId(folderId)) throw new InvalidRequest();
+      return { action: 'moveFile', id, folderId, operationId, privacy };
+    case 'duplicateFile':
+      if (!isId(id) || (folderId !== undefined && !isId(folderId))) throw new InvalidRequest();
+      return {
+        action: 'duplicateFile',
+        id,
+        name: nameOf(name),
+        ...(folderId !== undefined ? { folderId } : {}),
+        operationId,
+        privacy
+      };
+    default:
+      throw new InvalidRequest();
+  }
 }
 
 /** Un entero en `[min, max]`. */
@@ -993,6 +1053,12 @@ export class WriterSocketServer {
           result = await handlers.replaceFileText(input);
           break;
         }
+        case 'looseFileWrite': {
+          const input = looseFileWriteInputOf(envelope.params);
+          if (!handlers.looseFileWrite) throw new InvalidRequest();
+          result = await handlers.looseFileWrite(input);
+          break;
+        }
         case 'replaceBody': {
           const input = replaceBodyInputOf(envelope.params);
           if (!handlers.replaceBody) throw new InvalidRequest();
@@ -1020,10 +1086,12 @@ export class WriterSocketServer {
       const edit = editIndexOf(error);
       const candidates = candidatesOf(error);
       const target = operationTargetOf(error);
+      const existing = error instanceof StoreError ? error.existingId : undefined;
       response = { id: envelope.id, ok: false, error: code };
       if (edit !== undefined) response.edit = edit;
       if (candidates !== undefined) response.candidates = candidates;
       if (target !== undefined) response.target = target;
+      if (existing !== undefined) response.existing = existing;
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'error', code });
     }
     if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(response)}\n`);
@@ -1090,7 +1158,8 @@ function remoteError(
   code: WriterSocketErrorCode,
   edit?: number,
   candidates?: readonly SectionRef[],
-  target?: string
+  target?: string,
+  existing?: string
 ): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
@@ -1099,7 +1168,8 @@ function remoteError(
       code,
       edit,
       code === 'ambiguous_heading' ? candidates : undefined,
-      code === 'operation_id_reused' ? target : undefined
+      code === 'operation_id_reused' ? target : undefined,
+      code === 'file_exists' ? existing : undefined
     );
   }
   return new WriterRemoteError(code);
@@ -1219,12 +1289,17 @@ export function requestWriter(
         typeof response.target === 'string' && response.target.length > 0 && response.target.length <= MAX_ID_LENGTH
           ? response.target
           : undefined;
+      const existing =
+        typeof response.existing === 'string' && response.existing.length > 0 && response.existing.length <= MAX_ID_LENGTH
+          ? response.existing
+          : undefined;
       finish({
         error: remoteError(
           KNOWN_ERROR_CODES.has(code) ? code : 'internal',
           edit,
           sectionRefsOf(response.candidates),
-          target
+          target,
+          existing
         )
       });
     });

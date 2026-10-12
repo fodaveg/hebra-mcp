@@ -62,6 +62,11 @@ import {
   type ReplaceFileTextInput,
   type ReplaceFileTextSaved
 } from '../store/file-writes';
+import {
+  writeLooseFile,
+  type LooseFileSaved,
+  type LooseFileWriteInput
+} from '../store/file-verbs';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
 import {
   ReplaceBatch,
@@ -563,6 +568,19 @@ export class LibraryInstance implements NoteWriteTarget {
   replaceFileTextLocal(input: ReplaceFileTextInput): Promise<LocalWrite<ReplaceFileTextSaved>> {
     const runner = this.runner;
     return replaceFileText(
+      this,
+      input,
+      runner ? (sha256) => runner.readBlob(sha256) : null,
+      () => void this.runner?.requestRound()
+    );
+  }
+
+  /** Crea, renombra, mueve o duplica un fichero suelto (D17, `../store/file-verbs.ts`). Al
+   *  duplicar, si este escritor no tiene aún los bytes del origen, los baja antes con su
+   *  motor de sync. Pide la ronda de después sin esperarla. */
+  looseFileWriteLocal(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>> {
+    const runner = this.runner;
+    return writeLooseFile(
       this,
       input,
       runner ? (sha256) => runner.readBlob(sha256) : null,

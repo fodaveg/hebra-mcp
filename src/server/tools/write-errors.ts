@@ -6,7 +6,8 @@
  * - `StoreError` de un rechazo de la edición o la organización (`WriteRejectionCode`,
  *   `src/store/errors.ts`) → el mismo código, con `{edit}` (índice de la sustitución)
  *   cuando lo trae, o con `{candidates}` (títulos y posiciones de los apartados) en
- *   `ambiguous_heading` (D11). Nunca el texto buscado.
+ *   `ambiguous_heading` (D11), o con `{id}` (el fichero visible que choca) en `file_exists`
+ *   (D17). Nunca el texto buscado.
  * - `LibraryError` de Hebra con `note_not_found` o `folder_not_found` → `not_found`,
  *   igual que una nota o carpeta oculta por privacidad (SPEC.md §6.3: «igual que una
  *   inexistente»). El `file_not_found` de un fichero suelto (D10) no llega hasta aquí:
@@ -28,6 +29,11 @@ export function mapWriteError(error: unknown): ToolError {
   if (error instanceof StoreError && isWriteRejectionCode(error.code)) {
     if (error.code === 'ambiguous_heading' && error.candidates !== undefined) {
       return new ToolError(error.code, { candidates: error.candidates });
+    }
+    // D17: el id del fichero VISIBLE que choca. Quien lo devuelve lo declara a la puerta
+    // final (`../privacy-gate.ts`), que mira que se siga viendo antes de responder.
+    if (error.code === 'file_exists' && error.existingId !== undefined) {
+      return new ToolError(error.code, { id: error.existingId });
     }
     const mapped =
       error.editIndex === undefined ? new ToolError(error.code) : new ToolError(error.code, { edit: error.editIndex });

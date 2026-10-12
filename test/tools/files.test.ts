@@ -541,7 +541,7 @@ describe('ficheros sueltos por MCP', () => {
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   }
 
-  it('las tres herramientas están y purgar, crear, renombrar, mover, reemplazar o leer no existe', async () => {
+  it('las tres herramientas están y purgar, vaciar su papelera o reemplazar los bytes no existe', async () => {
     await connect();
     const names = (await client!.listTools()).tools.map((tool) => tool.name).sort();
     expect(names).toEqual(TOOL_NAMES);

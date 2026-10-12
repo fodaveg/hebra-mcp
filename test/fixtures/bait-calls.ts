@@ -194,6 +194,58 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       }
     ]),
     { name: 'hebra_read_file', arguments: { id: library.files.inventario } },
+    // D17: crear en la carpeta privada (por ruta y por id) con el cebo en el nombre y en el
+    // texto, y renombrar, mover o duplicar los ocultos o hacia la carpeta privada: todo
+    // `not_found`, sin el cebo en la salida ni en el log (el texto nunca va al log).
+    {
+      name: 'hebra_create_file',
+      arguments: {
+        folder: 'Diario/2026',
+        name: `${BAIT_FOLDER}.base`,
+        text: `${BAIT_FOLDER} ${BAIT_TAG}`,
+        operationId: 'bait-create-1'
+      }
+    },
+    {
+      name: 'hebra_create_file',
+      arguments: {
+        folderId: library.folders.diario,
+        name: `${BAIT_TAG}.yaml`,
+        text: BAIT_TAG,
+        operationId: 'bait-create-2'
+      }
+    },
+    ...[
+      library.files.privateFolder,
+      library.files.referencedByHash,
+      library.files.referencedByName,
+      library.files.referencedByLockedNote,
+      library.files.trashedPrivateFolder,
+      library.files.tombstone
+    ].flatMap((id): BaitCall[] => [
+      {
+        name: 'hebra_rename_file',
+        arguments: { id, name: `${BAIT_FOLDER}.pdf`, operationId: `bait-rename-${id}` }
+      },
+      { name: 'hebra_move_file', arguments: { id, operationId: `bait-move-${id}` } },
+      {
+        name: 'hebra_duplicate_file',
+        arguments: { id, name: `${BAIT_TAG}.pdf`, folderId: 'root', operationId: `bait-dup-${id}` }
+      }
+    ]),
+    {
+      name: 'hebra_move_file',
+      arguments: { id: library.files.acta, folder: 'Diario', operationId: 'bait-move-visible' }
+    },
+    {
+      name: 'hebra_duplicate_file',
+      arguments: {
+        id: library.files.acta,
+        name: `${BAIT_FOLDER}.pdf`,
+        folderId: library.folders.diario2026,
+        operationId: 'bait-dup-visible'
+      }
+    },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en

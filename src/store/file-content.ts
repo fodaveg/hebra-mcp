@@ -18,10 +18,12 @@
  */
 import {
   ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_NAME_MAX_LENGTH,
   extensionOf,
   normalizedType,
   typeBySignature,
-  utf8Text
+  utf8Text,
+  validAttachmentName
 } from './attachment-content';
 
 /** Bytes que se leen de un fichero suelto: los mismos 5 MiB que un adjunto. */
@@ -116,6 +118,63 @@ export function detectFileType(
     }
   }
   return { allowed: true, kind: 'text', mimeType: textType, text };
+}
+
+/**
+ * Crear, renombrar, mover y duplicar ficheros sueltos (D17, decisión de David del 12 oct
+ * 2026; `./file-verbs.ts`). Lo que no depende del almacén: el nombre, la extensión y los
+ * topes, que miran la herramienta y otra vez el escritor.
+ */
+
+/** Caracteres del nombre de un fichero suelto que se crea, renombra o duplica, tras
+ *  recortar: los mismos que el de un adjunto. */
+export const FILE_NAME_MAX_LENGTH = ATTACHMENT_NAME_MAX_LENGTH;
+
+/** Bytes UTF-8 del texto de `hebra_create_file`: los mismos que reemplaza
+ *  `hebra_replace_file_text`. */
+export const FILE_CREATE_MAX_BYTES = FILE_TEXT_REPLACE_MAX_BYTES;
+
+/** Bytes del fichero que `hebra_duplicate_file` copia: los mismos que se leen. */
+export const FILE_DUPLICATE_MAX_BYTES = FILE_READ_MAX_BYTES;
+
+/** Extensiones (en minúsculas) de un fichero que `hebra_create_file` puede crear. Un `.md`
+ *  no: es una nota (`hebra_create_note`). */
+export const FILE_CREATE_EXTENSIONS: readonly string[] = ['base', 'yaml', 'yml', 'json', 'csv', 'txt'];
+
+/**
+ * El nombre recortado si vale para un fichero suelto: las reglas del nombre de un adjunto
+ * (`validAttachmentName`: no vacío, hasta 255 caracteres, sin `| [ ] \ #`, controles ni
+ * separadores de línea, que romperían un `![[nombre]]`) y la del motor (`validName` de
+ * `sqlite-engine.ts`: sin `/`, que separa rutas en los enlaces). Si no, `null`.
+ */
+export function validFileName(raw: string): string | null {
+  const name = validAttachmentName(raw);
+  return name === null || name.includes('/') ? null : name;
+}
+
+/** La extensión de un nombre: lo que va detrás del ÚLTIMO punto, en minúsculas (`''` si
+ *  acaba en punto), o `null` si no tiene punto. Para comparar la de antes y la de después
+ *  sin distinguir mayúsculas. */
+export function nameExtension(name: string): string | null {
+  const dot = name.lastIndexOf('.');
+  return dot < 0 ? null : name.slice(dot + 1).toLowerCase();
+}
+
+/** El tipo con que `hebra_create_file` guarda un fichero de esa extensión (`.base`,
+ *  `.yaml` y `.yml`, `text/yaml`, como lo lee `hebra_read_file`); `undefined` si la
+ *  extensión no se puede crear. */
+export function createFileMime(name: string): string | undefined {
+  const extension = nameExtension(name);
+  if (extension === null || !FILE_CREATE_EXTENSIONS.includes(extension)) return undefined;
+  return FILE_TEXT_TYPE_BY_EXTENSION[extension];
+}
+
+/** El tipo que se enseña de un fichero suelto sin leer sus bytes: el de su fila de `blobs`
+ *  o, si no dice nada útil y la extensión es de texto, el de la extensión (como
+ *  `hebra_read_file` con un `.base` del importador, que llega como
+ *  `application/octet-stream`). `null` si no se sabe. */
+export function looseFileMime(declared: string | null, name: string): string | null {
+  return textTypeOf(declared, name) ?? declaredFileType(declared);
 }
 
 const LONE_SURROGATE = /\p{Cs}/u;

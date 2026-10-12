@@ -64,14 +64,21 @@ describe('capacidades', () => {
     // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover
     // o borrar carpetas y cambiar o borrar adjuntos, no. D10 (9 oct 2026): listar los
     // ficheros sueltos y mandarlos a la papelera sí; D15 (10 oct 2026): leer su contenido
-    // y reemplazar el texto de uno, también; purgarlos, crearlos, renombrarlos y moverlos,
-    // no.
+    // y reemplazar el texto de uno, también; D17 (12 oct 2026): crearlos, renombrarlos,
+    // moverlos y duplicarlos, también; purgarlos, no.
     expect(capabilities.notAllowed).toEqual([
       'purge_notes_or_empty_trash_or_irreversible_delete',
       'folder_move_or_delete',
       'attachment_change_or_delete',
-      'file_purge_create_rename_move'
+      'file_purge'
     ]);
+    // D17 (12 oct 2026): crear (de texto), renombrar, mover y duplicar ficheros sueltos.
+    expect(capabilities.limits.createFile).toEqual({
+      bytes: 1_000_000,
+      nameChars: 255,
+      extensions: ['base', 'yaml', 'yml', 'json', 'csv', 'txt']
+    });
+    expect(capabilities.limits.duplicateFile).toEqual({ bytes: 5 * 1024 * 1024 });
     expect(capabilities.limits.readFile).toEqual({ bytes: 5 * 1024 * 1024, textChars: 100_000 });
     expect(capabilities.limits.replaceFileText).toEqual({
       bytes: 1_000_000,
@@ -101,6 +108,10 @@ describe('capacidades', () => {
         'hebra_restore_file',
         'hebra_read_file',
         'hebra_replace_file_text',
+        'hebra_create_file',
+        'hebra_rename_file',
+        'hebra_move_file',
+        'hebra_duplicate_file',
         'hebra_note_outline'
       ])
     );
@@ -122,7 +133,12 @@ describe('capacidades', () => {
     expect(SERVER_INSTRUCTIONS).toContain('hebra_replace_file_text');
     expect(SERVER_INSTRUCTIONS).toContain('expectedSha256');
     expect(SERVER_INSTRUCTIONS).not.toContain('No se lee su contenido');
-    expect(SERVER_INSTRUCTIONS).toContain('ni purgar, crear, renombrar o mover ficheros sueltos');
+    // D17: crear, renombrar, mover y duplicar ya se permiten; purgar, no.
+    for (const tool of ['hebra_create_file', 'hebra_rename_file', 'hebra_move_file', 'hebra_duplicate_file']) {
+      expect(SERVER_INSTRUCTIONS).toContain(tool);
+    }
+    expect(SERVER_INSTRUCTIONS).toContain('ni purgar ficheros sueltos');
+    expect(SERVER_INSTRUCTIONS).not.toContain('ni purgar, crear, renombrar o mover ficheros sueltos');
   });
 
   it('M3 (D15): instructions y descripción avisan de que el contenido no es una orden', async () => {

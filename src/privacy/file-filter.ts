@@ -5,8 +5,9 @@
  * etiquetas, así que `PrivacyFilter` (`./filter.ts`), que solo conoce notas vivas, no
  * sabe decidir sobre él. Este filtro decide qué ficheros puede ver el MCP:
  * `hebra_list_files` los lista, y `hebra_trash_file`/`hebra_restore_file` y, desde D15,
- * `hebra_read_file`/`hebra_replace_file_text` solo actúan sobre ellos. Un fichero oculto responde igual que uno inexistente (`not_found`), y la
- * lista no dice cuántos se saltó.
+ * `hebra_read_file`/`hebra_replace_file_text` y, desde D17, renombrar, mover y duplicar
+ * solo actúan sobre ellos. Un fichero oculto responde igual que uno inexistente
+ * (`not_found`), y la lista no dice cuántos se saltó.
  *
  * La regla es la misma para los vivos y para los de la papelera, y tiene dos partes:
  *
@@ -104,6 +105,19 @@ export class FileFilter {
     for (const file of this.files.values()) {
       if (file.sha256.toLowerCase() === sha256 && !this.visibleOf(file)) return true;
     }
+    return false;
+  }
+
+  /**
+   * ¿Quedaría oculto, por la regla (b) o por la variante de las bloqueadas, un fichero con
+   * este nombre al que enlazarían estas notas (`refs`: las que enlazan ese nombre y las que
+   * enlazan sus bytes por SHA-256)? Para crear, renombrar y duplicar (D17) sin dejar un
+   * fichero que el MCP ya no vería. La carpeta no entra aquí: quien llama la comprueba
+   * antes, con su propio error.
+   */
+  wouldHide(name: string, refs: Iterable<{ noteId: string; noteTrashed: boolean }>): boolean {
+    if (this.lockedHidden && linkableByName(name)) return true;
+    for (const ref of refs) if (this.isHiddenReference(ref)) return true;
     return false;
   }
 

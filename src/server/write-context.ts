@@ -46,6 +46,7 @@ import type {
   ReplaceFileTextInput,
   ReplaceFileTextSaved
 } from '../store/file-writes';
+import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
@@ -81,6 +82,10 @@ export interface WriteContextSources {
    *  `hebra_replace_file_text` responde `invalid_input`. */
   fetchFile?(input: FetchFileInput): Promise<boolean>;
   replaceFileText?(input: ReplaceFileTextInput): Promise<LocalWrite<ReplaceFileTextSaved>>;
+  /** Crear, renombrar, mover o duplicar un fichero suelto en local (D17,
+   *  `LibraryInstance.looseFileWriteLocal`), sin esperar ronda. Opcional, como
+   *  `replaceFileText`: sin él, las cuatro herramientas responden `invalid_input`. */
+  looseFileWrite?(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -158,6 +163,11 @@ export type FileOutcome = FileSaved & SyncFields;
  *  exige la fila del fichero limpia y el blob nuevo ya subido). */
 export type ReplaceFileTextOutcome = ReplaceFileTextSaved & SyncFields;
 
+/** Crear, renombrar, mover o duplicar un fichero suelto (D17), antes de poner la ruta:
+ *  la prueba de lo guardado y el estado de sync (`uploaded` exige la fila del fichero
+ *  limpia y, al crear o duplicar, el blob ya subido). */
+export type LooseFileOutcome = LooseFileSaved & SyncFields;
+
 /** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
  *  estado de sync (`uploaded` exige además el blob ya subido). */
 export type AddAttachmentOutcome = EditNoteOutcome & {
@@ -218,6 +228,10 @@ export interface WriteContext {
    *  ronda. En un lector, todo ocurre en el escritor (`./forward.ts`). Opcionales. */
   fetchFile?(input: FetchFileInput): Promise<{ available: boolean }>;
   replaceFileText?(input: ReplaceFileTextInput): Promise<ReplaceFileTextOutcome>;
+  /** Crear, renombrar, mover o duplicar un fichero suelto (D17): escribe, espera la ronda y
+   *  devuelve el estado de sync; sin escritura («ya estaba», reintento), sin ronda. En un
+   *  lector, todo ocurre en el escritor (`./forward.ts`). Opcional. */
+  looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -505,7 +519,26 @@ export function buildWriteContext(
   const replaceFile = sources.replaceFileText?.bind(sources);
   const fetchFile = sources.fetchFile?.bind(sources);
 
+  /** Ficheros sueltos (D17): como `replaceFileWrite`. Crear y duplicar dejan una fila nueva
+   *  cuyo blob tiene que subir; renombrar y mover, solo la fila. */
+  async function looseFileWrite(
+    run: NonNullable<WriteContextSources['looseFileWrite']>,
+    input: LooseFileWriteInput
+  ): Promise<LooseFileOutcome> {
+    const { result: saved, wrote } = await run(input);
+    const withBlob = input.action === 'createFile' || input.action === 'duplicateFile';
+    const dirty = withBlob ? replacedFileDirtyOf(saved.sha256) : fileDirtyOf;
+    if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id, dirty)) };
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...saved, ...syncFieldsOf(wait, await dirty(saved.id)) };
+  }
+
+  const looseFile = sources.looseFileWrite?.bind(sources);
+
   return {
+    ...(looseFile
+      ? { looseFileWrite: (input: LooseFileWriteInput) => looseFileWrite(looseFile, input) }
+      : {}),
     ...(replace ? { replaceInNotes: (request: ReplaceRequest) => replaceWrite(replace, request) } : {}),
     ...(replaceFile
       ? { replaceFileText: (input: ReplaceFileTextInput) => replaceFileWrite(replaceFile, input) }

@@ -14,11 +14,12 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  * crea y renombra carpetas y añade adjuntos: `folderCreate`, `folderRename` y `blobPut`
  * solo existen en el turno de escritura y solo los llama `NoteWriter` (penúltimo test).
  * Desde D10 (9 oct 2026) manda ficheros sueltos a la papelera y los saca: `fileTrash` y
- * `fileRestore`, con la misma regla (penúltimo test), y desde D15 (10 oct 2026) reemplaza
- * el texto de uno: `fileReplace`, igual (último test).
+ * `fileRestore`, con la misma regla, desde D15 (10 oct 2026) reemplaza el texto de uno:
+ * `fileReplace`, igual, y desde D17 (12 oct 2026) los crea, renombra y mueve:
+ * `fileCreate`, `fileRename` y `fileMove`, igual (último test).
  * Siguen fuera: purgar (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento
  * (`trashCounts`, contaría las privadas), purgar versiones, todo lo demás de los recursos
- * sueltos (`file*`: purgar, crear, renombrar, mover), renombrar etiquetas, y
+ * sueltos (`file*`: purgar, `filePurge`), renombrar etiquetas, y
  * mover y borrar carpetas (`folderMove`, `folderTrash`).
  * Tres comprobaciones sobre lo que el servidor puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
@@ -32,11 +33,13 @@ import { LibraryInstance } from '../../src/sync/library-instance';
 /**
  * `file[A-Z]…` sigue cerrado por defecto: cualquier método de recursos sueltos del motor,
  * de hoy o de mañana, está prohibido salvo los dos que D10 permite, `fileTrash` y
- * `fileRestore`, y el que añade D15 (10 oct 2026), `fileReplace`, nombrados uno a uno
- * (`\b` para que `fileTrashEmpty`, `fileRestoreAll` o `fileReplaceAll` NO pasen). Que solo
- * salgan del turno del escritor lo comprueban los dos últimos tests.
+ * `fileRestore`, el que añade D15 (10 oct 2026), `fileReplace`, y los tres que añade D17
+ * (12 oct 2026), `fileCreate`, `fileRename` y `fileMove`, nombrados uno a uno (`\b` para
+ * que `fileTrashEmpty`, `fileRestoreAll`, `fileReplaceAll` o `fileMoveAll` NO pasen).
+ * `filePurge` sigue prohibido. Que solo salgan del turno del escritor lo comprueban los
+ * tres últimos tests.
  */
-const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b';
+const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|Move\\b';
 const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
 const FORBIDDEN = `notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
@@ -112,18 +115,18 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'folderTrash',
       'folderMove',
       'filePurge',
-      'fileCreate',
-      'fileRename',
-      'fileMove',
       // Cerrado por defecto: ni un `file*` que no exista hoy, ni uno que solo EMPIECE
-      // como los tres permitidos.
+      // como los permitidos.
       'fileDirty',
       'fileAlgoNuevo',
       'fileTrashEmpty',
       'fileTrashed',
       'fileRestoreAll',
       'fileReplaceAll',
-      'fileReplaced'
+      'fileReplaced',
+      'fileCreateMany',
+      'fileRenameAll',
+      'fileMoveAll'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
       for (const form of reachForms(name)) expect(FORBIDDEN_CALL.test(form), form).toBe(true);
@@ -134,10 +137,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'noteVersionsList',
       'noteVersionRead',
       'noteVersionSnapshot',
-      // D10 y D15: los tres únicos `file*` que pasan.
+      // D10, D15 y D17: los seis únicos `file*` que pasan.
       'fileTrash',
       'fileRestore',
-      'fileReplace'
+      'fileReplace',
+      'fileCreate',
+      'fileRename',
+      'fileMove'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(false);
       for (const form of reachForms(name)) expect(FORBIDDEN_CALL.test(form), form).toBe(false);
@@ -214,12 +220,14 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       [
         /\.\s*(blobPut|blobPutFromPath)\s*\(/,
         // D15: `file-writes.ts` guarda en el mismo turno el texto nuevo de un fichero suelto
-        // antes de `fileReplace`, con el filtro de los ficheros ya aplicado.
+        // antes de `fileReplace`, con el filtro de los ficheros ya aplicado; D17:
+        // `file-verbs.ts`, el texto de un fichero que crea, antes de `fileCreate`.
         [
           'src/store/node-port.ts',
           'src/store/writes.ts',
           'src/store/sync-port.ts',
-          'src/store/file-writes.ts'
+          'src/store/file-writes.ts',
+          'src/store/file-verbs.ts'
         ]
       ]
     ];
@@ -252,12 +260,16 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       expect(methodNames(port.syncStorePort())).not.toContain('folderCreate');
       expect(methodNames(port.syncStorePort())).not.toContain('folderRename');
       const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
-      // De ficheros sueltos (D10 y D15), lo del test de abajo: `fileReplace`,
-      // `fileRestore`, `fileTrash` y la lectura `filesIndex`; y `blobRead`, que el
-      // reemplazo usa para leer el contenido actual y la prueba de lo guardado (solo lee).
+      // De ficheros sueltos (D10, D15 y D17), lo de los tests de abajo: `fileCreate`,
+      // `fileMove`, `fileRename`, `fileReplace`, `fileRestore`, `fileTrash` y la lectura
+      // `filesIndex`; y `blobRead`, que el reemplazo y el duplicado usan para leer el
+      // contenido actual y la prueba de lo guardado (solo lee).
       expect(storeKeys.filter((key) => /^(blob|file|folder[A-Z])/.test(key)).sort()).toEqual([
         'blobPut',
         'blobRead',
+        'fileCreate',
+        'fileMove',
+        'fileRename',
         'fileReplace',
         'fileRestore',
         'fileTrash',
@@ -279,8 +291,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * dentro del turno. Ni el puerto de las herramientas, ni su vista de sync, ni la
    * instancia, ni su `port` tienen ninguno, y ninguna otra fuente los llama. En TODO
    * `src` (también `src/server` y `src/privacy`, que las comprobaciones de arriba no
-   * recorren) no hay ninguna llamada a otro `file*` del motor: ni purgar, ni crear,
-   * renombrar o mover (reemplazar, D15, tiene su propio test, abajo). Tampoco a sus listas de ficheros (`filesPage`,
+   * recorren) no hay ninguna llamada a otro `file*` del motor: ni purgar (reemplazar, D15,
+   * y crear, renombrar y mover, D17, tienen sus propios tests, abajo). Tampoco a sus listas de ficheros (`filesPage`,
    * `filesFindByName`…), cuyo aviso de que quedan más delataría los ocultos: la lista
    * sale de `filesIndex`, propia. Del turno no sale nada más de ficheros.
    */
@@ -331,6 +343,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       }
       const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
       expect(storeKeys.filter((key) => /^file/.test(key)).sort()).toEqual([
+        'fileCreate',
+        'fileMove',
+        'fileRename',
         'fileReplace',
         'fileRestore',
         'fileTrash',
@@ -357,6 +372,29 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
     for (const file of allSourceFiles()) {
       const path = relative(root, file).split(sep).join('/');
       const calls = replaceCall.test(readFileSync(file, 'utf8'));
+      if (calls) callers += 1;
+      if (!allowed.includes(path)) expect(calls, path).toBe(false);
+    }
+    expect(callers).toBe(allowed.length);
+  });
+
+  /**
+   * Crear, renombrar y mover un fichero suelto (D17, 12 oct 2026): `fileCreate`,
+   * `fileRename` y `fileMove` solo los tiene el turno de escritura (arriba) y solo los
+   * llaman el puerto, que los pone en el turno, y `src/store/file-verbs.ts`, que antes
+   * aplica el filtro de los ficheros, el choque de nombres y que el resultado no quede
+   * oculto, dentro del turno. Ninguna otra fuente de `src` (herramientas incluidas).
+   */
+  it('crear, renombrar y mover un fichero suelto (D17): solo en el turno del escritor y en file-verbs.ts', () => {
+    const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts'];
+    const verbCall = reachPattern('fileCreate|fileRename|fileMove');
+    for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
+      for (const form of reachForms(name)) expect(verbCall.test(form), form).toBe(true);
+    }
+    let callers = 0;
+    for (const file of allSourceFiles()) {
+      const path = relative(root, file).split(sep).join('/');
+      const calls = verbCall.test(readFileSync(file, 'utf8'));
       if (calls) callers += 1;
       if (!allowed.includes(path)) expect(calls, path).toBe(false);
     }

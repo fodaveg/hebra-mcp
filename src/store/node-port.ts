@@ -7,7 +7,9 @@
  * usa `SqliteLibraryEngine` directamente y expone solo lo que D2 permite. De los ficheros
  * sueltos (D10, 9 oct 2026) solo tiene una LECTURA propia (`filesIndex`); mandarlos a la
  * papelera y sacarlos (`fileTrash`/`fileRestore` del motor) solo existe dentro del turno
- * de escritura, y lo mismo reemplazar su contenido (`fileReplace`, D15, 10 oct 2026).
+ * de escritura, y lo mismo reemplazar su contenido (`fileReplace`, D15, 10 oct 2026) y
+ * crearlos, renombrarlos y moverlos (`fileCreate`/`fileRename`/`fileMove`, D17, 12 oct
+ * 2026).
  *
  * Del mismo almacén salen tres vistas, todas por la MISMA cola (`SerialQueue`, ver su
  * cabecera) para que una ronda de sync y una escritura nunca se crucen en la conexión:
@@ -70,7 +72,7 @@ import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
-import { blobNoteRefRows } from './file-sql';
+import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
 import {
   ensurePrivacyEpochIndexes,
   noteStamps,
@@ -713,10 +715,16 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
         blobPut: (bytes, options) => this.engine.blobPut(bytes, options),
-        // D10: mandar un fichero suelto a la papelera y sacarlo, igual: solo aquí. Ningún
-        // otro `file*` del motor (purgar, crear, renombrar, mover, reemplazar) está.
+        // D10: mandar un fichero suelto a la papelera y sacarlo, igual: solo aquí. Purgar
+        // (`filePurge`) no está en ningún sitio.
         fileTrash: (id) => this.engine.fileTrash(id),
         fileRestore: (id) => this.engine.fileRestore(id),
+        // D17: crear, renombrar y mover un fichero suelto, y las notas que enlazan un
+        // nombre. Solo para `./file-verbs.ts`, que antes aplica el filtro en el turno.
+        fileCreate: (folderId, name, sha) => this.engine.fileCreate(folderId, name, sha),
+        fileRename: (fileId, name) => this.engine.fileRename(fileId, name),
+        fileMove: (fileId, folderId) => this.engine.fileMove(fileId, folderId),
+        notesLinkingFileName: (name) => nameLinkNoteRefRows(this.db, name),
         // D15: reemplazar el contenido de un fichero suelto con la base comprobada del
         // motor (`file_stale`), y lo que ese reemplazo lee y guarda en el mismo turno.
         // Solo para `./file-writes.ts`.

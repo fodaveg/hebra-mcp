@@ -1,6 +1,6 @@
 /**
- * `annotations` MCP de las 30 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13 y D14 del 10 oct 2026): cada una
+ * `annotations` MCP de las 36 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -70,6 +70,12 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // que Hebra no versiona, y la vuelta atrás solo vive en una tabla local.
   hebra_read_file: READ,
   hebra_replace_file_text: WRITE_DESTRUCTIVE_IDEMPOTENT,
+  // D17: crear, renombrar, mover y duplicar un fichero suelto se reintentan con su
+  // `operationId` sin repetir nada, y ninguna destruye contenido.
+  hebra_create_file: WRITE_IDEMPOTENT,
+  hebra_rename_file: WRITE_IDEMPOTENT,
+  hebra_move_file: WRITE_IDEMPOTENT,
+  hebra_duplicate_file: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

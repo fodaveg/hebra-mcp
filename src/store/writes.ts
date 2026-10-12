@@ -31,9 +31,10 @@
  *   final del cuerpo, como `appendToNote`, con la idempotencia de `editNote`.
  * - `organizeFileLocal` (D10, 9 oct 2026): mandar un fichero suelto a la papelera y
  *   sacarlo (`fileTrash`/`fileRestore` del motor, reversibles), con el filtro de los
- *   ficheros (`../privacy/file-filter.ts`) dentro del turno. Nunca lo purga, ni lo crea,
- *   renombra o mueve. Leer su contenido y reemplazar el de uno de texto (D15, 10 oct 2026)
- *   van por `./file-writes.ts`, sobre este mismo turno.
+ *   ficheros (`../privacy/file-filter.ts`) dentro del turno. Nunca lo purga. Leer su
+ *   contenido y reemplazar el de uno de texto (D15, 10 oct 2026) van por
+ *   `./file-writes.ts`, y crearlo, renombrarlo, moverlo y duplicarlo (D17, 12 oct 2026),
+ *   por `./file-verbs.ts`, sobre este mismo turno.
  *
  * Después de cada escritura, `onWritten` (la instancia lo conecta a
  * `SyncRunner.requestRound`, SPEC.md §8: «una ronda justo después de cada escritura»).
@@ -120,17 +121,24 @@ export interface NoteWriteStore {
   /** Ficheros sueltos (D10, 9 oct 2026): mandar a la papelera y sacar, los métodos del
    *  mismo nombre del motor, reversibles. Solo los llama `NoteWriter.organizeFileLocal`,
    *  que corta antes si el fichero ya está en ese estado: el motor los marca sucios y
-   *  sube su `local_seq` SIEMPRE, también al repetir. Purgar, crear, renombrar, mover y
-   *  reemplazar un fichero NO están, ni aquí ni en ningún sitio de hebra-mcp
-   *  (`test/store/surface.node.test.ts`). */
+   *  sube su `local_seq` SIEMPRE, también al repetir. Purgar un fichero NO está, ni aquí
+   *  ni en ningún sitio de hebra-mcp (`test/store/surface.node.test.ts`); reemplazarlo
+   *  (D15), crearlo, renombrarlo y moverlo (D17) van más abajo. */
   fileTrash(id: string): Promise<FileRow>;
   fileRestore(id: string): Promise<FileRow>;
   /** Reemplazar el contenido de un fichero suelto (D15, 10 oct 2026): `fileReplace` del
    *  motor, que comprueba en su transacción que el fichero sigue con `baseSha256` (si no,
    *  `file_stale` sin escribir) y que el blob nuevo ya está. Solo lo llama
    *  `./file-writes.ts`, en el mismo turno en que guarda el blob y el contenido anterior.
-   *  Purgar, crear, renombrar y mover un fichero siguen sin estar. */
+   *  Purgar un fichero sigue sin estar. */
   fileReplace(id: string, sha256: string, baseSha256: string): Promise<FileRow>;
+  /** Crear, renombrar y mover un fichero suelto (D17, 12 oct 2026): los métodos del mismo
+   *  nombre del motor. Solo los llama `./file-verbs.ts`, que antes aplica en el mismo turno
+   *  el filtro de los ficheros, el choque de nombres (el motor no lo impide) y la regla de
+   *  que el resultado no quede oculto. `fileCreate` necesita el blob ya presente. */
+  fileCreate(folderId: string, name: string, sha256: string): Promise<FileRow>;
+  fileRename(id: string, name: string): Promise<FileRow>;
+  fileMove(id: string, folderId: string): Promise<FileRow>;
   /** Bytes de un blob de este dispositivo (`blobRead` del motor, que verifica el hash), o
    *  `null`. Para leer el contenido actual de un fichero suelto antes de reemplazarlo y la
    *  prueba de lo guardado (D15). */
@@ -138,6 +146,10 @@ export interface NoteWriteStore {
   /** Las notas que enlazan unos bytes por su SHA-256 (`./file-sql.ts`): si alguna es
    *  oculta, el contenido nuevo dejaría el fichero oculto por la regla (b) de D10. */
   notesLinkingBlob(sha256: string): BlobNoteRef[];
+  /** Las notas que enlazan un fichero por su nombre exacto (`./file-sql.ts`, D17): con
+   *  `notesLinkingBlob`, si alguna es oculta, el fichero creado, renombrado o duplicado
+   *  quedaría oculto por la regla (b) de D10. */
+  notesLinkingFileName(name: string): BlobNoteRef[];
   /** El contenido anterior de los ficheros reemplazados (`./file-previous.ts`). */
   looseFilePrevious: FilePreviousStore;
   /** Organización de notas (D2 ampliada): los métodos del mismo nombre de
@@ -360,9 +372,10 @@ export interface OrganizeSaved {
 /**
  * Ficheros sueltos (D10, 9 oct 2026): mandar uno a la papelera (`trashFile`) y sacarlo
  * (`restoreFile`), por id. Cada una se deshace con la otra, desde Hebra o desde el MCP, y
- * las dos son idempotentes por estado (sin `operationId`). No hay más acciones: ni
- * purgar, ni crear, renombrar, mover o reemplazar. No son acciones de `OrganizeAction`,
- * que es solo de notas.
+ * las dos son idempotentes por estado (sin `operationId`). Purgar no existe; reemplazar
+ * (D15) y crear, renombrar, mover o duplicar (D17) llevan `operationId` y van por
+ * `./file-writes.ts` y `./file-verbs.ts`. No son acciones de `OrganizeAction`, que es solo
+ * de notas.
  */
 export type OrganizeFileAction =
   | { action: 'trashFile'; id: string }

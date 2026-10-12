@@ -10,7 +10,8 @@
  *   2026), `createFolder`, `renameFolder` y `addAttachment`, desde D10 (9 oct 2026),
  *   `organizeFile` (la papelera de los ficheros sueltos), y desde D14 (10 oct 2026),
  *   `replaceInNotes` en todos sus modos (los planes viven en el escritor), y desde D15,
- *   `replaceFileText` y `fetchFile` (los bytes de un fichero suelto) al escritor. Todas
+ *   `replaceFileText` y `fetchFile` (los bytes de un fichero suelto), y desde D17 (12 oct
+ *   2026), `looseFileWrite` (crear, renombrar, mover o duplicar uno) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -90,6 +91,7 @@ import type {
   RestoreVersionInput
 } from '../store/writes';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
+import type { LooseFileWriteInput } from '../store/file-verbs';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
   AWAIT_ROUND_TIMEOUT_MS,
@@ -98,6 +100,7 @@ import {
   type EditNoteOutcome,
   type FileOutcome,
   type FolderOutcome,
+  type LooseFileOutcome,
   type OrganizeOutcome,
   type ReplaceFileTextOutcome,
   type ReplaceOutcome,
@@ -129,6 +132,9 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // bajar la base, el `blobPut` y la ronda.
   fetchFile: 60_000,
   replaceFileText: AWAIT_ROUND_TIMEOUT_MS + 60_000,
+  // Crear, renombrar, mover o duplicar (D17): al duplicar, quizá bajar los bytes del
+  // origen; al crear, el `blobPut`; y la ronda.
+  looseFileWrite: AWAIT_ROUND_TIMEOUT_MS + 60_000,
   // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
   replaceBody: 15_000,
   trashConflictCopies: 15_000,
@@ -297,6 +303,36 @@ function asReplaceFileTextOutcome(value: unknown, id: string): ReplaceFileTextOu
     byteLength: asCount(value.byteLength),
     mimeType: value.mimeType,
     previousSha256: value.previousSha256,
+    ...(value.replayed === true ? { replayed: true as const } : {}),
+    ...syncFieldsFrom(value)
+  };
+}
+
+/** Valida el `LooseFileOutcome` que devuelve el escritor (D17), campo a campo. Con un
+ *  `id` de origen (renombrar, mover), tiene que ser ese. */
+function asLooseFileOutcome(value: unknown, id?: string): LooseFileOutcome {
+  if (!isRecord(value) || typeof value.id !== 'string' || value.id.length === 0) {
+    throw new Error('writer_protocol');
+  }
+  if (id !== undefined && value.id !== id) throw new Error('writer_protocol');
+  if (
+    (value.outcome !== 'saved' && value.outcome !== 'already') ||
+    typeof value.name !== 'string' ||
+    typeof value.folderId !== 'string' ||
+    typeof value.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(value.sha256) ||
+    (value.mimeType !== null && (typeof value.mimeType !== 'string' || value.mimeType.length > 255))
+  ) {
+    throw new Error('writer_protocol');
+  }
+  return {
+    id: value.id,
+    name: value.name,
+    folderId: value.folderId,
+    sha256: value.sha256,
+    byteLength: value.byteLength === null ? null : asCount(value.byteLength),
+    mimeType: value.mimeType,
+    outcome: value.outcome,
     ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
   };
@@ -827,6 +863,24 @@ export function buildRoutedWriteContext(
             )
         }
       : {}),
+    // Crear, renombrar, mover o duplicar (D17): todo en el escritor, con la privacidad de
+    // ESTE lector. Si la conexión se corta tras enviarla, no se repite: el agente reintenta
+    // con el mismo `operationId`.
+    ...(local.looseFileWrite
+      ? {
+          looseFileWrite: (input: LooseFileWriteInput) =>
+            routed(
+              'looseFileWrite',
+              { ...input },
+              (value) =>
+                asLooseFileOutcome(
+                  value,
+                  input.action === 'renameFile' || input.action === 'moveFile' ? input.id : undefined
+                ),
+              () => local.looseFileWrite!(input)
+            )
+        }
+      : {}),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
     // relevo, esta instancia ya es el escritor y lo anota en local.
@@ -874,6 +928,10 @@ export function writerSocketHandlers(
     ...(local.fetchFile ? { fetchFile: (input: FetchFileInput) => local.fetchFile!(input) } : {}),
     ...(local.replaceFileText
       ? { replaceFileText: (input: ReplaceFileTextInput) => local.replaceFileText!(input) }
+      : {}),
+    // D17: crear, renombrar, mover o duplicar, con la privacidad del lector y la ronda aquí.
+    ...(local.looseFileWrite
+      ? { looseFileWrite: (input: LooseFileWriteInput) => local.looseFileWrite!(input) }
       : {})
   };
   return {

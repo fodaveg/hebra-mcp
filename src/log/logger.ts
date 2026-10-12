@@ -42,7 +42,11 @@ export type ToolErrorCode =
   | 'file_changed'
   | 'file_too_large'
   | 'file_type_not_allowed'
-  | 'file_unavailable';
+  | 'file_unavailable'
+  // Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026;
+  // `src/store/file-verbs.ts`).
+  | 'file_exists'
+  | 'file_name_unavailable';
 
 interface ToolCallOkEvent {
   event: 'tool.call';

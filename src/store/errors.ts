@@ -47,6 +47,13 @@ import type { SectionRef } from './sections';
  * - `file_type_not_allowed`: el fichero no es de texto (al reemplazar) o no es de un tipo
  *   que se pueda leer.
  * - `file_unavailable`: sus bytes no están en este dispositivo y no se pudieron bajar.
+ * Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026; `./file-verbs.ts`):
+ * - `file_exists`: en la carpeta de destino ya hay un fichero suelto VIVO y VISIBLE con ese
+ *   nombre (sin distinguir mayúsculas); lleva su id (`existingId`). Un homónimo oculto nunca
+ *   lo produce.
+ * - `file_name_unavailable`: el fichero que se crearía quedaría oculto (lo enlaza una nota
+ *   oculta, o hay una nota bloqueada oculta y el nombre se puede incrustar). Uno solo, sin
+ *   detalles.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -70,7 +77,9 @@ export type WriteRejectionCode =
   | 'file_changed'
   | 'file_too_large'
   | 'file_type_not_allowed'
-  | 'file_unavailable';
+  | 'file_unavailable'
+  | 'file_exists'
+  | 'file_name_unavailable';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -94,7 +103,9 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'file_changed',
   'file_too_large',
   'file_type_not_allowed',
-  'file_unavailable'
+  'file_unavailable',
+  'file_exists',
+  'file_name_unavailable'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de
@@ -113,7 +124,10 @@ export class StoreError extends Error {
     /** De `operation_id_reused`: lo que nombra el registro que lo decidió (una nota, un
      *  fichero o un plan). No sale nunca en la respuesta: lo juzga la puerta final del lector
      *  (R3-2 de la 3.ª revisión de Codex). */
-    readonly operationTarget?: string
+    readonly operationTarget?: string,
+    /** De `file_exists` (D17): el id del fichero VISIBLE que ya tiene ese nombre en la
+     *  carpeta de destino. Sale en la respuesta, y lo juzga antes la puerta final. */
+    readonly existingId?: string
   ) {
     super(code);
     this.name = 'StoreError';
@@ -123,6 +137,11 @@ export class StoreError extends Error {
 /** `operation_id_reused` sin haber escrito nada, con lo que nombra el registro. */
 export function operationReused(target: string): StoreError {
   return new StoreError('operation_id_reused', undefined, undefined, target);
+}
+
+/** `file_exists` (D17) sin haber escrito nada, con el id del fichero visible que choca. */
+export function existingFileRejected(existingId: string): StoreError {
+  return new StoreError('file_exists', undefined, undefined, undefined, existingId);
 }
 
 /**

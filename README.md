@@ -4,14 +4,14 @@ Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, leer
 por apartados, editar por sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
 añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
-la papelera o sacarlos, leer su contenido y reemplazar el texto de uno; nunca purgar ni
-vaciar la papelera, mover ni borrar carpetas, cambiar ni borrar adjuntos, ni crear,
-renombrar o mover un fichero suelto; `SPEC.md` §5) a
+la papelera o sacarlos, leer su contenido, reemplazar el texto de uno, crear uno de texto
+y renombrarlos, moverlos o duplicarlos; nunca purgar ni vaciar la papelera, mover ni
+borrar carpetas, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 32 herramientas
+Estado a 12 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 36 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -52,8 +52,7 @@ Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 32 herram
 - Ficheros sueltos (D10; los recursos con carpeta propia que no cuelgan de una nota, como
   un `.base` o un PDF): `hebra_list_files` (los vivos por nombre o, con `trashed: true`,
   los de la papelera; limit 1-100, def. 50), `hebra_trash_file` y `hebra_restore_file`.
-  Sin purga y sin crearlos, renombrarlos ni moverlos. La versión 0.3.0 o posterior trae
-  las tres de ficheros sueltos (D10).
+  Sin purga. La versión 0.3.0 o posterior trae las tres de ficheros sueltos (D10).
 - Contenido de un fichero suelto (D15): `hebra_read_file` lo lee (un `.base` de Obsidian
   Bases, `.md`, `.txt`, `.json`, `.csv` o `.yaml` como texto, por tramos de 100 000
   caracteres; PNG, JPEG, GIF y WebP como imagen; PDF como recurso; hasta 5 MiB) y da el
@@ -62,6 +61,13 @@ Estado a 10 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 32 herram
   lectura, `file_changed` y no escribe; conserva el id, el nombre y la carpeta, devuelve el
   `sha256` y el tamaño de lo guardado, y guarda el contenido anterior 7 días para volver a
   él (`undoOperationId`). Un fichero privado responde `not_found` igual que uno inexistente.
+- Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026):
+  `hebra_create_file` crea uno de texto (`.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`,
+  hasta 1 000 000 bytes; un `.base` creado así sale en Bases de Hebra tras el sync),
+  `hebra_rename_file` lo renombra sin cambiar la extensión, `hebra_move_file` lo mueve a otra
+  carpeta y `hebra_duplicate_file` lo copia (mismos bytes, hasta 5 MiB) con otro nombre. Las
+  cuatro llevan `operationId`; un nombre que ya usa otro fichero visible de la carpeta
+  responde `file_exists` con su id, y lo privado responde como lo inexistente.
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`
@@ -247,5 +253,8 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
   leer un fichero suelto y reemplazar el texto de uno (D15): tipos y topes, el reemplazo
   con la base comprobada en el turno del escritor (`fileReplace` del motor) y el contenido
   anterior guardado 7 días en `library.sqlite`.
+- `src/store/file-verbs.ts`, `src/server/tools/loose-files.ts` — crear, renombrar, mover y
+  duplicar un fichero suelto (D17): el choque de nombres y la regla de que el resultado no
+  quede oculto, en el turno del escritor (`fileCreate`, `fileRename` y `fileMove` del motor).
 - `scripts/build.mjs`, `scripts/check-bundle.mjs`, `scripts/check-no-hebra-code.mjs` —
   build y los dos checks que corre `npm run check` junto con `typecheck` y `test`.

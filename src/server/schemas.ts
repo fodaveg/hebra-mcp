@@ -280,7 +280,8 @@ export const listTrashInputShape = {
 };
 
 /** Ficheros sueltos (D10, 9 oct 2026): listar, mandar a la papelera y sacar, por id. Nada
- *  de purgar, crear, renombrar ni mover (leer y reemplazar el texto, D15, abajo). Sin
+ *  de purgar (leer y reemplazar el texto, D15, y crear, renombrar, mover y duplicar, D17,
+ *  abajo). Sin
  *  `.min()`/`.max()` en `name`: su longitud (1–255) la aplica `files.ts` con
  *  `invalid_input`, sin eco de la entrada. */
 export const listFilesInputShape = {
@@ -344,6 +345,53 @@ export const replaceFileTextInputShape = {
   operationId: z
     .string()
     .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a escribir.')
+};
+
+/** Crear, renombrar, mover y duplicar un fichero suelto (D17, 12 oct 2026). Sin `.max()`
+ *  en los textos: el nombre (1–255 tras recortar), el texto (1 000 000 bytes) y
+ *  `operationId` los aplica `loose-files.ts` con sus códigos, sin eco, y otra vez el
+ *  escritor. */
+const FILE_NAME_HINT =
+  'Nombre del fichero CON extensión (hasta 255 caracteres; sin / | [ ] \\ # ni saltos de línea; se recortan los espacios de los extremos).';
+const FILE_FOLDER_HINT = 'Ruta de la carpeta de destino, como `path` de hebra_list_folders.';
+const FILE_FOLDER_ID_HINT =
+  'Id de la carpeta de destino (hebra_list_folders; "root" es la raíz), en vez de `folder`.';
+const FILE_OPERATION_ID = z
+  .string()
+  .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a escribir.');
+
+export const createFileInputShape = {
+  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la raíz.`),
+  folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
+  name: z
+    .string()
+    .describe(`${FILE_NAME_HINT} Extensión .base, .yaml, .yml, .json, .csv o .txt (un .md es una nota: hebra_create_note).`),
+  text: z.string().describe('Contenido entero, UTF-8 (hasta 1 000 000 bytes).'),
+  operationId: FILE_OPERATION_ID
+};
+
+export const renameFileInputShape = {
+  id: z.string().describe('Id de un fichero de hebra_list_files (vivo).'),
+  name: z.string().describe(`${FILE_NAME_HINT} La extensión no puede cambiar.`),
+  operationId: FILE_OPERATION_ID
+};
+
+export const moveFileInputShape = {
+  id: z.string().describe('Id de un fichero de hebra_list_files (vivo).'),
+  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la raíz.`),
+  folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
+  operationId: FILE_OPERATION_ID
+};
+
+export const duplicateFileInputShape = {
+  id: z.string().describe('Id del fichero de hebra_list_files (vivo) que se copia.'),
+  name: z.string().describe(`${FILE_NAME_HINT} Con la misma extensión que el original.`),
+  folder: z
+    .string()
+    .optional()
+    .describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la carpeta del original.`),
+  folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
+  operationId: FILE_OPERATION_ID
 };
 
 /** Versiones anteriores (ampliación de D2, 30 sep 2026). */
