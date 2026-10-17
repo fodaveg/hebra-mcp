@@ -1,7 +1,8 @@
 /**
  * OAuth de Hebra con consentimiento Lumbre montado sobre `serve-http`.
  * `null` si falta la credencial de backchannel o el almacén de secretos:
- * entonces `serve-http` no arranca (SPEC.md §12.2).
+ * entonces `serve-http` no arranca (SPEC.md §12.2). `LUMBRE_APP_ORIGIN` fija el origen de
+ * Lumbre (por defecto `https://app.lumbre.pro`); si es inválido, `HttpConfigError`.
  *
  * Rutas, todas en la raíz del host (la metadata OAuth tiene que ir ahí):
  * - `/.well-known/oauth-protected-resource` y `/.well-known/oauth-protected-resource/mcp`
@@ -27,7 +28,7 @@ import type { HttpAuth } from '../http/app';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
 import type { SecretStore } from '../secrets';
-import { BackchannelError, LumbreBackchannel } from './backchannel';
+import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from './backchannel';
 import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback } from './clients';
 import { GrantSecrets } from './grants';
 import { RevocationFile } from './owner';
@@ -65,8 +66,11 @@ export async function loadOAuthHttpAuth(
   options: OAuthHttpAuthOptions = {}
 ): Promise<OAuthHttpAuth | null> {
   if (!oauthHttpAuthConfigured(secrets, options.env)) return null;
-  const rawSecret = (options.env ?? process.env).HEBRA_MCP_BACKCHANNEL_SECRET!;
-  const backchannel = new LumbreBackchannel(rawSecret, config.resourceUrl, options.backchannelFetch);
+  const env = options.env ?? process.env;
+  // `LUMBRE_APP_ORIGIN` (H36): vacío o ausente, el de producción. Uno inválido lanza
+  // `HttpConfigError` antes de tocar tokens ni concesiones.
+  const backchannel = new LumbreBackchannel(env.HEBRA_MCP_BACKCHANNEL_SECRET!, config.resourceUrl,
+    env.LUMBRE_APP_ORIGIN || DEFAULT_LUMBRE_APP_ORIGIN, options.backchannelFetch);
   const now = options.now ?? Date.now;
   const tokens = await TokenStore.open(dataDir, now);
   const revocations = new RevocationFile(dataDir);

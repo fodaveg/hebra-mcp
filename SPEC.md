@@ -1678,8 +1678,29 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 - Hebra MCP conserva el OAuth público del SDK: issuer `https://mcp.hebra.pro`, recurso
   `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR para Claude y Codex, PKCE S256,
-  state, códigos de un uso, access de una hora y refresh rotatorio con familia de 30 días
-  absolutos. Un refresh reutilizado fuera de la ventana de gracia revoca su familia.
+  state, códigos de un uso, access de una hora y refresh rotatorio. Un refresh reutilizado
+  fuera de la ventana de gracia revoca su familia.
+- Caducidad de la familia (decisión del 17 oct 2026, H-dec4/H31 del audit «Lumbre ·
+  integración con Hebra»; sustituye a los 30 días absolutos desde la autorización): la de
+  su concesión de Lumbre (`expiresAt`), sin tope propio. Lumbre da 30 días al autorizar y
+  cada refresh correcto la renueva con `POST /api/integrations/hebra-mcp/renew`
+  (`{accessToken}` con el mismo bearer de backchannel), otros 30 días desde la renovación.
+  El refresh valida antes su familia (caducada, revocada o con `oauth-revoke-all` no llama
+  a `/renew` ni se reactiva) y hace la introspección fresca; después renueva y guarda la
+  fecha nueva en la familia (`grant.expiresAt` y su caducidad) en la misma escritura atómica
+  que rota el refresh, antes de entregar tokens, porque la introspección siguiente la
+  compara exactamente. `{active:false}` corta la familia y da `invalid_grant`: hay que
+  volver a dar consentimiento. Red, 5xx, 429 o una respuesta inesperada dan `server_error`
+  (500) sin tocar la familia ni `oauth-tokens.json`, y el mismo refresh vale al reintentar.
+  El handler de `/token` del SDK no deja fijar cabeceras desde el proveedor, así que el
+  `Retry-After` de un 429 de Lumbre se lee pero no llega al cliente. Dos refresh de la misma
+  familia se serializan: solo uno renueva. Mientras una renovación está a medio guardar,
+  una introspección de `/mcp` que solo discrepa en la fecha da 503 y no corta la familia.
+  Si la escritura falla después de renovar, la familia queda con la fecha vieja y la
+  introspección siguiente la corta (cerrado ante la duda).
+- El origen de Lumbre es `LUMBRE_APP_ORIGIN` (H36; por defecto `https://app.lumbre.pro`),
+  validado como `HEBRA_MCP_PUBLIC_URL`: destino del backchannel y único origen admitido en
+  la URL de consentimiento que devuelve `/requests`. Otro origen da 503 sin redirigir.
 - Claude conserva su callback exacto `https://claude.ai/api/mcp/auth_callback` y CIMD
   HTTPS en `claude.ai`. Codex admite exclusivamente el CIMD oficial
   `https://chatgpt.com/oauth/codex/client.json` y callbacks HTTP `/callback` en
@@ -1701,7 +1722,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   `opaqueDeviceId` real del dispositivo Blob V2. Lumbre comprueba propietario, bóveda
   activa y la fila exacta `hebraBlobDevices` no revocada, vinculada a esa credencial.
   Hebra compara los tres campos con su emparejado actual al canjear, acceder y refrescar.
-  Consulta introspección en Lumbre al canjear y en cada refresh; en `/mcp` reutiliza en
+  Consulta introspección en Lumbre al canjear y en cada refresh (antes de `/renew`; la
+  introspección no renueva nada); en `/mcp` reutiliza en
   memoria, por familia y durante 30 s (`INTROSPECTION_CACHE_MS`), un resultado positivo
   y coherente con la concesión guardada, o hasta el `expiresAt` de la concesión si llega
   antes (decisión D8). El plazo de 30 s se mide también con reloj monotónico: un retroceso

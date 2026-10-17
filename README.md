@@ -164,12 +164,14 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   biblioteca; el emparejado y los comandos que sí la abren conservan el bloqueo de escritor.
 - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`
   (`127.0.0.1`; en el contenedor, `0.0.0.0`), `HEBRA_MCP_PUBLIC_URL`
-  (`https://mcp.hebra.pro`) y, para los secretos del dispositivo,
-  `HEBRA_MCP_SECRET_STORE=file`.
+  (`https://mcp.hebra.pro`), `LUMBRE_APP_ORIGIN` (`https://app.lumbre.pro`: el origen de
+  Lumbre, el mismo que su `ORIGIN`; la URL de consentimiento de otro origen se rechaza) y,
+  para los secretos del dispositivo, `HEBRA_MCP_SECRET_STORE=file`.
 - En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. El navegador
   pasa por el login y consentimiento de Lumbre; Claude recibe un access token de 1 h y un
-  refresh rotatorio (la autorización dura hasta 30 días). La gestión de concesiones está
-  en `/integrations/hebra-mcp` de Lumbre.
+  refresh rotatorio. La autorización caduca 30 días después de aprobarla o del último
+  refresh, que la renueva en Lumbre; caducada, hay que volver a aprobarla. La gestión de
+  concesiones está en `/integrations/hebra-mcp` de Lumbre.
 - Codex usa el mismo recurso `https://mcp.hebra.pro/mcp`, su CIMD oficial
   `https://chatgpt.com/oauth/codex/client.json` o DCR y un callback local HTTP
   `127.0.0.1`/`localhost` en `/callback` con puerto dinámico. Lumbre exige el mismo

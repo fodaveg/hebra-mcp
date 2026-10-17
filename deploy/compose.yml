@@ -70,6 +70,11 @@ services:
       # 2026 (SPEC.md §12.5); ya resuelve al servidor, falta el sitio en Caddy
       # (`deploy/mcp-hebra-pro.caddy`).
       HEBRA_MCP_PUBLIC_URL: 'https://mcp.hebra.pro'
+      # `src/oauth/backchannel.ts`: origen de Lumbre, destino del backchannel y
+      # único origen admitido en la URL de consentimiento. Tiene que coincidir
+      # con el `ORIGIN` (o uno de `LUMBRE_PUBLIC_ORIGINS`) de Lumbre: si no,
+      # `/authorize` responde 503. Mismo valor que el de por defecto.
+      LUMBRE_APP_ORIGIN: 'https://app.lumbre.pro'
     volumes:
       - data:/data
     networks:

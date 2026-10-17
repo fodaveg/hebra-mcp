@@ -12,6 +12,8 @@ import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
 import { CODEX_CIMD_CLIENT_ID } from '../../src/oauth/clients';
+import { BackchannelError, LumbreBackchannel } from '../../src/oauth/backchannel';
+import { HttpConfigError } from '../../src/http/config';
 import { ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS } from '../../src/oauth/token-store';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
@@ -43,6 +45,10 @@ let requestCount: number;
 let exchangeCount: number;
 let introspectCount: number;
 let introspectionResponse: (() => Promise<Response>) | null;
+let renewCount: number;
+let renewResponse: (() => Promise<Response>) | null;
+/** Origen de la URL de consentimiento que devuelve el broker en `/requests`. */
+let authorizationOrigin: string;
 let grantExpiresAt: string;
 let brokerDevice: string;
 let brokerVault: string;
@@ -77,7 +83,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     transactionId = body.transactionId!;
     clientId = body.clientId!;
     resource = body.resource!;
-    return response({ requestId, authorizationUrl: `https://app.lumbre.pro/integrations/hebra-mcp?request=${requestId}`,
+    return response({ requestId, authorizationUrl: `${authorizationOrigin}/integrations/hebra-mcp?request=${requestId}`,
       expiresAt: new Date(Date.now() + 600_000).toISOString() });
   }
   if (path === 'exchange') {
@@ -92,6 +98,15 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     if (!deviceActive || body.accessToken !== UPSTREAM) return response({ active: false });
     return response({ active: true, credentialId: GRANT_ID, clientId, resource, scope: 'hebra:mcp', accountId: ACCOUNT,
       pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
+  }
+  if (path === 'renew') {
+    renewCount += 1;
+    expect(Object.keys(body)).toEqual(['accessToken']);
+    if (renewResponse) return renewResponse();
+    if (!deviceActive || body.accessToken !== UPSTREAM) return response({ active: false });
+    // Como Lumbre: 30 días desde la renovación, y la introspección siguiente ya da esta fecha.
+    grantExpiresAt = new Date(Date.now() + clockOffset + 30 * 86400_000).toISOString();
+    return response({ active: true, expiresAt: grantExpiresAt });
   }
   if (path === 'revoke') { approved = false; return response({ revoked: true }); }
   throw new Error('unexpected route');
@@ -115,6 +130,7 @@ beforeEach(async () => {
   });
   approved = false; deviceActive = true; available = true; requestCount = 0; exchangeCount = 0; introspectCount = 0;
   introspectionResponse = null;
+  renewCount = 0; renewResponse = null; authorizationOrigin = 'https://app.lumbre.pro';
   clockOffset = 0;
   brokerPair = PAIR_ID; brokerVault = VAULT; brokerDevice = DEVICE;
   grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
@@ -865,5 +881,221 @@ describe('recuperación de revocaciones', () => {
     expect(reopened).not.toBeNull();
     expect(approved).toBe(false);
     expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+  });
+});
+
+const DAY_MS = 86400_000;
+
+/** La única familia persistida en `oauth-tokens.json`. */
+async function savedFamily(): Promise<{ expiresAt: number; createdAt: number; grant: { expiresAt: string } }> {
+  const saved = JSON.parse(await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8')) as
+    { families: Array<{ expiresAt: number; createdAt: number; grant: { expiresAt: string } }> };
+  expect(saved.families).toHaveLength(1);
+  return saved.families[0]!;
+}
+
+function refresh(refreshToken: string): Promise<Response> {
+  return token({ grant_type: 'refresh_token', refresh_token: refreshToken });
+}
+
+describe('renovación de la concesión con Lumbre (/renew)', () => {
+  it('un refresh renueva en Lumbre y guarda la fecha nueva; la introspección siguiente casa', async () => {
+    const issued = await issuedTokens();
+    const original = grantExpiresAt;
+    clockOffset = 10 * DAY_MS;
+    const refreshed = await refresh(issued.refresh_token);
+    expect(refreshed.status).toBe(200);
+    expect(renewCount).toBe(1);
+    expect(grantExpiresAt).not.toBe(original);
+    const family = await savedFamily();
+    expect(family.grant.expiresAt).toBe(grantExpiresAt);
+    expect(family.expiresAt).toBe(Date.parse(grantExpiresAt));
+    const next = await refreshed.json() as { access_token: string; refresh_token: string };
+    const base = introspectCount;
+    expect((await mcpCall(next.access_token)).status).toBe(200);
+    expect(introspectCount).toBe(base + 1);
+  });
+
+  it('active:false exige consentimiento nuevo: invalid_grant, sin tokens y familia cortada', async () => {
+    const issued = await issuedTokens();
+    renewResponse = async () => response({ active: false });
+    const refused = await refresh(issued.refresh_token);
+    expect(refused.status).toBe(400);
+    const body = await refused.json() as Record<string, unknown>;
+    expect(body.error).toBe('invalid_grant');
+    expect(body.access_token).toBeUndefined();
+    expect(await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8')).not.toContain(GRANT_ID);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('{}');
+    expect((await mcpCall(issued.access_token)).status).toBe(401);
+    renewResponse = null;
+    expect((await refresh(issued.refresh_token)).status).toBe(400);
+    expect(renewCount).toBe(1);
+  });
+
+  it.each([
+    ['503', async () => response({ error: 'temporarily_unavailable' }, 503)],
+    ['429', async () => new Response(JSON.stringify({ error: 'rate_limited' }),
+      { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '7' } })],
+    ['error de red', async (): Promise<Response> => { throw new TypeError('fetch failed'); }]
+  ])('%s al renovar: error temporal, oauth-tokens.json intacto y el mismo refresh vale después', async (_label, failure) => {
+    const issued = await issuedTokens();
+    const file = join(context.dataDir, OAUTH_TOKENS_FILE);
+    const before = await readFile(file);
+    const grantsBefore = await store.get('hebra-mcp-oauth-grants');
+    renewResponse = failure;
+    const failed = await refresh(issued.refresh_token);
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toMatchObject({ error: 'server_error' });
+    expect(Buffer.compare(await readFile(file), before)).toBe(0);
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe(grantsBefore);
+    expect(approved).toBe(true);
+    renewResponse = null;
+    expect((await refresh(issued.refresh_token)).status).toBe(200);
+    expect(renewCount).toBe(2);
+  });
+
+  it.each([
+    ['revocada por OAuth', async (issued: { refresh_token: string }) => {
+      await provider.revokeToken({ client_id: DCR_CLIENT_ID } as never, { token: issued.refresh_token } as never);
+    }],
+    ['revocada con oauth-revoke-all', async () => { await revokeAllTokens(context.dataDir, Date.now() + 1); }],
+    ['caducada', async () => { clockOffset = 30 * DAY_MS + 1; }]
+  ])('familia %s: invalid_grant sin llamar a /renew', async (_label, kill) => {
+    const issued = await issuedTokens();
+    await kill(issued);
+    expect((await refresh(issued.refresh_token)).status).toBe(400);
+    expect(renewCount).toBe(0);
+  });
+
+  it('cada renovación alarga la familia más allá de los 30 días desde la autorización', async () => {
+    const issued = await issuedTokens();
+    const authorizedAt = (await savedFamily()).createdAt;
+    clockOffset = 29 * DAY_MS;
+    const first = await refresh(issued.refresh_token);
+    expect(first.status).toBe(200);
+    const middle = await first.json() as { refresh_token: string };
+    clockOffset = 31 * DAY_MS;
+    const second = await refresh(middle.refresh_token);
+    expect(second.status).toBe(200);
+    const latest = await second.json() as { access_token: string };
+    expect((await savedFamily()).expiresAt).toBeGreaterThan(authorizedAt + 60 * DAY_MS);
+    expect((await mcpCall(latest.access_token)).status).toBe(200);
+    expect(renewCount).toBe(2);
+  });
+
+  it('una introspección de /mcp con la fecha nueva antes de guardarla da 503 y no corta la familia', async () => {
+    const issued = await issuedTokens();
+    clockOffset = INTROSPECTION_CACHE_MS;
+    const gate = deferred<Response>();
+    renewResponse = () => gate.promise;
+    const pending = refresh(issued.refresh_token);
+    await vi.waitFor(() => expect(renewCount).toBe(1));
+    // Lumbre ya renovó, pero la respuesta aún no ha llegado al broker.
+    grantExpiresAt = new Date(Date.now() + clockOffset + 30 * DAY_MS).toISOString();
+    // El refresh dejó en caché su introspección fresca; sin ella, `/mcp` pregunta a Lumbre
+    // (lo que pasa con una introspección que ya estaba en vuelo al empezar el refresh).
+    cachedIntrospections().clear();
+    expect((await mcpCall(issued.access_token)).status).toBe(503);
+    gate.resolve(response({ active: true, expiresAt: grantExpiresAt }));
+    const refreshed = await pending;
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json() as { access_token: string };
+    expect((await mcpCall(next.access_token)).status).toBe(200);
+    expect((await savedFamily()).grant.expiresAt).toBe(grantExpiresAt);
+  });
+
+  it('dos refresh simultáneos renuevan una sola vez', async () => {
+    const issued = await issuedTokens();
+    const results = await Promise.all([refresh(issued.refresh_token), refresh(issued.refresh_token)]);
+    expect(results.map((result) => result.status).sort()).toEqual([200, 400]);
+    expect(renewCount).toBe(1);
+  });
+
+  it.each(['https://evil.example', 'http://app.lumbre.pro', 'https://app.lumbre.pro:8443'])(
+    'una URL de consentimiento de otro origen (%s) da 503 sin redirigir', async (origin) => {
+      authorizationOrigin = origin;
+      const start = await authorize(pkce().challenge);
+      expect(start.status).toBe(503);
+      expect(start.headers.get('location')).toBeNull();
+      expect(await start.json()).toEqual({ error: 'temporarily_unavailable' });
+      expect(requestCount).toBe(1);
+    });
+});
+
+describe('LUMBRE_APP_ORIGIN', () => {
+  const binding = { pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE,
+    transactionId: 'transaccion', clientId: DCR_CLIENT_ID, clientName: 'Claude' };
+
+  it('un origen configurado cambia el destino del backchannel y el origen admitido', async () => {
+    const calls: string[] = [];
+    let returned = 'https://lumbre.example';
+    const fetcher = async (input: string | URL) => {
+      calls.push(String(input));
+      const id = crypto.randomUUID();
+      return response({ requestId: id, authorizationUrl: `${returned}/integrations/hebra-mcp?request=${id}`,
+        expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    };
+    const backchannel = new LumbreBackchannel(SECRET, app.config.resourceUrl, 'https://lumbre.example/', fetcher);
+    expect(backchannel.appOrigin).toBe('https://lumbre.example');
+    await expect(backchannel.request(binding)).resolves.toMatchObject({ authorizationUrl: expect.stringMatching(/^https:\/\/lumbre\.example\//) });
+    expect(calls).toEqual(['https://lumbre.example/api/integrations/hebra-mcp/requests']);
+    returned = 'https://app.lumbre.pro';
+    await expect(backchannel.request(binding)).rejects.toMatchObject({ kind: 'invalid' });
+  });
+
+  it('se lee del entorno; vacío o ausente, el de producción', async () => {
+    const origin = async (env: NodeJS.ProcessEnv) => {
+      const loaded = await loadOAuthHttpAuth(context.dataDir, app.config, store,
+        { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET, ...env } });
+      return (loaded!.provider as unknown as { backchannel: LumbreBackchannel }).backchannel.appOrigin;
+    };
+    expect(await origin({ LUMBRE_APP_ORIGIN: 'https://lumbre.example' })).toBe('https://lumbre.example');
+    expect(await origin({ LUMBRE_APP_ORIGIN: 'http://localhost:5173' })).toBe('http://localhost:5173');
+    expect(await origin({ LUMBRE_APP_ORIGIN: '' })).toBe('https://app.lumbre.pro');
+    expect(await origin({})).toBe('https://app.lumbre.pro');
+  });
+
+  it.each(['http://lumbre.example', 'https://lumbre.example/ruta', 'https://lumbre.example/?x=1',
+    'https://lumbre.example/#f', 'https://u:p@lumbre.example', 'nada'])('rechaza %s nombrando la variable, sin su valor', async (value) => {
+    const loading = loadOAuthHttpAuth(context.dataDir, app.config, store,
+      { backchannelFetch: broker, env: { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET, LUMBRE_APP_ORIGIN: value } });
+    await expect(loading).rejects.toBeInstanceOf(HttpConfigError);
+    const error = await loading.then((): never => { throw new Error('no falló'); }, (caught: unknown) => caught as HttpConfigError);
+    expect(error.variable).toBe('LUMBRE_APP_ORIGIN');
+    expect(error.message).not.toContain(value);
+  });
+});
+
+describe('respuesta de /renew', () => {
+  const renewWith = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+    new LumbreBackchannel(SECRET, 'http://127.0.0.1/mcp', undefined, async () => new Response(JSON.stringify(body),
+      { status, headers: { 'content-type': 'application/json', ...headers } })).renew(UPSTREAM);
+
+  it('acepta solo active:false o active:true con un ISO canónico', async () => {
+    const expiresAt = new Date(Date.now() + 30 * DAY_MS).toISOString();
+    await expect(renewWith(200, { active: true, expiresAt })).resolves.toBe(expiresAt);
+    await expect(renewWith(200, { active: false })).resolves.toBeNull();
+    for (const bad of [{ active: true }, { active: true, expiresAt: '2026-10-17' }, { active: true, expiresAt, extra: 1 },
+      { active: false, expiresAt }, { active: 'true', expiresAt }, []]) {
+      await expect(renewWith(200, bad)).rejects.toMatchObject({ kind: 'invalid' });
+    }
+  });
+
+  it('429 es rate_limited con Retry-After solo si es válido; 4xx inválido y 5xx no disponible, sin cuerpo', async () => {
+    const limited = (value?: string) => renewWith(429, { error: 'rate_limited', secreto: SECRET },
+      value === undefined ? {} : { 'retry-after': value });
+    await expect(limited('7')).rejects.toMatchObject({ kind: 'rate_limited', retryAfter: 7 });
+    await expect(limited('Wed, 21 Oct 2015 07:28:00 GMT')).rejects.toMatchObject({ kind: 'rate_limited', retryAfter: 0 });
+    for (const value of [undefined, 'pronto', '-1', '999999', '1.5']) {
+      const error = await limited(value).then((): never => { throw new Error('no falló'); }, (caught: unknown) => caught as BackchannelError);
+      expect(error).toBeInstanceOf(BackchannelError);
+      expect(error.kind).toBe('rate_limited');
+      expect(error.retryAfter).toBeUndefined();
+      expect(error.message).toBe('rate_limited');
+      expect(JSON.stringify(error)).not.toContain(SECRET);
+    }
+    await expect(renewWith(400, { error: 'invalid_request' })).rejects.toMatchObject({ kind: 'invalid' });
+    await expect(renewWith(401, { error: 'unauthorized' })).rejects.toMatchObject({ kind: 'invalid' });
+    await expect(renewWith(503, { error: 'temporarily_unavailable' })).rejects.toMatchObject({ kind: 'unavailable' });
   });
 });

@@ -111,6 +111,13 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private introspectionEpoch = 0;
   private readonly inFlightIntrospections = new Map<string, Set<IntrospectionAttempt>>();
   private seenRevokedBefore: number | null = null;
+  /** Cola de refresh por familia: dos refresh de la misma familia nunca renuevan a la vez. */
+  private readonly refreshQueues = new Map<string, Promise<void>>();
+  /**
+   * Familias entre la llamada a `/renew` y la escritura de su fecha nueva. En ese hueco
+   * Lumbre ya puede introspeccionar con la fecha nueva: no es un desajuste que corte la familia.
+   */
+  private readonly renewing = new Set<string>();
 
   constructor(options: HebraOAuthProviderOptions) {
     this.issuer = options.issuer;
@@ -364,8 +371,11 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (!inspected) { await this.dropFamily(familyId); return false; }
     // Otra petición pudo invalidar la familia mientras Lumbre respondía.
     if (attempt.invalidated || epoch !== this.introspectionEpoch) return false;
-    if (inspected.credentialId !== grant.credentialId || inspected.clientId !== grant.clientId ||
-      inspected.accountId !== grant.accountId || inspected.expiresAt !== grant.expiresAt || !sameBinding(inspected, grant)) {
+    const sameGrant = inspected.credentialId === grant.credentialId && inspected.clientId === grant.clientId &&
+      inspected.accountId === grant.accountId && sameBinding(inspected, grant);
+    if (!sameGrant || inspected.expiresAt !== grant.expiresAt) {
+      // Solo la fecha, con una renovación a medio guardar: transitorio, no se corta la familia.
+      if (sameGrant && this.renewing.has(familyId)) throw new BackchannelError('unavailable');
       await this.dropFamily(familyId); return false;
     }
     this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
@@ -409,26 +419,73 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     } catch { await cleanup(); throw new ServerError('No se pudo guardar la autorización.'); }
   }
 
+  /** Un refresh que no es el vigente de una familia viva: replay, rotación reciente o caducada. Nunca renueva. */
+  private async rejectRefresh(refreshToken: string, clientId: string, revokedBefore: number): Promise<never> {
+    const replay = await this.tokens.rotateRefresh(refreshToken, clientId, revokedBefore);
+    if (replay.ok) throw new ServerError('Estado OAuth inconsistente.');
+    throw new InvalidGrantError('Refresh token no válido.');
+  }
+
+  /** Ejecuta `run` después de los refresh anteriores de la misma familia. */
+  private async serializeRefresh<T>(familyId: string, run: () => Promise<T>): Promise<T> {
+    const current = (this.refreshQueues.get(familyId) ?? Promise.resolve()).then(run);
+    const tail = current.then(() => undefined, () => undefined);
+    this.refreshQueues.set(familyId, tail);
+    try { return await current; }
+    finally { if (this.refreshQueues.get(familyId) === tail) this.refreshQueues.delete(familyId); }
+  }
+
+  /**
+   * Refresh con renovación en Lumbre (`/renew`, contrato H-dec4/H31 del 17 oct 2026): antes de
+   * entregar tokens se renueva la concesión y su fecha nueva se guarda en la familia en la
+   * misma escritura que rota el refresh. `active: false` exige consentimiento nuevo
+   * (`invalid_grant` y familia cortada); red, 5xx o 429 dan un error temporal sin tocar la
+   * familia, para que el cliente reintente con el mismo refresh. El handler del SDK no deja
+   * fijar cabeceras desde el proveedor, así que el `Retry-After` de Lumbre no llega al cliente.
+   */
   async exchangeRefreshToken(client: OAuthClientInformationFull, refreshToken: string, scopes?: string[], resource?: URL): Promise<OAuthTokens> {
     this.checkScopes(scopes);
     if (!this.sameResource(resource)) throw new InvalidTargetError(`El resource debe ser ${this.resource}.`);
     const revokedBefore = await this.revokedBefore();
-    const candidate = this.tokens.lookupRefresh(refreshToken, client.client_id, revokedBefore);
-    if (!candidate) {
-      const replay = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore);
-      if (replay.ok) throw new ServerError('Estado OAuth inconsistente.');
-      throw new InvalidGrantError('Refresh token no válido.');
-    }
-    // Emitir tokens nuevos exige una introspección fresca: la caché solo ahorra la de `/mcp`.
-    try { if (!await this.active(candidate.familyId, candidate.grant, false)) throw new InvalidGrantError('Refresh token no válido.'); }
-    catch (error) { if (error instanceof InvalidGrantError) throw error; throw new ServerError('Consentimiento temporalmente no disponible.'); }
-    const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore);
-    if (!outcome.ok) {
-      // Un replay o una familia caducada la quitan del almacén; una rotación reciente solo fuerza otra consulta.
-      this.forgetIntrospection(candidate.familyId);
-      throw new InvalidGrantError('Refresh token no válido.');
-    }
-    return this.tokensResponse(outcome.tokens);
+    const found = this.tokens.lookupRefresh(refreshToken, client.client_id, revokedBefore);
+    if (!found) return this.rejectRefresh(refreshToken, client.client_id, revokedBefore);
+    return this.serializeRefresh(found.familyId, async () => {
+      // Otro refresh de la familia pudo rotar este token mientras esperaba su turno.
+      const candidate = this.tokens.lookupRefresh(refreshToken, client.client_id, revokedBefore);
+      if (!candidate) return this.rejectRefresh(refreshToken, client.client_id, revokedBefore);
+      const { familyId } = candidate;
+      // Emitir tokens nuevos exige una introspección fresca: la caché solo ahorra la de `/mcp`.
+      try { if (!await this.active(familyId, candidate.grant, false)) throw new InvalidGrantError('Refresh token no válido.'); }
+      catch (error) { if (error instanceof InvalidGrantError) throw error; throw new ServerError('Consentimiento temporalmente no disponible.'); }
+      const bearer = this.grants.get(familyId);
+      if (!bearer) { this.forgetIntrospection(familyId); throw new InvalidGrantError('Refresh token no válido.'); }
+      this.renewing.add(familyId);
+      try {
+        let renewed: string | null;
+        try { renewed = await this.backchannel.renew(bearer); }
+        catch {
+          logEvent({ event: 'oauth.renew', result: 'unavailable' });
+          throw new ServerError('temporarily_unavailable');
+        }
+        if (renewed === null) {
+          logEvent({ event: 'oauth.renew', result: 'inactive' });
+          await this.dropFamily(familyId);
+          throw new InvalidGrantError('La autorización caducó: hay que volver a conectar.');
+        }
+        // «Activa» con una fecha ya pasada no es una renovación: no se toca la familia.
+        if (Date.parse(renewed) <= this.now()) {
+          logEvent({ event: 'oauth.renew', result: 'invalid' });
+          throw new ServerError('temporarily_unavailable');
+        }
+        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed);
+        // La caché y las introspecciones en vuelo eran de la fecha anterior.
+        this.forgetIntrospection(familyId);
+        // Un replay o una familia caducada la quitan del almacén; una rotación reciente solo fuerza otra consulta.
+        if (!outcome.ok) throw new InvalidGrantError('Refresh token no válido.');
+        logEvent({ event: 'oauth.renew', result: 'renewed' });
+        return this.tokensResponse(outcome.tokens);
+      } finally { this.renewing.delete(familyId); }
+    });
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {

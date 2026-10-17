@@ -1,8 +1,13 @@
 /**
  * Tokens del OAuth con consentimiento Lumbre (SPEC.md §12.2): opacos, aleatorios y guardados solo
- * como SHA-256. Valores de lumbre-mcp (`oauth.ts:25-26`): access de 1 h y familia de
- * refresh de 30 días desde la autorización (vigencia absoluta: pasado ese plazo hay que
- * volver a meter el secreto).
+ * como SHA-256. Access de 1 h, como lumbre-mcp (`oauth.ts:25`).
+ *
+ * - Caducidad de la familia = la de su concesión de Lumbre (`grant.expiresAt`), sin tope
+ *   absoluto propio desde la autorización (decisión del 17 oct 2026, H-dec4/H31). Lumbre
+ *   da 30 días al autorizar, y cada refresh correcto la renueva por `/renew` (otros 30
+ *   días desde la renovación): `rotateRefresh` guarda esa fecha nueva en la familia en la
+ *   misma escritura que rota el refresh, antes de entregar tokens, porque la introspección
+ *   siguiente la compara exactamente. Una familia caducada o revocada no se renueva.
  *
  * - Familia = una autorización aprobada. Guarda el hash del refresh VIGENTE y los de sus
  *   access aún válidos (como mucho `MAX_ACCESS_PER_FAMILY`: el refresh deja vivos los
@@ -27,7 +32,6 @@ import { readJsonOrNull, tokensFilePath, writeJsonAtomic } from './files';
 import type { ActiveGrant } from './backchannel';
 
 export const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
-export const REFRESH_FAMILY_TTL_MS = 30 * 24 * 60 * 60_000;
 const MAX_ACCESS_PER_FAMILY = 4;
 /** Ventana tras una rotación en la que el refresh recién rotado da `invalid_grant` sin
  *  revocar la familia (hallazgo B3 de la auditoría). */
@@ -244,7 +248,8 @@ export class TokenStore {
         // La marca es la aprobación, no el canje: una revocación concurrente
         // nunca convierte un código antiguo en una familia nueva.
         createdAt: input.authorizedAt,
-        expiresAt: Math.min(input.authorizedAt + REFRESH_FAMILY_TTL_MS, Date.parse(input.grant.expiresAt)),
+        // La de la concesión, sin tope propio: cada refresh la renueva en Lumbre.
+        expiresAt: Date.parse(input.grant.expiresAt),
         refreshHash: '',
         access: [],
         grant: input.grant
@@ -260,8 +265,12 @@ export class TokenStore {
     });
   }
 
-  /** Rota un refresh. Reutilizar uno ya rotado revoca su familia entera. */
-  rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number): Promise<RefreshOutcome> {
+  /**
+   * Rota un refresh. Reutilizar uno ya rotado revoca su familia entera. Con
+   * `renewedExpiresAt` (la fecha que devolvió `/renew`), la familia y su concesión pasan a
+   * caducar entonces, en la misma escritura atómica que la rotación.
+   */
+  rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number, renewedExpiresAt?: string): Promise<RefreshOutcome> {
     return this.mutate((): RefreshOutcome => {
       const now = this.now();
       const match = REFRESH_PATTERN.exec(refreshToken);
@@ -291,6 +300,12 @@ export class TokenStore {
       this.prune(revokedBefore, now);
       family.previousRefreshHash = family.refreshHash;
       family.rotatedAt = now;
+      if (renewedExpiresAt !== undefined) {
+        // En el sitio, no una copia: una verificación en vuelo que ya tiene la concesión
+        // compara con la fecha nueva. Si la escritura falla, `mutate` restaura la copia previa.
+        family.grant.expiresAt = renewedExpiresAt;
+        family.expiresAt = Date.parse(renewedExpiresAt);
+      }
       const accessToken = this.newAccess(family, now);
       const nextRefresh = this.newRefresh(family);
       return { ok: true, tokens: this.issued(family, accessToken, nextRefresh) };
