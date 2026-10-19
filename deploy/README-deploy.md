@@ -153,8 +153,10 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 
    ```bash
    # En el servidor, con HEBRA_MCP_DATA_DEVICE=<directorio dentro del volumen cifrado>
-   sudo install -d -o 1000 -g 1000 -m 0700 "$HEBRA_MCP_DATA_DEVICE"
-   echo "HEBRA_MCP_DATA_DEVICE=$HEBRA_MCP_DATA_DEVICE" >> "$HEBRA_MCP_DEST/deploy/.env"
+   # chown numérico: `install -o 1000` falla si el host no tiene un usuario 1000 (medido el 19 oct 2026)
+   sudo mkdir -m 0700 "$HEBRA_MCP_DATA_DEVICE" && sudo chown 1000:1000 "$HEBRA_MCP_DATA_DEVICE"
+   # deploy/.env es de root y 0600: `>>` sin sudo no puede escribirlo
+   echo "HEBRA_MCP_DATA_DEVICE=$HEBRA_MCP_DATA_DEVICE" | sudo tee -a "$HEBRA_MCP_DEST/deploy/.env" >/dev/null
    ```
 
    Si el volumen cifrado no está montado al arrancar (crypttab con `nofail`),
