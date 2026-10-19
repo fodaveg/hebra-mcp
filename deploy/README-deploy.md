@@ -166,12 +166,27 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    a mano sin el volumen montado: se montaría el cifrado encima después y los
    datos quedarían ocultos en el disco sin cifrar.
 
-4. Construir y levantar:
+4. Construir y levantar. En el servidor se guardan como mucho dos imágenes: la
+   actual (`hebra-mcp:latest`) y una para volver atrás (`hebra-mcp:previous`).
+   El disco del sistema del VPS es pequeño y no se puede ampliar (19 oct 2026):
+   antes de construir, la imagen en uso pasa a `previous`; después se borran
+   las imágenes de este proyecto que se quedaron sin etiqueta (la `previous`
+   anterior y las de builds intermedias). El filtro por la etiqueta de compose
+   deja fuera las imágenes de los demás servicios:
 
    ```bash
    ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
-     docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build"
+     { ! docker image inspect hebra-mcp:latest >/dev/null 2>&1 || \
+       docker tag hebra-mcp:latest hebra-mcp:previous; } && \
+     docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build && \
+     docker image prune -f --filter label=com.docker.compose.project=hebra-mcp"
    ```
+
+   Volver atrás: `docker tag hebra-mcp:previous hebra-mcp:latest` y
+   `docker compose --env-file deploy/.env -f deploy/compose.yml up -d --no-build`.
+   Solo sirve si la versión anterior lee el estado que dejó la nueva (SQLite y
+   ficheros de planes); no se guardan imágenes más viejas porque volver
+   semanas atrás sobre datos de hoy no es una vuelta atrás segura.
 
    Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en
    `deploy/.env` privado con el mismo valor que el broker Lumbre. También se
