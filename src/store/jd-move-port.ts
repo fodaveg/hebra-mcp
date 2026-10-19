@@ -11,18 +11,27 @@
  *   aplicar es `plan_stale` y al deshacer, `skipped` con `refused`.
  * - Los demás rechazos de Hebra SE LANZAN (el motor no captura excepciones): un nombre que no
  *   vale (`invalid_name`), una nota bloqueada que habría que renombrar (`note_locked`) y, si el
- *   destino no se puede usar por la privacidad (una ruta privada configurada, un homónimo
- *   OCULTO, un nombre o unos bytes que dejarían oculto lo movido), UN error genérico,
- *   `destination_unavailable`, que no dice que hay algo oculto.
+ *   destino de una nota o un fichero no se puede usar por la privacidad (un nombre o unos bytes
+ *   que dejarían oculto lo movido), UN error genérico, `destination_unavailable`, que no dice
+ *   que hay algo oculto. Una CARPETA solo se rechaza por la configuración, con la regla y el
+ *   error de `hebra_rename_folder` (`planRenameFolder`, D9; revisión de seguridad del 19 oct
+ *   2026): una ruta privada configurada por debajo de la suya, su ruta nueva o la de una
+ *   descendiente en una ruta privada, o un homónimo oculto en el destino, `folder_unavailable`.
  * - Renombrar y mover a la vez: una carpeta, si el nombre viejo está libre en el destino,
  *   primero se mueve y luego se renombra; si no, al revés (`folderMoveIfUnchanged` y
  *   `folderRenameIfUnchanged` del motor, con su guarda). Una nota se mueve con la guarda de
  *   revisión y carpeta de `noteMoveIfUnchanged` y se renombra editando su `title:`
  *   (`bodyWithFrontmatterTitle`); un fichero, sin guarda en el motor, se comprueba aquí.
- * - `hiddenInside(carpeta)`: si en su árbol hay una subcarpeta oculta, una nota oculta (viva o
- *   de la papelera, por carpeta, etiqueta privada o bloqueada con etiquetas privadas) o un
- *   fichero suelto oculto. Sobre los datos sin filtrar, leyendo solo ids, nunca cuerpos ni
- *   títulos, y recorriéndolo todo (el tiempo no depende de dónde esté lo oculto).
+ * - `hiddenInside(carpeta)` NO mira el contenido del almacén (revisión de seguridad del 19 oct
+ *   2026: con él, simular era un oráculo de qué carpeta visible tiene algo oculto, y
+ *   distinguía homónimas, deshaciendo M4). Responde la regla de configuración de
+ *   `configRejects`: la misma para cualquier carpeta con la misma ruta, tenga lo que tenga
+ *   dentro. Lo oculto que no depende de la ruta (notas por etiqueta privada, bloqueadas,
+ *   ficheros ocultos por la regla (b) de D10, carpetas de la memoria de A3) viaja con la
+ *   carpeta y sigue oculto, como al renombrarla con `hebra_rename_folder`; lo que depende de la
+ *   ruta (una carpeta resuelta por una ruta configurada, y las notas y ficheros de A2 y de la
+ *   papelera que se juzgan subiendo por las lápidas hasta una carpeta de dentro) siempre
+ *   necesita una ruta privada configurada por debajo de la de la carpeta, y eso la rechaza.
  * Las comprobaciones de privacidad se hacen igual en la simulación (`preflight`), para no
  * dejar carpetas creadas antes de un rechazo, y otra vez al mover.
  */
@@ -31,7 +40,6 @@ import type { EnsureResult, LibraryMovePort, MoveParent, MovePlan, PlanWrite } f
 import type { PrivacyConfig } from '../privacy/config';
 import { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
-import { TrashFilter } from '../privacy/trash-filter';
 import { StoreError, writeRejected } from './errors';
 import { nameExtension, validFileName } from './file-content';
 import { folderNameKey, planCreateFolder, validFolderName } from './folders';
@@ -55,16 +63,32 @@ function unavailable(): StoreError {
   return writeRejected('destination_unavailable');
 }
 
-/** Lo que mover una carpeta puede dar del motor de Hebra: lo que ya no está, `{ok: false}`; un
- *  nombre ocupado (lo visible ya lo miró el motor JD: lo que queda es oculto), el error
- *  genérico; un nombre que no vale, `invalid_name`. */
+/** El rechazo de mover una carpeta por la privacidad: el de `hebra_rename_folder` (D9). */
+function folderUnavailable(): StoreError {
+  return writeRejected('folder_unavailable');
+}
+
+/**
+ * ¿No se puede mover la carpeta `id` desde aquí? Solo por la CONFIGURACIÓN, como
+ * `planRenameFolder`: no se ve, o hay una ruta privada configurada por debajo de la suya (o es
+ * la suya). Nunca mira lo que tiene dentro: dos carpetas con la misma ruta responden igual.
+ */
+export function configRejects(live: PrivacyFilter, id: string): boolean {
+  if (id === ROOT_FOLDER_ID || !visibleFolder(live, id)) return true;
+  const segments = live.folderSegments(id);
+  return live.isPrivateFolderPath(segments) || live.isPrivatePathPrefix(segments);
+}
+
+/** Lo que mover una carpeta puede dar del motor de Hebra: lo que ya no está o un nombre
+ *  ocupado, `{ok: false}`; un nombre que no vale, `invalid_name`. */
 function folderFailure(error: unknown): { ok: false } {
   if (error instanceof LibraryError) {
     switch (error.code) {
-      case 'folder_name_taken':
-        throw unavailable();
       case 'invalid_name':
         throw jdRejected('invalid_name');
+      // Un nombre ocupado (lo visible ya lo miró el motor JD: un homónimo que llegó entre medias,
+      // o uno oculto) cuenta como «ya no está como se esperaba».
+      case 'folder_name_taken':
       case 'folder_not_found':
       case 'folder_cycle':
       case 'root_folder_immutable':
@@ -94,13 +118,13 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     return FileFilter.fromSnapshot(live, this.store.filesIndex(), this.privacy);
   }
 
-  /** La subcarpeta y la carpeta de un ID que crea el plan: un homónimo oculto o una ruta
-   *  privada son el error genérico, no `folder_unavailable`. */
+  /** La subcarpeta y la carpeta de un ID que crea el plan, como `hebra_create_folder`: un
+   *  homónimo oculto o una ruta privada son su `folder_unavailable` (D9), y un nombre que no
+   *  vale, `invalid_name`. */
   override async ensureFolder(parentId: string | null, name: string): Promise<EnsureResult> {
     try {
       return await super.ensureFolder(parentId, name);
     } catch (error) {
-      if (error instanceof StoreError && error.code === 'folder_unavailable') throw unavailable();
       if (error instanceof StoreError && error.code === 'invalid_input') throw jdRejected('invalid_name');
       throw error;
     }
@@ -116,8 +140,11 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
       .map((file) => ({ id: file.id, name: file.name }));
   }
 
+  /** La regla de configuración (`configRejects`), nunca el contenido: la simulación ya rechaza
+   *  con `folder_unavailable` antes de llegar al motor, así que aquí solo es verdadero si la
+   *  configuración cambió entre simular y aplicar (`plan_stale`). */
   async hiddenInside(folderId: string): Promise<boolean> {
-    return hiddenInside(this.store, this.live(), this.privacy, folderId);
+    return configRejects(this.live(), folderId);
   }
 
   async moveNote(
@@ -220,15 +247,17 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     ) {
       return NOT_OK;
     }
-    // Algo oculto dentro: no se mueve (al deshacer, `refused`).
-    if (hiddenInside(this.store, live, this.privacy, id)) return NOT_OK;
     const newName = to.name === undefined ? currentName : checkFolderName(to.name);
-    checkFolderTarget(live, id, live.folderSegments(to.parentId), newName);
+    // Solo la configuración, como `planRenameFolder` (nunca lo que haya dentro), y un homónimo
+    // en el destino: no se mueve (`plan_stale` al aplicar, `refused` al deshacer). La
+    // simulación ya respondió `folder_unavailable` con esto mismo (`preflight`).
+    if (configRejects(live, id) || folderTargetRejects(live, id, live.folderSegments(to.parentId), newName)) {
+      return NOT_OK;
+    }
     const homonyms = live
       .folderChildren(to.parentId)
       .filter((child) => child.id !== id && folderNameKey(child.name) === folderNameKey(newName));
-    if (homonyms.some((child) => !child.hidden)) return NOT_OK;
-    if (homonyms.length > 0) throw unavailable();
+    if (homonyms.length > 0) return NOT_OK;
     const moving = to.parentId !== parent;
     const renaming = newName !== currentName;
     const oldNameFree = !live
@@ -271,12 +300,12 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
       if ('folderId' in write.parent) {
         const planned = planCreateFolder(live, write.parent.folderId, write.name);
         if (planned.kind === 'reject') {
-          throw planned.code === 'invalid_input' ? jdRejected('invalid_name') : unavailable();
+          throw planned.code === 'invalid_input' ? jdRejected('invalid_name') : writeRejected(planned.code);
         }
       } else if (validFolderName(write.name) === null) {
         throw jdRejected('invalid_name');
       } else if (live.isPrivateFolderPath(segmentsOf(position))) {
-        throw unavailable();
+        throw folderUnavailable();
       }
     }
     const files = this.filesFilter(live);
@@ -284,13 +313,17 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
       const parentSegments = parentSegmentsOf(live, move.to.parentId, segmentsOf);
       const renamed = move.to.name !== move.from.name;
       if (move.kind === 'folder') {
+        // La regla de `planRenameFolder` y su error (D9): por la configuración, o un homónimo
+        // oculto en el destino.
         const name = renamed ? checkFolderName(move.to.name) : move.to.name;
-        checkFolderTarget(live, move.id, parentSegments, name);
+        if (configRejects(live, move.id) || folderTargetRejects(live, move.id, parentSegments, name)) {
+          throw folderUnavailable();
+        }
         if (typeof move.to.parentId === 'string') {
           const hidden = live
             .folderChildren(move.to.parentId)
             .some((child) => child.id !== move.id && child.hidden && folderNameKey(child.name) === folderNameKey(name));
-          if (hidden) throw unavailable();
+          if (hidden) throw folderUnavailable();
         }
       } else if (move.kind === 'file') {
         const content = files.contentOf(move.id);
@@ -303,26 +336,6 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
       }
     }
   }
-}
-
-/** Ver la cabecera. Recorre TODO (carpetas, notas vivas y de la papelera, ficheros), con
- *  ids y el filtro, sin leer cuerpos ni títulos. Una carpeta que no se ve, `true`. */
-export function hiddenInside(store: NoteWriteStore, live: PrivacyFilter, privacy: PrivacyConfig, folderId: string): boolean {
-  if (!visibleFolder(live, folderId)) return true;
-  const tree = new Set(live.folderSubtree(folderId));
-  let hidden = false;
-  for (const id of tree) if (live.isFolderHidden(id)) hidden = true;
-  for (const entry of store.notesVisibilityIndex()) {
-    const inside = tree.has(entry.folderId) || (entry.storedFolderId !== undefined && tree.has(entry.storedFolderId));
-    if (inside && live.isHiddenNote(entry.id)) hidden = true;
-  }
-  const trash = store.trashIndex();
-  const trashFilter = TrashFilter.fromSnapshot(live, trash, privacy);
-  for (const note of trash.notes) if (tree.has(note.folderId) && !trashFilter.isVisible(note.id)) hidden = true;
-  const index = store.filesIndex();
-  const files = FileFilter.fromSnapshot(live, index, privacy);
-  for (const file of index.files) if (tree.has(file.folderId) && !files.isVisible(file.id)) hidden = true;
-  return hidden;
 }
 
 /** El cuerpo de una nota con el título nuevo (y sus derivados), o el rechazo: bloqueada,
@@ -352,21 +365,19 @@ function checkFolderName(raw: string): string {
 }
 
 /**
- * La carpeta `id` en su ruta nueva (`parentSegments` + `name`), desde la configuración, como
- * renombrar una carpeta (D9): una ruta privada configurada por debajo de la suya de ahora
- * (cambiaría por dónde se resuelve), su ruta nueva privada o una descendiente que quedaría en
- * una ruta privada son el error genérico.
+ * ¿Cae la carpeta `id` en una ruta privada al quedar en `parentSegments` + `name`? Desde la
+ * configuración, con la misma regla que `planRenameFolder` (D9): su ruta nueva privada, o la de
+ * una descendiente.
  */
-function checkFolderTarget(live: PrivacyFilter, id: string, parentSegments: readonly string[], name: string): void {
-  const current = live.folderSegments(id);
-  if (live.isPrivatePathPrefix(current)) throw unavailable();
+function folderTargetRejects(live: PrivacyFilter, id: string, parentSegments: readonly string[], name: string): boolean {
   const target = [...parentSegments, pathSegment(name)];
-  if (live.isPrivateFolderPath(target)) throw unavailable();
-  const depth = current.length;
+  if (live.isPrivateFolderPath(target)) return true;
+  const depth = live.folderSegments(id).length;
   for (const below of live.folderSubtree(id)) {
     if (below === id) continue;
-    if (live.isPrivateFolderPath([...target, ...live.folderSegments(below).slice(depth)])) throw unavailable();
+    if (live.isPrivateFolderPath([...target, ...live.folderSegments(below).slice(depth)])) return true;
   }
+  return false;
 }
 
 /** ¿Quedaría oculto un fichero con ese nombre y esos bytes? (regla (b) de D10 y la variante

@@ -222,6 +222,46 @@ describe('hebra_jd_move (D19)', () => {
     });
   });
 
+  it('un plan aplicado y deshecho no se vuelve a aplicar con otro operationId (plan_expired)', async () => {
+    let noteId = '';
+    h = await startJd({
+      prepare: async (engine) => {
+        noteId = (await createNote(engine, null, '# Una vez\n')).id;
+      }
+    });
+    const plan = await simulate({ kind: 'note', id: noteId, toId: '21.11' });
+    const applied = await apply(plan.planId, 'op-e1');
+    expect((await h.call('hebra_jd_move', { mode: 'undo', planId: plan.planId, operationId: 'op-e2' })).isError).toBe(false);
+    expect(await h.call('hebra_jd_move', { mode: 'apply', planId: plan.planId, operationId: 'op-e3' })).toEqual({
+      isError: true,
+      value: { error: 'plan_expired' }
+    });
+    expect(h.rawNotes().find((note) => note.id === noteId)!.folderId).toBe('root');
+    // El mismo `operationId` de la primera vez lo sirve el registro, sin volver a mover.
+    expect(await h.call('hebra_jd_move', { mode: 'apply', planId: plan.planId, operationId: 'op-e1' })).toEqual({
+      isError: false,
+      value: { ...applied, replayed: true }
+    });
+    expect(h.rawNotes().find((note) => note.id === noteId)!.folderId).toBe('root');
+  });
+
+  it('el operationId de un apply de carpeta, en otra herramienta, da operation_id_reused', async () => {
+    let projectId = '';
+    h = await startJd({
+      prepare: async (engine) => {
+        const inbox = await engine.folderCreate(null, 'Bandeja');
+        projectId = (await engine.folderCreate(inbox.id, 'Proyecto')).id;
+      }
+    });
+    const plan = await simulate({ kind: 'folder', id: projectId, toId: '21.11' });
+    await apply(plan.planId, 'op-r1');
+    const other = await h.call('hebra_jd_new_id', { mode: 'simulate', category: '21', title: 'Otro' });
+    expect(await h.call('hebra_jd_new_id', { mode: 'apply', planId: other.value.planId, operationId: 'op-r1' })).toEqual({
+      isError: true,
+      value: { error: 'operation_id_reused' }
+    });
+  });
+
   it('valida la entrada sin eco y no deja usar un plan de hebra_jd_new_id', async () => {
     h = await startJd();
     for (const args of [

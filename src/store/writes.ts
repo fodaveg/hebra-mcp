@@ -714,8 +714,8 @@ export function priorOperation(
 }
 
 /**
- * Para `priorOperation`: ¿es `id` una nota (viva o de la papelera) o un fichero suelto que con
- * la configuración de quien pide NO se ve? Los planes comparten el registro: se juzgan
+ * Para `priorOperation`: ¿es `id` una nota (viva o de la papelera), un fichero suelto o, desde
+ * D19, una carpeta que con la configuración de quien pide NO se ve? Los planes comparten el registro: se juzgan
  * por TODAS sus notas y por la configuración con que fueron simulados. Un destino ya
  * purgado se trata como oculto para no revelar que antes existió.
  */
@@ -735,6 +735,8 @@ export function hiddenOperationTarget(
     if (files.files.some((file) => file.id === id)) {
       return !FileFilter.fromSnapshot(filter, files, privacy).isVisible(id);
     }
+    // Una carpeta (la pieza de un `hebra_jd_move` de carpeta, D19), con el filtro.
+    if (filter.folderExists(id)) return filter.isFolderHidden(id);
     const plan = store.replacePlans.plan(id);
     if (plan) {
       const notes = store.replacePlans.notes(id);

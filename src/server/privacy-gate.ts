@@ -110,7 +110,7 @@ export class GateUsage {
   private readonly trashed = new Map<string, SealedUse>();
   /** Notas que pueden estar vivas o en la papelera (una copia de conflicto). */
   private readonly anyState = new Set<string>();
-  /** Lo que nombra el registro de un `operationId` (nota, fichero o plan). */
+  /** Lo que nombra el registro de un `operationId` (nota, fichero, carpeta o plan). */
   private readonly operationTargets = new Set<string>();
   private readonly files = new Map<string, SealedUse>();
   private readonly folders = new Map<string, { path: string | undefined; conflict: boolean }>();
@@ -331,7 +331,10 @@ export async function passGate(
         : live.visibleMeta(id) !== undefined
       : files?.sealOf(id) !== undefined
         ? files.isVisible(id)
-        : (() => {
+        : live.folderExists(id) && id !== ROOT_FOLDER_ID
+          // Una carpeta: la pieza de un `hebra_jd_move` de carpeta (D19).
+          ? !live.isFolderHidden(id)
+          : (() => {
             const plan = snapshot.operationPlans?.get(id);
             return plan !== undefined && plan.privacySha256 === privacyFingerprint(now) &&
               plan.noteIds.length > 0 && plan.noteIds.every((noteId) => live.visibleMeta(noteId) !== undefined);

@@ -70,8 +70,9 @@ export interface JdPlanStore {
   get(planId: string): JdPlanRecord | null;
   /** Marca un plan como aplicado (la primera vez): desde ahí vale 7 días para deshacerlo. */
   markApplied(planId: string, now: number): void;
-  /** Borra un plan SIN aplicar (el de una simulación que la puerta final descartó). */
-  delete(planId: string): void;
+  /** Borra un plan SIN aplicar de esa herramienta (el de una simulación que la puerta final
+   *  descartó): un `planId` de la otra no se toca. */
+  delete(planId: string, kind: JdPlanKind): void;
 }
 
 /** El fichero de los planes, junto al de la biblioteca. */
@@ -187,8 +188,8 @@ export function sqliteJdPlanStore(db: DatabaseSync): JdPlanStore {
     markApplied(planId, now) {
       statement('UPDATE hebra_mcp_jd_plans SET applied_at = ? WHERE plan_id = ? AND applied_at IS NULL').run(now, planId);
     },
-    delete(planId) {
-      statement('DELETE FROM hebra_mcp_jd_plans WHERE plan_id = ? AND applied_at IS NULL').run(planId);
+    delete(planId, kind) {
+      statement('DELETE FROM hebra_mcp_jd_plans WHERE plan_id = ? AND kind = ? AND applied_at IS NULL').run(planId, kind);
     }
   };
 }

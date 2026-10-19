@@ -55,9 +55,10 @@ import type { SectionRef } from './sections';
  *   oculta, o hay una nota bloqueada oculta y el nombre se puede incrustar). Uno solo, sin
  *   detalles.
  * Mover a un ID (`hebra_jd_move`, D19, 19 oct 2026; `./jd-move-port.ts`):
- * - `destination_unavailable`: el destino no se puede usar así por la privacidad (una ruta
- *   privada, un homónimo oculto, un nombre que dejaría oculto lo movido). Uno solo, sin
- *   detalles, como `folder_unavailable` y `file_name_unavailable`.
+ * - `destination_unavailable`: una nota o un fichero que el destino dejaría oculto (un nombre o
+ *   unos bytes que enlaza una nota oculta). Uno solo, sin detalles, como
+ *   `file_name_unavailable`. Una carpeta que no se puede mover así es el `folder_unavailable`
+ *   de `hebra_rename_folder` (D9), y el `folder_has_hidden` del motor no sale nunca.
  */
 export type WriteRejectionCode =
   | 'not_found'

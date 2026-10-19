@@ -198,7 +198,11 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
   });
 
   it('ninguna fuente llama ni importa las mutaciones prohibidas', () => {
-    for (const file of sourceFiles()) {
+    // En TODO `src` (también `src/server` y `src/privacy`), no solo en `SURFACE_DIRS`: desde D19
+    // `folderMove` a secas es la vía que sigue cerrada, y mover a un ID tiene su propio test.
+    const files = allSourceFiles();
+    expect(files.length).toBeGreaterThan(60);
+    for (const file of files) {
       const text = readFileSync(file, 'utf8');
       expect(FORBIDDEN_CALL.exec(text)?.[0] ?? null, relative(root, file)).toBeNull();
       expect(FORBIDDEN_IMPORT.exec(text)?.[0] ?? null, relative(root, file)).toBeNull();
@@ -415,7 +419,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * mover carpetas. `noteMoveIfUnchanged`, `folderMoveIfUnchanged` y `folderRenameIfUnchanged`
    * (las versiones con guarda del motor) solo los tiene el turno de escritura y solo los llaman
    * el puerto, que los pone en el turno, y `src/store/jd-move-port.ts`, que antes aplica el
-   * filtro, la ruta privada y que no haya nada oculto dentro. `folderMove` a secas sigue
+   * filtro y la regla de las rutas privadas configuradas de D9. `folderMove` a secas sigue
    * prohibido en todo `src` (lista de arriba), y fuera del turno nadie los tiene.
    */
   it('mover a un ID (D19): las mutaciones con guarda solo en el turno del escritor y en jd-move-port.ts', async () => {

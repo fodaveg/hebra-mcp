@@ -38,11 +38,12 @@ import {
   type MoveSource,
   type PlannedMove
 } from '../jd';
+import { ROOT_FOLDER_ID } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { writeRejected } from './errors';
-import { JdMovePort } from './jd-move-port';
+import { configRejects, JdMovePort } from './jd-move-port';
 import { jdRejected, JD_PLAN_ID_MAX_LENGTH, type JdFolderView } from './jd-new-id';
 import { isJdexFolderCandidate } from './jd-port';
 import { JD_MOVE_UNDO_RETENTION_MS, JD_PLAN_APPLY_TTL_MS } from './jd-plans';
@@ -210,7 +211,22 @@ function pieceVisible(store: NoteWriteStore, live: PrivacyFilter, privacy: Priva
 /** La pieza que pide el agente, con la carpeta donde está para quien pide (la pone el
  *  servidor). Oculta, inexistente o de la papelera: `source_not_found`, todo igual. */
 function sourceOf(store: NoteWriteStore, live: PrivacyFilter, privacy: PrivacyConfig, source: { kind: JdMoveKind; id: string }): MoveSource {
-  if (source.kind === 'folder') return { kind: 'folder', id: source.id };
+  if (source.kind === 'folder') {
+    // Oculta, inexistente o de primer nivel (que el motor tampoco mueve): todo igual.
+    if (
+      source.id === ROOT_FOLDER_ID ||
+      !live.folderExists(source.id) ||
+      live.isFolderHidden(source.id) ||
+      (live.folderParent(source.id) ?? ROOT_FOLDER_ID) === ROOT_FOLDER_ID
+    ) {
+      throw jdRejected('source_not_found');
+    }
+    // Solo la configuración, con el error de `hebra_rename_folder` (D9), ANTES del motor: así
+    // su `folder_has_hidden` nunca sale, y nada de lo que la carpeta tenga dentro decide la
+    // respuesta (revisión de seguridad del 19 oct 2026).
+    if (configRejects(live, source.id)) throw writeRejected('folder_unavailable');
+    return { kind: 'folder', id: source.id };
+  }
   if (source.kind === 'note') {
     const meta = live.visibleMeta(source.id);
     if (!meta) throw jdRejected('source_not_found');
@@ -319,7 +335,7 @@ export async function runJdMove(
       const now = Date.now();
       store.jdPlans.purgeExpired(now);
       if (request.mode === 'discard') {
-        store.jdPlans.delete(request.planId);
+        store.jdPlans.delete(request.planId, 'move');
         return { result: { mode: 'discard' }, wrote: false };
       }
       if (request.mode === 'simulate') {
@@ -366,7 +382,9 @@ export async function runJdMove(
       const piece = plan.moves[0]!;
       let report: JdMoveApplyReport | JdMoveUndoReport;
       if (request.mode === 'apply') {
-        if (record.appliedAt === null && now - record.createdAt > JD_PLAN_APPLY_TTL_MS) throw writeRejected('plan_expired');
+        // Un plan ya aplicado solo se repite con el MISMO `operationId` (lo sirve el registro,
+        // arriba): con otro, aunque se haya deshecho, `plan_expired`. Sin aplicar, la hora.
+        if (record.appliedAt !== null || now - record.createdAt > JD_PLAN_APPLY_TTL_MS) throw writeRejected('plan_expired');
         const outcome = await applyMovePlan(enginePort, plan);
         if (!outcome.ok) throw jdRejected(outcome.code);
         store.jdPlans.markApplied(request.planId, now);

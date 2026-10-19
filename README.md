@@ -92,8 +92,9 @@ Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 39 herram
   una carpeta entera dentro de la carpeta de un ID del JDex (o de una subcarpeta suya), y
   crea la carpeta del ID y la subcarpeta si faltan; con `as`, otro nombre. Es la única forma
   de mover carpetas desde el MCP. Tres pasos: `simulate` (sin escribir), `apply` (con
-  `operationId`) y `undo` (7 días). Una carpeta con algo privado dentro responde
-  `folder_has_hidden`, y un destino que no se puede usar, `destination_unavailable`.
+  `operationId`) y `undo` (7 días). Una carpeta solo se rechaza por la configuración de
+  privados, con el `folder_unavailable` de `hebra_rename_folder`; lo privado que tenga dentro
+  se mueve con ella y sigue oculto, como al renombrarla.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).

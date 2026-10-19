@@ -64,9 +64,14 @@ describe('jd-plans.sqlite (D18, D19)', () => {
       }
       expect(store.get('applied')).not.toBeNull();
       expect(store.get('p0')).toBeNull();
-      // Descartar no borra uno aplicado.
-      store.delete('applied');
+      // Descartar no borra uno aplicado, ni uno de la otra herramienta.
+      store.delete('applied', 'move');
       expect(store.get('applied')).not.toBeNull();
+      const last = `p${JD_STORED_PLANS_MAX}`;
+      store.delete(last, 'move');
+      expect(store.get(last)).not.toBeNull();
+      store.delete(last, 'new_id');
+      expect(store.get(last)).toBeNull();
       store.purgeExpired(now + JD_MOVE_UNDO_RETENTION_MS);
       expect(store.get('applied')).toBeNull();
     } finally {

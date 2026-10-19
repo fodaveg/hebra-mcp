@@ -338,7 +338,7 @@ export async function runJdNewId(
       store.jdPlans.purgeExpired(now);
       switch (request.mode) {
         case 'discard':
-          store.jdPlans.delete(request.planId);
+          store.jdPlans.delete(request.planId, 'new_id');
           return { result: { mode: 'discard' }, wrote: false };
         case 'simulate':
           // Cerrado ante la duda: una configuración que no resuelve no simula nada.

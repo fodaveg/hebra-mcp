@@ -338,10 +338,13 @@ carpeta del ID (puede que no exista todavía) y nunca otra vía para una carpeta
    después; `destination_taken`: su sitio ya tiene algo con ese nombre; `refused`). Díselo
    pieza a pieza. Las carpetas que creó el plan se quedan.
 
-Una carpeta de primer nivel no se mueve (`source_not_found`). `folder_has_hidden`: la carpeta
-tiene algo que el MCP no ve, y no se mueve desde aquí; que lo haga en Hebra.
-`destination_unavailable`: ese destino o ese nombre no se pueden usar; prueba otro nombre u
-otra subcarpeta, sin especular por qué. Una nota bloqueada no se mueve (`plan_stale`).
+Una carpeta de primer nivel no se mueve (`source_not_found`). Al mover una carpeta se mueve
+todo lo que tiene, también lo que el MCP no ve (notas privadas por etiqueta, bloqueadas), que
+sigue oculto en su sitio nuevo, igual que al renombrarla: dilo si importa.
+`folder_unavailable`: esa carpeta no se puede mover así, o ese nombre o esa subcarpeta no se
+pueden usar ahí (por la configuración de privacidad del dueño); prueba otro nombre u otro
+destino, sin especular por qué. `destination_unavailable`: una nota o un fichero no se pueden
+dejar ahí con ese nombre; prueba otro. Una nota bloqueada no se mueve (`plan_stale`).
 
 `hebra_jd_audit` revisa el sistema en solo lectura: IDs repetidos (dos carpetas o dos notas con
 el mismo número, también tras crear el mismo ID desde dos dispositivos), carpetas sin nota en
@@ -525,8 +528,7 @@ título) ni especules sobre qué hay oculto.
 | `category_full` / `id_taken` / `invalid_title` | Sin números libres; el número ya está usado; título vacío, con `/` o que no vale como nombre de carpeta | Díselo; con `invalid_title`, otro título. |
 | `plan_stale` | `hebra_jd_new_id` o `hebra_jd_move`: algo cambió desde la simulación; no se escribió (o no se movió) nada | Simula otra vez y revisa el plan nuevo. |
 | `source_not_found` / `id_not_found` | `hebra_jd_move`: lo que se mueve no existe, no se ve o es una carpeta de primer nivel; el ID no está en el JDex | Díselo; comprueba el id y el número. |
-| `folder_has_hidden` | `hebra_jd_move`: la carpeta tiene dentro algo que el MCP no ve | No insistas: que la mueva en Hebra. |
-| `destination_unavailable` / `destination_taken` | `hebra_jd_move`: ese destino o nombre no se puede usar (por la privacidad); en el destino ya hay algo con ese nombre | Otro nombre (`as`) u otra subcarpeta, sin especular. |
+| `destination_unavailable` / `destination_taken` | `hebra_jd_move`: esa nota o ese fichero no se pueden dejar ahí con ese nombre (por la privacidad); en el destino ya hay algo con ese nombre | Otro nombre (`as`) u otra subcarpeta, sin especular. |
 | `invalid_name` / `invalid_subfolder` / `already_in_destination` / `destination_inside_source` | `hebra_jd_move`: nombre o subcarpeta que no valen; ya está ahí; el destino está dentro de la carpeta que se mueve | Díselo y corrige la petición. |
 | `plan_expired` | Pasó la hora para aplicar el plan (o para reanudar uno cortado), o los 7 días para deshacerlo (en `hebra_jd_new_id`, la hora desde la simulación) | Para aplicar: simula otra vez y revisa el plan nuevo; lo que ya entró se deshace con `undo`. Para deshacer: díselo; quedan las versiones anteriores de cada nota. |
 | `plan_already_applied` | Ese plan ya se aplicó (o se está aplicando) con otro `operationId` | Si se perdió la respuesta, repite con el `operationId` de la primera vez; si no, simula otro plan. |

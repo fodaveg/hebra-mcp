@@ -15,10 +15,11 @@
  *   pieza a su sitio si sigue donde la dejó; si no, `skipped` con su motivo.
  *
  * Todo en el escritor (`../../store/jd-move.ts`; un lector lo reenvía), con la configuración
- * de privados de ESTA instancia: lo oculto no existe. Una carpeta con algo oculto dentro no se
- * mueve (`folder_has_hidden`, el único bit de lo oculto que sale, y solo de la carpeta que se
- * mueve), y un destino que no se puede usar por la privacidad responde
- * `destination_unavailable`, sin decir por qué. Aquí solo se valida la entrada, sin eco.
+ * de privados de ESTA instancia: lo oculto no existe. Una carpeta solo se rechaza por la
+ * configuración, con la regla y el error de `hebra_rename_folder` (`folder_unavailable`), y lo
+ * oculto que tenga dentro viaja con ella sin que el agente lo sepa (revisión de seguridad del
+ * 19 oct 2026); una nota o un fichero que el destino dejaría oculto, `destination_unavailable`,
+ * sin decir por qué. Aquí solo se valida la entrada, sin eco.
  *
  * Logs (§6.4): `jd.move` con el modo, el tipo de pieza (al simular), números, `replayed` y el
  * estado de sync. Nunca ids, nombres ni rutas.
