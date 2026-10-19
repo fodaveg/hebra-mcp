@@ -5,13 +5,14 @@ por apartados, editar por sustituciones puntuales, mover a carpetas existentes, 
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
 añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
 la papelera o sacarlos, leer su contenido, reemplazar el texto de uno, crear uno de texto
-y renombrarlos, moverlos o duplicarlos; nunca purgar ni vaciar la papelera, mover ni
+y renombrarlos, moverlos o duplicarlos, crear un ID nuevo del JDex y auditar el sistema
+Johnny.Decimal; nunca purgar ni vaciar la papelera, mover ni
 borrar carpetas, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 12 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 36 herramientas
+Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 38 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -77,6 +78,16 @@ Estado a 12 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 36 herram
   `![[sha256:H|nombre]]` al final de la nota, o de un apartado con `heading`, y sube con el sync). Sin cambiar ni borrar.
 - Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
   `folder_unavailable` para todo lo privado. Sin mover ni borrar.
+- Johnny.Decimal (D18, 19 oct 2026), con el motor de
+  [jdex-manager](https://github.com/fodaveg/jdex-manager) (submódulo `vendor/jdex-manager`):
+  `hebra_jd_new_id` crea un ID nuevo en una categoría que ya existe (la nota del JDex con
+  la plantilla de `00.03`, o la de serie, y por defecto la carpeta del ID), siempre en dos
+  pasos: `mode: "simulate"` devuelve un `planId` y lo que se escribiría, sin escribir, y
+  `mode: "apply"` con ese `planId` y un `operationId` lo escribe; reintentar con el mismo
+  `operationId` completa lo que falte sin duplicar. `hebra_jd_audit` audita el sistema en
+  solo lectura (IDs repetidos, carpetas sin nota, nombres que no casan…). Una categoría con
+  algo privado responde `category_has_hidden`, sin decir qué. Sin categorías, áreas, hijos
+  «+» ni mover.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).
@@ -236,6 +247,8 @@ fichero que Hebra corre contra su motor TypeScript y contra Rust) sobre el adapt
 ## Estructura
 
 - `vendor/hebra/` — submódulo, fijado a un SHA. Nunca se edita desde este repo.
+- `vendor/jdex-manager/` — submódulo público (MIT) del motor JD, fijado a un SHA; entra solo
+  por `src/jd.ts` (`src/jd/public.ts`). Tampoco se edita desde aquí (D18).
 - `src/store/sqlite-conn-node.ts` — adaptador `node:sqlite` → `SqliteConn` (la interfaz
   que espera `sqlite-engine.ts` de Hebra, por duck typing con `@sqlite.org/sqlite-wasm`).
 - `src/store/blob-store-fs.ts` — adjuntos en disco (`<dir>/blobs/aa/bb/<sha256>`,

@@ -4,6 +4,7 @@
  * `logToolCall`/`logToolError` no reciben nada del `input` de la llamada, solo el
  * nombre de la herramienta, si salió bien y, si no, un código cerrado.
  */
+import type { JdRejectionCode } from '../store/errors';
 
 export type ToolErrorCode =
   | 'not_found'
@@ -46,7 +47,9 @@ export type ToolErrorCode =
   // Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026;
   // `src/store/file-verbs.ts`).
   | 'file_exists'
-  | 'file_name_unavailable';
+  | 'file_name_unavailable'
+  // Un ID nuevo del JDex (D18, 19 oct 2026; `src/store/jd-new-id.ts`): los del motor JD.
+  | JdRejectionCode;
 
 interface ToolCallOkEvent {
   event: 'tool.call';

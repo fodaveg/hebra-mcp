@@ -50,7 +50,10 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_create_file',
   'hebra_rename_file',
   'hebra_move_file',
-  'hebra_duplicate_file'
+  'hebra_duplicate_file',
+  // Johnny.Decimal con el motor de jdex-manager (D18, 19 oct 2026).
+  'hebra_jd_new_id',
+  'hebra_jd_audit'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */

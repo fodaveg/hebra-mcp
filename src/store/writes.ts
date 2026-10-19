@@ -73,6 +73,7 @@ import { headingRejected, operationReused, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
 import type { ReplacePlanStore } from './replace-plans';
+import type { JdPlanStore } from './jd-plans';
 import { privacyFingerprint } from './replace';
 import { decodeRevision, encodeRevision } from './revision';
 import {
@@ -187,6 +188,8 @@ export interface NoteWriteStore {
   /** Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo los usa
    *  `./replace-batch.ts`. */
   replacePlans: ReplacePlanStore;
+  /** Planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo los usa `./jd-new-id.ts`. */
+  jdPlans: JdPlanStore;
 }
 
 /** Lo que `NoteWriter` necesita del almacén: un turno exclusivo de la cola. Rechaza con
@@ -536,8 +539,9 @@ function bytesSha256Hex(bytes: Uint8Array): string {
 
 /** Los errores del motor de Hebra que crear o renombrar una carpeta pueden dar. Un
  *  `folder_name_taken` que se escape del plan (`./folders.ts` ya mira las hermanas)
- *  sería una carpeta que este filtro no ve: `folder_unavailable`, nunca el del motor. */
-function folderRejection(error: unknown): unknown {
+ *  sería una carpeta que este filtro no ve: `folder_unavailable`, nunca el del motor.
+ *  También lo usa la carpeta de un ID nuevo del JDex (`./jd-port.ts`, D18). */
+export function folderRejection(error: unknown): unknown {
   if (!(error instanceof LibraryError)) return error;
   switch (error.code) {
     case 'folder_name_taken':

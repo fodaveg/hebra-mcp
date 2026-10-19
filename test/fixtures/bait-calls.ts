@@ -246,6 +246,21 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
         operationId: 'bait-dup-visible'
       }
     },
+    // Johnny.Decimal (D18, 19 oct 2026): la carpeta privada como JDex o como plantillas
+    // responde como una que no existe (`jdex_not_found`, `templates_not_found`), el cebo como
+    // título no sale en ninguna salida ni en el log, y aplicar un plan que no existe es
+    // `plan_not_found`. La auditoría con la carpeta privada como JDex, igual.
+    {
+      name: 'hebra_jd_new_id',
+      arguments: { mode: 'simulate', category: '21', title: BAIT_FOLDER, jdexFolderId: library.folders.diario }
+    },
+    {
+      name: 'hebra_jd_new_id',
+      arguments: { mode: 'simulate', category: '21', title: BAIT_TAG, templatesFolderId: library.folders.diario2026 }
+    },
+    { name: 'hebra_jd_new_id', arguments: { mode: 'apply', planId: library.privateFolderNoteId, operationId: 'bait-jd-1' } },
+    { name: 'hebra_jd_audit', arguments: { jdexFolderId: library.folders.diario } },
+    { name: 'hebra_jd_audit', arguments: {} },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en

@@ -216,7 +216,12 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    */
   it('carpetas y adjuntos (D9): folderCreate, folderRename y blobPut solo en el turno del escritor', async () => {
     const calls: Array<[RegExp, string[]]> = [
-      [/\.\s*(folderCreate|folderRename)\s*\(/, ['src/store/node-port.ts', 'src/store/writes.ts']],
+      [
+        /\.\s*(folderCreate|folderRename)\s*\(/,
+        // D18: la carpeta de un ID nuevo del JDex, con el plan de `folders.ts` rehecho en el
+        // turno (`jd-port.ts`, sobre el almacén del turno que le da `jd-new-id.ts`).
+        ['src/store/node-port.ts', 'src/store/writes.ts', 'src/store/jd-port.ts', 'src/store/jd-new-id.ts']
+      ],
       [
         /\.\s*(blobPut|blobPutFromPath)\s*\(/,
         // D15: `file-writes.ts` guarda en el mismo turno el texto nuevo de un fichero suelto

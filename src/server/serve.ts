@@ -94,6 +94,7 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
     fetchFile: (input) => instance.fetchFile(input),
     replaceFileText: (input) => instance.replaceFileTextLocal(input),
     looseFileWrite: (input) => instance.looseFileWriteLocal(input),
+    jdNewId: (request) => instance.jdNewIdLocal(request),
     noteRead: (id) => instance.port.noteRead(id),
     folderDirty: (id) => instance.port.folderDirty(id),
     blobUploaded: (sha256) => instance.port.blobUploaded(sha256),

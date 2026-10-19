@@ -70,6 +70,11 @@
  *   `{id, name, folderId?}`. Ninguna otra acción (purgar no existe): `invalid_request`. Un
  *   `file_exists` vuelve con el id del fichero que choca (`existing`). Un escritor sin
  *   ella (o de una versión anterior) responde `invalid_request`.
+ * - `jdNewId` `{mode, …, privacy}` (D18, 19 oct 2026) → el resultado de `hebra_jd_new_id`:
+ *   `simulate` `{category, title, systemId?, createFolder?, jdexFolderId?,
+ *   templatesFolderId?}` (guarda el plan en la base del escritor), `apply` `{planId,
+ *   operationId}` (ronda ya esperada) o `discard` `{planId}`. El plan nunca viaja del lector
+ *   al escritor: solo su id. Un escritor sin ella responde `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -118,12 +123,14 @@ import type {
   EditNoteOutcome,
   FileOutcome,
   FolderOutcome,
+  JdNewIdOutcome,
   LooseFileOutcome,
   OrganizeOutcome,
   ReplaceFileTextOutcome,
   ReplaceOutcome,
   RoundWait
 } from '../server/write-context';
+import { JD_PLAN_ID_MAX_LENGTH, JD_TITLE_MAX_LENGTH, type JdNewIdRequest } from '../store/jd-new-id';
 import { GREP_PATTERN_MAX_CHARS } from '../store/grep';
 import { REPLACE_SCOPE_MAX_IDS, REPLACEMENT_MAX_CHARS } from '../store/replace';
 import { PLAN_ID_MAX_LENGTH, type ReplaceRequest, type ReplaceScope } from '../store/replace-batch';
@@ -226,6 +233,7 @@ export type WriterSocketOp =
   | 'fetchFile'
   | 'replaceFileText'
   | 'looseFileWrite'
+  | 'jdNewId'
   | 'replaceBody'
   | 'trashConflictCopies'
   | 'syncRound'
@@ -235,6 +243,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'fetchFile',
   'replaceFileText',
   'looseFileWrite',
+  'jdNewId',
   'createNote',
   'appendToNote',
   'editNote',
@@ -311,6 +320,9 @@ export interface WriterSocketHandlers {
   /** Crear, renombrar, mover o duplicar un fichero suelto (D17, 12 oct 2026), con la ronda
    *  ya esperada. Opcional: un escritor sin él responde `invalid_request`. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
+  /** Un ID nuevo del JDex (D18, 19 oct 2026): simular, aplicar (con la ronda ya esperada) o
+   *  descartar un plan. Opcional: un escritor sin él responde `invalid_request`. */
+  jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
   /**
    * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
    * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
@@ -641,6 +653,48 @@ function looseFileWriteInputOf(params: Record<string, unknown>): LooseFileWriteI
         operationId,
         privacy
       };
+    default:
+      throw new InvalidRequest();
+  }
+}
+
+/**
+ * `jdNewId` (D18): `simulate` `{category, title, systemId?, createFolder?, jdexFolderId?,
+ * templatesFolderId?}`, `apply` `{planId, operationId}` o `discard` `{planId}` (interno: la
+ * simulación que la puerta final del lector descartó). El plan nunca viaja: solo su id. El
+ * escritor vuelve a comprobar todo con el motor.
+ */
+function jdNewIdRequestOf(params: Record<string, unknown>): JdNewIdRequest {
+  const privacy = privacyOf(params.privacy);
+  switch (params.mode) {
+    case 'simulate': {
+      const { category, title, systemId, createFolder, jdexFolderId, templatesFolderId } = params;
+      if (typeof category !== 'string' || category.length === 0 || category.length > 16) throw new InvalidRequest();
+      if (typeof title !== 'string' || title.length > JD_TITLE_MAX_LENGTH) throw new InvalidRequest();
+      if (systemId !== undefined && (typeof systemId !== 'string' || systemId.length > 16)) throw new InvalidRequest();
+      if (createFolder !== undefined && typeof createFolder !== 'boolean') throw new InvalidRequest();
+      if (jdexFolderId !== undefined && !isId(jdexFolderId)) throw new InvalidRequest();
+      if (templatesFolderId !== undefined && !isId(templatesFolderId)) throw new InvalidRequest();
+      return {
+        mode: 'simulate',
+        category,
+        title,
+        ...(systemId !== undefined ? { systemId } : {}),
+        ...(createFolder !== undefined ? { createFolder } : {}),
+        ...(jdexFolderId !== undefined ? { jdexFolderId } : {}),
+        ...(templatesFolderId !== undefined ? { templatesFolderId } : {}),
+        privacy
+      };
+    }
+    case 'apply':
+      return {
+        mode: 'apply',
+        planId: boundedText(params.planId, JD_PLAN_ID_MAX_LENGTH),
+        operationId: operationIdOf(params.operationId),
+        privacy
+      };
+    case 'discard':
+      return { mode: 'discard', planId: boundedText(params.planId, JD_PLAN_ID_MAX_LENGTH), privacy };
     default:
       throw new InvalidRequest();
   }
@@ -1057,6 +1111,12 @@ export class WriterSocketServer {
           const input = looseFileWriteInputOf(envelope.params);
           if (!handlers.looseFileWrite) throw new InvalidRequest();
           result = await handlers.looseFileWrite(input);
+          break;
+        }
+        case 'jdNewId': {
+          const input = jdNewIdRequestOf(envelope.params);
+          if (!handlers.jdNewId) throw new InvalidRequest();
+          result = await handlers.jdNewId(input);
           break;
         }
         case 'replaceBody': {

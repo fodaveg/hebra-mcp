@@ -1,6 +1,6 @@
 /**
- * `annotations` MCP de las 36 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026): cada una
+ * `annotations` MCP de las 38 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 del 19 oct 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -76,6 +76,10 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_rename_file: WRITE_IDEMPOTENT,
   hebra_move_file: WRITE_IDEMPOTENT,
   hebra_duplicate_file: WRITE_IDEMPOTENT,
+  // D18: simular no escribe nada, y aplicar con el mismo `operationId` completa lo que falte
+  // sin duplicar; la auditoría solo lee.
+  hebra_jd_new_id: WRITE_IDEMPOTENT,
+  hebra_jd_audit: READ,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

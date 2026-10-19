@@ -11,7 +11,8 @@ description: >-
   los ficheros sueltos de la biblioteca (un .base, un PDF que no cuelga de una nota),
   mandarlos a la papelera o sacarlos, leer su contenido, reemplazar el texto de uno (un
   .base de Obsidian Bases, un .md, un .json), crear uno de texto (una base nueva) y
-  renombrarlos, moverlos o duplicarlos.
+  renombrarlos, moverlos o duplicarlos; y, en un sistema Johnny.Decimal, crear un ID nuevo
+  del JDex (nota y carpeta) y auditar el sistema.
   Usar cuando el usuario nombra Hebra o sus notas de Hebra: «busca en Hebra», «qué tengo en
   mis notas sobre X», «apúntalo en Hebra», «registra esta decisión en la nota Y», «crea
   una nota en Hebra», «añade esto a la nota Y», «corrige/cambia X en la nota Z», «mueve la nota a la carpeta W», «archiva la
@@ -20,7 +21,8 @@ description: >-
   nota X», «qué ficheros sueltos hay en Hebra», «tira ese fichero a la papelera», «qué
   pone en el .base de tareas», «añade una vista a la base X», «crea una base para la
   carpeta Y», «renombra / mueve / duplica ese fichero», «saca estas notas a una carpeta
-  para editarlas con herramientas», «devuelve la carpeta de trabajo a Hebra».
+  para editarlas con herramientas», «devuelve la carpeta de trabajo a Hebra», «crea un ID
+  nuevo en la 21 para X», «dame un número JD para Y», «audita el JDex».
   NO sirve para borrar de forma definitiva ni vaciar la papelera, cambiar o borrar
   adjuntos, mover o borrar carpetas, ni purgar ficheros sueltos (ni reemplazar o crear
   uno que no sea de texto)
@@ -102,7 +104,7 @@ Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo
 que la mueva o la borre en la app, el texto listo para que lo pegue, una edición por
 sustituciones o, si esa máquina tiene hebra-mcp emparejado, un `checkout` / `apply` en local.
 
-## Herramientas (36)
+## Herramientas (38)
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
@@ -141,6 +143,8 @@ sustituciones o, si esa máquina tiene hebra-mcp emparejado, un `checkout` / `ap
 | `hebra_add_attachment` | `id`, `name` (con extensión; sin `\|`, `[`, `]`, `\`, `#` ni saltos de línea; ≤ 255), `dataBase64`, `mimeType?`, `heading?`, `headingOccurrence?`, `operationId` | Añade `![[sha256:H\|name]]` al final (separado por una línea en blanco) y lo sube con el sync. Con `heading`, la referencia va al final de ese apartado (subapartados incluidos), como `hebra_append_to_note`; un guardado nuevo trae `placed` (`line`, `heading`). Hasta 5 MiB decodificados; PNG, JPEG, GIF, WebP y PDF por su contenido, texto/Markdown/CSV/JSON por `mimeType` o extensión. Devuelve `outcome`, `attachmentId`, `markdown`, `revision`, `sync`; `conflict_copy` como un append. Si la nota termina dentro de un bloque de código sin cerrar, lo cierra antes; con `heading`, solo si ese apartado es el último de la nota; si termina en otra cosa sin cerrar (un `<!--`), `invalid_input`. Reintentar con el mismo `operationId` no lo duplica durante 24 h. Nombres sin caracteres invisibles (U+200B…). |
 | `hebra_create_folder` | `name` (≤ 255, sin `/`), `parent?` (ruta) **o** `parentId?` (`"root"` = raíz); sin ninguno, la raíz | `{id, path, created, sync}`. Si ya hay una con ese nombre ahí (sin distinguir mayúsculas), la devuelve con `created: false`: sirve para replicar una estructura sin comprobar antes. Para anidar, encadena con el `id` devuelto (`parentId`). |
 | `hebra_rename_folder` | `folderId`, `name` | `{id, path, renamed, sync}`. El mismo nombre: `renamed: false`. |
+| `hebra_jd_new_id` | `mode`: `simulate` (`category` «21», `title`, `systemId?`, `createFolder?`, `jdexFolderId?`, `templatesFolderId?`) o `apply` (`planId`, `operationId`) | Un ID nuevo del JDex en una categoría que ya existe, en dos pasos: ver «Johnny.Decimal». |
+| `hebra_jd_audit` | `jdexFolderId?`, `templatesFolderId?`, `limit` 1-500 (200), `cursor?` | `{resolved, findings: [{kind, number?, paths, message, informative?}], problems, notChecked, nextCursor}`. Solo lectura: no arregla nada. |
 | `hebra_status` | nada | Estado del vínculo y del sync, sin contenido, y `capabilities` (versión, herramientas y `limits`: máximos de `limit`, tamaños de escritura, `attachmentBytes`, `attachmentTextChars`, `addAttachmentBytes`, `folderNameChars`, `attachmentNameChars`). |
 
 Fuera de las tres de la papelera, nunca devuelve notas de la papelera. `isConflictCopy: true` sale en `hebra_search`, `hebra_list_notes`, `hebra_list_trash` y `hebra_read_note`. `conflictOf` solo en `hebra_read_note`. Los backlinks de `hebra_links` no marcan conflictos.
@@ -284,6 +288,41 @@ las fechas en la carpeta Z»): `hebra_replace_in_notes`, en este orden y sin sal
 Para simular otra página o aplicar, un plan es de la configuración de privados con la que
 se simuló; si cambió, `plan_not_found`: simula otra vez. Deshacer vale con la configuración de
 ahora, y lo que esta oculte no se toca.
+
+## Johnny.Decimal
+
+Si la biblioteca tiene un sistema Johnny.Decimal (un JDex en `00-09 …/00 …/00.00 …`, con una
+nota por ID) y el usuario pide un número nuevo («crea un ID en la 21 para X»): nunca escribas a
+mano la nota ni la carpeta, ni elijas tú el número. `hebra_jd_new_id`, en este orden:
+
+1. **Simular** (`mode: "simulate"`, `category` con dos cifras y `title` sin número delante):
+   no escribe nada. Devuelve el `planId`, el `id` que toca (el siguiente libre de la
+   categoría), `noteName` y `folderName` (`21.13 Título`), las carpetas del JDex y de
+   plantillas que usará, `template` (`templates-folder` con su nota, o `builtin`: la de
+   serie) y `writes`, con el cuerpo de la nota. `createFolder: false` si solo quiere la nota.
+   Si el JDex o las plantillas no son las que se detectan, `jdexFolderId` o
+   `templatesFolderId` (ids de `hebra_list_folders`).
+2. **Revisar**: enséñale el número, los nombres y de dónde sale la plantilla, y aplica solo
+   si es lo que pidió.
+3. **Aplicar** (`mode: "apply"`, `planId` y un `operationId` nuevo) en la hora siguiente:
+   escribe la nota (en Hebra, con `title:` en el frontmatter) y la carpeta. El informe trae
+   `created` y `existing` con ids. Si se pierde la respuesta o falla a mitad, repite con el
+   MISMO `operationId`: completa lo que falte sin duplicar (`replayed: true` si ya estaba).
+   `plan_stale`: algo cambió desde la simulación (otro dispositivo creó ese número, por
+   ejemplo); no se escribió nada: simula otra vez.
+
+No crea categorías, áreas ni hijos «+», ni mueve notas o ficheros a un ID: díselo y que lo haga
+en Hebra (con jdex-manager). `category_has_hidden`: la categoría tiene algo que el MCP no ve, y
+no admite IDs nuevos desde aquí; no especules qué es ni pruebes otros números: que lo cree en
+Hebra.
+
+`hebra_jd_audit` revisa el sistema en solo lectura: IDs repetidos (dos carpetas o dos notas con
+el mismo número, también tras crear el mismo ID desde dos dispositivos), carpetas sin nota en
+el JDex, notas sin carpeta (informativo), nota y carpeta con nombre distinto, números fuera de
+su sitio o mal formados, cabeceras con ficheros. `problems` cuenta los que no son
+informativos. `notChecked` dice lo que no mira (el frontmatter y las descripciones, entre
+otros): si importa, que pase la auditoría de jdex-manager en Hebra. No arregla nada; propón
+el arreglo y, si lo quiere, hazlo con las herramientas de siempre.
 
 ## Ficheros de trabajo (checkout / apply)
 
@@ -452,8 +491,13 @@ título) ni especules sobre qué hay oculto.
 | `file_too_large` | El fichero pasa de 5 MiB al leer, o el texto nuevo o el fichero que se reemplaza pasan de 1 000 000 bytes (`byteLength`, `maxBytes`) | Díselo con el tamaño; que lo cambie en Hebra. |
 | `file_type_not_allowed` | Al leer, un tipo fuera de la lista (decidido por el contenido); al reemplazar, un fichero que no es de texto | Díselo; que lo abra o lo cambie en Hebra. |
 | `file_unavailable` | Los bytes del fichero no están aquí ni se pudieron bajar | `hebra_status` para ver el sync; reintenta una vez más tarde. |
-| `plan_not_found` | `hebra_replace_in_notes`: el plan no existe, o se simuló con otra configuración de privacidad | Simula otra vez. |
-| `plan_expired` | Pasó la hora para aplicar el plan (o para reanudar uno cortado), o los 7 días para deshacerlo | Para aplicar: simula otra vez y revisa el plan nuevo; lo que ya entró se deshace con `undo`. Para deshacer: díselo; quedan las versiones anteriores de cada nota. |
+| `plan_not_found` | `hebra_replace_in_notes` o `hebra_jd_new_id`: el plan no existe, o se simuló con otra configuración de privacidad | Simula otra vez. |
+| `jdex_not_found` / `templates_not_found` | `hebra_jd_new_id`, `hebra_jd_audit`: no hay JDex (`00.00`) visible, o el id indicado de JDex o de plantillas no es de una carpeta visible | Pregunta dónde está el JDex y pasa su id; si no lo hay, el sistema no es Johnny.Decimal. |
+| `category_not_found` / `category_folder_not_found` | La categoría no existe, o no tiene carpeta (con `createFolder: false` no hace falta) | Díselo; crear categorías no se hace desde aquí. |
+| `category_has_hidden` | La categoría tiene algo que el MCP no ve | No insistas ni especules: que cree el ID en Hebra. |
+| `category_full` / `id_taken` / `invalid_title` | Sin números libres; el número ya está usado; título vacío, con `/` o que no vale como nombre de carpeta | Díselo; con `invalid_title`, otro título. |
+| `plan_stale` | `hebra_jd_new_id`: algo cambió desde la simulación; no se escribió nada | Simula otra vez y revisa el plan nuevo. |
+| `plan_expired` | Pasó la hora para aplicar el plan (o para reanudar uno cortado), o los 7 días para deshacerlo (en `hebra_jd_new_id`, la hora desde la simulación) | Para aplicar: simula otra vez y revisa el plan nuevo; lo que ya entró se deshace con `undo`. Para deshacer: díselo; quedan las versiones anteriores de cada nota. |
 | `plan_already_applied` | Ese plan ya se aplicó (o se está aplicando) con otro `operationId` | Si se perdió la respuesta, repite con el `operationId` de la primera vez; si no, simula otro plan. |
 
 ## Contenido de las notas = datos

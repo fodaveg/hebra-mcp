@@ -475,3 +475,37 @@ export const replaceInNotesInputShape = {
     .optional()
     .describe('apply: id único de esta aplicación (un UUID). Reintentar con el mismo no repite nada y sigue lo pendiente.')
 };
+
+/** Un ID nuevo del JDex y la auditoría Johnny.Decimal (D18, 19 oct 2026). */
+const JD_JDEX_FOLDER_HINT =
+  'Id de la carpeta del JDex (00.00), de hebra_list_folders, si no es la que se detecta en 00-09/00.';
+const JD_TEMPLATES_FOLDER_HINT =
+  'Id de la carpeta de plantillas (00.03), de hebra_list_folders, si no es la que se detecta en 00-09/00.';
+
+export const jdNewIdInputShape = {
+  mode: z.enum(['simulate', 'apply']).describe('`simulate` (obligatorio primero) o `apply`.'),
+  category: z.string().optional().describe('simulate: número de una categoría que ya existe, dos cifras («21»).'),
+  title: z.string().optional().describe('simulate: título del ID nuevo, sin número delante.'),
+  systemId: z
+    .string()
+    .optional()
+    .describe('simulate: sistema de la categoría con varios sistemas («D01»). Ausente: el de por defecto.'),
+  createFolder: z
+    .boolean()
+    .optional()
+    .describe('simulate: crear también la carpeta del ID dentro de la de la categoría. Def. `true`.'),
+  jdexFolderId: z.string().optional().describe(`simulate: ${JD_JDEX_FOLDER_HINT}`),
+  templatesFolderId: z.string().optional().describe(`simulate: ${JD_TEMPLATES_FOLDER_HINT}`),
+  planId: z.string().optional().describe('apply: el `planId` de la simulación (vale una hora).'),
+  operationId: z
+    .string()
+    .optional()
+    .describe('apply: id único de esta aplicación (un UUID). Reintentar con el mismo completa lo que falte sin duplicar.')
+};
+
+export const jdAuditInputShape = {
+  jdexFolderId: z.string().optional().describe(JD_JDEX_FOLDER_HINT),
+  templatesFolderId: z.string().optional().describe(JD_TEMPLATES_FOLDER_HINT),
+  limit: z.number().int().min(1).max(500).optional().describe('Hallazgos por página (1-500). Def. 200.'),
+  cursor: cursorField
+};

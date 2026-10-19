@@ -67,6 +67,12 @@ import {
   type LooseFileSaved,
   type LooseFileWriteInput
 } from '../store/file-verbs';
+import {
+  runJdNewId,
+  type JdNewIdRequest,
+  type JdNewIdResult,
+  type JdTestHooks
+} from '../store/jd-new-id';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
 import {
   ReplaceBatch,
@@ -586,6 +592,14 @@ export class LibraryInstance implements NoteWriteTarget {
       runner ? (sha256) => runner.readBlob(sha256) : null,
       () => void this.runner?.requestRound()
     );
+  }
+
+  /** `hebra_jd_new_id` (D18, `../store/jd-new-id.ts`): simular, aplicar o descartar un plan
+   *  de ID nuevo del JDex en este escritor. Aplicar pide la ronda de después sin esperarla
+   *  (la espera `WriteContext`) si creó algo. `hooks`, solo en tests. Rechaza con
+   *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
+  jdNewIdLocal(request: JdNewIdRequest, hooks?: JdTestHooks): Promise<LocalWrite<JdNewIdResult>> {
+    return runJdNewId(this, request, () => void this.runner?.requestRound(), hooks);
   }
 
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y

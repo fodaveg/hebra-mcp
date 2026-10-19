@@ -79,7 +79,36 @@ export type WriteRejectionCode =
   | 'file_type_not_allowed'
   | 'file_unavailable'
   | 'file_exists'
-  | 'file_name_unavailable';
+  | 'file_name_unavailable'
+  | JdRejectionCode;
+
+/**
+ * Un ID nuevo del JDex (`hebra_jd_new_id`, D18, 19 oct 2026; `./jd-new-id.ts`): los códigos
+ * del motor JD de jdex-manager (`JdLibraryErrorCode`), con el mismo nombre y sin su mensaje,
+ * que podría nombrar una carpeta o un número. Ninguno dice qué está oculto ni qué número
+ * está ocupado: `category_has_hidden` es UNO para todo lo que la categoría no enseña. Los del
+ * motor de mover (`id_not_found` y siguientes) están para que la lista sea la del motor
+ * entera (`./jd-new-id.ts` lo comprueba al compilar); ninguna herramienta los da todavía.
+ */
+export type JdRejectionCode =
+  | 'jdex_not_found'
+  | 'templates_not_found'
+  | 'category_not_found'
+  | 'category_folder_not_found'
+  | 'category_has_hidden'
+  | 'category_full'
+  | 'id_taken'
+  | 'invalid_pattern'
+  | 'invalid_title'
+  | 'plan_stale'
+  | 'id_not_found'
+  | 'source_not_found'
+  | 'invalid_name'
+  | 'invalid_subfolder'
+  | 'destination_taken'
+  | 'destination_inside_source'
+  | 'already_in_destination'
+  | 'folder_has_hidden';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'not_found',
@@ -105,7 +134,25 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'file_type_not_allowed',
   'file_unavailable',
   'file_exists',
-  'file_name_unavailable'
+  'file_name_unavailable',
+  'jdex_not_found',
+  'templates_not_found',
+  'category_not_found',
+  'category_folder_not_found',
+  'category_has_hidden',
+  'category_full',
+  'id_taken',
+  'invalid_pattern',
+  'invalid_title',
+  'plan_stale',
+  'id_not_found',
+  'source_not_found',
+  'invalid_name',
+  'invalid_subfolder',
+  'destination_taken',
+  'destination_inside_source',
+  'already_in_destination',
+  'folder_has_hidden'
 ]);
 
 /** Códigos que una escritura del almacén de hebra-mcp puede devolver además de los de

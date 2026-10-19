@@ -68,11 +68,19 @@ function git(args, cwd) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' });
 }
 
-// Ficheros que git sigue en hebra-mcp, fuera del gitlink del submódulo.
+// Ficheros que git sigue en hebra-mcp, fuera de los gitlinks de los submódulos (el de
+// jdex-manager, D18, es público y MIT: no es código de Hebra, pero es un directorio y no un
+// fichero que comparar).
 const tracked = git(['ls-files'], root)
   .trim()
   .split('\n')
-  .filter((path) => path && path !== 'vendor/hebra' && !path.startsWith('vendor/hebra/'));
+  .filter(
+    (path) =>
+      path &&
+      path !== 'vendor/hebra' &&
+      !path.startsWith('vendor/hebra/') &&
+      path !== 'vendor/jdex-manager'
+  );
 
 // --- 1. Blob idéntico -------------------------------------------------------------
 

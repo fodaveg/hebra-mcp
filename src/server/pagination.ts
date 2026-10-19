@@ -35,7 +35,9 @@ export const LIMITS = {
   listVersions: { default: 50, max: 200 },
   listAttachments: { default: null, max: 200 },
   noteOutline: { default: 200, max: 500 },
-  grep: { default: 20, max: 100 }
+  grep: { default: 20, max: 100 },
+  /** Hallazgos de `hebra_jd_audit` por página (D18). */
+  jdAudit: { default: 200, max: 500 }
 } as const;
 
 /** Máximo de elementos que el motor devuelve por consulta de página (`PAGE_LIMIT_MAX` de
@@ -49,8 +51,9 @@ export function storePageSize(want: number): number {
 }
 
 /** `fl1` es el de `hebra_list_files` (D10); `f1`, el de las carpetas; `o1`, el de
- *  `hebra_note_outline` (D11); `g1`, el de `hebra_grep` (D13). */
-export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1' | 'fl1' | 'o1' | 'g1';
+ *  `hebra_note_outline` (D11); `g1`, el de `hebra_grep` (D13); `j1`, el de
+ *  `hebra_jd_audit` (D18: la posición en la lista de hallazgos, todos visibles). */
+export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1' | 'fl1' | 'o1' | 'g1' | 'j1';
 
 const CURSOR_MAX_LENGTH = 2_048;
 

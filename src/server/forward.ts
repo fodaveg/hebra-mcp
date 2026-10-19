@@ -11,7 +11,8 @@
  *   `organizeFile` (la papelera de los ficheros sueltos), y desde D14 (10 oct 2026),
  *   `replaceInNotes` en todos sus modos (los planes viven en el escritor), y desde D15,
  *   `replaceFileText` y `fetchFile` (los bytes de un fichero suelto), y desde D17 (12 oct
- *   2026), `looseFileWrite` (crear, renombrar, mover o duplicar uno) al escritor. Todas
+ *   2026), `looseFileWrite` (crear, renombrar, mover o duplicar uno), y desde D18 (19 oct
+ *   2026), `jdNewId` (simular y aplicar un ID nuevo del JDex) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -92,6 +93,8 @@ import type {
 } from '../store/writes';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
+import type { JdNewIdRequest } from '../store/jd-new-id';
+import type { CreatedItem, PlanWrite } from '../jd';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
   AWAIT_ROUND_TIMEOUT_MS,
@@ -100,6 +103,7 @@ import {
   type EditNoteOutcome,
   type FileOutcome,
   type FolderOutcome,
+  type JdNewIdOutcome,
   type LooseFileOutcome,
   type OrganizeOutcome,
   type ReplaceFileTextOutcome,
@@ -135,6 +139,8 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // Crear, renombrar, mover o duplicar (D17): al duplicar, quizá bajar los bytes del
   // origen; al crear, el `blobPut`; y la ronda.
   looseFileWrite: AWAIT_ROUND_TIMEOUT_MS + 60_000,
+  // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
+  jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
   replaceBody: 15_000,
   trashConflictCopies: 15_000,
@@ -336,6 +342,84 @@ function asLooseFileOutcome(value: unknown, id?: string): LooseFileOutcome {
     ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
   };
+}
+
+/** Un elemento creado o que ya estaba de un ID nuevo del JDex (D18). */
+function asJdItem(value: unknown): CreatedItem {
+  const record = asRecordValue(value);
+  return { kind: oneOfValues(record.kind, ['folder', 'note'] as const), id: asString(record.id), name: asString(record.name) };
+}
+
+/** Una escritura de un plan de ID nuevo (D18): la nota con su cuerpo o una carpeta. */
+function asJdWrite(value: unknown): PlanWrite {
+  const record = asRecordValue(value);
+  if (record.kind === 'ensure_note') {
+    return { kind: 'ensure_note', folderId: asString(record.folderId), title: asString(record.title), body: asString(record.body) };
+  }
+  if (record.kind === 'ensure_folder') {
+    const parent = asRecordValue(record.parent);
+    return {
+      kind: 'ensure_folder',
+      parent: 'folderId' in parent ? { folderId: asString(parent.folderId) } : { write: asCount(parent.write) },
+      name: asString(record.name)
+    };
+  }
+  throw new Error('writer_protocol');
+}
+
+function asJdFolder(value: unknown): { id: string; name: string } {
+  const record = asRecordValue(value);
+  return { id: asString(record.id), name: asString(record.name) };
+}
+
+/** Valida lo que devuelve el escritor para `hebra_jd_new_id` (D18), campo a campo. */
+function asJdOutcome(value: unknown): JdNewIdOutcome {
+  const record = asRecordValue(value);
+  if (record.mode === 'discard') return { mode: 'discard' };
+  const folderName = asNullableString(record.folderName);
+  if (record.mode === 'simulate') {
+    const category = asRecordValue(record.category);
+    const resolved = asRecordValue(record.resolved);
+    const template = asRecordValue(record.template);
+    return {
+      mode: 'simulate',
+      planId: asString(record.planId),
+      expiresAt: asString(record.expiresAt),
+      id: asString(record.id),
+      system: asString(record.system),
+      noteName: asString(record.noteName),
+      folderName,
+      category: {
+        number: asString(category.number),
+        label: asString(category.label),
+        folderId: asNullableString(category.folderId)
+      },
+      resolved: {
+        jdex: asJdFolder(resolved.jdex),
+        templates: resolved.templates === null ? null : asJdFolder(resolved.templates)
+      },
+      template: {
+        source: oneOfValues(template.source, ['templates-folder', 'builtin'] as const),
+        ...(template.noteName !== undefined ? { noteName: asString(template.noteName) } : {}),
+        ...(template.noteId !== undefined ? { noteId: asString(template.noteId) } : {})
+      },
+      writes: asArray(record.writes).map(asJdWrite)
+    };
+  }
+  if (record.mode === 'apply') {
+    return {
+      mode: 'apply',
+      planId: asString(record.planId),
+      id: asString(record.id),
+      noteName: asString(record.noteName),
+      folderName,
+      created: asArray(record.created).map(asJdItem),
+      existing: asArray(record.existing).map(asJdItem),
+      ...(record.replayed === true ? { replayed: true as const } : {}),
+      ...syncFieldsFrom(record)
+    };
+  }
+  throw new Error('writer_protocol');
 }
 
 /** Valida el `AddAttachmentOutcome` que devuelve el escritor (D9): el de una edición más
@@ -881,6 +965,15 @@ export function buildRoutedWriteContext(
             )
         }
       : {}),
+    // Un ID nuevo del JDex (D18): todo en el escritor, que guarda los planes, con la
+    // privacidad de ESTE lector. Si la conexión se corta tras enviar `apply`, no se repite:
+    // el agente reintenta con el mismo `operationId` y el escritor completa lo que falte.
+    ...(local.jdNewId
+      ? {
+          jdNewId: (request: JdNewIdRequest) =>
+            routed('jdNewId', { ...request }, asJdOutcome, () => local.jdNewId!(request))
+        }
+      : {}),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
     // relevo, esta instancia ya es el escritor y lo anota en local.
@@ -932,7 +1025,9 @@ export function writerSocketHandlers(
     // D17: crear, renombrar, mover o duplicar, con la privacidad del lector y la ronda aquí.
     ...(local.looseFileWrite
       ? { looseFileWrite: (input: LooseFileWriteInput) => local.looseFileWrite!(input) }
-      : {})
+      : {}),
+    // D18: un ID nuevo del JDex, con la privacidad del lector y, al aplicar, la ronda aquí.
+    ...(local.jdNewId ? { jdNewId: (request: JdNewIdRequest) => local.jdNewId!(request) } : {})
   };
   return {
     ...workdir,

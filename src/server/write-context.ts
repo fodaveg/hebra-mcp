@@ -47,6 +47,7 @@ import type {
   ReplaceFileTextSaved
 } from '../store/file-writes';
 import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
+import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
@@ -86,6 +87,10 @@ export interface WriteContextSources {
    *  `LibraryInstance.looseFileWriteLocal`), sin esperar ronda. Opcional, como
    *  `replaceFileText`: sin él, las cuatro herramientas responden `invalid_input`. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>>;
+  /** `hebra_jd_new_id` en local (D18, `LibraryInstance.jdNewIdLocal`): simular, aplicar o
+   *  descartar un plan, sin esperar ronda. Opcional: sin él, la herramienta responde
+   *  `invalid_input`. */
+  jdNewId?(request: JdNewIdRequest): Promise<LocalWrite<JdNewIdResult>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -185,6 +190,12 @@ export type ReplaceOutcome =
   | (ReplaceUndoReport & SyncFields)
   | ReplaceDiscardResult;
 
+/** `hebra_jd_new_id` (D18): la simulación tal cual; el informe de aplicar con el estado de
+ *  sync de la nota y la carpeta (`uploaded` solo si ninguna sigue sucia). */
+export type JdNewIdOutcome =
+  | Exclude<JdNewIdResult, JdApplyReport>
+  | (JdApplyReport & SyncFields);
+
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
@@ -232,6 +243,10 @@ export interface WriteContext {
    *  devuelve el estado de sync; sin escritura («ya estaba», reintento), sin ronda. En un
    *  lector, todo ocurre en el escritor (`./forward.ts`). Opcional. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
+  /** Un ID nuevo del JDex (D18): simular o descartar, tal cual; aplicar escribe, espera la
+   *  ronda si creó algo y devuelve el estado de sync. En un lector, todo ocurre en el
+   *  escritor (`./forward.ts`). Opcional. */
+  jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -535,7 +550,36 @@ export function buildWriteContext(
 
   const looseFile = sources.looseFileWrite?.bind(sources);
 
+  /** `hebra_jd_new_id` (D18): la simulación tal cual; aplicar, con UNA ronda si creó algo y
+   *  el estado de sync de la nota y la carpeta que nombra el informe. */
+  async function jdWrite(
+    run: NonNullable<WriteContextSources['jdNewId']>,
+    request: JdNewIdRequest
+  ): Promise<JdNewIdOutcome> {
+    const { result, wrote } = await run(request);
+    if (result.mode !== 'apply') return result;
+    const items = [...result.created, ...result.existing];
+    const anyDirty = async (): Promise<boolean | null> => {
+      let unknown = false;
+      for (const item of items) {
+        const dirty = item.kind === 'note' ? await dirtyOf(item.id) : await folderDirtyOf(item.id);
+        if (dirty === true) return true;
+        if (dirty === null) unknown = true;
+      }
+      return unknown ? null : false;
+    };
+    if (!wrote) {
+      if (!sources.isLinked()) return { ...result, sync: 'not_linked' };
+      return { ...result, sync: (await anyDirty()) === false ? 'uploaded' : 'pending' };
+    }
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...result, ...syncFieldsOf(wait, await anyDirty()) };
+  }
+
+  const jd = sources.jdNewId?.bind(sources);
+
   return {
+    ...(jd ? { jdNewId: (request: JdNewIdRequest) => jdWrite(jd, request) } : {}),
     ...(looseFile
       ? { looseFileWrite: (input: LooseFileWriteInput) => looseFileWrite(looseFile, input) }
       : {}),

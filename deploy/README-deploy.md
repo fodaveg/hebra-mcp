@@ -113,7 +113,9 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 
 ## Publicar una versión nueva
 
-1. Compilar en el Mac (donde SÍ está el submódulo `vendor/hebra`):
+1. Compilar en el Mac (donde SÍ está el submódulo `vendor/hebra`; desde D18, también
+   `vendor/jdex-manager`, público: `git submodule update --init` los trae los dos, y el
+   motor JD queda dentro de `dist/` igual que el código de Hebra):
 
    ```bash
    npm run build

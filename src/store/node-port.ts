@@ -72,6 +72,7 @@ import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
+import { openJdPlansDatabase, sqliteJdPlanStore, type JdPlanStore } from './jd-plans';
 import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
 import {
   ensurePrivacyEpochIndexes,
@@ -183,7 +184,10 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensurePrivateFoldersTable(db);
   // Índices de la época de privacidad de la puerta final (`./privacy-sql.ts`).
   if (mode === 'readWrite') ensurePrivacyEpochIndexes(db);
-  return new NodeLibraryPort(engine, db, mode, conn);
+  // Planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor, y en su propio
+  // fichero, para no mover la época de privacidad de un lector al simular.
+  const jdPlansDb = mode === 'readWrite' ? openJdPlansDatabase(options.sqlitePath) : null;
+  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb);
 }
 
 /**
@@ -216,6 +220,7 @@ async function secureSqliteFileModes(sqlitePath: string): Promise<void> {
 export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private readonly queue = new SerialQueue();
   private syncView: SyncStorePort | null = null;
+  private jdPlanStore: JdPlanStore | null = null;
   private closed = false;
   /** Consultas propias ya preparadas (una vez por conexión; `close` las suelta). */
   private readonly statements = new Map<string, StatementSync>();
@@ -236,7 +241,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     private readonly engine: SqliteLibraryEngine,
     private readonly db: DatabaseSync,
     readonly mode: NodeSqliteMode = 'readWrite',
-    private readonly conn?: SqliteConn
+    private readonly conn?: SqliteConn,
+    /** La base de los planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor. */
+    private readonly jdPlansDb: DatabaseSync | null = null
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -750,7 +757,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db)),
-        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.db))
+        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.db)),
+        // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
+        jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
       })
     );
   }
@@ -832,6 +841,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     this.statements.clear();
     this.operationStore = null;
     this.replacePlanStore = null;
+    this.jdPlanStore = null;
+    this.jdPlansDb?.close();
     this.db.close();
   }
 }
