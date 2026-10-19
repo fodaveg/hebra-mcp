@@ -1,3 +1,6 @@
 [submodule "vendor/hebra"]
 	path = vendor/hebra
 	url = git@github.com:fodaveg/hebra.git
+[submodule "vendor/jdex-manager"]
+	path = vendor/jdex-manager
+	url = git@github.com:fodaveg/jdex-manager.git
