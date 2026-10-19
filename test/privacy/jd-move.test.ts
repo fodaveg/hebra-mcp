@@ -5,6 +5,10 @@
  *   `hebra_rename_folder` (`folder_unavailable`), y lo oculto por etiqueta, bloqueado o un
  *   fichero oculto viajan con ella y siguen ocultos (P1); dos homónimas no se distinguen (P6);
  * - una ruta privada configurada en el destino, `folder_unavailable`;
+ * - sondas del auditor: todo lo oculto viaja y ninguna lectura lo enseña (P8); una nota de A2
+ *   oculta por una ruta configurada rechaza la carpeta como `hebra_rename_folder`, y sin ruta
+ *   configurada se mueve y sigue visible (P9); una ruta configurada viva en el destino da
+ *   `destination_taken` sin ocultar nada (P10);
  * - lo que se mueve tiene que ser visible: uno oculto responde como uno que no existe;
  * - la respuesta no depende de lo oculto de OTRAS carpetas, y nada oculto aparece en ninguna
  *   respuesta ni en el log.
@@ -206,5 +210,127 @@ describe('hebra_jd_move (D19): privacidad', () => {
       h = undefined;
     }
     expect(shapes[1]).toBe(shapes[0]);
+  });
+
+  it('P8: todo lo oculto de una carpeta viaja con ella y ninguna lectura lo enseña después; deshacer la devuelve', async () => {
+    const BAIT = 'CEBO_P8_4b1d';
+    const ids: Record<string, string> = {};
+    h = await startJd({
+      prepare: async (engine) => {
+        const inbox = await engine.folderCreate(null, 'Bandeja');
+        ids.mover = (await engine.folderCreate(inbox.id, 'Mover')).id;
+        ids.sub = (await engine.folderCreate(ids.mover, 'Sub')).id;
+        ids.visible = (await createNote(engine, ids.mover, '# Nota a la vista\n\nTexto normal.\n')).id;
+        ids.tagged = (await createNote(engine, ids.mover, `# ${BAIT} etiquetada\n\n#secreto ${BAIT}\n`)).id;
+        ids.deep = (await createNote(engine, ids.sub, `# ${BAIT} en Sub\n\n#secreto ${BAIT}\n`)).id;
+        ids.locked = (await createNote(engine, ids.mover, lockedBody(`${BAIT} bloqueada`, []))).id;
+        const blob = await engine.blobPut(PDF, { mime: 'application/pdf' });
+        ids.file = (await engine.fileCreate(ids.mover, 'cebofile.pdf', blob.sha256)).id;
+        await createNote(engine, null, `# Enlace ${BAIT}\n\n![[cebofile.pdf]]\n\n#secreto\n`);
+      }
+    });
+    const plan = await h.call('hebra_jd_move', { mode: 'simulate', kind: 'folder', id: ids.mover, toId: '21.11' });
+    expect(plan.isError, JSON.stringify(plan.value)).toBe(false);
+    const applied = await h.call('hebra_jd_move', { mode: 'apply', planId: plan.value.planId, operationId: 'op-p8' });
+    expect(applied.isError, JSON.stringify(applied.value)).toBe(false);
+    // Todo viajó: la carpeta está en 21.11 y lo de dentro sigue en ella.
+    expect(h.rawFolders().find((folder) => folder.id === ids.mover)!.parentId).toBe(h.ids.id2111);
+    for (const id of [ids.visible, ids.tagged, ids.locked]) {
+      expect(h.rawNotes().find((note) => note.id === id)!.folderId).toBe(ids.mover);
+    }
+    expect(h.rawNotes().find((note) => note.id === ids.deep)!.folderId).toBe(ids.sub);
+    expect((await h.test.ctx.port.filesIndex()).files.find((file) => file.id === ids.file)!.folderId).toBe(ids.mover);
+
+    const notFound = { isError: true, value: { error: 'not_found' } };
+    const outputs: unknown[] = [plan, applied];
+    for (const id of [ids.tagged, ids.deep, ids.locked]) {
+      const read = await h.call('hebra_read_note', { id });
+      expect(read, id).toEqual(notFound);
+    }
+    for (const title of [`${BAIT} etiquetada`, `${BAIT} en Sub`, `${BAIT} bloqueada`]) {
+      const read = await h.call('hebra_read_note', { title });
+      expect(read, title).toEqual(notFound);
+      outputs.push(read);
+    }
+    const listed = await h.call('hebra_list_notes', { folder: '20-29 Trabajo/21 Productos/21.11 Uno/Mover', subfolders: true });
+    expect((listed.value.notes as Array<{ id: string }>).map((note) => note.id)).toEqual([ids.visible]);
+    const search = await h.call('hebra_search', { query: BAIT });
+    expect(search.value.results).toEqual([]);
+    const grep = await h.call('hebra_grep', { pattern: BAIT });
+    expect(grep.value.matches).toEqual([]);
+    const files = await h.call('hebra_list_files', { limit: 100 });
+    expect((files.value.files as Array<{ id: string }>).map((file) => file.id)).not.toContain(ids.file);
+    expect(await h.call('hebra_read_file', { id: ids.file })).toEqual(notFound);
+    outputs.push(listed, search, grep, files);
+    expectHidden(outputs, [BAIT, 'cebofile', ids.tagged!, ids.deep!, ids.locked!, ids.file!]);
+
+    const undone = await h.call('hebra_jd_move', { mode: 'undo', planId: plan.value.planId, operationId: 'op-p8-undo' });
+    expect(undone.value).toMatchObject({ mode: 'undo', restored: [{ kind: 'folder', id: ids.mover }], skipped: [] });
+    expect(h.rawFolders().find((folder) => folder.id === ids.mover)!.parentId).not.toBe(h.ids.id2111);
+    expectHidden(undone, [BAIT, 'cebofile']);
+  });
+
+  it('P9 (A2): una ruta privada configurada que oculta una nota por una lápida de dentro rechaza la carpeta como hebra_rename_folder', async () => {
+    const ids: Record<string, string> = {};
+    h = await startJd({
+      extraPrivateFolders: [['bandeja', 'v', 't']],
+      prepare: async (engine) => {
+        const inbox = await engine.folderCreate(null, 'Bandeja');
+        // V/t se borra (lápida) y su nota vuelve de la papelera: queda viva con la carpeta
+        // guardada en la lápida (A2). Una carpeta viva T hace que la ruta configurada resuelva.
+        ids.v = (await engine.folderCreate(inbox.id, 'V')).id;
+        const t = await engine.folderCreate(ids.v, 't');
+        ids.hiddenA2 = (await createNote(engine, t.id, '# Nota A2 de V\n')).id;
+        await engine.folderTrash(t.id);
+        await engine.noteRestore(ids.hiddenA2);
+        await engine.folderCreate(ids.v, 'T');
+        // V2: lo mismo, sin ruta configurada debajo.
+        ids.v2 = (await engine.folderCreate(inbox.id, 'V2')).id;
+        const t2 = await engine.folderCreate(ids.v2, 't');
+        ids.visibleA2 = (await createNote(engine, t2.id, '# Nota A2 de V2\n')).id;
+        await engine.folderTrash(t2.id);
+        await engine.noteRestore(ids.visibleA2);
+      }
+    });
+    expect(await h.call('hebra_read_note', { id: ids.hiddenA2 })).toEqual({ isError: true, value: { error: 'not_found' } });
+    const moved = await h.call('hebra_jd_move', { mode: 'simulate', kind: 'folder', id: ids.v, toId: '21.11' });
+    expect(moved).toEqual({ isError: true, value: { error: 'folder_unavailable' } });
+    expect(await h.call('hebra_rename_folder', { folderId: ids.v, name: 'V' })).toEqual(moved);
+    expectHidden(moved, ['Nota A2 de V', ids.hiddenA2!]);
+
+    const read = await h.call('hebra_read_note', { id: ids.visibleA2 });
+    expect(read.isError, JSON.stringify(read.value)).toBe(false);
+    const plan = await h.call('hebra_jd_move', { mode: 'simulate', kind: 'folder', id: ids.v2, toId: '21.11' });
+    expect(plan.isError, JSON.stringify(plan.value)).toBe(false);
+    const applied = await h.call('hebra_jd_move', { mode: 'apply', planId: plan.value.planId, operationId: 'op-p9' });
+    expect(applied.isError, JSON.stringify(applied.value)).toBe(false);
+    expect(h.rawFolders().find((folder) => folder.id === ids.v2)!.parentId).toBe(h.ids.id2111);
+    expect((await h.call('hebra_read_note', { id: ids.visibleA2 })).isError).toBe(false);
+  });
+
+  it('P10 (A2 al revés): mover a una ruta configurada viva da destination_taken y la nota visible no queda oculta', async () => {
+    const ids: Record<string, string> = {};
+    h = await startJd({
+      extraPrivateFolders: [['20-29 trabajo', '21 productos', '21.11 uno', 'w', 't']],
+      prepare: async (engine, jd) => {
+        const w = await engine.folderCreate(jd.id2111, 'w');
+        await engine.folderCreate(w.id, 't');
+        const inbox = await engine.folderCreate(null, 'Bandeja');
+        ids.w = (await engine.folderCreate(inbox.id, 'W')).id;
+        await engine.folderCreate(ids.w, 'T');
+        ids.wNote = (await createNote(engine, ids.w, '# Nota de W\n')).id;
+        ids.otra = (await engine.folderCreate(inbox.id, 'Otra')).id;
+        ids.otraNote = (await createNote(engine, ids.otra, '# Nota de Otra\n')).id;
+      }
+    });
+    const foldersBefore = h.rawFolders();
+    const taken = { isError: true, value: { error: 'destination_taken' } };
+    expect(await h.call('hebra_jd_move', { mode: 'simulate', kind: 'folder', id: ids.w, toId: '21.11' })).toEqual(taken);
+    expect(await h.call('hebra_jd_move', { mode: 'simulate', kind: 'folder', id: ids.otra, toId: '21.11', as: 'w' })).toEqual(taken);
+    expect(h.rawFolders()).toEqual(foldersBefore);
+    for (const id of [ids.wNote, ids.otraNote]) {
+      const read = await h.call('hebra_read_note', { id });
+      expect(read.isError, JSON.stringify(read.value)).toBe(false);
+    }
   });
 });
