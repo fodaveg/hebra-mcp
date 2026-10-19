@@ -38,17 +38,17 @@ import {
   type NoteSaveResult
 } from '../hebra';
 import {
-  detectFolders,
   extractJdPrefix,
   type EnsureResult,
   type LibraryPort,
   type PortFolder,
   type PortNote
 } from '../jd';
+import type { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { writeRejected } from './errors';
 import { planCreateFolder } from './folders';
-import type { NoteVisibilityEntry } from './types';
+import type { FilesIndex, NoteVisibilityEntry } from './types';
 import { folderRejection, LOCKED_BODY_PREFIX, saveInputFor, type FolderRow } from './writes';
 
 /** Lo que el puerto lee: el árbol y el índice de visibilidad SIN filtrar, las filas de las
@@ -58,6 +58,24 @@ export interface JdView {
   notes(): readonly NoteVisibilityEntry[] | Promise<readonly NoteVisibilityEntry[]>;
   noteRead(id: string): Promise<NoteRow | null>;
   filter(): PrivacyFilter | Promise<PrivacyFilter>;
+  /** Solo los TÍTULOS de unas notas, sin cargar su cuerpo (los de las ocultas, para
+   *  `hasHidden`: el tiempo de respuesta no puede depender del tamaño de lo oculto). Sin él,
+   *  `hasHidden` responde `true` (cerrado ante la duda). */
+  noteTitles?(ids: readonly string[]): Map<string, string> | Promise<Map<string, string>>;
+  /** Los ficheros sueltos sin filtrar y su filtro, para `hasHidden`. Sin él, `true`. */
+  files?(): { index: FilesIndex; filter: FileFilter } | Promise<{ index: FilesIndex; filter: FileFilter }>;
+}
+
+/**
+ * ¿Es `id` una carpeta que se puede usar como JDex indicada por el agente (`jdexFolderId`)?
+ * Visible para quien pide y con el prefijo JD `00.00` de algún sistema en su nombre. Si no,
+ * quien llama responde `jdex_not_found`, lo mismo que sin JDex: una carpeta cualquiera como
+ * JDex convertía la regla (c) de `hasHidden` en un oráculo de las notas ocultas de ESA carpeta.
+ */
+export function isJdexFolderCandidate(filter: PrivacyFilter, id: string): boolean {
+  if (id === ROOT_FOLDER_ID || !filter.folderExists(id) || filter.isFolderHidden(id)) return false;
+  const prefix = extractJdPrefix(filter.folderName(id) ?? '');
+  return prefix?.number.kind === 'id' && prefix.number.id === '00.00' && !prefix.number.extension;
 }
 
 /** Lo que el puerto escribe, solo dentro de un turno del escritor. */
@@ -70,28 +88,6 @@ export interface JdWrites {
 /** Lo que el motor ve como padre de una carpeta: `null` es la raíz de Hebra. */
 function portParent(parentId: string | null): string | null {
   return parentId === null || parentId === ROOT_FOLDER_ID ? null : parentId;
-}
-
-/** Ruta de cada carpeta por nombres (como la reconstruye el motor), sin la raíz. */
-function namePaths(list: FoldersList): Map<string, string> {
-  const byId = new Map(list.folders.map((folder) => [folder.id, folder]));
-  const paths = new Map<string, string>();
-  const visiting = new Set<string>();
-  const pathOf = (id: string): string => {
-    const known = paths.get(id);
-    if (known !== undefined) return known;
-    const folder = byId.get(id);
-    if (!folder || id === ROOT_FOLDER_ID || visiting.has(id)) return '';
-    visiting.add(id);
-    const parent = folder.parentId === null ? '' : pathOf(folder.parentId);
-    visiting.delete(id);
-    const name = folder.name.normalize('NFC');
-    const path = parent ? `${parent}/${name}` : name;
-    paths.set(id, path);
-    return path;
-  };
-  for (const folder of list.folders) pathOf(folder.id);
-  return paths;
 }
 
 /** La categoría (`"21"`) del prefijo JD de un nombre de carpeta o un título, o `null`. */
@@ -134,7 +130,10 @@ export class JdLibraryPort implements LibraryPort {
   async listFolders(): Promise<PortFolder[]> {
     const [list, filter] = await Promise.all([this.view.folders(), this.view.filter()]);
     return list.folders
-      .filter((folder) => folder.id !== ROOT_FOLDER_ID && !filter.isFolderHidden(folder.id))
+      // Visible y conocida por el filtro, como en `listNotes` y `ensureNote`.
+      .filter(
+        (folder) => folder.id !== ROOT_FOLDER_ID && filter.folderExists(folder.id) && !filter.isFolderHidden(folder.id)
+      )
       .map((folder) => ({ id: folder.id, parentId: portParent(folder.parentId), name: folder.name }));
   }
 
@@ -158,6 +157,7 @@ export class JdLibraryPort implements LibraryPort {
 
   async readNote(id: string): Promise<{ body: string | null }> {
     const filter = await this.view.filter();
+    // `visibleMeta` es `undefined` también para una nota que el filtro no conoce.
     if (!filter.visibleMeta(id)) return { body: null };
     const row = await this.view.noteRead(id);
     if (!row || row.trashedAt !== null || row.body.startsWith(LOCKED_BODY_PREFIX)) return { body: null };
@@ -211,49 +211,63 @@ export class JdLibraryPort implements LibraryPort {
   /**
    * ¿Tiene la categoría algo que quien pide no ve? Sobre el árbol y las notas SIN filtrar,
    * con el filtro de quien pide («oculto» es lo que ese filtro esconde). Verdadero si:
-   * (a) hay una carpeta oculta en el árbol de una carpeta de esa categoría;
+   * (a) hay, en el árbol de una carpeta de esa categoría, una carpeta oculta, o una nota o un
+   *     fichero suelto vivo ocultos cuyo prefijo JD es de esa categoría (cerrado ante la duda);
    * (b) hay una carpeta oculta, en cualquier parte, cuyo prefijo JD es de esa categoría (un
    *     ID `21.xx` o la propia categoría `21`, de cualquier sistema: cerrado ante la duda);
-   * (c) hay una nota oculta en la carpeta del JDex cuyo título tiene un prefijo de esa
-   *     categoría;
-   * (d) la carpeta del JDex (la que usa este puerto, o la `00.00` que se detecta sobre el árbol
-   *     entero) está oculta: entonces lo es para todas las categorías.
-   * Nunca dice qué ni cuántos: el motor solo recibe el booleano.
+   * (c) hay una nota oculta en la carpeta del JDex QUE USA ESTE PUERTO cuyo título tiene un
+   *     prefijo de esa categoría (solo esa carpeta: la indicada por el agente ya se validó
+   *     como `00.00` visible, `isJdexFolderCandidate`);
+   * (d) la carpeta del JDex que usa este puerto está oculta, o, si el puerto aún no tiene
+   *     JDex, hay alguna carpeta `00.00` oculta: entonces lo es para todas las categorías. Sin
+   *     mirar el orden de las carpetas: una `00.00` oculta duplicada no decide nada si el JDex
+   *     que se usa es otro, visible.
+   * De las notas ocultas solo se leen los TÍTULOS (`JdView.noteTitles`, sin el cuerpo), para
+   * que el tiempo de respuesta no dependa del tamaño de lo oculto. Nunca dice qué ni cuántos:
+   * el motor solo recibe el booleano.
    */
   async hasHidden(category: string): Promise<boolean> {
     const [list, filter] = await Promise.all([this.view.folders(), this.view.filter()]);
+    if (!this.view.noteTitles || !this.view.files) return true;
     const hidden = (id: string): boolean => !filter.folderExists(id) || filter.isFolderHidden(id);
-    const paths = namePaths(list);
-    const pathToId = new Map<string, string>();
-    for (const [id, path] of [...paths].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
-      if (!pathToId.has(path)) pathToId.set(path, id);
-    }
-    const jdexIds = new Set<string>();
-    const detected = detectFolders([...paths.values()]).jdex;
-    if (detected !== null) {
-      const id = pathToId.get(detected);
-      if (id !== undefined) jdexIds.add(id);
-    }
-    if (this.jdexFolderId !== undefined) jdexIds.add(this.jdexFolderId);
+    const isJdexName = (name: string): boolean => {
+      const prefix = extractJdPrefix(name);
+      return prefix?.number.kind === 'id' && prefix.number.id === '00.00' && !prefix.number.extension;
+    };
     // (d)
-    for (const id of jdexIds) if (hidden(id)) return true;
+    if (this.jdexFolderId !== undefined) {
+      if (hidden(this.jdexFolderId)) return true;
+    } else if (list.folders.some((folder) => folder.id !== ROOT_FOLDER_ID && isJdexName(folder.name) && hidden(folder.id))) {
+      return true;
+    }
+    const categoryTrees = new Set<string>();
     for (const folder of list.folders) {
       if (folder.id === ROOT_FOLDER_ID) continue;
       const own = categoryOfName(folder.name) === category;
       // (b)
       if (own && filter.isFolderHidden(folder.id)) return true;
-      // (a): solo las carpetas de la categoría, no las de sus IDs (su árbol ya está dentro).
+      // (a): las carpetas de la categoría (su árbol incluye las de sus IDs).
       const prefix = extractJdPrefix(folder.name);
       if (own && prefix?.number.kind === 'category') {
-        if (filter.folderSubtree(folder.id).some((id) => filter.isFolderHidden(id))) return true;
+        const tree = filter.folderSubtree(folder.id);
+        if (tree.some((id) => filter.isFolderHidden(id))) return true;
+        for (const id of tree) categoryTrees.add(id);
       }
     }
-    // (c)
-    for (const entry of await this.view.notes()) {
-      if (!jdexIds.has(entry.folderId) || !filter.isHiddenNote(entry.id)) continue;
-      const row = await this.view.noteRead(entry.id);
-      if (row && categoryOfName(row.title) === category) return true;
+    // (a), ficheros sueltos vivos ocultos del árbol con el prefijo de la categoría.
+    const files = await this.view.files();
+    for (const file of files.index.files) {
+      if (file.trashedAt !== null || !categoryTrees.has(file.folderId)) continue;
+      if (!files.filter.isVisible(file.id) && categoryOfName(file.name) === category) return true;
     }
-    return false;
+    // (a) y (c): notas ocultas del árbol de la categoría o del JDex, por su título.
+    const candidates: string[] = [];
+    for (const entry of await this.view.notes()) {
+      const inScope = categoryTrees.has(entry.folderId) || entry.folderId === this.jdexFolderId;
+      if (inScope && filter.isHiddenNote(entry.id)) candidates.push(entry.id);
+    }
+    if (candidates.length === 0) return false;
+    const titles = await this.view.noteTitles(candidates);
+    return candidates.some((id) => categoryOfName(titles.get(id) ?? '') === category);
   }
 }

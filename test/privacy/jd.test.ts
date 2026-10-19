@@ -26,7 +26,10 @@ import { registerTools } from '../../src/server/register-tools';
 import { localWriteContext } from '../../src/server/serve';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { LibraryInstance, LIBRARY_SQLITE_FILE } from '../../src/sync/library-instance';
-import { startJd, type JdHarness } from '../fixtures/jd-library';
+import { FileFilter } from '../../src/privacy/file-filter';
+import { JdLibraryPort } from '../../src/store/jd-port';
+import { privacyInTurn } from '../../src/store/writes';
+import { JD_DEFAULT_CONFIG, startJd, type JdHarness } from '../fixtures/jd-library';
 import { createNote } from '../fixtures/test-library';
 
 const HAS_HIDDEN = { isError: true, value: { error: 'category_has_hidden' } };
@@ -102,7 +105,7 @@ describe('Johnny.Decimal (D18): privacidad', () => {
     expect((await simulate('22')).isError).toBe(false);
   });
 
-  it('con el JDex oculto no se puede crear nada, tampoco señalando otro JDex visible', async () => {
+  it('con el JDex oculto no se puede crear nada en él; otro 00.00 visible indicado no depende del oculto', async () => {
     h = await startJd({
       extraPrivateFolders: [['00-09 sistema', '00 sistema', '00.00 jdex']],
       prepare: async (engine) => {
@@ -114,15 +117,128 @@ describe('Johnny.Decimal (D18): privacidad', () => {
     const notesBefore = h.rawNotes();
     expect(await simulate('21')).toEqual({ isError: true, value: { error: 'jdex_not_found' } });
     expect(await simulate('21', { jdexFolderId: h.ids.jdex })).toEqual({ isError: true, value: { error: 'jdex_not_found' } });
-    const copy = h.rawFolders().find((folder) => folder.name === '00.00 Copia del JDex')!;
-    for (const category of ['21', '22']) {
-      const result = await simulate(category, { jdexFolderId: copy.id });
-      expect(result, category).toEqual(HAS_HIDDEN);
-      expectHidden(result, [h.ids.jdex, '00.00 JDex', '21.11', '21.12']);
-    }
     expect(await h.call('hebra_jd_audit', {})).toEqual({ isError: true, value: { error: 'jdex_not_found' } });
     expect(h.rawFolders()).toEqual(foldersBefore);
     expect(h.rawNotes()).toEqual(notesBefore);
+    // (d) solo mira el JDex que se usa: un `00.00` visible indicado simula con lo visible, sin
+    // nombrar nada del oculto.
+    const copy = h.rawFolders().find((folder) => folder.name === '00.00 Copia del JDex')!;
+    const result = await simulate('22', { jdexFolderId: copy.id });
+    expect(result.value).toMatchObject({ mode: 'simulate', id: '22.11', resolved: { jdex: { id: copy.id } } });
+    expectHidden(result, [h.ids.jdex, '00.00 JDex', '21.11', '21.12']);
+  });
+
+  it('jdexFolderId solo vale para una 00.00 visible: otra carpeta, con o sin notas ocultas, responde igual (punto 1)', async () => {
+    h = await startJd({
+      prepare: async (engine) => {
+        const a = await engine.folderCreate(null, 'Sonda A');
+        await engine.folderCreate(null, 'Sonda B');
+        await createNote(engine, a.id, '# 21.40 Medico\n\n#secreto\n');
+      }
+    });
+    const folders = h.rawFolders();
+    const a = folders.find((folder) => folder.name === 'Sonda A')!;
+    const b = folders.find((folder) => folder.name === 'Sonda B')!;
+    const withA = await simulate('21', { jdexFolderId: a.id });
+    const withB = await simulate('21', { jdexFolderId: b.id });
+    expect(withA).toEqual({ isError: true, value: { error: 'jdex_not_found' } });
+    expect(withB).toEqual(withA);
+    expectHidden(withA, ['21.40', 'Medico']);
+    // La auditoría, igual.
+    const auditA = await h.call('hebra_jd_audit', { jdexFolderId: a.id });
+    expect(auditA).toEqual({ isError: true, value: { error: 'jdex_not_found' } });
+    expect(await h.call('hebra_jd_audit', { jdexFolderId: b.id })).toEqual(auditA);
+    // El 00.00 de verdad, indicado, sigue valiendo.
+    expect((await simulate('21', { jdexFolderId: h.ids.jdex })).value).toMatchObject({ mode: 'simulate', id: '21.13' });
+  });
+
+  it('de las notas ocultas solo se leen los títulos, nunca el cuerpo (punto 1b)', async () => {
+    let hiddenId = '';
+    h = await startJd({
+      prepare: async (engine, ids) => {
+        hiddenId = (await createNote(engine, ids.jdex, `# 21.17 Nota privada\n\n#secreto\n${'x'.repeat(50_000)}\n`)).id;
+      }
+    });
+    const reads: string[] = [];
+    const answer = await h.port.writeExclusive(async (store) => {
+      const port = new JdLibraryPort(
+        {
+          folders: () => store.foldersList(),
+          notes: () => store.notesVisibilityIndex(),
+          noteRead: (id) => {
+            reads.push(id);
+            return store.noteRead(id);
+          },
+          filter: () => privacyInTurn(store, JD_DEFAULT_CONFIG),
+          noteTitles: (ids) => store.noteTitles(ids),
+          files: () => {
+            const index = store.filesIndex();
+            return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, JD_DEFAULT_CONFIG), index, JD_DEFAULT_CONFIG) };
+          }
+        },
+        null,
+        { jdexFolderId: h!.ids.jdex }
+      );
+      return port.hasHidden('21');
+    });
+    expect(answer).toBe(true);
+    expect(reads).not.toContain(hiddenId);
+  });
+
+  it('una 00.00 oculta duplicada no decide nada si el JDex que se usa es visible, sea cual sea el orden (punto 2)', async () => {
+    for (let run = 0; run < 6; run += 1) {
+      h = await startJd({
+        extraPrivateFolders: [['00-09 privado']],
+        prepare: async (engine) => {
+          const area = await engine.folderCreate(null, '00-09 Privado');
+          const category = await engine.folderCreate(area.id, '00 P');
+          await engine.folderCreate(category.id, '00.00 Viejo');
+        }
+      });
+      const result = await simulate('21');
+      expect(result.value, `ejecución ${run}`).toMatchObject({ mode: 'simulate', id: '21.13', resolved: { jdex: { id: h.ids.jdex } } });
+      expectHidden(result, ['Viejo', '00-09 Privado']);
+      await h.close();
+      h = undefined;
+    }
+  });
+
+  it('la plantilla que pasa a privada entre simular y aplicar da plan_stale, sin escribir (punto 3)', async () => {
+    h = await startJd();
+    const plan = await simulate('21');
+    expect(plan.value.template).toMatchObject({ source: 'templates-folder', noteId: h.ids.templateNote });
+    const diario = h.rawFolders().find((folder) => folder.name === 'Diario')!;
+    await h.withEngine((engine) => engine.noteMove(h!.ids.templateNote, diario.id));
+    const notesBefore = h.rawNotes();
+    const foldersBefore = h.rawFolders();
+    const result = await h.call('hebra_jd_new_id', { mode: 'apply', planId: plan.value.planId, operationId: 'op-tpl' });
+    expect(result).toEqual({ isError: true, value: { error: 'plan_stale' } });
+    expect(h.rawNotes()).toEqual(notesBefore);
+    expect(h.rawFolders()).toEqual(foldersBefore);
+  });
+
+  it('una nota o un fichero suelto ocultos con el prefijo de la categoría dentro de su árbol dan category_has_hidden (punto 5)', async () => {
+    h = await startJd({
+      prepare: async (engine, ids) => {
+        await createNote(engine, ids.id2111, '# 21.30 Oculta dentro\n\n#secreto\n');
+      }
+    });
+    const byNote = await simulate('21');
+    expect(byNote).toEqual(HAS_HIDDEN);
+    expectHidden(byNote, ['21.30', 'Oculta dentro']);
+    await h.close();
+
+    h = await startJd({
+      prepare: async (engine, ids) => {
+        const blob = await engine.blobPut(new TextEncoder().encode('%PDF-1.4\n%%EOF\n'), { mime: 'application/pdf' });
+        await engine.fileCreate(ids.id2111, '21.31 Informe.pdf', blob.sha256);
+        await createNote(engine, null, '# Enlaza\n\n![[21.31 Informe.pdf]]\n\n#secreto\n');
+      }
+    });
+    const byFile = await simulate('21');
+    expect(byFile).toEqual(HAS_HIDDEN);
+    expectHidden(byFile, ['21.31', 'Informe']);
+    expect((await simulate('22')).isError).toBe(false);
   });
 
   it('una plantilla oculta: se usa la de serie y la simulación lo dice', async () => {

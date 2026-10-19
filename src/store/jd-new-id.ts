@@ -40,9 +40,10 @@ import {
   type PlannedTemplate
 } from '../jd';
 import type { PrivacyConfig } from '../privacy/config';
+import { FileFilter } from '../privacy/file-filter';
 import { StoreError, writeRejected, type JdRejectionCode } from './errors';
 import { planCreateFolder, validFolderName } from './folders';
-import { JdLibraryPort } from './jd-port';
+import { isJdexFolderCandidate, JdLibraryPort } from './jd-port';
 import { JD_PLAN_APPLY_TTL_MS } from './jd-plans';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import { privacyFingerprint } from './replace';
@@ -146,7 +147,12 @@ function turnPort(store: NoteWriteStore, privacy: PrivacyConfig, jdexFolderId?: 
       folders: () => store.foldersList(),
       notes: () => store.notesVisibilityIndex(),
       noteRead: (id) => store.noteRead(id),
-      filter: () => privacyInTurn(store, privacy)
+      filter: () => privacyInTurn(store, privacy),
+      noteTitles: (ids) => store.noteTitles(ids),
+      files: () => {
+        const index = store.filesIndex();
+        return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, privacy), index, privacy) };
+      }
     },
     {
       noteCreate: (folderId) => store.noteCreate(folderId),
@@ -172,6 +178,18 @@ function isPlan(value: unknown): value is NewIdPlan {
     resolved !== null &&
     typeof (resolved.jdex as { id?: unknown } | undefined)?.id === 'string'
   );
+}
+
+/** Lo que se guarda por plan: el del motor y el sello de su plantilla (`null` sin ella). */
+interface StoredJdPlan {
+  plan: NewIdPlan;
+  templateSeal: number | null;
+}
+
+function isStoredPlan(value: unknown): value is StoredJdPlan {
+  if (typeof value !== 'object' || value === null) return false;
+  const stored = value as Record<string, unknown>;
+  return isPlan(stored.plan) && (stored.templateSeal === null || typeof stored.templateSeal === 'number');
 }
 
 function isItem(value: unknown): value is CreatedItem {
@@ -231,6 +249,11 @@ async function simulate(
   now: number
 ): Promise<JdSimulation> {
   const port = turnPort(store, request.privacy);
+  // Una carpeta cualquiera como JDex haría de `hasHidden` un oráculo de sus notas ocultas: solo
+  // una `00.00` visible (si no, como sin JDex).
+  if (request.jdexFolderId !== undefined && !isJdexFolderCandidate(privacyInTurn(store, request.privacy), request.jdexFolderId)) {
+    throw jdRejected('jdex_not_found');
+  }
   const resolved = await resolveSettings(port, {
     ...(request.jdexFolderId !== undefined ? { jdexFolderId: request.jdexFolderId } : {}),
     ...(request.templatesFolderId !== undefined ? { templatesFolderId: request.templatesFolderId } : {})
@@ -253,12 +276,19 @@ async function simulate(
   const plan = planned.value;
   checkWrites(store, request.privacy, plan);
   const planId = randomUUID();
+  // La plantilla no es una precondición del motor: su sello (`local_seq`) se guarda con el plan
+  // y aplicar exige que siga visible y sin cambios.
+  const templateId = plan.template.noteId;
+  const stored: StoredJdPlan = {
+    plan,
+    templateSeal: templateId === undefined ? null : (privacyInTurn(store, request.privacy).sealOf(templateId) ?? null)
+  };
   store.jdPlans.insert({
     planId,
     libraryId: store.libraryId(),
     privacySha256: privacyFingerprint(request.privacy),
     createdAt: now,
-    plan
+    plan: stored
   });
   return {
     mode: 'simulate',
@@ -334,12 +364,19 @@ export async function runJdNewId(
             !record ||
             record.libraryId !== store.libraryId() ||
             record.privacySha256 !== privacyFingerprint(request.privacy) ||
-            !isPlan(record.plan)
+            !isStoredPlan(record.plan)
           ) {
             throw writeRejected('plan_not_found');
           }
           if (now - record.createdAt > JD_PLAN_APPLY_TTL_MS) throw writeRejected('plan_expired');
-          const plan = record.plan;
+          const { plan, templateSeal } = record.plan;
+          // La plantilla de la simulación: visible y con el mismo `local_seq`; si no, el cuerpo
+          // simulado ya no es el de la plantilla de ahora (o la delataría oculta).
+          const templateId = plan.template.noteId;
+          if (templateId !== undefined) {
+            const seal = filter.visibleMeta(templateId) ? filter.sealOf(templateId) : undefined;
+            if (seal === undefined || templateSeal === null || seal !== templateSeal) throw jdRejected('plan_stale');
+          }
           const port = turnPort(store, request.privacy, plan.resolved.jdex.id);
           created = port.created;
           const outcome = await applyPlan(hooks.port ? hooks.port(port) : port, plan);

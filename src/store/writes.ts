@@ -109,6 +109,9 @@ export interface NoteWriteStore {
   noteCreate(folderId?: string | null): Promise<NoteRow>;
   noteRead(id: string): Promise<NoteRow | null>;
   noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
+  /** Solo el título de unas notas (no lápidas), sin leer su cuerpo: lo que `hasHidden` de un
+   *  ID nuevo del JDex (D18, `./jd-port.ts`) mira de las ocultas. */
+  noteTitles(ids: readonly string[]): Map<string, string>;
   /** Carpetas (D9, 3 oct 2026): crear y renombrar, solo desde `NoteWriter` y con el plan
    *  de `./folders.ts` rehecho en el turno. Mover y borrar carpetas (`folderMove`,
    *  `folderTrash`) NO están, ni aquí ni en ningún sitio de hebra-mcp

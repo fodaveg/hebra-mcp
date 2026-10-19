@@ -9,6 +9,7 @@
  *     escribir;
  * (3) la categoría pasa a tener algo oculto entre simular y aplicar: `plan_stale`.
  */
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -191,6 +192,8 @@ describe('hebra_jd_new_id (D18)', () => {
   it('un plan vale una hora y solo con la configuración de privados con que se simuló', async () => {
     h = await startJd();
     const plan = await simulate();
+    // La base de los planes es solo del dueño (SPEC.md §6.1), desde que nace.
+    expect(statSync(join(h.test.dataDir, JD_PLANS_SQLITE_FILE)).mode & 0o777).toBe(0o600);
     // Los planes viven en su propio fichero, junto a la biblioteca.
     const plans = new DatabaseSync(join(h.test.dataDir, JD_PLANS_SQLITE_FILE));
     try {

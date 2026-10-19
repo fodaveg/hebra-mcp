@@ -301,7 +301,8 @@ mano la nota ni la carpeta, ni elijas tú el número. `hebra_jd_new_id`, en este
    plantillas que usará, `template` (`templates-folder` con su nota, o `builtin`: la de
    serie) y `writes`, con el cuerpo de la nota. `createFolder: false` si solo quiere la nota.
    Si el JDex o las plantillas no son las que se detectan, `jdexFolderId` o
-   `templatesFolderId` (ids de `hebra_list_folders`).
+   `templatesFolderId` (ids de `hebra_list_folders`); el JDex tiene que ser una carpeta `00.00`
+   (otra responde `jdex_not_found`).
 2. **Revisar**: enséñale el número, los nombres y de dónde sale la plantilla, y aplica solo
    si es lo que pidió.
 3. **Aplicar** (`mode: "apply"`, `planId` y un `operationId` nuevo) en la hora siguiente:

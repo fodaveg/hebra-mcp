@@ -40,7 +40,7 @@ import {
 import type { PrivacyConfig } from '../privacy/config';
 import { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
-import { JdLibraryPort } from './jd-port';
+import { isJdexFolderCandidate, JdLibraryPort } from './jd-port';
 import type { HebraLibraryPort } from './types';
 import type { NoteRow } from '../hebra';
 import { jdRejected, type JdFolderView } from './jd-new-id';
@@ -111,6 +111,10 @@ export async function runJdAudit(
     },
     null
   );
+  // Como al crear: solo una `00.00` visible vale como JDex indicado (`isJdexFolderCandidate`).
+  if (options.jdexFolderId !== undefined && !isJdexFolderCandidate(filter, options.jdexFolderId)) {
+    throw jdRejected('jdex_not_found');
+  }
   const resolved = await resolveSettings(jd, options);
   if (!resolved.ok) throw jdRejected(resolved.code);
   const state = await loadLibraryState(jd, resolved.value);

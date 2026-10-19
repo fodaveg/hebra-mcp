@@ -21,7 +21,7 @@
  * guardar uno que lo pasaría, cae el más antiguo. `unpair` borra el directorio de datos y,
  * con él, esto.
  */
-import { chmodSync } from 'node:fs';
+import { chmodSync, closeSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
@@ -69,9 +69,18 @@ export const JD_PLANS_SQLITE_FILE = 'jd-plans.sqlite';
  */
 export function openJdPlansDatabase(librarySqlitePath: string): DatabaseSync {
   const path = librarySqlitePath === ':memory:' ? ':memory:' : join(dirname(librarySqlitePath), JD_PLANS_SQLITE_FILE);
+  if (path !== ':memory:') {
+    // Nace en 0600 (`wx`: solo si no existe), sin un hueco entre crearlo y corregir el modo.
+    // Uno que ya existía de antes con otro modo se deja en 0600.
+    try {
+      closeSync(openSync(path, 'wx', 0o600));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      chmodSync(path, 0o600);
+    }
+  }
   const db = new DatabaseSync(path);
   try {
-    if (path !== ':memory:') chmodSync(path, 0o600);
     db.exec(TABLE_SQL);
   } catch (error) {
     db.close();
