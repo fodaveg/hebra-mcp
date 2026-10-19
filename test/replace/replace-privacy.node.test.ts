@@ -7,7 +7,7 @@
  * IDÉNTICOS en las dos (salvo el `planId`, que es aleatorio), y ninguna nota oculta se
  * toca. Una nota que pasa a oculta entre simular y aplicar no se toca ni se nombra.
  */
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PrivacyConfig } from '../../src/privacy/config';
@@ -18,6 +18,7 @@ import {
   type ReplaceRequest,
   type ReplaceResult
 } from '../../src/store/replace-batch';
+import { REPLACE_PLANS_SQLITE_FILE } from '../../src/store/replace-plans';
 import { NoteWriter } from '../../src/store/writes';
 import { privacyFingerprint } from '../../src/store/replace';
 import { buildGrepLibraryPair, GREP_BAIT, GREP_PRIVACY, type GrepLibraryPair } from '../fixtures/grep-library';
@@ -138,7 +139,8 @@ describe('hebra_replace_in_notes no deja ver lo privado', () => {
       expect(bodies(pair.withPrivate, pair.privateIds)).toEqual(privateBefore);
       // Ni en los planes guardados con esta configuración (el de control, sin privados, sí
       // las tiene: es de otra configuración y no vale con esta).
-      const db = new DatabaseSync(pair.withPrivate, { readOnly: true });
+      // Los planes viven en su propio fichero, junto a la biblioteca.
+      const db = new DatabaseSync(join(dirname(pair.withPrivate), REPLACE_PLANS_SQLITE_FILE), { readOnly: true });
       try {
         const planned = (
           db

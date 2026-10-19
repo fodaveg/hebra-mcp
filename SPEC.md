@@ -433,8 +433,14 @@ Detalle de las escrituras (D2):
     visible, sin bloquear y con el cuerpo simulado) y el plan se guarda entero en una
     transacción, con un `planId` aleatorio (UUID). La respuesta sale de lo guardado.
   - **Plan** (`hebra_mcp_replace_plans` y `hebra_mcp_replace_plan_notes`, tablas propias de
-    `library.sqlite`, como `hebra_mcp_operations`: no viajan por sync ni las toca
-    `libraryReset`): biblioteca, huella de la configuración de privados (SHA-256 de las
+    hebra-mcp en su propio fichero, `replace-plans.sqlite`, junto a `library.sqlite` (0600): no
+    viajan por sync, no las toca `libraryReset` y `unpair` las borra con el directorio de
+    datos. Van aparte porque la escritura de un plan en `library.sqlite` subía `data_version`,
+    parte de la época de privacidad de la puerta final (§6.3), y una simulación pedida desde un
+    lector descartaba su propia respuesta y devolvía un plan vacío. El escritor las pasa
+    desde `library.sqlite` al abrir si una versión anterior las dejó allí, con la vuelta atrás
+    de 7 días de lo ya aplicado; un lector solo las lee, en solo lectura, para saber si el plan
+    que nombra un `operation_id_reused` sigue visible): biblioteca, huella de la configuración de privados (SHA-256 de las
     rutas y etiquetas ordenadas), fecha, `operationId` de la aplicación, tamaño de sus
     resultados y estado (`simulated`, `applying`, `applied`, `undoing`, `undone`,
     `expired`); por nota, en orden, el id, los SHA-256 base y resultante, el cuerpo

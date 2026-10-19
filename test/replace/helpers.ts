@@ -13,6 +13,7 @@ import { localWriteContext } from '../../src/server/serve';
 import { runReplaceInNotes, type ReplaceInNotesInput } from '../../src/server/tools/replace-in-notes';
 import type { ReplaceOutcome } from '../../src/server/write-context';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
+import { REPLACE_PLANS_SQLITE_FILE } from '../../src/store/replace-plans';
 import { LIBRARY_SQLITE_FILE, LibraryInstance } from '../../src/sync/library-instance';
 
 export const OPEN: PrivacyConfig = { privateFolders: [], privateTags: [] };
@@ -59,9 +60,15 @@ export async function createFolder(instance: LibraryInstance, name: string, pare
   return (await instance.createFolderLocal({ parentId, name, privacy: OPEN })).result.id;
 }
 
+/** El fichero que guarda las tablas que nombra `sql`: las de los planes viven en
+ *  `replace-plans.sqlite`, junto a la biblioteca; el resto, en `library.sqlite`. */
+function sqliteFileFor(dataDir: string, sql: string): string {
+  return join(dataDir, sql.includes('hebra_mcp_replace_plan') ? REPLACE_PLANS_SQLITE_FILE : LIBRARY_SQLITE_FILE);
+}
+
 /** Lectura directa de la SQLite (en solo lectura), para mirar lo que de verdad quedó. */
 export function query<T>(dataDir: string, sql: string, ...params: Array<string | number>): T[] {
-  const db = new DatabaseSync(join(dataDir, LIBRARY_SQLITE_FILE), { readOnly: true });
+  const db = new DatabaseSync(sqliteFileFor(dataDir, sql), { readOnly: true });
   try {
     return db.prepare(sql).all(...params) as T[];
   } finally {
@@ -71,7 +78,7 @@ export function query<T>(dataDir: string, sql: string, ...params: Array<string |
 
 /** Escritura directa en la SQLite (con el escritor de este proceso abierto: WAL). */
 export function exec(dataDir: string, sql: string, ...params: Array<string | number>): void {
-  const db = new DatabaseSync(join(dataDir, LIBRARY_SQLITE_FILE));
+  const db = new DatabaseSync(sqliteFileFor(dataDir, sql));
   try {
     db.prepare(sql).run(...params);
   } finally {

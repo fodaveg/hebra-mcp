@@ -1,4 +1,7 @@
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { expect, it, vi } from 'vitest';
+import { REPLACE_PLANS_SQLITE_FILE } from '../../src/store/replace-plans';
 import { auditHarness, createNote, NOT_FOUND, saveBody, type AuditHarness } from './audit-harness';
 
 async function twoNotes(): Promise<AuditHarness<string[]>> {
@@ -60,9 +63,12 @@ it('una simulación repetida por la puerta no deja el plan del intento descartad
     expect(result.isError).toBe(false);
     expect(result.json.notes.map((note: { id: string }) => note.id)).toEqual([h.extra[1]]);
     expect([result.json.planNotes, result.json.planMatches]).toEqual([1, 1]);
-    const plans = await h.mutate(async (_engine, _library, db) =>
-      (db.prepare('SELECT plan_id FROM hebra_mcp_replace_plans').all() as Array<{ plan_id: string }>).map((row) => row.plan_id)
+    // Los planes viven en su propio fichero, junto a la biblioteca.
+    const plansDb = new DatabaseSync(join(h.dataDir, REPLACE_PLANS_SQLITE_FILE), { readOnly: true });
+    const plans = (plansDb.prepare('SELECT plan_id FROM hebra_mcp_replace_plans').all() as Array<{ plan_id: string }>).map(
+      (row) => row.plan_id
     );
+    plansDb.close();
     expect(plans).toEqual([result.json.planId]);
   } finally {
     spy.mockRestore();

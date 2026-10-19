@@ -1,12 +1,22 @@
 /**
  * Planes de `hebra_replace_in_notes` (D14, SPEC.md §5): lo simulado, lo aplicado y lo
- * necesario para deshacerlo, en DOS tablas propias de hebra-mcp en la MISMA SQLite de la
- * biblioteca, como el registro de operaciones (`./operations.ts`): Hebra no las conoce, no
- * viajan por sync y no las toca `libraryReset`. Las crea el escritor al abrir en
- * lectura-escritura; un lector nunca las lee ni las escribe (todo el lote pasa por el
- * escritor, también desde un lector por `writer.sock`). Viven en disco, no en memoria:
- * un plan sobrevive a un reinicio y a un relevo del escritor, que es lo que hace repetible
- * un `apply` cortado (AC5).
+ * necesario para deshacerlo, en DOS tablas propias de hebra-mcp en su PROPIO fichero,
+ * `replace-plans.sqlite`, junto a `library.sqlite` (`openReplacePlansDatabase`), como los
+ * planes de `hebra_jd_new_id` (`./jd-plans.ts`): la época de privacidad de la puerta final
+ * incluye `data_version` de la biblioteca, que sube con cualquier escritura de OTRA conexión,
+ * también la de un plan; en la misma base, una simulación pedida desde un lector cambiaba la
+ * época de su propia llamada y la puerta la descartaba, con un plan vacío como respuesta.
+ * Hebra no las conoce, no viajan por sync y no las toca `libraryReset`. Las crea el escritor
+ * al abrir en lectura-escritura; un lector no las escribe (todo el lote pasa por el escritor,
+ * también desde un lector por `writer.sock`) y solo las LEE, en solo lectura y sin tocar la
+ * biblioteca, para comprobar que el plan que nombra un `operation_id_reused` sigue visible
+ * (`readReplacePlanTargets`). Viven en disco, no en memoria: un plan sobrevive a un reinicio
+ * y a un relevo del escritor, que es lo que hace repetible un `apply` cortado (AC5).
+ *
+ * Una biblioteca de una versión anterior guardó estas tablas en `library.sqlite`: al abrir,
+ * el escritor las copia al fichero nuevo y las borra de la biblioteca
+ * (`migrateReplacePlansFromLibrary`), con lo que un plan aplicado conserva su vuelta atrás
+ * de 7 días.
  *
  * - `hebra_mcp_replace_plans`: una fila por plan. A qué biblioteca y a qué configuración de
  *   privados pertenece (`privacyFingerprint`), cuándo se simuló, el `operationId` de la
@@ -29,9 +39,11 @@
  * (`PLAN_TOMBSTONE_KEEP_MS`). Tope de lo guardado sin aplicar (`STORED_PLANS_MAX`,
  * `STORED_PLAN_CHARS_MAX`): al guardar uno nuevo que lo pasaría, caen los más antiguos SIN
  * aplicar, nunca uno aplicado o a medias (hacen falta para deshacer). `unpair` borra el
- * directorio de datos y, con él, todo esto.
+ * directorio de datos y, con él, el fichero de los planes.
  */
-import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import { chmodSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { DatabaseSync, type StatementSync } from 'node:sqlite';
 
 /** Un plan simulado se puede aplicar durante una hora (y un `apply` cortado se puede
  *  reanudar durante una hora desde que empezó). */
@@ -211,6 +223,114 @@ export function ensureReplacePlanTables(db: DatabaseSync): void {
       db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
     }
   }
+}
+
+/** El fichero de los planes, junto al de la biblioteca. */
+export const REPLACE_PLANS_SQLITE_FILE = 'replace-plans.sqlite';
+
+function replacePlansPathOf(librarySqlitePath: string): string | null {
+  return librarySqlitePath === ':memory:' ? null : join(dirname(librarySqlitePath), REPLACE_PLANS_SQLITE_FILE);
+}
+
+/**
+ * Abre (y crea si falta) la base de los planes junto a `librarySqlitePath`, en 0600 como la
+ * biblioteca (SPEC.md §6.1), con sus tablas. Con una biblioteca `:memory:` (tests), en
+ * memoria. Solo el escritor.
+ */
+export function openReplacePlansDatabase(librarySqlitePath: string): DatabaseSync {
+  const path = replacePlansPathOf(librarySqlitePath) ?? ':memory:';
+  const db = new DatabaseSync(path);
+  try {
+    if (path !== ':memory:') chmodSync(path, 0o600);
+    ensureReplacePlanTables(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  return db;
+}
+
+const PLAN_COLUMNS = [
+  'plan_id', 'library_id', 'privacy_sha256', 'created_at', 'apply_operation_id', 'applied_at', 'state', 'matches',
+  'result_chars'
+];
+const PLAN_NOTE_COLUMNS = [
+  'plan_id', 'position', 'note_id', 'base_sha256', 'result_sha256', 'result_body', 'matches', 'preview', 'base_body',
+  'outcome', 'copy_id', 'proof', 'undo_outcome', 'undo_copy', 'undo_proof', 'attempt_at', 'copy_owned'
+];
+
+/**
+ * Pasa a `plansDb` los planes que una versión anterior guardó en `library.sqlite` y quita
+ * esas tablas de la biblioteca (que así no mueve más su `data_version` por ellos). Solo el
+ * escritor, al abrir, y con una biblioteca en fichero. Sin tablas viejas no hace nada. Un
+ * plan que ya estuviera en el fichero nuevo manda (`INSERT OR IGNORE`). Devuelve cuántos
+ * planes pasó.
+ */
+export function migrateReplacePlansFromLibrary(libraryDb: DatabaseSync, plansDb: DatabaseSync, librarySqlitePath: string): number {
+  const has = (name: string) =>
+    libraryDb.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+  if (!has('hebra_mcp_replace_plans') && !has('hebra_mcp_replace_plan_notes')) return 0;
+  if (librarySqlitePath === ':memory:') return 0;
+  let moved = 0;
+  if (has('hebra_mcp_replace_plans') && has('hebra_mcp_replace_plan_notes')) {
+    // Las columnas que se añadieron después de la primera versión, si la tabla vieja no las tiene.
+    for (const [table, column, definition] of ADDED_COLUMNS) {
+      const columns = libraryDb.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+      if (!columns.some((entry) => entry.name === column)) {
+        libraryDb.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+      }
+    }
+    plansDb.prepare('ATTACH DATABASE ? AS old').run(librarySqlitePath);
+    try {
+      plansDb.exec('BEGIN IMMEDIATE');
+      try {
+        const plans = PLAN_COLUMNS.join(', ');
+        const notes = PLAN_NOTE_COLUMNS.join(', ');
+        plansDb.exec(`INSERT OR IGNORE INTO main.hebra_mcp_replace_plans (${plans})
+           SELECT ${plans} FROM old.hebra_mcp_replace_plans`);
+        plansDb.exec(`INSERT OR IGNORE INTO main.hebra_mcp_replace_plan_notes (${notes})
+           SELECT ${notes} FROM old.hebra_mcp_replace_plan_notes`);
+        moved = Number((plansDb.prepare('SELECT COUNT(*) AS n FROM old.hebra_mcp_replace_plans').get() as { n: number | bigint }).n);
+        plansDb.exec('COMMIT');
+      } catch (error) {
+        plansDb.exec('ROLLBACK');
+        throw error;
+      }
+    } finally {
+      plansDb.exec('DETACH DATABASE old');
+    }
+  }
+  libraryDb.exec('DROP TABLE IF EXISTS hebra_mcp_replace_plan_notes; DROP TABLE IF EXISTS hebra_mcp_replace_plans');
+  return moved;
+}
+
+/**
+ * Lo que un lector necesita de los planes para la puerta final (`operation_id_reused` que
+ * nombra un plan): por cada id que sea un plan de esta biblioteca y no esté caducado, la
+ * huella de privados y las notas que toca. Abre el fichero de los planes EN SOLO LECTURA y
+ * lo cierra; sin fichero, no hay planes. No escribe nada ni toca la biblioteca.
+ */
+export function readReplacePlanTargets(
+  librarySqlitePath: string,
+  ids: readonly string[],
+  libraryId: string
+): Map<string, { privacySha256: string; noteIds: string[] }> {
+  const plans = new Map<string, { privacySha256: string; noteIds: string[] }>();
+  const path = replacePlansPathOf(librarySqlitePath);
+  if (!path || !existsSync(path)) return plans;
+  const db = new DatabaseSync(path, { readOnly: true, timeout: 2000 });
+  try {
+    const store = sqliteReplacePlanStore(db);
+    for (const id of ids) {
+      const plan = store.plan(id);
+      if (plan && plan.libraryId === libraryId && plan.state !== 'expired') {
+        plans.set(id, { privacySha256: plan.privacySha256, noteIds: store.notes(id).map((note) => note.noteId) });
+      }
+    }
+  } finally {
+    db.close();
+  }
+  return plans;
 }
 
 const PLAN_STATES: ReadonlySet<string> = new Set<PlanState>([

@@ -70,7 +70,13 @@ import {
 import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
-import { ensureReplacePlanTables, sqliteReplacePlanStore, type ReplacePlanStore } from './replace-plans';
+import {
+  migrateReplacePlansFromLibrary,
+  openReplacePlansDatabase,
+  readReplacePlanTargets,
+  sqliteReplacePlanStore,
+  type ReplacePlanStore
+} from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { openJdPlansDatabase, sqliteJdPlanStore, type JdPlanStore } from './jd-plans';
 import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
@@ -176,8 +182,6 @@ export async function openNodeLibraryPort(
   // Registro de idempotencia de `hebra_edit_note` (`./operations.ts`): tabla propia de
   // hebra-mcp; solo la crea (y la escribe) el escritor.
   if (mode === 'readWrite') ensureOperationsTable(db);
-  // Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): igual, solo el escritor.
-  if (mode === 'readWrite') ensureReplacePlanTables(db);
   // Contenido anterior de los ficheros sueltos reemplazados (D15, `./file-previous.ts`).
   if (mode === 'readWrite') ensureFilePreviousTable(db);
   // Memoria de las carpetas privadas (A3 del audit de privacidad, `./private-folders.ts`).
@@ -186,8 +190,23 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensurePrivacyEpochIndexes(db);
   // Planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor, y en su propio
   // fichero, para no mover la época de privacidad de un lector al simular.
-  const jdPlansDb = mode === 'readWrite' ? openJdPlansDatabase(options.sqlitePath) : null;
-  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb);
+  let jdPlansDb: DatabaseSync | null = null;
+  // Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): igual, solo el escritor y
+  // en su propio fichero. Los que una versión anterior dejó en `library.sqlite` pasan aquí.
+  let replacePlansDb: DatabaseSync | null = null;
+  if (mode === 'readWrite') {
+    try {
+      jdPlansDb = openJdPlansDatabase(options.sqlitePath);
+      replacePlansDb = openReplacePlansDatabase(options.sqlitePath);
+      migrateReplacePlansFromLibrary(db, replacePlansDb, options.sqlitePath);
+    } catch (error) {
+      jdPlansDb?.close();
+      replacePlansDb?.close();
+      db.close();
+      throw error;
+    }
+  }
+  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath);
 }
 
 /**
@@ -243,7 +262,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     readonly mode: NodeSqliteMode = 'readWrite',
     private readonly conn?: SqliteConn,
     /** La base de los planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor. */
-    private readonly jdPlansDb: DatabaseSync | null = null
+    private readonly jdPlansDb: DatabaseSync | null = null,
+    /** La base de los planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo el escritor. */
+    private readonly replacePlansDb: DatabaseSync | null = null,
+    /** Ruta de `library.sqlite` (o `:memory:`): de ella cuelga el fichero de los planes que lee un lector. */
+    private readonly librarySqlitePath: string = ':memory:'
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -403,14 +426,20 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           check: request.check ? request.check() : true
         };
         if (request.operationTargets?.length) {
+          // Los planes viven en su propio fichero (`./replace-plans.ts`): el escritor usa su
+          // conexión y un lector abre el fichero en solo lectura, sin tocar la biblioteca.
           const plans = new Map<string, { privacySha256: string; noteIds: string[] }>();
-          if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'hebra_mcp_replace_plans'").get()) {
-            const store = this.replacePlanStore ??= sqliteReplacePlanStore(this.db);
+          if (this.replacePlansDb) {
+            const store = this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb);
             for (const id of request.operationTargets) {
               const plan = store.plan(id);
               if (plan && plan.libraryId === this.libraryIdSync() && plan.state !== 'expired') {
                 plans.set(id, { privacySha256: plan.privacySha256, noteIds: store.notes(id).map((note) => note.noteId) });
               }
+            }
+          } else {
+            for (const [id, plan] of readReplacePlanTargets(this.librarySqlitePath, request.operationTargets, this.libraryIdSync())) {
+              plans.set(id, plan);
             }
           }
           snapshot.operationPlans = plans;
@@ -772,7 +801,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db)),
-        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.db)),
+        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb ?? this.db)),
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
         jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
       })
@@ -858,6 +887,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     this.replacePlanStore = null;
     this.jdPlanStore = null;
     this.jdPlansDb?.close();
+    this.replacePlansDb?.close();
     this.db.close();
   }
 }
