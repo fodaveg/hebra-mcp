@@ -12,7 +12,8 @@
  *   `replaceInNotes` en todos sus modos (los planes viven en el escritor), y desde D15,
  *   `replaceFileText` y `fetchFile` (los bytes de un fichero suelto), y desde D17 (12 oct
  *   2026), `looseFileWrite` (crear, renombrar, mover o duplicar uno), y desde D18 (19 oct
- *   2026), `jdNewId` (simular y aplicar un ID nuevo del JDex) al escritor. Todas
+ *   2026), `jdNewId` (simular y aplicar un ID nuevo del JDex), y desde D19, `jdMove`
+ *   (mover a un ID) al escritor. Todas
  *   menos la primera vuelven ya con la ronda esperada allí (`appendAndAwaitRound`,
  *   `WriteContext.editNote`/`organize`/`restoreVersion`), así que `awaitRound` y
  *   `onConflictCopy` de este lado no tienen nada que esperar (un lector no tiene runner).
@@ -94,6 +95,7 @@ import type {
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
 import type { JdNewIdRequest } from '../store/jd-new-id';
+import type { JdMoveItem, JdMoveRequest } from '../store/jd-move';
 import type { CreatedItem, PlanWrite } from '../jd';
 import type { InstanceStatus, WriterRole } from '../sync/library-instance';
 import {
@@ -103,6 +105,7 @@ import {
   type EditNoteOutcome,
   type FileOutcome,
   type FolderOutcome,
+  type JdMoveOutcome,
   type JdNewIdOutcome,
   type LooseFileOutcome,
   type OrganizeOutcome,
@@ -141,6 +144,8 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   looseFileWrite: AWAIT_ROUND_TIMEOUT_MS + 60_000,
   // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
   jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
+  // Mover a un ID (D19): leer la biblioteca, crear carpetas, mover y la ronda.
+  jdMove: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   // Ficheros de trabajo (SPEC.md §13): sin ronda dentro (la espera `syncRound`, una vez).
   replaceBody: 15_000,
   trashConflictCopies: 15_000,
@@ -420,6 +425,87 @@ function asJdOutcome(value: unknown): JdNewIdOutcome {
     };
   }
   throw new Error('writer_protocol');
+}
+
+const JD_MOVE_KINDS = ['note', 'file', 'folder'] as const;
+
+/** Una pieza de un informe de mover a un ID (D19). */
+function asJdMoveItem(value: unknown): JdMoveItem {
+  const record = asRecordValue(value);
+  return {
+    kind: oneOfValues(record.kind, JD_MOVE_KINDS),
+    id: asString(record.id),
+    fromName: asString(record.fromName),
+    toName: asString(record.toName)
+  };
+}
+
+function asJdMovePlace(value: unknown): { folderId: string | null; folderPath: string } {
+  const record = asRecordValue(value);
+  return { folderId: asNullableString(record.folderId), folderPath: asString(record.folderPath) };
+}
+
+/** Valida lo que devuelve el escritor para `hebra_jd_move` (D19), campo a campo. */
+function asJdMoveOutcome(value: unknown): JdMoveOutcome {
+  const record = asRecordValue(value);
+  const replayed = record.replayed === true ? { replayed: true as const } : {};
+  switch (record.mode) {
+    case 'discard':
+      return { mode: 'discard' };
+    case 'simulate': {
+      const jdex = asJdFolder(record.jdex);
+      const destination = asRecordValue(record.destination);
+      const move = asRecordValue(record.move);
+      const to = asRecordValue(move.to);
+      return {
+        mode: 'simulate',
+        planId: asString(record.planId),
+        expiresAt: asString(record.expiresAt),
+        id: asString(record.id),
+        system: asString(record.system),
+        jdex,
+        destination: { folderName: asString(destination.folderName), subfolder: asNullableString(destination.subfolder) },
+        move: {
+          kind: oneOfValues(move.kind, JD_MOVE_KINDS),
+          id: asString(move.id),
+          name: asString(move.name),
+          from: asJdMovePlace(move.from),
+          to: { ...asJdMovePlace(to), name: asString(to.name) }
+        },
+        createFolders: asArray(record.createFolders).map((entry) => {
+          const folder = asRecordValue(entry);
+          return { name: asString(folder.name), folderPath: asString(folder.folderPath) };
+        })
+      };
+    }
+    case 'apply':
+      return {
+        mode: 'apply',
+        planId: asString(record.planId),
+        id: asString(record.id),
+        created: asArray(record.created).map(asJdItem),
+        existing: asArray(record.existing).map(asJdItem),
+        moved: asArray(record.moved).map(asJdMoveItem),
+        alreadyDone: asArray(record.alreadyDone).map(asJdMoveItem),
+        ...replayed,
+        ...syncFieldsFrom(record)
+      };
+    case 'undo':
+      return {
+        mode: 'undo',
+        planId: asString(record.planId),
+        restored: asArray(record.restored).map(asJdMoveItem),
+        alreadyRestored: asArray(record.alreadyRestored).map(asJdMoveItem),
+        skipped: asArray(record.skipped).map((entry) => ({
+          ...asJdMoveItem(entry),
+          reason: oneOfValues(asRecordValue(entry).reason, ['not_where_left', 'destination_taken', 'refused'] as const)
+        })),
+        ...replayed,
+        ...syncFieldsFrom(record)
+      };
+    default:
+      throw new Error('writer_protocol');
+  }
 }
 
 /** Valida el `AddAttachmentOutcome` que devuelve el escritor (D9): el de una edición más
@@ -974,6 +1060,14 @@ export function buildRoutedWriteContext(
             routed('jdNewId', { ...request }, asJdOutcome, () => local.jdNewId!(request))
         }
       : {}),
+    // Mover a un ID (D19): como `jdNewId`. Si se corta tras enviar `apply` o `undo`, el agente
+    // reintenta con el mismo `operationId`.
+    ...(local.jdMove
+      ? {
+          jdMove: (request: JdMoveRequest) =>
+            routed('jdMove', { ...request }, asJdMoveOutcome, () => local.jdMove!(request))
+        }
+      : {}),
     onConflictCopy: (listener) => local.onConflictCopy(listener),
     // Un lector no tiene ronda (ni copias que anotar): lo anota el escritor. Tras un
     // relevo, esta instancia ya es el escritor y lo anota en local.
@@ -1027,7 +1121,9 @@ export function writerSocketHandlers(
       ? { looseFileWrite: (input: LooseFileWriteInput) => local.looseFileWrite!(input) }
       : {}),
     // D18: un ID nuevo del JDex, con la privacidad del lector y, al aplicar, la ronda aquí.
-    ...(local.jdNewId ? { jdNewId: (request: JdNewIdRequest) => local.jdNewId!(request) } : {})
+    ...(local.jdNewId ? { jdNewId: (request: JdNewIdRequest) => local.jdNewId!(request) } : {}),
+    // D19: mover a un ID, con la privacidad del lector y, al aplicar o deshacer, la ronda aquí.
+    ...(local.jdMove ? { jdMove: (request: JdMoveRequest) => local.jdMove!(request) } : {})
   };
   return {
     ...workdir,

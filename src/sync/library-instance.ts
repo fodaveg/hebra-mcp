@@ -73,6 +73,7 @@ import {
   type JdNewIdResult,
   type JdTestHooks
 } from '../store/jd-new-id';
+import { runJdMove, type JdMoveRequest, type JdMoveResult, type JdMoveTestHooks } from '../store/jd-move';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
 import {
   ReplaceBatch,
@@ -600,6 +601,13 @@ export class LibraryInstance implements NoteWriteTarget {
    *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
   jdNewIdLocal(request: JdNewIdRequest, hooks?: JdTestHooks): Promise<LocalWrite<JdNewIdResult>> {
     return runJdNewId(this, request, () => void this.runner?.requestRound(), hooks);
+  }
+
+  /** `hebra_jd_move` (D19, `../store/jd-move.ts`): simular, aplicar, deshacer o descartar un
+   *  plan de mover a un ID en este escritor. Pide la ronda de después sin esperarla si cambió
+   *  algo. `hooks`, solo en tests. Rechaza con `busy_other_instance` en un lector. */
+  jdMoveLocal(request: JdMoveRequest, hooks?: JdMoveTestHooks): Promise<LocalWrite<JdMoveResult>> {
+    return runJdMove(this, request, () => void this.runner?.requestRound(), hooks);
   }
 
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y

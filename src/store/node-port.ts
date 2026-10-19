@@ -765,6 +765,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
+        // D19: mover a un ID, con las guardas del motor. Solo para `./jd-move-port.ts`.
+        noteMoveIfUnchanged: (id, folderId, expected) => this.engine.noteMoveIfUnchanged(id, folderId, expected),
+        folderMoveIfUnchanged: (id, parentId, expected) => this.engine.folderMoveIfUnchanged(id, parentId, expected),
+        folderRenameIfUnchanged: (id, name, expected) => this.engine.folderRenameIfUnchanged(id, name, expected),
         blobPut: (bytes, options) => this.engine.blobPut(bytes, options),
         // D10: mandar un fichero suelto a la papelera y sacarlo, igual: solo aquí. Purgar
         // (`filePurge`) no está en ningún sitio.

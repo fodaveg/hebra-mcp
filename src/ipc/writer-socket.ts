@@ -75,6 +75,10 @@
  *   templatesFolderId?}` (guarda el plan en la base del escritor), `apply` `{planId,
  *   operationId}` (ronda ya esperada) o `discard` `{planId}`. El plan nunca viaja del lector
  *   al escritor: solo su id. Un escritor sin ella responde `invalid_request`.
+ * - `jdMove` `{mode, …, privacy}` (D19, 19 oct 2026) → el resultado de `hebra_jd_move`:
+ *   `simulate` `{source: {kind, id}, toId, subfolder?, as?, systemId?, jdexFolderId?}`,
+ *   `apply` y `undo` `{planId, operationId}` (ronda ya esperada) o `discard` `{planId}`. Como
+ *   `jdNewId`: el plan no viaja, y un escritor sin ella responde `invalid_request`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -123,6 +127,7 @@ import type {
   EditNoteOutcome,
   FileOutcome,
   FolderOutcome,
+  JdMoveOutcome,
   JdNewIdOutcome,
   LooseFileOutcome,
   OrganizeOutcome,
@@ -131,6 +136,7 @@ import type {
   RoundWait
 } from '../server/write-context';
 import { JD_PLAN_ID_MAX_LENGTH, JD_TITLE_MAX_LENGTH, type JdNewIdRequest } from '../store/jd-new-id';
+import { JD_MOVE_NAME_MAX_LENGTH, type JdMoveRequest } from '../store/jd-move';
 import { GREP_PATTERN_MAX_CHARS } from '../store/grep';
 import { REPLACE_SCOPE_MAX_IDS, REPLACEMENT_MAX_CHARS } from '../store/replace';
 import { PLAN_ID_MAX_LENGTH, type ReplaceRequest, type ReplaceScope } from '../store/replace-batch';
@@ -234,6 +240,7 @@ export type WriterSocketOp =
   | 'replaceFileText'
   | 'looseFileWrite'
   | 'jdNewId'
+  | 'jdMove'
   | 'replaceBody'
   | 'trashConflictCopies'
   | 'syncRound'
@@ -244,6 +251,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'replaceFileText',
   'looseFileWrite',
   'jdNewId',
+  'jdMove',
   'createNote',
   'appendToNote',
   'editNote',
@@ -323,6 +331,9 @@ export interface WriterSocketHandlers {
   /** Un ID nuevo del JDex (D18, 19 oct 2026): simular, aplicar (con la ronda ya esperada) o
    *  descartar un plan. Opcional: un escritor sin él responde `invalid_request`. */
   jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
+  /** Mover a un ID (D19, 19 oct 2026): simular, aplicar o deshacer (con la ronda ya esperada)
+   *  o descartar un plan. Opcional: un escritor sin él responde `invalid_request`. */
+  jdMove?(request: JdMoveRequest): Promise<JdMoveOutcome>;
   /**
    * Ficheros de trabajo (SPEC.md §13, 10 oct 2026): reescribir el cuerpo entero con la
    * base comprobada, mandar a la papelera las copias de conflicto de un lote que se
@@ -689,6 +700,49 @@ function jdNewIdRequestOf(params: Record<string, unknown>): JdNewIdRequest {
     case 'apply':
       return {
         mode: 'apply',
+        planId: boundedText(params.planId, JD_PLAN_ID_MAX_LENGTH),
+        operationId: operationIdOf(params.operationId),
+        privacy
+      };
+    case 'discard':
+      return { mode: 'discard', planId: boundedText(params.planId, JD_PLAN_ID_MAX_LENGTH), privacy };
+    default:
+      throw new InvalidRequest();
+  }
+}
+
+/**
+ * `jdMove` (D19): `simulate` `{source: {kind, id}, toId, subfolder?, as?, systemId?,
+ * jdexFolderId?}`, `apply` y `undo` `{planId, operationId}` o `discard` `{planId}`. El plan
+ * nunca viaja: solo su id. El escritor vuelve a comprobar todo con el motor.
+ */
+function jdMoveRequestOf(params: Record<string, unknown>): JdMoveRequest {
+  const privacy = privacyOf(params.privacy);
+  const text = (value: unknown, max: number): string => {
+    if (typeof value !== 'string' || value.length > max) throw new InvalidRequest();
+    return value;
+  };
+  switch (params.mode) {
+    case 'simulate': {
+      const { source, toId, subfolder, as, systemId, jdexFolderId } = params;
+      if (!isPlainObject(source) || !isId(source.id)) throw new InvalidRequest();
+      if (source.kind !== 'note' && source.kind !== 'file' && source.kind !== 'folder') throw new InvalidRequest();
+      if (jdexFolderId !== undefined && !isId(jdexFolderId)) throw new InvalidRequest();
+      return {
+        mode: 'simulate',
+        source: { kind: source.kind, id: source.id },
+        toId: text(toId, 32),
+        ...(subfolder !== undefined ? { subfolder: text(subfolder, JD_MOVE_NAME_MAX_LENGTH) } : {}),
+        ...(as !== undefined ? { as: text(as, JD_MOVE_NAME_MAX_LENGTH) } : {}),
+        ...(systemId !== undefined ? { systemId: text(systemId, 16) } : {}),
+        ...(typeof jdexFolderId === 'string' ? { jdexFolderId } : {}),
+        privacy
+      };
+    }
+    case 'apply':
+    case 'undo':
+      return {
+        mode: params.mode,
         planId: boundedText(params.planId, JD_PLAN_ID_MAX_LENGTH),
         operationId: operationIdOf(params.operationId),
         privacy
@@ -1117,6 +1171,12 @@ export class WriterSocketServer {
           const input = jdNewIdRequestOf(envelope.params);
           if (!handlers.jdNewId) throw new InvalidRequest();
           result = await handlers.jdNewId(input);
+          break;
+        }
+        case 'jdMove': {
+          const input = jdMoveRequestOf(envelope.params);
+          if (!handlers.jdMove) throw new InvalidRequest();
+          result = await handlers.jdMove(input);
           break;
         }
         case 'replaceBody': {

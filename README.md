@@ -5,14 +5,14 @@ por apartados, editar por sustituciones puntuales, mover a carpetas existentes, 
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
 añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
 la papelera o sacarlos, leer su contenido, reemplazar el texto de uno, crear uno de texto
-y renombrarlos, moverlos o duplicarlos, crear un ID nuevo del JDex y auditar el sistema
-Johnny.Decimal; nunca purgar ni vaciar la papelera, mover ni
-borrar carpetas, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
+y renombrarlos, moverlos o duplicarlos, crear un ID nuevo del JDex, auditar el sistema
+Johnny.Decimal y archivar notas, ficheros o carpetas dentro de un ID; nunca purgar ni vaciar
+la papelera, borrar carpetas ni moverlas fuera de un ID, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 38 herramientas
+Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 39 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -77,7 +77,7 @@ Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 38 herram
   `hebra_add_attachment` (D9: los mismos tipos y tope, en base64; queda como
   `![[sha256:H|nombre]]` al final de la nota, o de un apartado con `heading`, y sube con el sync). Sin cambiar ni borrar.
 - Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
-  `folder_unavailable` para todo lo privado. Sin mover ni borrar.
+  `folder_unavailable` para todo lo privado. Sin borrar; moverlas, solo con `hebra_jd_move`.
 - Johnny.Decimal (D18, 19 oct 2026), con el motor de
   [jdex-manager](https://github.com/fodaveg/jdex-manager) (submódulo `vendor/jdex-manager`):
   `hebra_jd_new_id` crea un ID nuevo en una categoría que ya existe (la nota del JDex con
@@ -86,8 +86,14 @@ Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 38 herram
   `mode: "apply"` con ese `planId` y un `operationId` lo escribe; reintentar con el mismo
   `operationId` completa lo que falte sin duplicar. `hebra_jd_audit` audita el sistema en
   solo lectura (IDs repetidos, carpetas sin nota, nombres que no casan…). Una categoría con
-  algo privado responde `category_has_hidden`, sin decir qué. Sin categorías, áreas, hijos
-  «+» ni mover.
+  algo privado responde `category_has_hidden`, sin decir qué. Sin categorías, áreas ni hijos
+  «+».
+- Mover a un ID (D19, 19 oct 2026): `hebra_jd_move` archiva una nota, un fichero suelto o
+  una carpeta entera dentro de la carpeta de un ID del JDex (o de una subcarpeta suya), y
+  crea la carpeta del ID y la subcarpeta si faltan; con `as`, otro nombre. Es la única forma
+  de mover carpetas desde el MCP. Tres pasos: `simulate` (sin escribir), `apply` (con
+  `operationId`) y `undo` (7 días). Una carpeta con algo privado dentro responde
+  `folder_has_hidden`, y un destino que no se puede usar, `destination_unavailable`.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).

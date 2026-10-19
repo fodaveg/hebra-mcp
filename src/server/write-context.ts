@@ -48,6 +48,7 @@ import type {
 } from '../store/file-writes';
 import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
 import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
+import type { JdMoveApplyReport, JdMoveRequest, JdMoveResult, JdMoveUndoReport } from '../store/jd-move';
 import type { SyncConflictCopy } from '../sync/runner';
 
 export interface WriteContextSources {
@@ -91,6 +92,9 @@ export interface WriteContextSources {
    *  descartar un plan, sin esperar ronda. Opcional: sin él, la herramienta responde
    *  `invalid_input`. */
   jdNewId?(request: JdNewIdRequest): Promise<LocalWrite<JdNewIdResult>>;
+  /** `hebra_jd_move` en local (D19, `LibraryInstance.jdMoveLocal`): simular, aplicar,
+   *  deshacer o descartar, sin esperar ronda. Opcional, como `jdNewId`. */
+  jdMove?(request: JdMoveRequest): Promise<LocalWrite<JdMoveResult>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -196,6 +200,13 @@ export type JdNewIdOutcome =
   | Exclude<JdNewIdResult, JdApplyReport>
   | (JdApplyReport & SyncFields);
 
+/** `hebra_jd_move` (D19): la simulación tal cual; aplicar y deshacer, con el estado de sync
+ *  de lo que nombran (`uploaded` solo si nada sigue sucio). */
+export type JdMoveOutcome =
+  | Exclude<JdMoveResult, JdMoveApplyReport | JdMoveUndoReport>
+  | (JdMoveApplyReport & SyncFields)
+  | (JdMoveUndoReport & SyncFields);
+
 export interface WriteContext {
   createNote(input: CreateNoteInput): Promise<CreateNoteResult>;
   appendToNote(input: AppendToNoteInput): Promise<AppendToNoteResult>;
@@ -247,6 +258,10 @@ export interface WriteContext {
    *  ronda si creó algo y devuelve el estado de sync. En un lector, todo ocurre en el
    *  escritor (`./forward.ts`). Opcional. */
   jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
+  /** Mover a un ID (D19): simular o descartar, tal cual; aplicar y deshacer escriben, esperan
+   *  la ronda si cambiaron algo y devuelven el estado de sync. En un lector, todo ocurre en el
+   *  escritor (`./forward.ts`). Opcional. */
+  jdMove?(request: JdMoveRequest): Promise<JdMoveOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -578,8 +593,41 @@ export function buildWriteContext(
 
   const jd = sources.jdNewId?.bind(sources);
 
+  /** `hebra_jd_move` (D19): como `jdWrite`, con lo que nombra el informe (las piezas, por su
+   *  tipo, y las carpetas creadas). */
+  async function jdMoveWrite(
+    run: NonNullable<WriteContextSources['jdMove']>,
+    request: JdMoveRequest
+  ): Promise<JdMoveOutcome> {
+    const { result, wrote } = await run(request);
+    if (result.mode !== 'apply' && result.mode !== 'undo') return result;
+    const items: Array<{ kind: 'note' | 'file' | 'folder'; id: string }> =
+      result.mode === 'apply'
+        ? [...result.moved, ...result.alreadyDone, ...result.created]
+        : [...result.restored, ...result.alreadyRestored];
+    const anyDirty = async (): Promise<boolean | null> => {
+      let unknown = false;
+      for (const item of items) {
+        const dirty =
+          item.kind === 'note' ? await dirtyOf(item.id) : item.kind === 'file' ? await fileDirtyOf(item.id) : await folderDirtyOf(item.id);
+        if (dirty === true) return true;
+        if (dirty === null) unknown = true;
+      }
+      return unknown ? null : false;
+    };
+    if (!wrote) {
+      if (!sources.isLinked()) return { ...result, sync: 'not_linked' };
+      return { ...result, sync: (await anyDirty()) === false ? 'uploaded' : 'pending' };
+    }
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...result, ...syncFieldsOf(wait, await anyDirty()) };
+  }
+
+  const jdMove = sources.jdMove?.bind(sources);
+
   return {
     ...(jd ? { jdNewId: (request: JdNewIdRequest) => jdWrite(jd, request) } : {}),
+    ...(jdMove ? { jdMove: (request: JdMoveRequest) => jdMoveWrite(jdMove, request) } : {}),
     ...(looseFile
       ? { looseFileWrite: (input: LooseFileWriteInput) => looseFileWrite(looseFile, input) }
       : {}),

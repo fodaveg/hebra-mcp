@@ -315,6 +315,7 @@ describe('reenvío lector→escritor (D18)', () => {
     // El sistema JD, escrito por otra conexión, como la app.
     const { db, conn } = openNodeSqliteConn(join(dataDir, LIBRARY_SQLITE_FILE));
     let category21 = '';
+    let loose = '';
     try {
       const engine = await SqliteLibraryEngine.open(conn, 'otro-dispositivo', { journalMode: 'WAL' });
       const area0 = await engine.folderCreate(null, '00-09 Sistema');
@@ -327,6 +328,7 @@ describe('reenvío lector→escritor (D18)', () => {
       await engine.folderCreate(area2.id, '22 Otra');
       const privado = await engine.folderCreate(null, 'Privado');
       await engine.folderCreate(privado.id, '22.40 Oculta');
+      loose = (await createNote(engine, null, '# Suelta\n')).id;
     } finally {
       db.close();
     }
@@ -381,6 +383,14 @@ describe('reenvío lector→escritor (D18)', () => {
     const audit = await call('hebra_jd_audit', {});
     expect(audit.isError, JSON.stringify(audit.value)).toBe(false);
     expect(JSON.stringify(audit)).not.toContain('22.40');
+    // Mover a un ID (D19) también va al escritor: simular, aplicar y deshacer.
+    const move = await call('hebra_jd_move', { mode: 'simulate', kind: 'note', id: loose, toId: '21.11' });
+    expect(move.value).toMatchObject({ mode: 'simulate', move: { id: loose, to: { name: 'Suelta' } } });
+    const moved = await call('hebra_jd_move', { mode: 'apply', planId: move.value.planId, operationId: 'op-mv' });
+    expect(moved.value).toMatchObject({ mode: 'apply', moved: [{ kind: 'note', id: loose }] });
+    const undone = await call('hebra_jd_move', { mode: 'undo', planId: move.value.planId, operationId: 'op-mv-undo' });
+    expect(undone.value).toMatchObject({ mode: 'undo', restored: [{ kind: 'note', id: loose }] });
+    expect(stderrText()).toContain('"event":"write.forward","op":"jdMove","outcome":"forwarded"');
     expect(stderrText()).toContain('"event":"write.forward","op":"jdNewId","outcome":"forwarded"');
     expect(stderrText()).not.toContain('Reenviado');
   });

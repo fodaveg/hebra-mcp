@@ -506,6 +506,24 @@ export const jdNewIdInputShape = {
     .describe('apply: id único de esta aplicación (un UUID). Reintentar con el mismo completa lo que falte sin duplicar.')
 };
 
+/** Mover a un ID del JDex (D19, 19 oct 2026). Topes como los del socket del escritor. */
+export const jdMoveInputShape = {
+  mode: z.enum(['simulate', 'apply', 'undo']).describe('`simulate` (obligatorio primero), `apply` o `undo`.'),
+  kind: z.enum(['note', 'file', 'folder']).optional().describe('simulate: qué se mueve: una nota, un fichero suelto o una carpeta.'),
+  id: z.string().max(200).optional().describe('simulate: id de la nota, del fichero (hebra_list_files) o de la carpeta (hebra_list_folders).'),
+  toId: z.string().max(32).optional().describe('simulate: ID de destino del JDex («21.34»); tiene que tener su nota en el JDex.'),
+  subfolder: z.string().max(1_000).optional().describe('simulate: una subcarpeta dentro de la del ID (un nivel); se crea si falta.'),
+  as: z.string().max(1_000).optional().describe('simulate: nombre nuevo (el título, en una nota; la misma extensión, en un fichero).'),
+  systemId: z.string().max(16).optional().describe('simulate: sistema del ID de destino con varios sistemas («D01»).'),
+  jdexFolderId: z.string().max(200).optional().describe(`simulate: ${JD_JDEX_FOLDER_HINT}`),
+  planId: z.string().max(200).optional().describe('apply, undo: el `planId` de la simulación (apply, en la hora siguiente; undo, 7 días tras aplicar).'),
+  operationId: z
+    .string()
+    .max(200)
+    .optional()
+    .describe('apply, undo: id único de esta llamada (un UUID). Reintentar con el mismo no repite nada.')
+};
+
 export const jdAuditInputShape = {
   jdexFolderId: z.string().max(200).optional().describe(JD_JDEX_FOLDER_HINT),
   templatesFolderId: z.string().max(200).optional().describe(JD_TEMPLATES_FOLDER_HINT),

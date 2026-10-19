@@ -17,9 +17,11 @@
  *
  * Caducidad (`purgeExpired`, al empezar cada operación de plan): un plan se puede aplicar
  * durante una hora (`JD_PLAN_APPLY_TTL_MS`; después, `plan_expired`) y se borra a las 24 h
- * (`JD_PLAN_KEEP_MS`; después, `plan_not_found`). Como mucho `JD_STORED_PLANS_MAX` planes: al
- * guardar uno que lo pasaría, cae el más antiguo. `unpair` borra el directorio de datos y,
- * con él, esto.
+ * (`JD_PLAN_KEEP_MS`; después, `plan_not_found`). Como mucho `JD_STORED_PLANS_MAX` planes sin
+ * aplicar: al guardar uno que lo pasaría, cae el más antiguo de ellos. Desde D19 (mover a un
+ * ID) los planes llevan su herramienta (`kind`) y, los de mover, cuándo se aplicaron: un plan
+ * aplicado se guarda 7 días (`JD_MOVE_UNDO_RETENTION_MS`) para deshacerlo y no cuenta para el
+ * tope. `unpair` borra el directorio de datos y, con él, esto.
  */
 import { chmodSync, closeSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -40,22 +42,35 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS hebra_mcp_jd_plans (
   plan TEXT NOT NULL
 )`;
 
+/** Un plan aplicado de mover a un ID (D19) se guarda 7 días para deshacerlo, como el de
+ *  `hebra_replace_in_notes`. */
+export const JD_MOVE_UNDO_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** De qué herramienta es un plan: no vale en la otra (`plan_not_found`). */
+export type JdPlanKind = 'new_id' | 'move';
+
 export interface JdPlanRecord {
   planId: string;
   libraryId: string;
   /** `privacyFingerprint` de la configuración con que se simuló: con otra, no vale. */
   privacySha256: string;
   createdAt: number;
-  /** El `NewIdPlan` del motor, ya leído del JSON (quien lo usa comprueba su forma). */
+  kind: JdPlanKind;
+  /** Cuándo se aplicó por primera vez (solo los de mover se marcan), o `null`. */
+  appliedAt: number | null;
+  /** El plan del motor, ya leído del JSON (quien lo usa comprueba su forma). */
   plan: unknown;
 }
 
 export interface JdPlanStore {
   purgeExpired(now: number): void;
-  /** Guarda un plan; si con él pasaría del tope, antes borra los más antiguos. */
-  insert(record: JdPlanRecord): void;
+  /** Guarda un plan sin aplicar; si con él pasaría del tope de los sin aplicar, antes borra
+   *  los más antiguos de ellos. */
+  insert(record: Omit<JdPlanRecord, 'appliedAt'>): void;
   get(planId: string): JdPlanRecord | null;
-  /** Borra un plan (el de una simulación que la puerta final descartó). */
+  /** Marca un plan como aplicado (la primera vez): desde ahí vale 7 días para deshacerlo. */
+  markApplied(planId: string, now: number): void;
+  /** Borra un plan SIN aplicar (el de una simulación que la puerta final descartó). */
   delete(planId: string): void;
 }
 
@@ -82,11 +97,27 @@ export function openJdPlansDatabase(librarySqlitePath: string): DatabaseSync {
   const db = new DatabaseSync(path);
   try {
     db.exec(TABLE_SQL);
+    ensureColumns(db);
   } catch (error) {
     db.close();
     throw error;
   }
   return db;
+}
+
+/** Columnas añadidas con D19 (mover a un ID): una base de antes las gana al abrir. */
+const ADDED_COLUMNS: ReadonlyArray<[column: string, definition: string]> = [
+  ['kind', "TEXT NOT NULL DEFAULT 'new_id'"],
+  ['applied_at', 'INTEGER']
+];
+
+function ensureColumns(db: DatabaseSync): void {
+  const columns = db.prepare('PRAGMA table_info(hebra_mcp_jd_plans)').all() as Array<{ name: string }>;
+  for (const [column, definition] of ADDED_COLUMNS) {
+    if (!columns.some((entry) => entry.name === column)) {
+      db.exec(`ALTER TABLE hebra_mcp_jd_plans ADD COLUMN ${column} ${definition}`);
+    }
+  }
 }
 
 export function sqliteJdPlanStore(db: DatabaseSync): JdPlanStore {
@@ -101,28 +132,42 @@ export function sqliteJdPlanStore(db: DatabaseSync): JdPlanStore {
   };
   return {
     purgeExpired(now) {
-      statement('DELETE FROM hebra_mcp_jd_plans WHERE created_at < ?').run(now - JD_PLAN_KEEP_MS);
+      statement('DELETE FROM hebra_mcp_jd_plans WHERE applied_at IS NULL AND created_at < ?').run(now - JD_PLAN_KEEP_MS);
+      statement('DELETE FROM hebra_mcp_jd_plans WHERE applied_at IS NOT NULL AND applied_at < ?').run(
+        now - JD_MOVE_UNDO_RETENTION_MS
+      );
     },
     insert(record) {
+      // El tope es de los planes sin aplicar: uno aplicado hace falta para deshacerlo.
       const count = Number(
-        (statement('SELECT COUNT(*) AS n FROM hebra_mcp_jd_plans').get() as { n: number | bigint }).n
+        (statement('SELECT COUNT(*) AS n FROM hebra_mcp_jd_plans WHERE applied_at IS NULL').get() as {
+          n: number | bigint;
+        }).n
       );
       if (count >= JD_STORED_PLANS_MAX) {
         statement(
           `DELETE FROM hebra_mcp_jd_plans WHERE plan_id IN (
-             SELECT plan_id FROM hebra_mcp_jd_plans ORDER BY created_at, rowid LIMIT ?)`
+             SELECT plan_id FROM hebra_mcp_jd_plans WHERE applied_at IS NULL ORDER BY created_at, rowid LIMIT ?)`
         ).run(count - JD_STORED_PLANS_MAX + 1);
       }
       statement(
-        `INSERT INTO hebra_mcp_jd_plans (plan_id, library_id, privacy_sha256, created_at, plan)
-         VALUES (?, ?, ?, ?, ?)`
-      ).run(record.planId, record.libraryId, record.privacySha256, record.createdAt, JSON.stringify(record.plan));
+        `INSERT INTO hebra_mcp_jd_plans (plan_id, library_id, privacy_sha256, created_at, plan, kind, applied_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL)`
+      ).run(
+        record.planId,
+        record.libraryId,
+        record.privacySha256,
+        record.createdAt,
+        JSON.stringify(record.plan),
+        record.kind
+      );
     },
     get(planId) {
       const row = statement(
-        `SELECT plan_id, library_id, privacy_sha256, created_at, plan FROM hebra_mcp_jd_plans WHERE plan_id = ?`
+        `SELECT plan_id, library_id, privacy_sha256, created_at, plan, kind, applied_at
+         FROM hebra_mcp_jd_plans WHERE plan_id = ?`
       ).get(planId) as Record<string, unknown> | undefined;
-      if (!row) return null;
+      if (!row || (row.kind !== 'new_id' && row.kind !== 'move')) return null;
       let plan: unknown;
       try {
         plan = JSON.parse(String(row.plan));
@@ -134,11 +179,16 @@ export function sqliteJdPlanStore(db: DatabaseSync): JdPlanStore {
         libraryId: String(row.library_id),
         privacySha256: String(row.privacy_sha256),
         createdAt: Number(row.created_at),
+        kind: row.kind,
+        appliedAt: row.applied_at === null || row.applied_at === undefined ? null : Number(row.applied_at),
         plan
       };
     },
+    markApplied(planId, now) {
+      statement('UPDATE hebra_mcp_jd_plans SET applied_at = ? WHERE plan_id = ? AND applied_at IS NULL').run(now, planId);
+    },
     delete(planId) {
-      statement('DELETE FROM hebra_mcp_jd_plans WHERE plan_id = ?').run(planId);
+      statement('DELETE FROM hebra_mcp_jd_plans WHERE plan_id = ? AND applied_at IS NULL').run(planId);
     }
   };
 }

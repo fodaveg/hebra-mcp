@@ -280,7 +280,10 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         'fileTrash',
         'filesIndex',
         'folderCreate',
-        'folderRename'
+        // D19: mover a un ID, con guarda (test de abajo).
+        'folderMoveIfUnchanged',
+        'folderRename',
+        'folderRenameIfUnchanged'
       ]);
     } finally {
       port.close();
@@ -391,7 +394,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * oculto, dentro del turno. Ninguna otra fuente de `src` (herramientas incluidas).
    */
   it('crear, renombrar y mover un fichero suelto (D17): solo en el turno del escritor y en file-verbs.ts', () => {
-    const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts'];
+    // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno.
+    const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts', 'src/store/jd-move-port.ts'];
     const verbCall = reachPattern('fileCreate|fileRename|fileMove');
     for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
       for (const form of reachForms(name)) expect(verbCall.test(form), form).toBe(true);
@@ -404,6 +408,44 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       if (!allowed.includes(path)) expect(calls, path).toBe(false);
     }
     expect(callers).toBe(allowed.length);
+  });
+
+  /**
+   * Mover a un ID del JDex (D19, decisión de David del 19 oct 2026): la ÚNICA vía del MCP para
+   * mover carpetas. `noteMoveIfUnchanged`, `folderMoveIfUnchanged` y `folderRenameIfUnchanged`
+   * (las versiones con guarda del motor) solo los tiene el turno de escritura y solo los llaman
+   * el puerto, que los pone en el turno, y `src/store/jd-move-port.ts`, que antes aplica el
+   * filtro, la ruta privada y que no haya nada oculto dentro. `folderMove` a secas sigue
+   * prohibido en todo `src` (lista de arriba), y fuera del turno nadie los tiene.
+   */
+  it('mover a un ID (D19): las mutaciones con guarda solo en el turno del escritor y en jd-move-port.ts', async () => {
+    const allowed = ['src/store/node-port.ts', 'src/store/jd-move-port.ts'];
+    const guarded = reachPattern('noteMoveIfUnchanged|folderMoveIfUnchanged|folderRenameIfUnchanged');
+    for (const name of ['noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged']) {
+      for (const form of reachForms(name)) expect(guarded.test(form), form).toBe(true);
+    }
+    let callers = 0;
+    for (const file of allSourceFiles()) {
+      const path = relative(root, file).split(sep).join('/');
+      const calls = guarded.test(readFileSync(file, 'utf8'));
+      if (calls) callers += 1;
+      if (!allowed.includes(path)) expect(calls, path).toBe(false);
+    }
+    expect(callers).toBe(allowed.length);
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['SyncStorePort', port.syncStorePort()]
+      ] as Array<[string, object]>) {
+        const names = methodNames(value);
+        for (const name of ['noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged']) {
+          expect(names, `${label}.${name}`).not.toContain(name);
+        }
+      }
+    } finally {
+      port.close();
+    }
   });
 });
 

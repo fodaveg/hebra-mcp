@@ -43,7 +43,7 @@ import type { PrivacyConfig } from '../privacy/config';
 import { FileFilter } from '../privacy/file-filter';
 import { StoreError, writeRejected, type JdRejectionCode } from './errors';
 import { planCreateFolder, validFolderName } from './folders';
-import { isJdexFolderCandidate, JdLibraryPort } from './jd-port';
+import { isJdexFolderCandidate, JdLibraryPort, type JdView, type JdWrites } from './jd-port';
 import { JD_PLAN_APPLY_TTL_MS } from './jd-plans';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import { privacyFingerprint } from './replace';
@@ -139,28 +139,34 @@ function applyFingerprint(planId: string): string {
   return sha256Hex(JSON.stringify(['jdNewId', planId]));
 }
 
-/** El puerto sobre el almacén de este turno, con el filtro de quien pide rehecho en cada
- *  llamada (lo que crea un `ensure*` lo ve el siguiente). */
+/** Lo que lee el puerto del motor sobre el almacén de este turno, con el filtro de quien pide
+ *  rehecho en cada llamada (lo que crea un `ensure*` lo ve el siguiente). También lo usa el
+ *  de mover (`./jd-move-port.ts`, D19). */
+export function turnView(store: NoteWriteStore, privacy: PrivacyConfig): JdView {
+  return {
+    folders: () => store.foldersList(),
+    notes: () => store.notesVisibilityIndex(),
+    noteRead: (id) => store.noteRead(id),
+    filter: () => privacyInTurn(store, privacy),
+    noteTitles: (ids) => store.noteTitles(ids),
+    files: () => {
+      const index = store.filesIndex();
+      return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, privacy), index, privacy) };
+    }
+  };
+}
+
+/** Lo que escribe el puerto del motor, en el mismo turno. */
+export function turnWrites(store: NoteWriteStore): JdWrites {
+  return {
+    noteCreate: (folderId) => store.noteCreate(folderId),
+    noteSave: (input) => store.noteSave(input),
+    folderCreate: (parentId, name) => store.folderCreate(parentId, name)
+  };
+}
+
 function turnPort(store: NoteWriteStore, privacy: PrivacyConfig, jdexFolderId?: string): JdLibraryPort {
-  return new JdLibraryPort(
-    {
-      folders: () => store.foldersList(),
-      notes: () => store.notesVisibilityIndex(),
-      noteRead: (id) => store.noteRead(id),
-      filter: () => privacyInTurn(store, privacy),
-      noteTitles: (ids) => store.noteTitles(ids),
-      files: () => {
-        const index = store.filesIndex();
-        return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, privacy), index, privacy) };
-      }
-    },
-    {
-      noteCreate: (folderId) => store.noteCreate(folderId),
-      noteSave: (input) => store.noteSave(input),
-      folderCreate: (parentId, name) => store.folderCreate(parentId, name)
-    },
-    jdexFolderId === undefined ? {} : { jdexFolderId }
-  );
+  return new JdLibraryPort(turnView(store, privacy), turnWrites(store), jdexFolderId === undefined ? {} : { jdexFolderId });
 }
 
 /** Un `NewIdPlan` leído de la tabla (no se fía de su forma): lo mínimo que usa `applyPlan`. */
@@ -288,6 +294,7 @@ async function simulate(
     libraryId: store.libraryId(),
     privacySha256: privacyFingerprint(request.privacy),
     createdAt: now,
+    kind: 'new_id',
     plan: stored
   });
   return {
@@ -364,6 +371,7 @@ export async function runJdNewId(
             !record ||
             record.libraryId !== store.libraryId() ||
             record.privacySha256 !== privacyFingerprint(request.privacy) ||
+            record.kind !== 'new_id' ||
             !isStoredPlan(record.plan)
           ) {
             throw writeRejected('plan_not_found');

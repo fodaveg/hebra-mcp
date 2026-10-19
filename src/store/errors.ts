@@ -54,6 +54,10 @@ import type { SectionRef } from './sections';
  * - `file_name_unavailable`: el fichero que se crearía quedaría oculto (lo enlaza una nota
  *   oculta, o hay una nota bloqueada oculta y el nombre se puede incrustar). Uno solo, sin
  *   detalles.
+ * Mover a un ID (`hebra_jd_move`, D19, 19 oct 2026; `./jd-move-port.ts`):
+ * - `destination_unavailable`: el destino no se puede usar así por la privacidad (una ruta
+ *   privada, un homónimo oculto, un nombre que dejaría oculto lo movido). Uno solo, sin
+ *   detalles, como `folder_unavailable` y `file_name_unavailable`.
  */
 export type WriteRejectionCode =
   | 'not_found'
@@ -80,6 +84,7 @@ export type WriteRejectionCode =
   | 'file_unavailable'
   | 'file_exists'
   | 'file_name_unavailable'
+  | 'destination_unavailable'
   | JdRejectionCode;
 
 /**
@@ -135,6 +140,7 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'file_unavailable',
   'file_exists',
   'file_name_unavailable',
+  'destination_unavailable',
   'jdex_not_found',
   'templates_not_found',
   'category_not_found',

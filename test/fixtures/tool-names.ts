@@ -53,7 +53,9 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_duplicate_file',
   // Johnny.Decimal con el motor de jdex-manager (D18, 19 oct 2026).
   'hebra_jd_new_id',
-  'hebra_jd_audit'
+  'hebra_jd_audit',
+  // Mover a un ID (D19, 19 oct 2026): la única vía para mover carpetas.
+  'hebra_jd_move'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
@@ -64,7 +66,8 @@ export const FORBIDDEN_TRASH_TOOLS: readonly string[] = [
 
 /** Lo que sigue fuera del MCP tras D9 (3 oct 2026, que trajo crear y renombrar carpetas
  *  y añadir adjuntos): mover y borrar carpetas, y cambiar o borrar adjuntos. Ningún
- *  transporte las lista. */
+ *  transporte las lista. D19 (19 oct 2026) mueve carpetas, pero solo dentro de un ID del
+ *  JDex con `hebra_jd_move`: un `hebra_move_folder` genérico sigue fuera. */
 export const REMOVED_FOLDER_TOOLS: readonly string[] = [
   'hebra_move_folder',
   'hebra_delete_folder',

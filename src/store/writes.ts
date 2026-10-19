@@ -103,6 +103,18 @@ export type FolderRow = Awaited<ReturnType<SqliteLibraryEngine['folderCreate']>>
 export type FileRow = Awaited<ReturnType<SqliteLibraryEngine['fileTrash']>>;
 export type BlobPutOptions = NonNullable<Parameters<SqliteLibraryEngine['blobPut']>[1]>;
 export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
+/** Las guardas de las mutaciones de mover a un ID (D19), como las tipa el motor
+ *  (`NoteMutationGuard`, `FolderMutationGuard` de `library/types.ts`, que `node.ts` no
+ *  reexporta): la revisión y la carpeta de la nota, o el nombre y el padre GUARDADO de la
+ *  carpeta. */
+export interface NoteMutationGuard {
+  revision: { localSeq: number; bodySha256: string };
+  folderId: string;
+}
+export interface FolderMutationGuard {
+  name: string;
+  parentId: string | null;
+}
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
 export interface NoteWriteStore {
@@ -118,6 +130,12 @@ export interface NoteWriteStore {
    *  (`test/store/surface.node.test.ts`). */
   folderCreate(parentId: string, name: string): Promise<FolderRow>;
   folderRename(id: string, name: string): Promise<FolderRow>;
+  /** Mover a un ID (D19, 19 oct 2026): las versiones con guarda del motor (`null` si la
+   *  nota o la carpeta ya no está como se esperaba). Solo las llama `./jd-move-port.ts`,
+   *  dentro del turno y con el filtro aplicado; mover carpetas no tiene otra vía en el MCP. */
+  noteMoveIfUnchanged(id: string, folderId: string, expected: NoteMutationGuard): Promise<NoteRow | null>;
+  folderMoveIfUnchanged(id: string, parentId: string, expected: FolderMutationGuard): Promise<FolderRow | null>;
+  folderRenameIfUnchanged(id: string, name: string, expected: FolderMutationGuard): Promise<FolderRow | null>;
   /** Guardar los bytes de un adjunto que se añade (D9): el `blobPut` del motor (fichero y
    *  fila de `blobs`). Solo lo llama `NoteWriter.addAttachment`, en el mismo turno en que
    *  la nota pasa a referenciarlo. */

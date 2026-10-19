@@ -261,6 +261,21 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_jd_new_id', arguments: { mode: 'apply', planId: library.privateFolderNoteId, operationId: 'bait-jd-1' } },
     { name: 'hebra_jd_audit', arguments: { jdexFolderId: library.folders.diario } },
     { name: 'hebra_jd_audit', arguments: {} },
+    // Mover a un ID (D19): la nota, el fichero y la carpeta ocultos responden como lo que no
+    // existe, con el cebo como nombre nuevo y como subcarpeta; deshacer o aplicar un plan que
+    // no existe, `plan_not_found`. Ni el cebo ni los ids llegan a la salida ni al log.
+    {
+      name: 'hebra_jd_move',
+      arguments: { mode: 'simulate', kind: 'note', id: library.privateFolderNoteId, toId: '21.11', as: BAIT_FOLDER }
+    },
+    {
+      name: 'hebra_jd_move',
+      arguments: { mode: 'simulate', kind: 'note', id: library.privateTagNoteId, toId: '21.11', subfolder: BAIT_TAG }
+    },
+    { name: 'hebra_jd_move', arguments: { mode: 'simulate', kind: 'file', id: library.files.privateFolder, toId: '21.11' } },
+    { name: 'hebra_jd_move', arguments: { mode: 'simulate', kind: 'folder', id: library.folders.diario2026, toId: '21.11' } },
+    { name: 'hebra_jd_move', arguments: { mode: 'apply', planId: library.privateFolderNoteId, operationId: 'bait-jd-move-1' } },
+    { name: 'hebra_jd_move', arguments: { mode: 'undo', planId: library.privateTagNoteId, operationId: 'bait-jd-move-2' } },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en
