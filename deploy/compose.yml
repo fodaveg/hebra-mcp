@@ -106,7 +106,25 @@ services:
         max-file: '3'
 
 volumes:
+  # El estado (SQLite de la biblioteca, blobs, secretos de fichero y store
+  # OAuth) vive en un volumen cifrado (LUKS) del servidor, no en el
+  # /var/lib/docker sin cifrar: el volumen `hebra-mcp_data` es un `local` en
+  # bind a un directorio de ese volumen cifrado. La variable es OBLIGATORIA
+  # para que nadie vuelva por descuido al volumen sin cifrar; su valor (la
+  # ruta del servidor) vive en el `deploy/.env` privado, nunca en este repo.
+  #
+  # Si el volumen cifrado no se abrió al arrancar (crypttab con `nofail`), el
+  # directorio no existe en el disco del sistema, Docker no puede hacer el
+  # bind y el contenedor NO arranca, que es lo buscado: arrancar sobre un
+  # directorio vacío crearía una biblioteca nueva, sin emparejado. Por eso
+  # nunca se crea ese directorio a mano en el punto de montaje sin el volumen
+  # montado.
   data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${HEBRA_MCP_DATA_DEVICE:?ruta del directorio de datos en el volumen cifrado}
 
 networks:
   edge:

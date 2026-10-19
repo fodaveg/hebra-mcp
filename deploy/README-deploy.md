@@ -28,6 +28,7 @@ no prueban publicación, login real ni acceso a la biblioteca en producción.
 | `/healthz` | Ruta de liveness, sin autenticación, responde **204 sin cuerpo** | — | `src/http/app.ts` |
 | `/mcp` | Ruta del transporte Streamable HTTP (`POST`; `GET`/`DELETE` dan 405) | — | `src/http/app.ts` |
 | `HEBRA_MCP_DATA_DIR` | Directorio de datos: SQLite, privados, secretos, `oauth-revocations-v2.json` y `oauth-tokens.json` | ninguno (obligatorio en el contenedor) | `src/privacy/data-dir.ts` |
+| `HEBRA_MCP_DATA_DEVICE` | Directorio del host, en el volumen cifrado del servidor, que se monta en `/data` (bind del volumen `hebra-mcp_data`). Vive en el `deploy/.env` del servidor, nunca en el repo | ninguno (obligatorio) | `deploy/compose.yml` |
 | `HEBRA_MCP_BACKCHANNEL_SECRET` | Bearer exclusivo de Hebra MCP, compartido con el broker Lumbre; 32–512 caracteres, sin CR/LF | ninguno (obligatorio) | `src/oauth/http-auth.ts` |
 | `HEBRA_MCP_SECRET_STORE` | Modo del almacén de secretos: `keychain` o `file`, selección EXPLÍCITA, nunca fallback | `keychain` (aquí se fija `file`) | `src/secrets/store-mode.ts` |
 | `HEBRA_MCP_HTTP_LISTEN` | Interfaz de escucha | `127.0.0.1` (aquí se fija `0.0.0.0`, o Caddy no llegaría por la red `edge`) | `src/http/config.ts` |
@@ -46,7 +47,7 @@ runbook, sustituidos ahora por los reales.
 | Servicio | un directorio propio en el VPS de Lumbre (mismo servidor que `lumbre-app` y `lumbre-mcp`) | copia de `dist/`, `package.json`, `package-lock.json` y `deploy/`, subida por `rsync` |
 | Contenedor | `hebra-mcp` | `node dist/cli.mjs serve-http`, escucha en 8787, usuario sin root |
 | Borde | `mcp-hebra-pro.caddy` en el `conf.d` del Caddy compartido (`/srv/edge` del VPS, el mismo borde que ya sirve Lumbre, Vega, fodaveg y las demos) | Caddy termina TLS y hace proxy, sin exponer `/healthz` |
-| Estado | volumen con nombre `hebra-mcp_data` | SQLite, `config.json` de privados, secretos de fichero (C1) y store OAuth (C3), todo en el mismo volumen |
+| Estado | volumen `hebra-mcp_data` en bind a `HEBRA_MCP_DATA_DEVICE`, en el volumen cifrado del servidor | SQLite, `config.json` de privados, secretos de fichero (C1) y store OAuth (C3), todo en el mismo directorio |
 
 El contenedor **no publica puertos al host**: Caddy lo alcanza por el DNS de
 la red Docker externa `edge` (`hebra-mcp:8787`), igual que `lumbre-app` y
@@ -141,15 +142,27 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    como de la eliminación. No aplicar `--delete` sobre nada que no sea el
    árbol que gestiona este `rsync`.
 
-3. Preparar el volumen la PRIMERA vez (el contenedor corre con `USER node`,
-   uid/gid 1000; sin este paso, el arranque falla al intentar escribir la
+3. Preparar el directorio de datos la PRIMERA vez. El estado vive en un volumen
+   cifrado del servidor, no en el volumen sin cifrar de Docker. Con ese volumen
+   cifrado YA montado, crear el directorio con dueño 1000:1000 (el contenedor
+   corre con `USER node`; sin esto, el arranque falla al intentar escribir la
    SQLite o los secretos de fichero, y eso se ve como un healthcheck en rojo,
-   no como un permiso denegado explícito):
+   no como un permiso denegado explícito) y modo 0700, y apuntarlo en
+   `deploy/.env`. `HEBRA_MCP_DATA_DEVICE` es la ruta de ese directorio en el
+   servidor (no se versiona):
 
    ```bash
-   ssh "$HEBRA_MCP_HOST" "docker volume create hebra-mcp_data && \
-     docker run --rm -v hebra-mcp_data:/data alpine chown -R 1000:1000 /data"
+   # En el servidor, con HEBRA_MCP_DATA_DEVICE=<directorio dentro del volumen cifrado>
+   sudo install -d -o 1000 -g 1000 -m 0700 "$HEBRA_MCP_DATA_DEVICE"
+   echo "HEBRA_MCP_DATA_DEVICE=$HEBRA_MCP_DATA_DEVICE" >> "$HEBRA_MCP_DEST/deploy/.env"
    ```
+
+   Si el volumen cifrado no está montado al arrancar (crypttab con `nofail`),
+   el directorio no existe y Docker no puede hacer el bind: el contenedor NO
+   arranca. Es lo buscado, porque arrancar sobre un directorio vacío crearía
+   una biblioteca nueva sin emparejado. Por eso NUNCA se crea ese directorio
+   a mano sin el volumen montado: se montaría el cifrado encima después y los
+   datos quedarían ocultos en el disco sin cifrar.
 
 4. Construir y levantar:
 
@@ -171,6 +184,63 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 **No hay `git pull` en el servidor**, por el submódulo privado (ver arriba). Si
 algún día se decide clonar el árbol público sin `vendor/hebra` y compilar en el
 propio VPS, este paso cambiaría; hoy no es el caso.
+
+## Migración al volumen cifrado (19 oct 2026)
+
+Para pasar un despliegue existente del volumen Docker sin cifrar al directorio
+del volumen cifrado. Con el volumen cifrado montado y `HEBRA_MCP_DATA_DEVICE`
+ya creado como en el paso 3 de arriba (dueño 1000:1000, modo 0700):
+
+1. Parar el contenedor. El apagado ordenado vuelca el WAL al cerrar la SQLite;
+   no copiar nunca con el contenedor en marcha:
+
+   ```bash
+   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+     docker compose --env-file deploy/.env -f deploy/compose.yml stop"
+   ```
+
+2. Copiar el contenido del volumen viejo conservando dueño y modos, y
+   comparar las sumas sha256 de los dos lados (la lista debe ser idéntica):
+
+   ```bash
+   OLD=$(ssh "$HEBRA_MCP_HOST" "docker volume inspect hebra-mcp_data --format '{{.Mountpoint}}'")
+   ssh "$HEBRA_MCP_HOST" "sudo cp -a '$OLD'/. \"$HEBRA_MCP_DATA_DEVICE\"/"
+   ssh "$HEBRA_MCP_HOST" "cd '$OLD' && sudo find . -type f -exec sha256sum {} + | sort -k2" > /tmp/viejo.sha
+   ssh "$HEBRA_MCP_HOST" "cd \"$HEBRA_MCP_DATA_DEVICE\" && sudo find . -type f -exec sha256sum {} + | sort -k2" > /tmp/nuevo.sha
+   diff /tmp/viejo.sha /tmp/nuevo.sha && echo IGUAL
+   ```
+
+3. Apartar la copia vieja y recrear el volumen. El `docker volume rm` borra el
+   contenido del volumen viejo, así que antes se aparta una copia (a un
+   directorio privado, modo 0700, fuera del volumen cifrado: es la única copia
+   sin cifrar y se borra en el paso 5). Compose no cambia las opciones de un
+   volumen ya creado, por eso hay que eliminar el viejo para que se recree en
+   bind:
+
+   ```bash
+   ssh "$HEBRA_MCP_HOST" "sudo install -d -m 0700 \"$HEBRA_MCP_DEST.viejo\" && \
+     sudo cp -a '$OLD'/. \"$HEBRA_MCP_DEST.viejo\"/"
+   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+     docker compose --env-file deploy/.env -f deploy/compose.yml rm -f && \
+     docker volume rm hebra-mcp_data"
+   ```
+
+4. Levantar y comprobar:
+
+   ```bash
+   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
+     docker compose --env-file deploy/.env -f deploy/compose.yml up -d"
+   ssh "$HEBRA_MCP_HOST" "docker volume inspect hebra-mcp_data"
+   # → Options con type none, o bind y device = HEBRA_MCP_DATA_DEVICE
+   ssh "$HEBRA_MCP_HOST" "docker inspect --format '{{.State.Health.Status}}' hebra-mcp"
+   # → healthy
+   ```
+
+   Comprobar también que un cliente OAuth existente sigue entrando sin
+   reautorizar (los tokens y el emparejado viajaron en el directorio).
+
+5. Solo después de esa comprobación, borrar la copia vieja sin cifrar
+   (`$HEBRA_MCP_DEST.viejo`).
 
 ## Configurar el broker y revocar acceso
 
@@ -334,9 +404,11 @@ sesión en la nube (§12.7, C6).
   ```bash
   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
     docker compose --env-file deploy/.env -f deploy/compose.yml down"
-  # el volumen NO se borra con `down` a secas; borrarlo es indistinguible de
-  # perder los secretos del emparejado remoto y todos los grants OAuth:
-  # docker volume rm hebra-mcp_data   # solo si se quiere borrar TODO el estado
+  # el volumen NO se borra con `down` a secas. Con el bind al volumen cifrado,
+  # `docker volume rm hebra-mcp_data` solo borra la definición del volumen: los
+  # datos siguen en el directorio `HEBRA_MCP_DATA_DEVICE`. Para borrar TODO el estado (indistinguible de
+  # perder los secretos del emparejado remoto y todos los grants OAuth) hay que
+  # borrar además ese directorio, a mano y a propósito.
   ```
 
   Retirar también el fragmento de Caddy (`rm` en `$EDGE_CONFD` + `validate` +
@@ -361,6 +433,10 @@ nuevo de este lote**: es el mismo hueco que ya tiene hoy el volumen `state` de
 que exista ningún job que la copie). Perder el volumen `hebra-mcp_data` sin
 backup significa: rehacer el emparejado remoto completo (C5) y que todos los
 clientes OAuth (claude.ai) tengan que reautorizar.
+
+Desde el 19 oct 2026 el directorio de datos está en el volumen cifrado del
+servidor (`HEBRA_MCP_DATA_DEVICE`), así que cualquier copia que se haga de él
+debe salir cifrada también.
 
 Pendiente, fuera del alcance de C4: decidir si se quiere un backup cifrado
 propio (mismo patrón `age` que los otros dos scripts) para `hebra-mcp_data`, o
