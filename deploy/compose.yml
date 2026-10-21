@@ -75,6 +75,15 @@ services:
       # con el `ORIGIN` (o uno de `LUMBRE_PUBLIC_ORIGINS`) de Lumbre: si no,
       # `/authorize` responde 503. Mismo valor que el de por defecto.
       LUMBRE_APP_ORIGIN: 'https://app.lumbre.pro'
+      # `src/oauth/login-config.ts` (D20, SPEC.md §12.9): quién identifica a la
+      # persona. `lumbre` por defecto; `sumego` exige el cliente completo o
+      # `serve-http` no arranca. El valor se toma del `deploy/.env` privado.
+      HEBRA_MCP_LOGIN_PROVIDER: ${HEBRA_MCP_LOGIN_PROVIDER:-lumbre}
+      HEBRA_MCP_OIDC_ISSUER: ${HEBRA_MCP_OIDC_ISSUER:-https://id.lumbre.pro}
+      HEBRA_MCP_OIDC_CLIENT_ID: ${HEBRA_MCP_OIDC_CLIENT_ID:-hebra-mcp}
+      # Secreto del cliente en Sumego: SOLO en `deploy/.env`, nunca aquí. Vacío
+      # con `lumbre` (sin back-channel logout); obligatorio con `sumego`.
+      HEBRA_MCP_OIDC_CLIENT_SECRET: ${HEBRA_MCP_OIDC_CLIENT_SECRET:-}
     volumes:
       - data:/data
     networks:

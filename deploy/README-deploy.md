@@ -35,6 +35,10 @@ no prueban publicación, login real ni acceso a la biblioteca en producción.
 | `HEBRA_MCP_HTTP_PORT` | Puerto de escucha | `8787` | `src/http/config.ts` |
 | `HEBRA_MCP_PUBLIC_URL` | Origen público: issuer OAuth y base del recurso (`<origen>/mcp`) | `https://mcp.hebra.pro` | `src/http/config.ts` |
 | `LUMBRE_APP_ORIGIN` | Origen de Lumbre: destino del backchannel y único origen admitido en la URL de consentimiento. Tiene que ser el mismo que Lumbre usa para construirla (`ORIGIN` o uno de `LUMBRE_PUBLIC_ORIGINS`); `https` sin ruta, query ni credenciales (`http` solo en loopback). Uno inválido impide arrancar | `https://app.lumbre.pro` | `src/oauth/backchannel.ts` |
+| `HEBRA_MCP_LOGIN_PROVIDER` | Quién identifica a la persona en `/authorize` (D20, SPEC.md §12.9): `lumbre` (login y consentimiento de Lumbre, §12.2) o `sumego` (cliente OIDC propio en Sumego y consentimiento en hebra-mcp). Otro valor impide arrancar; con `sumego` y el cliente incompleto tampoco arranca, nunca vuelve en silencio a `lumbre` | `lumbre` | `src/oauth/login-config.ts` |
+| `HEBRA_MCP_OIDC_ISSUER` | Issuer de Sumego; su discovery (`/.well-known/openid-configuration`) da los endpoints y el JWKS. `https` sin ruta | `https://id.lumbre.pro` | `src/oauth/login-config.ts` |
+| `HEBRA_MCP_OIDC_CLIENT_ID` | Cliente confidencial de hebra-mcp en Sumego | `hebra-mcp` | `src/oauth/login-config.ts` |
+| `HEBRA_MCP_OIDC_CLIENT_SECRET` | Secreto de ese cliente (`client_secret_basic`); 32–512 caracteres, sin CR/LF. Vive SOLO en el `deploy/.env` del servidor. Obligatorio con `sumego`; con `lumbre`, si está, monta el back-channel logout | ninguno | `src/oauth/login-config.ts` |
 
 No existe una variable `PORT` genérica ni un subcomando
 `oauth-set-owner-secret`: eran nombres de trabajo del primer borrador de este
@@ -194,6 +198,22 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    su presencia; el valor no se copia al repositorio. El dispositivo remoto ya
    debe estar emparejado mediante el procedimiento C5. Si falta configuración,
    `serve-http` sale cerrado.
+
+   Login con Sumego (D20, SPEC.md §12.9): el interruptor va en `lumbre` por
+   defecto, así que este código se puede publicar antes de que exista el
+   cliente en Sumego. Para pasar a `sumego`, añadir al `deploy/.env` privado
+   `HEBRA_MCP_LOGIN_PROVIDER=sumego` y `HEBRA_MCP_OIDC_CLIENT_SECRET=<secreto
+   del cliente hebra-mcp en Sumego>` (y `HEBRA_MCP_OIDC_ISSUER` o
+   `HEBRA_MCP_OIDC_CLIENT_ID` solo si no son los de por defecto), con `sudo tee
+   -a` como el resto del fichero, y recrear el contenedor. Volver a `lumbre` es
+   quitar o cambiar esa línea. Las dos piezas de Lumbre (`identityProvider` en
+   `/requests` y `sumego/exchange`) tienen que estar desplegadas antes de pasar
+   a `sumego`.
+
+   `oauth-tokens.json` pasa a v3 con esta versión (lee un v2 y escribe v3). Una
+   versión anterior no lee un v3: volver a la imagen `previous` después de
+   arrancar esta corta todas las familias OAuth y Claude y Codex tienen que
+   volver a conectar (las notas, el emparejado y la clave no se tocan).
 
 5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.

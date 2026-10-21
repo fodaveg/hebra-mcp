@@ -201,7 +201,7 @@ Reglas comunes:
 | `hebra_jd_new_id` (D18) | `mode` y los campos de ese modo (cualquier otro, o uno que falte, `invalid_input`). `simulate`: `category` (dos cifras, una categoría que ya existe), `title` (≤ 1 000), `systemId?` (con varios sistemas, `D01`), `createFolder?` (def. `true`), `jdexFolderId?` y `templatesFolderId?` (≤ 200; si no son las `00.00` y `00.03` que se detectan en `00-09/00`; `jdexFolderId` tiene que ser una carpeta visible con el prefijo `00.00`, si no `jdex_not_found`). `apply`: `planId`, `operationId` (≤ 200) | `simulate`: `{mode, planId, expiresAt, id, system, noteName, folderName, category: {number, label, folderId}, resolved: {jdex: {id, name}, templates: {id, name} \| null}, template: {source: "templates-folder" \| "builtin", noteName?, noteId?}, writes}`. `writes`, en orden: `{kind: "ensure_note", folderId, title, body}` (la nota del JDex con el cuerpo que se escribirá; al aplicar se le añade `title:` en el frontmatter para que Hebra derive exactamente ese título) y `{kind: "ensure_folder", parent: {folderId}, name}` (la carpeta del ID). No escribe ninguna nota ni carpeta; además de lo que comprueba el motor, rechaza lo que Hebra rechazaría al aplicar, porque la nota va antes que la carpeta: un nombre de carpeta que no vale (`invalid_title`), una ruta privada o un choque con algo oculto (`folder_unavailable`), un cuerpo con una etiqueta privada (`not_found`, decisión 4 de D2) o de más de 100 000 caracteres (`invalid_input`). `apply`: `{mode, planId, id, noteName, folderName, created: [{kind, id, name}], existing: [{kind, id, name}], replayed?, sync, syncError?}`. Errores, los del motor con su código y sin su mensaje: `jdex_not_found` (no hay JDex visible, o el indicado no se ve: igual), `templates_not_found`, `category_not_found` (también una categoría que entera es privada), `category_folder_not_found` (la categoría no tiene carpeta; con `createFolder: false` no hace falta), `category_has_hidden` (la categoría tiene algo que no se ve, D18), `category_full`, `id_taken`, `invalid_title` (vacío, con `/`, o un nombre que no vale como carpeta), `plan_stale` (al aplicar, algo cambió desde la simulación: otra carpeta o nota con ese ID, la carpeta del JDex o de la categoría ya no está, la categoría tiene ahora algo oculto, la nota de la plantilla cambió o ya no se ve; no se escribe nada). Y `plan_not_found` (no existe, otra biblioteca u otra configuración de privados), `plan_expired` (más de una hora desde la simulación), `operation_id_reused`, `privacy_config_unresolved`. |
 | `hebra_jd_audit` (D18) | `jdexFolderId?`, `templatesFolderId?` (como en `hebra_jd_new_id`), `limit?` (1-500, def. 200), `cursor?` | `{resolved: {jdex, templates}, findings: [{kind, number?, paths, message, informative?}], problems, notChecked, nextCursor}`. La auditoría del motor (`auditSystem`) sobre lo visible, en solo lectura y en la instancia que recibe la llamada. `kind`: `duplicate-id` (dos carpetas o dos notas con el mismo ID, también con el mismo nombre), `folder-without-note`, `note-without-folder` (informativo), `name-mismatch`, `reserved-used-as-content`, `header-with-files`, `out-of-parent`, `misplaced-number`, `malformed-number`, `structure-without-note` y `pattern-missing`, con los del motor. `paths`: rutas de la biblioteca (una nota, con su nombre de fichero `.md`). `problems`: los que no son informativos, de toda la auditoría. `notChecked`: lo que no comprueba: `frontmatter-mismatch` y `missing-description` (necesitan el frontmatter YAML con sus tipos, y hebra-mcp no tiene un analizador de YAML, B4 de D15; del frontmatter solo se lee `tipo`, para que un ID retirado no salga como nota sin carpeta), `inbox-stale` (la fecha de los ficheros del inbox) y `missing-folder` (las carpetas configuradas del plugin: aquí se detectan). Los ficheros de cada carpeta, que el motor mira en los números de gestión y las cabeceras, son las notas y los ficheros sueltos visibles. Sin los arreglos (`fix`): no arregla nada. Errores: `jdex_not_found`, `templates_not_found`, `invalid_input` (cursor), `privacy_config_unresolved`. |
 | `hebra_jd_move` (D19) | `mode` y los campos de ese modo (cualquier otro, o uno que falte, `invalid_input`). `simulate`: `kind` (`note`, `file` o `folder`), `id` (de la nota, del fichero de `hebra_list_files` o de la carpeta), `toId` (un ID con nota en el JDex, «21.34»), `subfolder?` (un nivel dentro de la carpeta del ID; se crea si falta), `as?` (nombre nuevo: el título de una nota, que se escribe en su `title:`; un fichero conserva la extensión), `systemId?`, `jdexFolderId?` (como en `hebra_jd_new_id`: una `00.00` visible). `apply` y `undo`: `planId`, `operationId` (≤ 200) | `simulate`: `{mode, planId, expiresAt, id, system, jdex: {id, name}, destination: {folderName, subfolder}, move: {kind, id, name, from: {folderId, folderPath}, to: {folderId, folderPath, name}}, createFolders: [{name, folderPath}]}`: qué se mueve, de dónde a dónde (`to.folderId` `null` si la carpeta se crea), con qué nombre, y las carpetas que se crean. No escribe nada en la biblioteca. `apply`: `{mode, planId, id, created: [{kind, id, name}], existing, moved: [{kind, id, fromName, toName}], alreadyDone, replayed?, sync, syncError?}`; `alreadyDone`, lo que un `apply` cortado ya había movido. `undo` (el plan aplicado, durante 7 días): `{mode, planId, restored, alreadyRestored, skipped: [{kind, id, fromName, toName, reason: "not_where_left" \| "destination_taken" \| "refused"}], replayed?, sync, syncError?}`; las carpetas que creó el plan se quedan. Errores, los del motor con su código y sin su mensaje: `source_not_found` (no existe, no se ve, está en la papelera o es una carpeta de primer nivel: todo igual), `id_not_found` (el ID no está en el JDex), `invalid_name`, `invalid_subfolder`, `destination_taken` (en el destino ya hay algo VISIBLE con ese nombre), `destination_inside_source`, `already_in_destination`, `category_folder_not_found` y `category_has_hidden` (si hay que crear la carpeta del ID), `plan_stale`, `jdex_not_found` (el `folder_has_hidden` del motor no sale nunca: ver D19); y `folder_unavailable` (una carpeta que no se puede mover así por la configuración, con la regla de `hebra_rename_folder`, o una subcarpeta que no se puede crear, como en `hebra_create_folder`), `destination_unavailable` (D19: una nota o un fichero que el destino dejaría oculto), `note_locked` (renombrar una nota bloqueada), `plan_not_found` (no existe, de otra biblioteca, otra configuración de privados, de `hebra_jd_new_id`, o sin aplicar al deshacer), `plan_expired` (más de una hora desde la simulación, o ya aplicado y con otro `operationId`), `operation_id_reused`, `privacy_config_unresolved`. |
-| `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, capabilities}`. Sin contenido de notas. |
+| `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, revokedReason?, capabilities}`. `revokedReason` solo aparece con `revoked: true` (§12.9). Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9; 9 oct 2026, D10; 10 oct 2026, D15; 12 oct 2026, D17; 19 oct 2026, D18):
 - Las 39 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_read_file` (D15), `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`, `hebra_jd_audit` (D18).
@@ -2010,8 +2010,9 @@ sin `initiate_login_uri`.
    `nonce` y `code_verifier` propios para Sumego y los guarda solo en esa solicitud, en memoria y
    de un solo uso. Registra la solicitud en Lumbre con el `/api/integrations/hebra-mcp/requests`
    de hoy, al que se añaden `identityProvider: "sumego"` y `sumegoNonceSha256` (sha256 del
-   `nonce`, en base64url). Lumbre guarda el nonce con la transacción y responde `requestId`;
-   su `authorizationUrl` no se usa en este modo. Pone la cookie `__Host-hebra_mcp_login` (aleatoria, `HttpOnly`, `Secure`,
+   `nonce`, en base64url). Lumbre guarda el nonce con la transacción y responde exactamente
+   `{requestId, expiresAt}`, sin `authorizationUrl` ni comprobación del origen público (claves
+   exactas; el modo `lumbre` no cambia). Pone la cookie `__Host-hebra_mcp_login` (aleatoria, `HttpOnly`, `Secure`,
    `SameSite=Lax`, `Path=/`, 10 min) y guarda su sha256 en la solicitud. Redirige con 302 al
    `authorization_endpoint` de la discovery con PKCE S256. La discovery y el JWKS se leen de
    `<issuer>/.well-known/openid-configuration`, nunca se copian a mano. La discovery se guarda
@@ -2030,7 +2031,10 @@ sin `initiate_login_uri`.
    cookie. Es el mismo paso que la página de Lumbre de §12.2, así que no añade ninguno al
    usuario. Si Sumego ya tiene sesión en ese navegador, el recorrido es este clic y nada más.
    La página lleva `Content-Security-Policy: default-src 'none'; form-action 'self'; style-src
-   'unsafe-inline'`, `X-Frame-Options: DENY` y `Cache-Control: no-store`.
+   'unsafe-inline'`, `X-Frame-Options: DENY` y `Cache-Control: no-store`. A `form-action` se
+   suma la `redirect_uri` exacta de esa solicitud (la de Claude o el loopback de Codex, ya
+   validada en `/authorize`): Chrome y Firefox aplican `form-action` también a la redirección
+   que sigue al envío del formulario, y solo con `'self'` bloquearían el 302 final al cliente.
 4. Al permitir, hebra-mcp canjea la transacción en Lumbre por backchannel
    (`POST <LUMBRE_APP_ORIGIN>/api/integrations/hebra-mcp/sumego/exchange`, el mismo Bearer
    `HEBRA_MCP_BACKCHANNEL_SECRET`, cuerpo de 16 KiB como máximo) con `{requestId,
@@ -2048,13 +2052,18 @@ sin `initiate_login_uri`.
 5. Cada familia guarda el `sub` y el `sid` del ID token (en `oauth-tokens.json`, que pasa a v3,
    con migración que deja `sub`/`sid` a `null` en las familias existentes).
 
-**Errores de Lumbre al canjear**: los del contrato de lumbre-mcp. Son `400 invalid_token` o
-`unknown_account`, `401` (secreto malo), `403 account_pending`, `account_suspended` o
-`account_rejected`, `404 transaction_not_found`, `409 token_reused`, `413` y `503` (discovery o
-JWKS de Sumego caídos). Hacia el navegador:
+**Errores de Lumbre al canjear**: los del contrato de lumbre-mcp. Son `400 invalid_token`,
+`unknown_account` o `invalid_request` (un `sub` distinto del dueño da `invalid_token`), `401
+{error}` (secreto malo), `403 account_pending`, `account_suspended` o `account_rejected`, `404
+transaction_not_found`, `409 token_reused`, `410 pairing_revoked` (emparejado revocado o vínculo
+Blob V2 inactivo; no consume el ID token), `413` y `503 sumego_unavailable` (discovery o JWKS de
+Sumego caídos). El código puede venir en `code` o en `error`; hebra-mcp lee los dos y decide
+por el estado HTTP. Hacia el navegador:
 - `400`, `403`, `404` y `409` se muestran como «acceso denegado», sin redirigir.
-- `401`, `413`, `503`, red, otro 5xx, 429 o una respuesta fuera de contrato se muestran como
-  «no disponible», también sin redirigir.
+- `410 pairing_revoked` muestra la página de emparejado revocado (párrafo «Credencial de
+  emparejado revocada»).
+- `401`, `413`, `503`, red, otro 5xx, 429, otro 410 o una respuesta fuera de contrato se
+  muestran como «no disponible», también sin redirigir.
 
 En todos los casos se descarta la solicitud y no se emite código. Un `401` además se registra en
 el log, porque significa que el secreto de backchannel no coincide.
@@ -2088,14 +2097,16 @@ esa credencial actúa en nombre de la persona sobre su biblioteca, y una credenc
 sobrevivir al gesto que existe para cortarla. Reemparejar después es el coste asumido. Un logout
 por `sid` no toca el emparejado. A cambio, hebra-mcp no se queda caído sin avisar, como el 21 oct
 2026 desde las 07:46 UTC:
-- Cuando el relé rechaza la credencial, o Lumbre responde 401 o «credencial revocada» en
-  `/requests`, `introspect` o `/renew`, hebra-mcp lo anota en el estado (`revoked: true`, que ya
-  existe) y emite una vez el evento de log `pairing.revoked`.
+- Cuando el relé rechaza la credencial (401/403), o Lumbre responde `410
+  {"error":"pairing_revoked"}` en `/requests` (con o sin Sumego) o en `sumego/exchange` (con
+  `code` además de `error`), hebra-mcp lo anota en el estado (`revoked: true`, que ya existe) y
+  emite una vez el evento de log `pairing.revoked`. Un `400` de Lumbre es un cuerpo mal formado,
+  no una revocación: sigue siendo «no disponible». Un fallo pasajero es `503` u otro 5xx.
 - Con el emparejado revocado, `/authorize` no responde un 503 JSON. Muestra una página HTML que
   dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes y que hay que
   reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7, `src/pair/pair.ts`), que
   conserva la identidad y la clave.
-- `hebra_status` devuelve ese mismo motivo.
+- `hebra_status` devuelve ese mismo motivo, en `revokedReason`, junto a `revoked: true`.
 - `/healthz` sigue respondiendo 200, porque el proceso está sano.
 
 **Pruebas** (sintéticas, sin red): discovery y JWKS falsos con claves ES256 generadas en el
