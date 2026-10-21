@@ -380,7 +380,9 @@ describe('consentimiento y vínculo exacto', () => {
     expect(metadata).not.toContain(UPSTREAM);
     expect(metadata).not.toContain(issued.access_token);
     expect(metadata).not.toContain(issued.refresh_token);
-    expect(metadata).toContain('"version":2');
+    // v3 desde D20 (SPEC.md §12.9): `sub`/`sid` a null con el login de Lumbre.
+    expect(metadata).toContain('"version":3');
+    expect(metadata).toContain('"sub":null,"sid":null');
   });
 
   it('denied falsificado, callback manipulado y transacción equivocada no conceden acceso', async () => {

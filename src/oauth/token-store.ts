@@ -25,6 +25,10 @@
  *   proceso. Las mutaciones van en cola y se persisten ANTES de devolver el token nuevo:
  *   un reinicio no resucita un refresh ya rotado. Un fichero corrupto se trata como vacío
  *   (todos los tokens dejan de valer: cerrado ante la duda).
+ * - Versión 3 (D20, SPEC.md §12.9): cada familia guarda el `sub` y el `sid` del ID token de
+ *   Sumego con el que se autorizó, o `null` si se autorizó con el login de Lumbre. Un fichero
+ *   v2 se carga con los dos a `null` y la escritura siguiente ya es v3. Esas familias solo se
+ *   cortan con `oauth-revoke-all` o al revocarlas en Lumbre, nunca por back-channel logout.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logEvent } from '../log/logger';
@@ -62,12 +66,25 @@ interface Family {
   rotatedAt?: number;
   access: AccessEntry[];
   grant: ActiveGrant;
+  /** `sub` del ID token de Sumego (v3); `null` con el login de Lumbre o migrada de v2. */
+  sub: string | null;
+  /** `sid` del ID token de Sumego (v3), si lo traía. */
+  sid: string | null;
 }
 
 interface TokensFile {
-  version: 2;
+  version: 3;
   families: Family[];
 }
+
+/** Identidad de Sumego de una autorización; `null` en las de Lumbre. */
+export interface FamilyIdentity {
+  sub: string;
+  sid: string | null;
+}
+
+/** A quién corta un back-channel logout: con `sid`, ese y (si viene) solo de ese `sub`. */
+export type LogoutSelector = { sid: string; sub?: string } | { sid?: undefined; sub: string };
 
 export interface IssuedTokens {
   accessToken: string;
@@ -102,7 +119,17 @@ function sameHash(a: string, b: string): boolean {
   return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }
 
+function nullableString(value: unknown): boolean {
+  return value === null || typeof value === 'string';
+}
+
+/** Familia v3: la de v2 más `sub`/`sid`. */
 function isFamily(value: unknown): value is Family {
+  return isFamilyV2(value) && nullableString((value as Record<string, unknown>).sub) &&
+    nullableString((value as Record<string, unknown>).sid);
+}
+
+function isFamilyV2(value: unknown): value is Omit<Family, 'sub' | 'sid'> {
   if (typeof value !== 'object' || value === null) return false;
   const family = value as Record<string, unknown>;
   return (
@@ -144,8 +171,13 @@ export class TokenStore {
     try {
       const value = (await readJsonOrNull(tokensFilePath(dataDir))) as Partial<TokensFile> | null;
       if (value !== null) {
-        if (value.version === 2 && Array.isArray(value.families) && value.families.every(isFamily)) {
-          families = value.families;
+        const record = value as { version?: unknown; families?: unknown };
+        if (record.version === 3 && Array.isArray(record.families) && record.families.every(isFamily)) {
+          families = record.families;
+        } else if (record.version === 2 && Array.isArray(record.families) && record.families.every(isFamilyV2)) {
+          // Migración v2 → v3: sin identidad de Sumego. Se escribe v3 en la mutación siguiente.
+          families = record.families.map((family) => ({ ...family, sub: null, sid: null }));
+          logEvent({ event: 'oauth.tokens', result: 'migrated', from: 2 });
         } else {
           logEvent({ event: 'oauth.tokens', result: 'invalid' });
         }
@@ -185,7 +217,7 @@ export class TokenStore {
         const liveIds = new Set(this.familyIds());
         removed = before.filter((family) => !liveIds.has(family.id)).map((family) => family.id);
         await writeJsonAtomic(this.dataDir, tokensFilePath(this.dataDir), {
-          version: 2,
+          version: 3,
           families: this.families
         } satisfies TokensFile);
       } catch (error) { this.families = before; throw error; }
@@ -230,7 +262,7 @@ export class TokenStore {
 
   /** Una familia nueva tras una autorización aprobada. */
   issueFamily(
-    input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number },
+    input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number; identity?: FamilyIdentity | null },
     revokedBefore: number,
     storeBearer: (familyId: string, liveIds: readonly string[]) => Promise<void>
   ): Promise<IssuedTokens> {
@@ -252,7 +284,9 @@ export class TokenStore {
         expiresAt: Date.parse(input.grant.expiresAt),
         refreshHash: '',
         access: [],
-        grant: input.grant
+        grant: input.grant,
+        sub: input.identity?.sub ?? null,
+        sid: input.identity?.sid ?? null
       };
       if (family.expiresAt <= now) throw new Error('grant_expired');
       const accessToken = this.newAccess(family, now);
@@ -347,6 +381,27 @@ export class TokenStore {
   /** Corta una familia cuando Lumbre confirma revocación. */
   dropFamily(id: string): Promise<void> {
     return this.mutate(() => { this.families = this.families.filter((family) => family.id !== id); });
+  }
+
+  /**
+   * Back-channel logout de Sumego (SPEC.md §12.9): con `sid`, las familias de esa sesión
+   * (y de ese `sub`, si viene); con solo `sub`, todas las suyas. Las familias sin identidad
+   * (Lumbre o v2) nunca casan. Resuelve con los ids cortados una vez persistida la baja;
+   * el observador de `onFamiliesRemoved` pide después la revocación upstream.
+   */
+  dropFamiliesByLogout(selector: LogoutSelector): Promise<string[]> {
+    return this.mutate((): string[] => {
+      const matches = (family: Family): boolean => {
+        if (family.sub === null) return false;
+        if (selector.sid !== undefined) {
+          return family.sid === selector.sid && (selector.sub === undefined || family.sub === selector.sub);
+        }
+        return family.sub === selector.sub;
+      };
+      const dropped = this.families.filter(matches).map((family) => family.id);
+      if (dropped.length) this.families = this.families.filter((family) => !matches(family));
+      return dropped;
+    });
   }
 
   /**
