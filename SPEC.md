@@ -30,7 +30,7 @@ comprobada, el 10 oct 2026).
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep–19 oct 2026, cerradas; D12, ficheros de trabajo, D13, `hebra_grep` y lectura por líneas, D14, `hebra_replace_in_notes`, y D15, leer y reemplazar ficheros sueltos, el 10 oct 2026; D16, cierre del audit de privacidad adversarial, el 11 oct 2026; D17, crear, renombrar, mover y duplicar ficheros sueltos, el 12 oct 2026; D18, un ID nuevo del JDex y la auditoría Johnny.Decimal, y D19, mover a un ID del JDex, el 19 oct 2026)
+## 3. Decisiones de David (26 sep–19 oct 2026, cerradas; D12, ficheros de trabajo, D13, `hebra_grep` y lectura por líneas, D14, `hebra_replace_in_notes`, y D15, leer y reemplazar ficheros sueltos, el 10 oct 2026; D16, cierre del audit de privacidad adversarial, el 11 oct 2026; D17, crear, renombrar, mover y duplicar ficheros sueltos, el 12 oct 2026; D18, un ID nuevo del JDex y la auditoría Johnny.Decimal, y D19, mover a un ID del JDex, el 19 oct 2026; D20, login con Sumego, el 21 oct 2026)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
@@ -53,6 +53,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D17 | **Crear, renombrar, mover y duplicar ficheros sueltos** (12 oct 2026, decidido por David, por la sesión de Hebra: «que pueda crear bases» y «no solo crear, dale todos los verbos que necesite»; el diseño, de la sesión principal). **Amplía D10 y D15**, que dejaban fuera crear, renombrar y mover un fichero suelto. 1) **`hebra_create_file`** (§5): un fichero de TEXTO nuevo en una carpeta visible (`folder` o `folderId`; sin ellas, la raíz, como `hebra_create_note`), con `name` (las reglas del nombre de un adjunto y la del motor: 1–255 caracteres tras recortar, sin `/ \| [ ] \ #`, controles ni separadores de línea) y `text` (UTF-8, hasta 1 000 000 bytes, sin NUL ni suplentes sueltos, como `hebra_replace_file_text`). Solo con extensión `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt` (sin distinguir mayúsculas; otra, o ninguna, `file_type_not_allowed`); el tipo sale de la extensión, como lo lee `hebra_read_file` (`.base`, `.yaml` y `.yml`, `text/yaml`). Un texto que empieza como la firma de una imagen o un PDF, `invalid_input`. No valida el YAML (como B4 de D15) ni añade BOM. Un `.base` creado aquí sale en Bases de Hebra tras el sync: la app los encuentra por el sufijo, sin tocar la app ni el motor. 2) **`hebra_rename_file`**: otro nombre, en la misma carpeta; la extensión no cambia (comparada sin distinguir mayúsculas; otra, `invalid_input`); cualquier tipo (también un PDF o una imagen); el nombre que ya tiene, `outcome: "already"` sin escribir. 3) **`hebra_move_file`**: a otra carpeta visible (o la raíz), con el mismo nombre; cualquier tipo; si ya está allí, `already`. 4) **`hebra_duplicate_file`**: un fichero NUEVO con los mismos bytes (mismo `sha256`, el blob se comparte) y otro nombre de la misma extensión, en la carpeta del original o en otra visible; cualquier tipo, hasta 5 MiB (`file_too_large`); si los bytes no están en este dispositivo, los baja el escritor por la vía de `hebra_read_file` (`file_unavailable` si no se puede). 5) **Comunes**: `operationId` obligatorio (≤ 200), idempotentes en el registro compartido `hebra_mcp_operations` con huella propia por acción (mismo `operationId` y misma petición: lo anotado con `replayed: true`, si lo que nombra sigue visible; distinta: `operation_id_reused`). Respuesta común `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved" \| "already", replayed?, sync, syncError?}`, con `sha256` y `byteLength` leídos del almacén tras escribir. Pasan por el escritor único (op `looseFileWrite` de `writer.sock`, con la privacidad del lector) y por la puerta final (§6.3). **Nombre repetido**: el motor no lo impide, lo mira el MCP; si en la carpeta de destino hay un fichero suelto VIVO y VISIBLE con ese nombre (NFC y sin distinguir mayúsculas, lo que choca en macOS y en Obsidian), `file_exists` con el `id` de ese fichero, sin escribir; uno de la papelera no cuenta. 6) **Privacidad** (§6.3), en la herramienta y otra vez en el escritor dentro de la transacción en que escribe: origen (`id`) oculto, inexistente, lápida o en la papelera, `not_found`, todos igual (como `hebra_read_file`); carpeta de destino oculta (privada o subcarpeta, también la que solo oculta la memoria de carpetas privadas de D16) o inexistente, `not_found`, como `hebra_move_note`; un homónimo OCULTO nunca da `file_exists` (lo revelaría) y se ignora para esa regla; un resultado que quedaría oculto (nombre, carpeta y bytes) por la regla (b) de D10 (lo enlaza una nota oculta por nombre o por SHA-256) o por la variante de las bloqueadas de D16 (punto 1: existe una nota bloqueada oculta y el nombre se puede incrustar) se rechaza SIN escribir: `not_found` al renombrar, mover o duplicar (como D15 con el contenido) y un error único `file_name_unavailable`, sin detalles, al crear. 7) Anotaciones: las cuatro `readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: true` (por el `operationId`). 8) `notAllowed` pasa de `file_purge_create_rename_move` a `file_purge`; límites nuevos `limits.createFile` (`bytes` 1 000 000, `nameChars` 255, `extensions`) y `limits.duplicateFile` (`bytes` 5 MiB). | Descartado: purgar (D2: el MCP nunca purga; el fichero se manda a la papelera con `hebra_trash_file`). Descartado: cambiar la extensión al renombrar o duplicar (cambiaría cómo lo abre Hebra y Obsidian, y un `.base` dejaría de salir en Bases sin decirlo). Descartado: crear un `.md` (un Markdown con carpeta propia es una nota para Hebra: `hebra_create_note`), y crear ficheros que no son de texto (una imagen o un PDF hechos por un agente no se pueden revisar en el contexto). Descartado: validar el YAML (como B4 de D15). Coste asumido: rechazar un nombre o unos bytes que quedarían ocultos confirma, a quien adivine el nombre exacto (o los bytes exactos), que una nota oculta lo enlaza, o que hay una nota bloqueada oculta (el mismo coste que D15 con el contenido y que la regla 4 de D2 con una etiqueta privada); y el motor admite dos ficheros con el mismo nombre en una carpeta, así que junto a un homónimo oculto se puede crear otro visible (no se avisa para no revelarlo). |
 | D18 | **Un ID nuevo del JDex y la auditoría Johnny.Decimal** (19 oct 2026, decidido por David: «si, crea las notas y los proyectos», sobre el contrato cerrado con la sesión de jdex-manager; el diseño del lado de hebra-mcp, de la sesión principal). 1) **Reparto**: la lógica JD (qué número toca, el nombre de la nota y de la carpeta, la plantilla, las precondiciones de un plan, qué es un hallazgo) es del **motor puro de jdex-manager**, que hebra-mcp consume como submódulo público (MIT) en `vendor/jdex-manager`, fijado a un SHA e importado solo desde `src/jd/public.ts` (`src/jd.ts`); hebra-mcp pone el `LibraryPort` de ese motor sobre la biblioteca de Hebra (`src/store/jd-port.ts`), la privacidad, el escritor único, la idempotencia y las herramientas. El motor no se parchea desde aquí: lo que no encaja se cuenta a la sesión de jdex-manager. 2) **Alcance**: solo un ID nuevo dentro de una categoría que ya existe: la nota del JDex y, por defecto, la carpeta del ID (`hebra_jd_new_id`), y la auditoría en solo lectura (`hebra_jd_audit`). Fuera: categorías y áreas nuevas, hijos «+» y mover (mover carpetas sigue fuera del MCP, D2 y D9; mover a un ID lo decide David aparte). 3) **La regla del contrato**: lo privado no existe para el MCP. El puerto solo enseña al motor lo visible para quien pide (carpetas, notas vivas fuera de la papelera, cuerpos), y le da un único booleano de lo oculto, `hasHidden(categoría)`, calculado sobre los datos sin filtrar dentro del turno: verdadero si hay en el árbol de la categoría una carpeta oculta, o una nota o un fichero suelto vivo ocultos con el prefijo JD de la categoría; una carpeta oculta en cualquier parte con ese prefijo; una nota oculta, con ese prefijo, en el JDex QUE SE USA (no en otra carpeta); o ese JDex oculto (entonces para todas; si aún no hay JDex, cualquier `00.00` oculta, sin depender del orden de las carpetas). De las notas ocultas solo se leen los títulos, por SQL y sin el cuerpo, para que el tiempo de respuesta no dependa del tamaño de lo oculto. **Revisión de seguridad del 19 oct 2026** (sobre a4fac60): `jdexFolderId` (y el de `hebra_jd_audit`) solo vale si nombra una carpeta visible cuyo nombre lleva el prefijo `00.00` de algún sistema (`extractJdPrefix` del motor); si no, `jdex_not_found`, como sin JDex: con cualquier carpeta como JDex, la regla de las notas del JDex era un oráculo de las notas ocultas de la carpeta que eligiera el agente. La plantilla de la simulación también es una precondición: su `local_seq` se guarda con el plan, y al aplicar tiene que seguir visible y sin cambios (`plan_stale`). El puerto solo lista carpetas que el filtro conoce, y `readNote` de una nota que no conoce da `{body: null}`. Con él el motor rechaza la categoría (`category_has_hidden`) sin decir qué ni qué número está ocupado. Ningún error, recuento ni mensaje revela lo oculto: los códigos del motor salen tal cual y su `message`, nunca. 4) **Dos pasos**, como D14: `simulate` no escribe nada y guarda el plan del motor (`NewIdPlan`, JSON plano) en el escritor; `apply` con el `planId` y un `operationId` nuevo ejecuta `applyPlan` del motor en UN turno del escritor, que vuelve a comprobar las precondiciones (`plan_stale` sin escribir) y asegura cada escritura, así que el reintento con el mismo `operationId` completa lo que falte sin duplicar. El plan nunca se acepta del agente. | Descartado: reimplementar la numeración y las plantillas en hebra-mcp (divergiría del plugin de Hebra; el motor da el mismo plan, lo prueba `tests/hebra/jdex-create-parity.test.ts` de jdex-manager). Descartado: dejar fuera las categorías con algo oculto solo en parte (el siguiente número delataría el oculto). Descartado: guardar los planes en `library.sqlite` (ver §5: moverían la época de privacidad de un lector). Coste asumido: `category_has_hidden` confirma, a quien lo pide, que la categoría tiene algo que no ve (sin decir qué); la auditoría no comprueba el frontmatter (hebra-mcp no tiene un analizador de YAML, B4 de D15). |
 | D19 | **Mover a un ID del JDex** (19 oct 2026, decidido por David: «deberia entrar el move, no?», tras D18; el contrato, cerrado con la sesión de jdex-manager; el diseño del lado de hebra-mcp, de la sesión principal). **Sustituye en parte el punto 5 de D2 y D9**, que dejaban mover carpetas fuera del MCP: 1) `hebra_jd_move` archiva una nota, un fichero suelto o una carpeta entera dentro de la carpeta de un ID del JDex (o de una subcarpeta suya, un nivel), creando la carpeta del ID y la subcarpeta si faltan, y con `as` otro nombre; mover carpetas solo es posible por aquí: **no hay un `hebra_move_folder` genérico**, borrar carpetas sigue fuera, y `hebra_move_note` y `hebra_move_file` no cambian. Una carpeta de primer nivel no se mueve (`source_not_found` del motor). 2) **Reparto**, como D18: la lógica (`planMoveIntoId`, `applyMovePlan`, `planUndoMove`, `applyUndoMovePlan` de `move-into-id.ts`) es del motor de jdex-manager; hebra-mcp pone el `LibraryMovePort` (`src/store/jd-move-port.ts`), la privacidad, el escritor único, la idempotencia y la herramienta. Ni `applyMovePlan` ni `applyUndoMovePlan` capturan excepciones: los `move*` del puerto devuelven `{ok: false}` si la pieza ya no está como se esperaba o el destino no existe o no se ve (`plan_stale` al aplicar; `skipped` con `refused` al deshacer) y lanzan los demás rechazos de Hebra. Al aplicar, `plan_stale` sale con cualquier cambio desde la simulación, de la configuración o del contenido: las precondiciones del motor (el JDex, la carpeta del ID, la pieza donde estaba, un homónimo nuevo) y la regla de configuración de una carpeta. 3) **Tres pasos**: `simulate` (no escribe nada; el plan, JSON plano, se guarda en el escritor), `apply` con `planId` y `operationId` (un turno del escritor; el reintento completa lo que falte) y `undo` con el `planId` aplicado y otro `operationId`, durante 7 días (el plan aplicado se guarda 7 días en `jd-plans.sqlite`, nunca en `library.sqlite`; el inverso lo calcula `planUndoMove` al pedirlo). 4) **Privacidad**, la de D18 más: lo que se mueve y el destino tienen que ser visibles (si no, como lo que no existe). **Revisión de seguridad del 19 oct 2026** (decisión de la sesión principal, con el precedente de D9): una CARPETA solo se rechaza por la configuración, con la regla de `planRenameFolder` y su mismo error, `folder_unavailable`: una ruta privada configurada por debajo de la suya, su ruta nueva o la de una descendiente en una ruta privada, o un homónimo oculto en el destino. Lo que tenga dentro no decide nada: el MCP mueve, junto con la carpeta, contenido oculto que no ve (notas por etiqueta privada, bloqueadas, ficheros ocultos por la regla (b) de D10, carpetas de la memoria de A3), que sigue oculto en su sitio nuevo, igual que ya hace `hebra_rename_folder` al cambiar su ruta. Antes se rechazaba con `folder_has_hidden` mirando el contenido, y simular era un oráculo de qué carpeta visible tenía algo oculto que además distinguía homónimas (deshacía M4 de D16): ese código ya no sale nunca. Lo oculto que depende de la RUTA (una carpeta a la que resuelve una ruta configurada; las notas vivas de A2 y las de la papelera y los ficheros que se juzgan subiendo por las lápidas hasta una carpeta de dentro) solo existe con una ruta privada configurada por debajo de la de la carpeta, y eso ya la rechaza. Una nota o un fichero cuyo destino no se puede usar por la privacidad (un nombre o unos bytes que lo dejarían oculto) responden UN error genérico, `destination_unavailable`, como `file_name_unavailable` (D17); crear la subcarpeta o la carpeta del ID, el `folder_unavailable` de `hebra_create_folder`. | Descartado: un `hebra_move_folder` genérico (abriría mover carpetas fuera del sistema JD, y sus errores revelarían carpetas privadas, la razón de la opción A de D2). Descartado: borrar las carpetas creadas al deshacer (el motor no las borra; borrar carpetas sigue fuera). Descartado: rechazar una carpeta por lo oculto que tenga dentro (el oráculo de arriba). Coste asumido, sin ningún bit nuevo sobre lo oculto: los ya declarados de D18 (`category_has_hidden` cuando hay que crear la carpeta del ID), de D9 (`folder_unavailable` confirma la configuración y, a quien adivine el nombre exacto, un homónimo oculto en el destino) y de D17 (`destination_unavailable`, a quien adivine el nombre o los bytes que enlaza una nota oculta); el contenido oculto de una carpeta se mueve con ella sin que el agente lo sepa; una nota bloqueada no se mueve (la guarda de `noteMoveIfUnchanged` del motor excluye las bloqueadas: `plan_stale`). |
+| D20 | **Login con Sumego** (21 oct 2026, decidido por David: «el mcp se tiene que conectar con sumego igual que el resto de apps», transmitido por la sesión de sumego; el diseño del lado de hebra-mcp, de la sesión principal, alineado con lumbre-mcp). **Revisa D7**: hebra-mcp conserva su OAuth público hacia Claude y Codex, pero identifica a la persona con su propio cliente OIDC de Sumego (`hebra-mcp`, confidencial) en vez de con el login y el consentimiento de Lumbre. Lumbre sigue emitiendo la concesión, ahora a partir del ID token de Sumego (§12.9). | Descartado: pasar por el BFF de Lumbre como `hebra-web` (hebra-mcp tiene servidor y secreto propio, como las demás apps). Descartado: que hebra-mcp autorice solo con el `sub` sin Lumbre (no sabe qué cuenta es dueña del emparejado y se perdería la revocación visible en Lumbre). |
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
@@ -1978,8 +1979,122 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C4** Despliegue | Dockerfile, compose, Caddy y runbook para `mcp.hebra.pro`. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
 | **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
+| **C7** Login con Sumego | §12.9 del lado de hebra-mcp, detrás de `HEBRA_MCP_LOGIN_PROVIDER`. | Las pruebas de §12.9 en verde; con `lumbre`, la suite OAuth de hoy sin cambios; `typecheck` y `check:bundle` en verde. Encender `sumego` en producción espera al endpoint de Lumbre y al cliente de Sumego. | C3 |
 
 C1 y C2 van en paralelo.
+
+### 12.9 Login con Sumego (D20, 21 oct 2026)
+
+Revisa la parte de §12.2 que dice quién identifica a la persona. El resto de §12.2 sigue igual:
+OAuth público hacia Claude y Codex, familias, refresh rotatorio, introspección con caché de
+30 s, `/renew`, `oauth-revoke-all` y el vínculo exacto `pairedCredentialId`/`syncVaultId`/
+`opaqueDeviceId`.
+
+**Interruptor.** `HEBRA_MCP_LOGIN_PROVIDER=lumbre|sumego`, por defecto `lumbre`. Con `lumbre`
+todo funciona como en §12.2, y así se puede desplegar el código antes de que exista el cliente en
+Sumego. Con `sumego` hacen falta `HEBRA_MCP_OIDC_ISSUER` (defecto `https://id.lumbre.pro`),
+`HEBRA_MCP_OIDC_CLIENT_ID` (defecto `hebra-mcp`) y `HEBRA_MCP_OIDC_CLIENT_SECRET` (32–512
+caracteres, sin CR/LF, vive en `deploy/.env`). Si falta alguna variable o un valor no es válido,
+`serve-http` no arranca; nunca vuelve en silencio a `lumbre`. Los nombres son los de lumbre-mcp.
+
+**Cliente en Sumego** (lo da de alta la sesión de sumego): `hebra-mcp`, confidencial con
+`client_secret_basic`, scopes `openid email`, `redirect_uri` exacta
+`https://mcp.hebra.pro/oauth/sumego/callback`, `backchannel_logout_uri`
+`https://mcp.hebra.pro/oauth/sumego/backchannel-logout` con `backchannel_logout_session_required`,
+sin `initiate_login_uri`.
+
+**Recorrido**:
+
+1. `/authorize` hace las mismas comprobaciones que hoy (redirect, scope, resource, PKCE de Claude,
+   cupos, emparejado vigente) y reserva la solicitud pendiente. Genera `state` (32 bytes),
+   `nonce` y `code_verifier` propios para Sumego y los guarda solo en esa solicitud, en memoria y
+   de un solo uso. Registra la solicitud en Lumbre con el `/api/integrations/hebra-mcp/requests`
+   de hoy, al que se añaden `identityProvider: "sumego"` y `sumegoNonceSha256` (sha256 del
+   `nonce`, en base64url). Lumbre guarda el nonce con la transacción y responde `requestId`;
+   su `authorizationUrl` no se usa en este modo. Pone la cookie `__Host-hebra_mcp_login` (aleatoria, `HttpOnly`, `Secure`,
+   `SameSite=Lax`, `Path=/`, 10 min) y guarda su sha256 en la solicitud. Redirige con 302 al
+   `authorization_endpoint` de la discovery con PKCE S256. La discovery y el JWKS se leen de
+   `<issuer>/.well-known/openid-configuration`, nunca se copian a mano. La discovery se guarda
+   10 min en caché y un fallo se recuerda 30 s, igual que Lumbre.
+2. `GET /oauth/sumego/callback?code&state&iss`: busca la solicitud por `state`. Exige que la
+   cookie sea la suya (comparación en tiempo constante del hash), que no haya caducado y que
+   `iss` sea exactamente el issuer (RFC 9207). Con `error=` de Sumego, la solicitud se
+   descarta y responde 400 sin redirigir. Canjea el código en el `token_endpoint` con
+   `client_secret_basic` y el `code_verifier`. Valida el ID token con `jose`: ES256, JWKS
+   remoto en caché, `iss`, `aud` = client_id (y `azp` igual si viene), `exp`, `iat` de 5 min
+   como mucho con 60 s de margen, `nonce` igual al de la solicitud, `sub` presente. Los tokens de Sumego no se
+   guardan ni se registran en logs: solo el ID token, en memoria, hasta el paso 3.
+3. hebra-mcp muestra su página de consentimiento: un único botón «Permitir», con el nombre del
+   cliente (Claude o Codex), el email del ID token y el alcance (`hebra:mcp`, la biblioteca
+   emparejada). El `POST` lleva un token de formulario de un uso ligado a la solicitud y a la
+   cookie. Es el mismo paso que la página de Lumbre de §12.2, así que no añade ninguno al
+   usuario. Si Sumego ya tiene sesión en ese navegador, el recorrido es este clic y nada más.
+   La página lleva `Content-Security-Policy: default-src 'none'; form-action 'self'; style-src
+   'unsafe-inline'`, `X-Frame-Options: DENY` y `Cache-Control: no-store`.
+4. Al permitir, hebra-mcp canjea la transacción en Lumbre por backchannel
+   (`POST <LUMBRE_APP_ORIGIN>/api/integrations/hebra-mcp/sumego/exchange`, el mismo Bearer
+   `HEBRA_MCP_BACKCHANNEL_SECRET`, cuerpo de 16 KiB como máximo) con `{requestId,
+   transactionId, idToken, clientId, resource, scope}`. Es la ruta hermana de la de lumbre-mcp
+   (`/api/integrations/mcp/sumego/exchange`), con sus mismas reglas. Lumbre valida el ID token
+   por su cuenta: ES256 por JWKS, `iss`, `aud` y `azp` iguales a `hebra-mcp`, `exp`, `iat` de
+   5 min como mucho con 60 s de margen, y su hash de un solo uso. Exige además que el `nonce`
+   sea el de la transacción y que `clientId`, `resource` y `scope` sean los guardados. Toma
+   `sub` = `users.id`, comprueba propietario, bóveda activa y fila Blob V2 del vínculo
+   guardado con la solicitud, y responde la misma concesión que el `exchange` de hoy (las
+   mismas claves y la misma validación, `validGrant`). Así, el secreto de backchannel solo no basta para emitir una
+   concesión: hace falta además un ID token fresco de Sumego para esa persona. Desde ese
+   momento el código OAuth, el canje, las familias, la introspección y `/renew` siguen el
+   camino de hoy.
+5. Cada familia guarda el `sub` y el `sid` del ID token (en `oauth-tokens.json`, que pasa a v3,
+   con migración que deja `sub`/`sid` a `null` en las familias existentes).
+
+**Errores de Lumbre al canjear**: los del contrato de lumbre-mcp. Son `400 invalid_token` o
+`unknown_account`, `401` (secreto malo), `403 account_pending`, `account_suspended` o
+`account_rejected`, `404 transaction_not_found`, `409 token_reused`, `413` y `503` (discovery o
+JWKS de Sumego caídos). Hacia el navegador:
+- `400`, `403`, `404` y `409` se muestran como «acceso denegado», sin redirigir.
+- `401`, `413`, `503`, red, otro 5xx, 429 o una respuesta fuera de contrato se muestran como
+  «no disponible», también sin redirigir.
+
+En todos los casos se descarta la solicitud y no se emite código. Un `401` además se registra en
+el log, porque significa que el secreto de backchannel no coincide.
+
+**`POST /oauth/sumego/backchannel-logout`** (OIDC Back-Channel Logout 1.0, formulario con
+`logout_token`, de servidor a servidor, sin CORS ni cookies). Se valida la firma contra el JWKS
+(solo ES256; rechazados `alg: none`, HS*, y un `kid` que no esté en el JWKS), `iss`,
+`aud` = client_id, `iat` de hace menos de 10 min con 60 s de margen, `exp` obligatorio, `events`
+con `http://schemas.openid.net/event/backchannel-logout`, sin `nonce`, y `sid` o `sub`. El `jti`
+es de un solo uso: su sha256 se guarda hasta el `exp` en `oauth-logout-jtis.json`, escrito de
+forma atómica. Con `sid` se revocan las familias con ese `sid` (si también trae `sub`, solo las
+suyas). Con solo `sub` se revocan todas las familias de ese `sub`. Revocar es lo mismo que
+revocar una familia por OAuth: primero se corta en local y después se pide la revocación upstream
+a Lumbre. El `jti` se apunta después de cortar en local: si el corte falla, la respuesta es 500 y
+el reintento de Sumego vale. Responde 200 sin cuerpo, o 400 si el token no vale. Cupo: 60 por
+minuto y dirección, y como mucho 8 verificaciones de firma a la vez (la siguiente, 503).
+Funciona con cualquier valor del interruptor si hay cliente configurado. Las familias de antes
+de v3 (sin `sub`) solo se cortan con `oauth-revoke-all` o al revocarlas en Lumbre.
+
+**Lo que no cambia**: el emparejado (§7 y §12.4) y la clave de la biblioteca. El login nunca da
+la clave. Ni Sumego ni Lumbre la tienen, y un login no crea identidad ni bóveda.
+
+**Pendiente fuera de hebra-mcp**:
+- Las dos piezas de Lumbre: los campos nuevos de `/requests` y `/api/integrations/hebra-mcp/sumego/exchange`.
+  Las hace la sesión de Lumbre siguiendo el contrato que cerró con lumbre-mcp el 21 oct 2026.
+- El alta del cliente en Sumego, que hace la sesión de sumego.
+- Abierto, lo decide Lumbre: si el cierre en todas partes por `sub` (`signOutEverywhere`) debe
+  revocar también la credencial de emparejado de hebra-mcp. Hoy la revoca, y eso dejó caído
+  hebra-mcp el 21 oct 2026 a las 07:46 UTC hasta reemparejar a mano.
+
+**Pruebas** (sintéticas, sin red): discovery y JWKS falsos con claves ES256 generadas en el
+test. Cubren:
+- ID token con `aud`, `iss`, `nonce` o `exp` malos, firma HS256 y `alg: none`.
+- `state` sin cookie o con la cookie de otra solicitud, `iss` ausente o distinto, y reutilizar
+  el `state`.
+- El token de formulario del consentimiento, de un uso.
+- `logout_token` con `nonce`, sin `events`, con `jti` repetido, por `sid` y por `sub`.
+- Que el `jti` no se consuma si falla el corte.
+- Con el interruptor en `lumbre`, el recorrido de §12.2 sin cambios.
+- Que ningún log contenga `code`, ID token, `logout_token` ni el secreto del cliente.
 
 ## 13. Ficheros de trabajo con vuelta (D12, 10 oct 2026)
 
