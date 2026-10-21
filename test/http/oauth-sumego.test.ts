@@ -13,6 +13,7 @@ import { HttpConfigError } from '../../src/http/config';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE } from '../../src/oauth';
 import { LOGOUT_JTIS_FILE } from '../../src/oauth/logout-jtis';
 import type { HebraOAuthProvider } from '../../src/oauth/provider';
+import { TokenStore } from '../../src/oauth/token-store';
 import { BACKCHANNEL_LOGOUT_EVENT, DISCOVERY_FAILURE_TTL_MS } from '../../src/oauth/sumego';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { PairingRevocation } from '../../src/status/pairing-revocation';
@@ -56,17 +57,35 @@ let currentChallenge: string;
 let currentSid: string;
 let currentSub: string;
 let issuedCodes: Set<string>;
+let liveRefresh: Set<string>;
+let omitCodeRefresh: boolean;
+let refreshCalls: string[];
+let refreshResponse: (() => Promise<Response>) | null;
+let discoveryResponse: (() => Response) | null;
+let jwksUp: boolean;
+/** Reloj de la app (y de los tokens firmados aquí): `Date.now()` más esto. */
+let clockOffset: number;
 
 // Lumbre simulado.
 let requestBodies: Array<Record<string, unknown>>;
 let exchangeBodies: Array<Record<string, unknown>>;
 let requestsResponse: (() => Promise<Response>) | null;
 let exchangeResponse: (() => Promise<Response>) | null;
+let renewResponse: (() => Promise<Response>) | null;
+let renewCount: number;
+let grantExpiresAt: string;
 let revokeCount: number;
 let requestId: string;
 let transactionId: string;
 
 function s256(value: string): string { return createHash('sha256').update(value).digest('base64url'); }
+function nowS(): number { return Math.floor((Date.now() + clockOffset) / 1000); }
+
+function newRefresh(): string {
+  const token = `rt-sumego-${randomBytes(18).toString('base64url')}`;
+  liveRefresh.add(token);
+  return token;
+}
 
 async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(input));
@@ -75,41 +94,56 @@ async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Res
   if (!sumegoUp) throw new Error('offline');
   if (url.pathname === '/.well-known/openid-configuration') {
     discoveryCount += 1;
+    if (discoveryResponse) return discoveryResponse();
     return json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`,
       jwks_uri: `${ISSUER}/jwks`, id_token_signing_alg_values_supported: ['ES256'] });
   }
-  if (url.pathname === '/jwks') { jwksCount += 1; return json({ keys: [publicJwk] }); }
+  if (url.pathname === '/jwks') {
+    jwksCount += 1;
+    if (!jwksUp) return json({ error: 'down' }, 503);
+    return json({ keys: [publicJwk] });
+  }
   if (url.pathname === '/token') {
     const form = new URLSearchParams(String(init?.body));
     const headers = new Headers(init?.headers);
     tokenCalls.push({ authorization: headers.get('authorization'), form });
+    if (form.get('grant_type') === 'refresh_token') {
+      const presented = form.get('refresh_token')!;
+      refreshCalls.push(presented);
+      if (refreshResponse) return refreshResponse();
+      if (!liveRefresh.delete(presented)) return json({ error: 'invalid_grant' }, 400);
+      return json({ access_token: 'acceso-de-sumego', token_type: 'Bearer', refresh_token: newRefresh(), id_token: 'no-se-usa' });
+    }
     const code = form.get('code')!;
     if (!issuedCodes.has(code) || s256(form.get('code_verifier')!) !== currentChallenge) return json({ error: 'invalid_grant' }, 400);
     issuedCodes.delete(code);
-    return json({ access_token: 'acceso-de-sumego', token_type: 'Bearer', id_token: await (nextIdToken ?? (() => idToken()))() });
+    return json({ access_token: 'acceso-de-sumego', token_type: 'Bearer', ...(omitCodeRefresh ? {} : { refresh_token: newRefresh() }),
+      id_token: await (nextIdToken ?? (() => idToken()))() });
   }
   throw new Error('unexpected sumego route');
 }
 
 /** ID token firmado con la clave del JWKS; `undefined` en un claim lo quita. */
-async function idToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256', kid = KID): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
+async function idToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256', kid = KID,
+  hsSecret: Uint8Array = new TextEncoder().encode('x'.repeat(32))): Promise<string> {
+  const now = nowS();
   const payload: Record<string, unknown> = { iss: ISSUER, aud: OIDC_CLIENT_ID, sub: currentSub, sid: currentSid, email: EMAIL,
     nonce: currentNonce, iat: now, exp: now + 300, ...overrides };
   for (const key of Object.keys(payload)) if (payload[key] === undefined) delete payload[key];
   if (alg === 'none') return new UnsecuredJWT(payload).encode();
-  if (alg === 'HS256') return new SignJWT(payload).setProtectedHeader({ alg: 'HS256', kid }).sign(new TextEncoder().encode('x'.repeat(32)));
+  if (alg === 'HS256') return new SignJWT(payload).setProtectedHeader({ alg: 'HS256', kid }).sign(hsSecret);
   return new SignJWT(payload).setProtectedHeader({ alg: 'ES256', kid }).sign(privateKey);
 }
 
-async function logoutToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256'): Promise<string> {
-  const now = Math.floor(Date.now() / 1000);
+async function logoutToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256', kid = KID,
+  hsSecret: Uint8Array = new TextEncoder().encode('x'.repeat(32))): Promise<string> {
+  const now = nowS();
   const payload: Record<string, unknown> = { iss: ISSUER, aud: OIDC_CLIENT_ID, iat: now, exp: now + 120, jti: randomUUID(),
     events: { [BACKCHANNEL_LOGOUT_EVENT]: {} }, sid: currentSid, ...overrides };
   for (const key of Object.keys(payload)) if (payload[key] === undefined) delete payload[key];
   if (alg === 'none') return new UnsecuredJWT(payload).encode();
-  if (alg === 'HS256') return new SignJWT(payload).setProtectedHeader({ alg: 'HS256', kid: KID }).sign(new TextEncoder().encode('x'.repeat(32)));
-  return new SignJWT(payload).setProtectedHeader({ alg: 'ES256', kid: KID }).sign(privateKey);
+  if (alg === 'HS256') return new SignJWT(payload).setProtectedHeader({ alg: 'HS256', kid }).sign(hsSecret);
+  return new SignJWT(payload).setProtectedHeader({ alg: 'ES256', kid }).sign(privateKey);
 }
 
 async function broker(input: string | URL, init?: RequestInit): Promise<Response> {
@@ -131,12 +165,17 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     if (body.requestId !== requestId || body.transactionId !== transactionId) return json({ code: 'transaction_not_found' }, 404);
     return json({ credentialId: GRANT_ID, accessToken: UPSTREAM, tokenType: 'Bearer', clientId: body.clientId, resource: body.resource,
       scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE,
-      expiresAt: new Date(Date.now() + 30 * 86400_000).toISOString() });
+      expiresAt: grantExpiresAt });
   }
   if (path === 'introspect') {
     return json({ active: true, credentialId: GRANT_ID, clientId: DCR_CLIENT_ID, resource: app.config.resourceUrl, scope: 'hebra:mcp',
-      accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE,
-      expiresAt: new Date(Date.now() + 30 * 86400_000).toISOString() });
+      accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE, expiresAt: grantExpiresAt });
+  }
+  if (path === 'renew') {
+    renewCount += 1;
+    if (renewResponse) return renewResponse();
+    grantExpiresAt = new Date(Date.now() + clockOffset + 30 * 86400_000).toISOString();
+    return json({ active: true, expiresAt: grantExpiresAt });
   }
   if (path === 'revoke') { revokeCount += 1; return json({ revoked: true }); }
   throw new Error(`unexpected route ${path}`);
@@ -149,7 +188,8 @@ function sumegoEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 
 async function startApp(env: NodeJS.ProcessEnv = sumegoEnv()): Promise<void> {
   app = await startTestHttpApp(context.serverContext, async (config) => {
-    const auth = await loadOAuthHttpAuth(context.dataDir, config, store, { backchannelFetch: broker, sumegoFetch, env, pairing });
+    const auth = await loadOAuthHttpAuth(context.dataDir, config, store, { backchannelFetch: broker, sumegoFetch, env, pairing,
+      now: () => Date.now() + clockOffset });
     if (!auth) throw new Error('auth absent');
     provider = auth.provider;
     return auth;
@@ -171,7 +211,9 @@ beforeEach(async () => {
   pairing = new PairingRevocation();
   discoveryCount = 0; jwksCount = 0; tokenCalls = []; sumegoUp = true; nextIdToken = null;
   currentNonce = ''; currentChallenge = ''; currentSid = 'sesion-a'; currentSub = SUB; issuedCodes = new Set();
+  liveRefresh = new Set(); omitCodeRefresh = false; refreshCalls = []; refreshResponse = null; discoveryResponse = null; jwksUp = true; clockOffset = 0;
   requestBodies = []; exchangeBodies = []; requestsResponse = null; exchangeResponse = null; revokeCount = 0;
+  renewResponse = null; renewCount = 0; grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
   await startApp();
 });
 
@@ -227,9 +269,9 @@ function callback(params: Record<string, string>, cookie?: string): Promise<Resp
   return fetch(url, { redirect: 'manual', headers: cookie ? { cookie } : {} });
 }
 
-function consent(formToken: string, cookie?: string): Promise<Response> {
+function consent(formToken: string, cookie?: string, origin?: string): Promise<Response> {
   return fetch(`${app.origin}/oauth/sumego/consent`, { method: 'POST', redirect: 'manual',
-    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}) },
+    headers: { 'content-type': 'application/x-www-form-urlencoded', ...(cookie ? { cookie } : {}), ...(origin ? { origin } : {}) },
     body: new URLSearchParams({ form_token: formToken }) });
 }
 
@@ -280,6 +322,8 @@ describe('recorrido con Sumego', () => {
     expect(page.headers.get('content-security-policy')).toBe(`default-src 'none'; form-action 'self' ${CLAUDE_CALLBACK}; style-src 'unsafe-inline'`);
     expect(page.headers.get('x-frame-options')).toBe('DENY');
     expect(page.headers.get('cache-control')).toBe('no-store');
+    expect(page.headers.get('referrer-policy')).toBe('same-origin');
+    expect(html).toContain('<meta name="referrer" content="same-origin">');
     expect(html).toContain(EMAIL);
     expect(html).toContain('hebra:mcp');
     expect(html).toContain('>Permitir<');
@@ -346,6 +390,8 @@ describe('ID token', () => {
     ['exp pasado', () => idToken({ exp: Math.floor(Date.now() / 1000) - 120 })],
     ['iat de hace más de 6 min', () => idToken({ iat: Math.floor(Date.now() / 1000) - 400, exp: Math.floor(Date.now() / 1000) + 300 })],
     ['sin sub', () => idToken({ sub: undefined })],
+    ['sin sid', () => idToken({ sid: undefined })],
+    ['HS256 firmado con la JWK pública como secreto', () => idToken({}, 'HS256', KID, new TextEncoder().encode(JSON.stringify(publicJwk)))],
     ['azp de otro cliente', () => idToken({ azp: 'otro-cliente' })],
     ['firma HS256', () => idToken({}, 'HS256')],
     ['alg none', () => idToken({}, 'none')],
@@ -572,7 +618,7 @@ describe('logs sin secretos', () => {
     await logout(logoutJwt);
     const text = logged();
     for (const secret of [login.code, lastIdToken, logoutJwt, login.state, currentNonce, CLIENT_SECRET, SECRET, oauthCode, formToken,
-      tokenCalls[0]!.form.get('code_verifier')!, login.cookie.split('=')[1]!, UPSTREAM]) {
+      tokenCalls[0]!.form.get('code_verifier')!, login.cookie.split('=')[1]!, UPSTREAM, ...liveRefresh]) {
       expect(secret.length).toBeGreaterThan(0);
       expect(text).not.toContain(secret);
     }
@@ -620,4 +666,282 @@ describe('configuración', () => {
       expect(String((failure as Error).message)).not.toContain(CLIENT_SECRET);
     });
   }
+});
+
+function refresh(refreshToken: string): Promise<Response> {
+  return fetch(`${app.origin}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: DCR_CLIENT_ID, grant_type: 'refresh_token', refresh_token: refreshToken,
+      resource: app.config.resourceUrl }) });
+}
+
+async function savedFamilies(): Promise<Array<Record<string, unknown>>> {
+  return (JSON.parse(await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8')) as { families: Array<Record<string, unknown>> }).families;
+}
+
+const HOUR = 60 * 60_000;
+
+describe('renovación horaria con Sumego (M1)', () => {
+  it('el refresh de Sumego se guarda cifrado y solo se renueva pasada 1 h; el rotado va con el de Hebra', async () => {
+    const first = await fullLogin();
+    const loginRefresh = [...liveRefresh][0]!;
+    const [family] = await savedFamilies();
+    expect(typeof family!.sumegoRefresh).toBe('string');
+    expect(JSON.stringify(await savedFamilies())).not.toContain(loginRefresh);
+    expect(await store.get('hebra-mcp-sumego-refresh-key')).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    // Antes de 1 h: sin llamar a Sumego.
+    clockOffset = 30 * 60_000;
+    const early = await refresh(first.refresh_token);
+    expect(early.status).toBe(200);
+    expect(refreshCalls).toEqual([]);
+
+    // Pasada 1 h desde el login: renueva con el refresh guardado y client_secret_basic.
+    clockOffset = HOUR + 60_000;
+    const second = await early.json() as { refresh_token: string };
+    const renewed = await refresh(second.refresh_token);
+    expect(renewed.status).toBe(200);
+    expect(refreshCalls).toEqual([loginRefresh]);
+    expect(tokenCalls.at(-1)!.authorization).toBe(`Basic ${Buffer.from(`${OIDC_CLIENT_ID}:${CLIENT_SECRET}`).toString('base64')}`);
+    const rotated = [...liveRefresh][0]!;
+    expect(rotated).not.toBe(loginRefresh);
+    expect(JSON.stringify(await savedFamilies())).not.toContain(rotated);
+    expect((await savedFamilies())[0]!.sumegoRenewedAt).toBeGreaterThan(Date.now() + HOUR);
+
+    // La siguiente renovación usa el rotado.
+    clockOffset = 2 * HOUR + 120_000;
+    const third = await renewed.json() as { refresh_token: string };
+    expect((await refresh(third.refresh_token)).status).toBe(200);
+    expect(refreshCalls).toEqual([loginRefresh, rotated]);
+  });
+
+  it('un 4xx de Sumego corta la familia como active:false, sin llamar a /renew', async () => {
+    const tokens = await fullLogin();
+    refreshResponse = async () => json({ error: 'invalid_grant' }, 400);
+    clockOffset = HOUR + 1;
+    const res = await refresh(tokens.refresh_token);
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: 'invalid_grant' });
+    expect(renewCount).toBe(0);
+    expect(await savedFamilies()).toHaveLength(0);
+    expect(revokeCount).toBe(1);
+  });
+
+  for (const [name, make] of [
+    ['red', async () => { throw new Error('offline'); }],
+    ['503', async () => json({ error: 'x' }, 503)],
+    ['429', async () => json({ error: 'slow_down' }, 429)]
+  ] as Array<[string, () => Promise<Response>]>) {
+    it(`Sumego ${name}: error temporal y la familia sigue; el reintento vale`, async () => {
+      const tokens = await fullLogin();
+      refreshResponse = make;
+      clockOffset = HOUR + 1;
+      expect((await refresh(tokens.refresh_token)).status).toBe(500);
+      expect(renewCount).toBe(0);
+      expect(await savedFamilies()).toHaveLength(1);
+      refreshResponse = null;
+      expect((await refresh(tokens.refresh_token)).status).toBe(200);
+    });
+  }
+
+  it('Sumego rota pero /renew falla: el reintento usa el refresh nuevo, no el ya gastado', async () => {
+    const tokens = await fullLogin();
+    const loginRefresh = [...liveRefresh][0]!;
+    renewResponse = async () => json({ error: 'x' }, 503);
+    clockOffset = HOUR + 1;
+    expect((await refresh(tokens.refresh_token)).status).toBe(500);
+    const rotated = [...liveRefresh][0]!;
+    expect(refreshCalls).toEqual([loginRefresh]);
+    renewResponse = null;
+    const retry = await refresh(tokens.refresh_token);
+    expect(retry.status).toBe(200);
+    // No volvió a Sumego (renovado hace nada) y el rotado quedó guardado.
+    expect(refreshCalls).toEqual([loginRefresh]);
+    clockOffset = 2 * HOUR + 10;
+    const next = await retry.json() as { refresh_token: string };
+    expect((await refresh(next.refresh_token)).status).toBe(200);
+    expect(refreshCalls).toEqual([loginRefresh, rotated]);
+  });
+
+  it('sin refresh de Sumego en el canje del código: login denegado', async () => {
+    omitCodeRefresh = true;
+    const login = await startLogin();
+    const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+    expect(res.status).toBe(400);
+    expect(exchangeBodies).toHaveLength(0);
+  });
+});
+
+describe('consentimiento y vida del ID token (M2)', () => {
+  it('pasado iat + 5 min − 30 s, el «Permitir» da «no disponible» y no canjea', async () => {
+    const { login, formToken } = await toConsent();
+    clockOffset = 271_000;
+    const res = await consent(formToken, login.cookie);
+    expect(res.status).toBe(503);
+    const html = await res.text();
+    expect(html).toContain('No disponible');
+    expect(html).toContain('Vuelve a conectar');
+    expect(exchangeBodies).toHaveLength(0);
+  });
+
+  it('un ID token que ya no llega a tiempo da «no disponible» en el callback', async () => {
+    nextIdToken = () => idToken({ iat: nowS() - 280 });
+    const login = await startLogin();
+    const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+    expect(res.status).toBe(503);
+    expect(await res.text()).toContain('Vuelve a conectar');
+  });
+});
+
+describe('logout con conexiones en vuelo', () => {
+  it('durante el consentimiento: el «Permitir» se rechaza y no canjea', async () => {
+    const { login, formToken } = await toConsent();
+    expect((await logout(await logoutToken({ sid: undefined, sub: SUB }))).status).toBe(200);
+    expect((await consent(formToken, login.cookie)).status).toBe(400);
+    expect(exchangeBodies).toHaveLength(0);
+  });
+
+  it('con el código emitido sin canjear: invalid_grant y la concesión se revoca', async () => {
+    const { login, formToken } = await toConsent();
+    const approved = await consent(formToken, login.cookie);
+    const code = new URL(approved.headers.get('location')!).searchParams.get('code')!;
+    expect((await logout(await logoutToken({ sid: 'sesion-a' }))).status).toBe(200);
+    expect(revokeCount).toBe(1);
+    const res = await fetch(`${app.origin}/token`, { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ client_id: DCR_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: login.verifier,
+        redirect_uri: CLAUDE_CALLBACK, resource: app.config.resourceUrl }) });
+    expect(res.status).toBe(400);
+    expect(await families()).toHaveLength(0);
+  });
+
+  it('issueFamily rechaza una identidad cerrada dentro de su escritura (logout entre el canje y la familia)', async () => {
+    const tokens = await TokenStore.open(context.dataDir);
+    const grant = { credentialId: GRANT_ID, clientId: DCR_CLIENT_ID, resource: 'https://mcp.hebra.pro/mcp', scope: 'hebra:mcp',
+      accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE,
+      expiresAt: new Date(Date.now() + 86400_000).toISOString(), active: true as const };
+    let closed = false;
+    // Una escritura ocupa la cola; la emisión entra detrás y el logout se apunta mientras espera.
+    const busy = tokens.dropFamiliesByLogout({ sub: 'nadie' });
+    const issued = tokens.issueFamily({ clientId: DCR_CLIENT_ID, scope: 'hebra:mcp', resource: grant.resource, grant,
+      authorizedAt: Date.now(), identity: { sub: SUB, sid: 'sesion-a' }, loggedOut: () => closed }, 0, async () => {});
+    closed = true;
+    await busy;
+    await expect(issued).rejects.toThrow('logged_out');
+    expect(tokens.liveFamilyCount(0)).toBe(0);
+  });
+
+  it('un login nuevo después de cerrar por sub no queda bloqueado', async () => {
+    expect((await logout(await logoutToken({ sid: undefined, sub: SUB, iat: nowS() - 5 }))).status).toBe(200);
+    await fullLogin();
+    expect(await families()).toHaveLength(1);
+  });
+});
+
+describe('cookie de login', () => {
+  it('sin cookie o con otra no se toca; al quemar la transacción se borra', async () => {
+    const login = await startLogin();
+    const foreign = await callback({ code: login.code, state: login.state, iss: ISSUER }, '__Host-hebra_mcp_login=otra');
+    expect(foreign.headers.get('set-cookie')).toBeNull();
+    const unknown = await callback({ code: login.code, state: 'desconocido', iss: ISSUER }, login.cookie);
+    expect(unknown.headers.get('set-cookie')).toBeNull();
+    const burned = await callback({ code: login.code, state: login.state, iss: 'https://otro.example.test' }, login.cookie);
+    expect(burned.status).toBe(400);
+    expect(burned.headers.get('set-cookie')).toContain('Max-Age=0');
+  });
+
+  it('un «Permitir» sin la cookie no la borra ni quema la transacción', async () => {
+    const { login, formToken } = await toConsent();
+    const res = await consent(formToken);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect((await consent(formToken, login.cookie)).status).toBe(302);
+  });
+});
+
+describe('Origin del «Permitir» (A1)', () => {
+  it('con Origin del host público pasa; con Origin: null, 403', async () => {
+    const first = await toConsent();
+    expect((await consent(first.formToken, first.login.cookie, app.origin)).status).toBe(302);
+    const second = await toConsent();
+    expect((await consent(second.formToken, second.login.cookie, 'null')).status).toBe(403);
+  });
+});
+
+describe('JWKS y discovery', () => {
+  it('un fallo del JWKS se recuerda 30 s, también para un kid desconocido', async () => {
+    await fullLogin();
+    const base = jwksCount;
+    jwksUp = false;
+    clockOffset = 31_000;
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(503);
+    expect(jwksCount).toBe(base + 1);
+    jwksUp = true;
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(503);
+    expect(jwksCount).toBe(base + 1);
+    clockOffset = 62_000;
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(400);
+    expect(jwksCount).toBe(base + 2);
+  });
+
+  it('kid desconocido: una nueva descarga cada 30 s como mucho, y el logout_token es 400', async () => {
+    await fullLogin();
+    const base = jwksCount;
+    clockOffset = 31_000;
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(400);
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(400);
+    expect(jwksCount).toBe(base + 1);
+    clockOffset = 62_000;
+    expect((await logout(await logoutToken({}, 'ES256', 'otra-clave'))).status).toBe(400);
+    expect(jwksCount).toBe(base + 2);
+  });
+
+  it('logout_token HS256 firmado con la JWK pública: 400', async () => {
+    await fullLogin();
+    const res = await logout(await logoutToken({}, 'HS256', KID, new TextEncoder().encode(JSON.stringify(publicJwk))));
+    expect(res.status).toBe(400);
+    expect(await families()).toHaveLength(1);
+  });
+
+  const broken: Array<[string, () => Response]> = [
+    ['endpoints de otro origen', () => json({ issuer: ISSUER, authorization_endpoint: 'https://evil.example.test/authorize',
+      token_endpoint: `${ISSUER}/token`, jwks_uri: `${ISSUER}/jwks` })],
+    ['jwks_uri de otro origen', () => json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`,
+      token_endpoint: `${ISSUER}/token`, jwks_uri: 'https://evil.example.test/jwks' })],
+    ['una redirección (no se sigue)', () => new Response(null, { status: 302, headers: { location: 'https://evil.example.test/conf' } })],
+    ['más de 64 KiB', () => json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`,
+      jwks_uri: `${ISSUER}/jwks`, relleno: 'x'.repeat(70_000) })]
+  ];
+  for (const [name, make] of broken) {
+    it(`discovery con ${name}: /authorize 503 sin redirigir`, async () => {
+      discoveryResponse = make;
+      const res = await authorize(pkce().challenge);
+      expect(res.status).toBe(503);
+      expect(res.headers.get('location')).toBeNull();
+      expect(requestBodies).toHaveLength(0);
+    });
+  }
+});
+
+describe('jti (B1) y entregas simultáneas', () => {
+  it('un token aceptado en exp + 30 s no se puede repetir', async () => {
+    await fullLogin();
+    const token = await logoutToken({ exp: nowS() + 10 });
+    clockOffset = 40_000;
+    expect((await logout(token)).status).toBe(200);
+    clockOffset = 45_000;
+    expect((await logout(token)).status).toBe(400);
+  });
+
+  it('dos POST simultáneos con el mismo jti: uno 200 y otro 400', async () => {
+    await fullLogin();
+    const token = await logoutToken();
+    const statuses = (await Promise.all([logout(token), logout(token)])).map((res) => res.status).sort();
+    expect(statuses).toEqual([200, 400]);
+  });
+
+  it('con el cupo de fallos agotado, un logout_token válido sigue pasando', async () => {
+    await fullLogin();
+    for (let index = 0; index < 60; index += 1) expect((await logout('no-es-un-jwt')).status).toBe(400);
+    expect((await logout('no-es-un-jwt')).status).toBe(429);
+    expect((await logout(await logoutToken({ sid: undefined, sub: SUB }))).status).toBe(200);
+    expect(await families()).toHaveLength(0);
+  });
 });

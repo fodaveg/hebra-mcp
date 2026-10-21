@@ -43,6 +43,7 @@ import { LogoutJtiStore } from './logout-jtis';
 import { RevocationFile } from './owner';
 import { HebraOAuthProvider, OAUTH_SCOPE } from './provider';
 import { SUMEGO_CALLBACK_PATH, SUMEGO_CONSENT_PATH, SUMEGO_LOGOUT_PATH, SumegoOidc } from './sumego';
+import { RefreshSealer } from './sumego-refresh';
 import { TokenStore } from './token-store';
 
 export interface OAuthHttpAuthOptions {
@@ -108,11 +109,12 @@ export async function loadOAuthHttpAuth(
     now,
     loginProvider: login.provider,
     sumego,
-    pairing: options.pairing
+    pairing: options.pairing,
+    sealer: sumego ? await RefreshSealer.open(secrets!) : null
   });
   const logout = sumego
     ? new BackchannelLogout({ oidc: sumego, jtis: await LogoutJtiStore.open(dataDir, now),
-      revoke: (selector) => provider.revokeByLogout(selector), now })
+      revoke: (selector, iat, until) => provider.revokeByLogout(selector, iat, until), now })
     : null;
 
   const protectedResource = {

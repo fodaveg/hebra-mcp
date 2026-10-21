@@ -70,6 +70,13 @@ interface Family {
   sub: string | null;
   /** `sid` del ID token de Sumego (v3), si lo traía. */
   sid: string | null;
+  /**
+   * Refresh de Sumego CIFRADO (`./sumego-refresh.ts`, AES-256-GCM con la clave del almacén de
+   * secretos), nunca en claro; `null` sin login de Sumego. Rota en cada renovación horaria.
+   */
+  sumegoRefresh: string | null;
+  /** Última renovación con Sumego (o el login), en ms; `null` sin login de Sumego. */
+  sumegoRenewedAt: number | null;
 }
 
 interface TokensFile {
@@ -85,6 +92,19 @@ export interface FamilyIdentity {
 
 /** A quién corta un back-channel logout: con `sid`, ese y (si viene) solo de ese `sub`. */
 export type LogoutSelector = { sid: string; sub?: string } | { sid?: undefined; sub: string };
+
+/** ¿Corta este logout a esta identidad? Una autorización sin identidad (Lumbre, v2) nunca casa. */
+export function logoutMatches(selector: LogoutSelector, identity: FamilyIdentity | null): boolean {
+  if (identity === null) return false;
+  if (selector.sid !== undefined) return identity.sid === selector.sid && (selector.sub === undefined || identity.sub === selector.sub);
+  return identity.sub === selector.sub;
+}
+
+/** Refresh de Sumego de una familia, cifrado, y cuándo se renovó por última vez. */
+export interface SumegoRefreshState {
+  sealedRefresh: string;
+  renewedAt: number;
+}
 
 export interface IssuedTokens {
   accessToken: string;
@@ -123,13 +143,25 @@ function nullableString(value: unknown): boolean {
   return value === null || typeof value === 'string';
 }
 
-/** Familia v3: la de v2 más `sub`/`sid`. */
+/**
+ * Familia v3: la de v2 más `sub`/`sid` y el refresh de Sumego cifrado con su fecha (los dos o
+ * ninguno). Los v3 escritos antes de guardar el refresh no traen esos dos campos: cuentan como
+ * `null` (`normalize`).
+ */
 function isFamily(value: unknown): value is Family {
-  return isFamilyV2(value) && nullableString((value as Record<string, unknown>).sub) &&
-    nullableString((value as Record<string, unknown>).sid);
+  if (!isFamilyV2(value)) return false;
+  const family = value as Record<string, unknown>;
+  const sealed = family.sumegoRefresh ?? null;
+  const renewedAt = family.sumegoRenewedAt ?? null;
+  return nullableString(family.sub) && nullableString(family.sid) &&
+    ((sealed === null && renewedAt === null) || (typeof sealed === 'string' && typeof renewedAt === 'number' && Number.isFinite(renewedAt)));
 }
 
-function isFamilyV2(value: unknown): value is Omit<Family, 'sub' | 'sid'> {
+function normalize(family: Family): Family {
+  return { ...family, sumegoRefresh: family.sumegoRefresh ?? null, sumegoRenewedAt: family.sumegoRenewedAt ?? null };
+}
+
+function isFamilyV2(value: unknown): value is Omit<Family, 'sub' | 'sid' | 'sumegoRefresh' | 'sumegoRenewedAt'> {
   if (typeof value !== 'object' || value === null) return false;
   const family = value as Record<string, unknown>;
   return (
@@ -173,10 +205,10 @@ export class TokenStore {
       if (value !== null) {
         const record = value as { version?: unknown; families?: unknown };
         if (record.version === 3 && Array.isArray(record.families) && record.families.every(isFamily)) {
-          families = record.families;
+          families = record.families.map(normalize);
         } else if (record.version === 2 && Array.isArray(record.families) && record.families.every(isFamilyV2)) {
           // Migración v2 → v3: sin identidad de Sumego. Se escribe v3 en la mutación siguiente.
-          families = record.families.map((family) => ({ ...family, sub: null, sid: null }));
+          families = record.families.map((family) => ({ ...family, sub: null, sid: null, sumegoRefresh: null, sumegoRenewedAt: null }));
           logEvent({ event: 'oauth.tokens', result: 'migrated', from: 2 });
         } else {
           logEvent({ event: 'oauth.tokens', result: 'invalid' });
@@ -260,9 +292,14 @@ export class TokenStore {
     };
   }
 
-  /** Una familia nueva tras una autorización aprobada. */
+  /**
+   * Una familia nueva tras una autorización aprobada. `loggedOut`, si lo hay, se evalúa dentro
+   * de la cola de mutaciones: un back-channel logout ya apuntado por el proveedor rechaza la
+   * identidad (`logged_out`) aunque llegue entre el canje del código y esta escritura.
+   */
   issueFamily(
-    input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number; identity?: FamilyIdentity | null },
+    input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number;
+      identity?: FamilyIdentity | null; sumego?: SumegoRefreshState | null; loggedOut?: () => boolean },
     revokedBefore: number,
     storeBearer: (familyId: string, liveIds: readonly string[]) => Promise<void>
   ): Promise<IssuedTokens> {
@@ -271,6 +308,7 @@ export class TokenStore {
       const priorIds = this.familyIds();
       this.prune(revokedBefore, now);
       if (input.authorizedAt <= revokedBefore) throw new Error('authorization_revoked');
+      if (input.loggedOut?.()) throw new Error('logged_out');
       if (this.families.length >= MAX_FAMILIES) throw new Error('too_many_families');
       const family: Family = {
         id: randomBytes(16).toString('base64url'),
@@ -286,7 +324,9 @@ export class TokenStore {
         access: [],
         grant: input.grant,
         sub: input.identity?.sub ?? null,
-        sid: input.identity?.sid ?? null
+        sid: input.identity?.sid ?? null,
+        sumegoRefresh: input.sumego?.sealedRefresh ?? null,
+        sumegoRenewedAt: input.sumego?.renewedAt ?? null
       };
       if (family.expiresAt <= now) throw new Error('grant_expired');
       const accessToken = this.newAccess(family, now);
@@ -302,9 +342,11 @@ export class TokenStore {
   /**
    * Rota un refresh. Reutilizar uno ya rotado revoca su familia entera. Con
    * `renewedExpiresAt` (la fecha que devolvió `/renew`), la familia y su concesión pasan a
-   * caducar entonces, en la misma escritura atómica que la rotación.
+   * caducar entonces, en la misma escritura atómica que la rotación. Con `sumego` (el refresh
+   * de Sumego recién rotado, cifrado), también va en esa escritura.
    */
-  rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number, renewedExpiresAt?: string): Promise<RefreshOutcome> {
+  rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number, renewedExpiresAt?: string,
+    sumego?: SumegoRefreshState): Promise<RefreshOutcome> {
     return this.mutate((): RefreshOutcome => {
       const now = this.now();
       const match = REFRESH_PATTERN.exec(refreshToken);
@@ -340,10 +382,21 @@ export class TokenStore {
         family.grant.expiresAt = renewedExpiresAt;
         family.expiresAt = Date.parse(renewedExpiresAt);
       }
+      if (sumego !== undefined) {
+        family.sumegoRefresh = sumego.sealedRefresh;
+        family.sumegoRenewedAt = sumego.renewedAt;
+      }
       const accessToken = this.newAccess(family, now);
       const nextRefresh = this.newRefresh(family);
       return { ok: true, tokens: this.issued(family, accessToken, nextRefresh) };
     });
+  }
+
+  /** Refresh de Sumego (cifrado) de una familia y su última renovación; `null` sin login de Sumego. */
+  sumegoRefreshOf(familyId: string): SumegoRefreshState | null {
+    const family = this.families.find((candidate) => candidate.id === familyId);
+    if (!family || family.sumegoRefresh === null || family.sumegoRenewedAt === null) return null;
+    return { sealedRefresh: family.sumegoRefresh, renewedAt: family.sumegoRenewedAt };
   }
 
   /** El access token, si es válido ahora. Sin escribir nada. */
@@ -391,13 +444,8 @@ export class TokenStore {
    */
   dropFamiliesByLogout(selector: LogoutSelector): Promise<string[]> {
     return this.mutate((): string[] => {
-      const matches = (family: Family): boolean => {
-        if (family.sub === null) return false;
-        if (selector.sid !== undefined) {
-          return family.sid === selector.sid && (selector.sub === undefined || family.sub === selector.sub);
-        }
-        return family.sub === selector.sub;
-      };
+      const matches = (family: Family): boolean =>
+        logoutMatches(selector, family.sub === null ? null : { sub: family.sub, sid: family.sid });
       const dropped = this.families.filter(matches).map((family) => family.id);
       if (dropped.length) this.families = this.families.filter((family) => !matches(family));
       return dropped;

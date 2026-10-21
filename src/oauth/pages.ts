@@ -1,8 +1,9 @@
 /**
  * Páginas HTML del login con Sumego (SPEC.md §12.9): consentimiento, «acceso denegado», «no
  * disponible» y emparejado revocado. Sin scripts ni recursos externos; todo texto variable va
- * escapado. Cabeceras de todas: `Content-Security-Policy` cerrada, `X-Frame-Options: DENY` y
- * `Cache-Control: no-store`.
+ * escapado. Cabeceras de todas: `Content-Security-Policy` cerrada, `X-Frame-Options: DENY`,
+ * `Cache-Control: no-store` y `Referrer-Policy` (`same-origin` en la de consentimiento, para que
+ * el POST lleve su `Origin`; `no-referrer` en el resto).
  *
  * `form-action` de la página de consentimiento suma a `'self'` la `redirect_uri` de esa
  * solicitud (la de Claude o el loopback de Codex, ya validada en `/authorize`): Chrome y Firefox
@@ -22,17 +23,25 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!);
 }
 
-function htmlDocument(title: string, body: string): string {
+/**
+ * `no-referrer` en todas salvo la de consentimiento, que lleva `same-origin`: con `no-referrer`
+ * el navegador manda el POST del «Permitir» con `Origin: null` y el filtro de Host/Origin de
+ * `src/http/app.ts` lo rechaza con 403. `same-origin` no filtra nada fuera de este origen.
+ */
+type ReferrerPolicy = 'no-referrer' | 'same-origin';
+
+function htmlDocument(title: string, body: string, referrer: ReferrerPolicy = 'no-referrer'): string {
   return `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<meta name="referrer" content="no-referrer"><title>${escapeHtml(title)}</title><style>${STYLE}</style></head>` +
+    `<meta name="referrer" content="${referrer}"><title>${escapeHtml(title)}</title><style>${STYLE}</style></head>` +
     `<body><main><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`;
 }
 
-function send(res: Response, status: number, html: string, csp = BASE_CSP): void {
+function send(res: Response, status: number, html: string, csp = BASE_CSP, referrer: ReferrerPolicy = 'no-referrer'): void {
   res.status(status);
   res.setHeader('content-security-policy', csp);
   res.setHeader('x-frame-options', 'DENY');
   res.setHeader('cache-control', 'no-store');
+  res.setHeader('referrer-policy', referrer);
   res.type('html').send(html);
 }
 
@@ -64,7 +73,13 @@ export function sendConsentPage(res: Response, page: ConsentPage): void {
     `<p><button type="submit">Permitir</button></p></form>`;
   const target = cspSource(page.redirectUri);
   const csp = target ? BASE_CSP.replace("form-action 'self'", `form-action 'self' ${target}`) : BASE_CSP;
-  send(res, 200, htmlDocument('Conectar con Hebra', body), csp);
+  send(res, 200, htmlDocument('Conectar con Hebra', body, 'same-origin'), csp, 'same-origin');
+}
+
+/** El «Permitir» llegó tarde: Lumbre ya no aceptaría el ID token. «No disponible», sin redirigir. */
+export function sendConsentExpiredPage(res: Response): void {
+  send(res, 503, htmlDocument('No disponible', '<p>La autorización ha caducado antes de pulsar «Permitir». ' +
+    'Vuelve a conectar Hebra desde Claude o Codex para empezar de nuevo.</p>'));
 }
 
 /** `400`, `403`, `404` o `409` de Lumbre, o un login que no vale: sin redirigir. */

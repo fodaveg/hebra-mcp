@@ -8,8 +8,11 @@
  *   issuer: así el único destino de redirección fuera de los callbacks de hoy es una URL de
  *   la discovery validada.
  * - JWKS: `jwks_uri` de la discovery, 10 min en caché. Un `kid` desconocido vuelve a pedirlo
- *   como mucho cada 30 s (rotación de claves sin abrir la puerta a una ráfaga de peticiones).
- *   Solo claves EC P-256 de firma.
+ *   como mucho cada 30 s (rotación de claves sin abrir la puerta a una ráfaga de peticiones), y
+ *   un fallo de descarga también se recuerda 30 s. Solo claves EC P-256 de firma.
+ * - `token_endpoint`: canje del código (ID token y refresh) y renovación horaria con el refresh,
+ *   que Sumego rota en cada uso. Scopes `openid email`: Sumego da refresh a sus clientes propios
+ *   sin `offline_access`.
  * - Firmas: solo ES256 (`jose`). `alg: none`, HS* y cualquier otro algoritmo se rechazan antes
  *   de buscar clave.
  * - Toda descarga va sin redirecciones, con timeout de 5 s y tope de 64 KiB.
@@ -65,8 +68,10 @@ interface Discovery {
 /** Lo que hebra-mcp se queda del ID token: identidad y el email para la página. */
 export interface IdTokenClaims {
   sub: string;
-  sid: string | null;
+  sid: string;
   email: string | null;
+  /** `iat` en segundos: el consentimiento caduca a `iat` + 5 min − 30 s. */
+  iat: number;
 }
 
 /** `logout_token` validado (OIDC Back-Channel Logout 1.0 §2.4). */
@@ -74,8 +79,15 @@ export interface LogoutClaims {
   jti: string;
   sub: string | null;
   sid: string | null;
-  /** Hasta cuándo hay que recordar el `jti` (ms desde epoch). */
+  /** `iat` en segundos: una autorización con ID token anterior o igual queda cerrada. */
+  iat: number;
+  /** Hasta cuándo hay que recordar el `jti` (y los `sid`/`sub` cerrados), en ms. */
   rememberUntil: number;
+}
+
+/** Refresh de Sumego tal como llega; el tope evita guardar algo desmesurado. */
+function refreshTokenValue(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 4096;
 }
 
 function sameString(a: string, b: string): boolean {
@@ -117,6 +129,7 @@ export class SumegoOidc {
   private discovering: Promise<Discovery> | null = null;
   private jwks: { keys: Array<JWK & { kid: string }>; at: number } | null = null;
   private jwksFetching: Promise<Array<JWK & { kid: string }>> | null = null;
+  private jwksFailedAt: number | null = null;
 
   /**
    * `publicOrigin` es el de `HEBRA_MCP_PUBLIC_URL`: la `redirect_uri` registrada en Sumego es
@@ -192,26 +205,50 @@ export class SumegoOidc {
     return url.href;
   }
 
-  /**
-   * Canjea el código en el `token_endpoint` con `client_secret_basic` y el `code_verifier`.
-   * Devuelve solo el ID token; el access token de Sumego no se usa ni se guarda.
-   */
-  async exchangeCode(code: string, codeVerifier: string): Promise<string> {
+  /** POST al `token_endpoint` con `client_secret_basic`; red, 5xx y 429 son `unavailable`. */
+  private async tokenRequest(form: Record<string, string>): Promise<Response> {
     const { tokenEndpoint } = await this.discovery();
     let response: Response;
     try {
       response = await this.fetcher(tokenEndpoint, {
         method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
         headers: { authorization: `Basic ${this.basic}`, 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-        body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: this.redirectUri, code_verifier: codeVerifier }).toString()
+        body: new URLSearchParams(form).toString()
       });
     } catch { throw new SumegoError('unavailable'); }
     if (response.status >= 500 || response.status === 429) throw new SumegoError('unavailable');
+    return response;
+  }
+
+  /**
+   * Canjea el código en el `token_endpoint` con `client_secret_basic` y el `code_verifier`.
+   * Devuelve el ID token y el refresh de Sumego (que con `openid email` Sumego emite a sus
+   * clientes propios y rota en cada uso, SPEC.md §4.0.1 de Sumego); el access token de Sumego
+   * no se usa ni se guarda. Sin refresh no hay renovación horaria: el login no vale.
+   */
+  async exchangeCode(code: string, codeVerifier: string): Promise<{ idToken: string; refreshToken: string }> {
+    const response = await this.tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: this.redirectUri, code_verifier: codeVerifier });
     if (response.status !== 200) throw new SumegoError('invalid');
     const raw = await readJson(response, ['application/json'], 'invalid');
-    const idToken = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).id_token : undefined;
-    if (typeof idToken !== 'string' || idToken.length > MAX_JWT_LENGTH) throw new SumegoError('invalid');
-    return idToken;
+    const record = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {};
+    const { id_token: idToken, refresh_token: refreshToken } = record;
+    if (typeof idToken !== 'string' || idToken.length > MAX_JWT_LENGTH || !refreshTokenValue(refreshToken)) throw new SumegoError('invalid');
+    return { idToken, refreshToken };
+  }
+
+  /**
+   * Renueva la sesión de la app con el refresh de Sumego (grant `refresh_token`,
+   * `client_secret_basic`) y devuelve el refresh nuevo, que rota. Un 4xx que no es 429 es
+   * `invalid` (cuenta suspendida, grant revocado o refresh ya usado: Sumego da `400
+   * invalid_grant`); red, 5xx, 429 o un 200 sin refresh son `unavailable`.
+   */
+  async refresh(refreshToken: string): Promise<string> {
+    const response = await this.tokenRequest({ grant_type: 'refresh_token', refresh_token: refreshToken });
+    if (response.status !== 200) throw new SumegoError('invalid');
+    const raw = await readJson(response, ['application/json'], 'unavailable');
+    const next = raw && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>).refresh_token : undefined;
+    if (!refreshTokenValue(next)) throw new SumegoError('unavailable');
+    return next;
   }
 
   private async loadJwks(): Promise<Array<JWK & { kid: string }>> {
@@ -222,15 +259,26 @@ export class SumegoOidc {
     return keys.filter(signingKey);
   }
 
-  /** Claves del JWKS; `refresh` lo vuelve a pedir si la copia tiene más de 30 s. */
+  /**
+   * Claves del JWKS; `refresh` lo vuelve a pedir si la copia tiene más de 30 s. Un fallo de
+   * descarga también se recuerda 30 s: mientras, nadie vuelve a pedirlo (ni por un `kid`
+   * desconocido) y quien no tenga copia válida recibe `unavailable`.
+   */
   private async signingKeys(refresh: boolean): Promise<Array<JWK & { kid: string }>> {
     const now = this.now();
     const age = this.jwks ? now - this.jwks.at : Infinity;
     const fresh = age >= 0 && age < JWKS_TTL_MS && !(refresh && age >= JWKS_REFETCH_MS);
     if (this.jwks && fresh) return this.jwks.keys;
+    // Una descarga fallida hace menos de 30 s: ni se repite ni se da por bueno un `kid` ausente.
+    const sinceFailure = this.jwksFailedAt === null ? Infinity : now - this.jwksFailedAt;
+    if (sinceFailure >= 0 && sinceFailure < JWKS_REFETCH_MS) throw new SumegoError('unavailable');
     this.jwksFetching ??= this.loadJwks().then((keys) => {
       this.jwks = { keys, at: this.now() };
+      this.jwksFailedAt = null;
       return keys;
+    }, () => {
+      this.jwksFailedAt = this.now();
+      throw new SumegoError('unavailable');
     }).finally(() => { this.jwksFetching = null; });
     return this.jwksFetching;
   }
@@ -270,11 +318,13 @@ export class SumegoOidc {
    * 60 s de margen, `nonce` igual al de la solicitud (en tiempo constante) y `sub` presente.
    */
   async verifyIdToken(idToken: string, nonce: string): Promise<IdTokenClaims> {
-    const payload = await this.verify(idToken, ID_TOKEN_MAX_AGE_S, ['iat', 'exp', 'sub', 'nonce']);
+    // `sid` obligatorio: Sumego lo emite siempre a hebra-mcp (`backchannel_logout_session_required`)
+    // y sin él un logout por sesión no alcanzaría a la familia.
+    const payload = await this.verify(idToken, ID_TOKEN_MAX_AGE_S, ['iat', 'exp', 'sub', 'nonce', 'sid']);
     if (typeof payload.nonce !== 'string' || !sameString(payload.nonce, nonce) || !shortString(payload.sub)) throw new SumegoError('invalid');
-    if (payload.sid !== undefined && !shortString(payload.sid)) throw new SumegoError('invalid');
+    if (!shortString(payload.sid)) throw new SumegoError('invalid');
     const email = typeof payload.email === 'string' && payload.email.length <= 320 ? payload.email : null;
-    return { sub: payload.sub, sid: typeof payload.sid === 'string' ? payload.sid : null, email };
+    return { sub: payload.sub, sid: payload.sid, email, iat: payload.iat! };
   }
 
   /**
@@ -295,9 +345,10 @@ export class SumegoOidc {
     if ((sub !== null && !shortString(sub)) || (sid !== null && !shortString(sid)) || (sub === null && sid === null)) {
       throw new SumegoError('invalid');
     }
-    // Pasado `iat` + 10 min + margen el token ya no vale: no hace falta recordarlo más allá.
-    const rememberUntil = Math.min(payload.exp!, payload.iat! + LOGOUT_TOKEN_MAX_AGE_S + CLOCK_TOLERANCE_S) * 1000;
-    return { jti: payload.jti, sub: sub as string | null, sid: sid as string | null, rememberUntil };
+    // El token vale hasta `min(exp, iat + 10 min)` MÁS el margen de 60 s de `jose`: hasta ahí
+    // hay que recordar el `jti`, o uno aceptado en `exp + 30 s` podría repetirse.
+    const rememberUntil = (Math.min(payload.exp!, payload.iat! + LOGOUT_TOKEN_MAX_AGE_S) + CLOCK_TOLERANCE_S) * 1000;
+    return { jti: payload.jti, sub: sub as string | null, sid: sid as string | null, iat: payload.iat!, rememberUntil };
   }
 }
 

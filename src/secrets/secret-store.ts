@@ -22,7 +22,9 @@ export const SECRET_SERVICE = 'hebra-mcp';
 export const SECRET_KEYS = ['lumbre-connection', 'recovery-code', 'device-identity'] as const;
 /** Bearers de concesiones OAuth; separado del emparejado para que `unpair` mantenga
  * su semántica y las familias se invaliden por comparación del vínculo. */
-export type SecretKey = (typeof SECRET_KEYS)[number] | 'hebra-mcp-oauth-grants' | 'hebra-mcp-oauth-pending';
+export type SecretKey = (typeof SECRET_KEYS)[number] | 'hebra-mcp-oauth-grants' | 'hebra-mcp-oauth-pending'
+  // Clave AES-256-GCM de los refresh de Sumego guardados cifrados en `oauth-tokens.json` (D20).
+  | 'hebra-mcp-sumego-refresh-key';
 
 export interface SecretStore {
   get(key: SecretKey): Promise<string | null>;

@@ -21,9 +21,10 @@ import { ClaudeClientsStore, isAllowedRedirectUri } from './clients';
 import { GrantSecrets } from './grants';
 import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
-import { sendConsentPage, sendDeniedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
+import { sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
 import { SumegoError, type SumegoOidc } from './sumego';
-import { TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector } from './token-store';
+import type { RefreshSealer } from './sumego-refresh';
+import { logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
 
 export const OAUTH_SCOPE = 'hebra:mcp';
 const PENDING_TTL_MS = 10 * 60_000;
@@ -64,8 +65,39 @@ interface SumegoLogin {
   idToken: string | null;
   email: string | null;
   identity: FamilyIdentity | null;
+  /** `iat` del ID token, en segundos (para los logout cerrados). */
+  idTokenIat: number | null;
+  /** Refresh de Sumego del canje, en claro solo en memoria hasta cifrarlo en la familia. */
+  refreshToken: string | null;
+  /** Cuándo se obtuvo ese refresh: cuenta como la primera renovación. */
+  refreshedAt: number | null;
+  /** Lumbre acepta el ID token hasta `iat` + 5 min (+60 s): el «Permitir» vale hasta `iat` + 5 min − 30 s. */
+  consentDeadline: number | null;
   formTokenHash: string | null;
 }
+
+/** Lo que una autorización con Sumego lleva hasta su familia. */
+interface SumegoAuthorization {
+  identity: FamilyIdentity;
+  idTokenIat: number;
+  refreshToken: string;
+  refreshedAt: number;
+}
+
+/** `sid`/`sub` cerrados por un back-channel logout, hasta `until` (el mismo plazo que su `jti`). */
+interface ClosedLogout {
+  selector: LogoutSelector;
+  /** `iat` del `logout_token`, en segundos: solo cierra autorizaciones con ID token anterior o igual. */
+  iat: number;
+  until: number;
+}
+
+/** Cada cuánto se renueva el refresh de Sumego al refrescar en `/token` (SPEC.md §12.9). */
+export const SUMEGO_RENEW_INTERVAL_MS = 60 * 60_000;
+/** Margen del «Permitir» respecto a los 5 min de vida del ID token en Lumbre. */
+const CONSENT_MARGIN_S = 30;
+const ID_TOKEN_ACCEPTED_S = 300;
+const MAX_CLOSED_LOGOUTS = 1024;
 
 interface PendingAuthorization extends Binding {
   requestId: string | null;
@@ -93,6 +125,8 @@ interface AuthorizationCode {
   expiresAt: number;
   /** `sub`/`sid` del ID token de Sumego; `null` con el login de Lumbre. */
   identity: FamilyIdentity | null;
+  /** Solo con el login de Sumego. */
+  sumego: SumegoAuthorization | null;
 }
 
 /** Introspección positiva y coherente de una familia, atada a la concesión con la que se comparó. */
@@ -149,6 +183,8 @@ export interface HebraOAuthProviderOptions {
   sumego?: SumegoOidc | null;
   /** Emparejado revocado (SPEC.md §12.9); `serve-http` comparte el suyo con `hebra_status`. */
   pairing?: PairingRevocation;
+  /** Cifra los refresh de Sumego de las familias; obligatorio con `sumego`. */
+  sealer?: RefreshSealer | null;
 }
 
 export class HebraOAuthProvider implements OAuthServerProvider {
@@ -179,7 +215,15 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private readonly renewing = new Set<string>();
   private readonly loginProvider: LoginProvider;
   private readonly sumego: SumegoOidc | null;
+  private readonly sealer: RefreshSealer | null;
   readonly pairing: PairingRevocation;
+  /** Logout recientes: alcanzan a solicitudes y códigos en vuelo y a la familia que aún no existe. */
+  private closedLogouts: ClosedLogout[] = [];
+  /**
+   * Refresh de Sumego ya rotado en Sumego y aún sin guardar (si `/renew` o la escritura
+   * fallaron después). El reintento lo usa en vez del viejo, que Sumego ya no acepta.
+   */
+  private readonly sumegoRotations = new Map<string, SumegoRefreshState>();
 
   constructor(options: HebraOAuthProviderOptions) {
     this.issuer = options.issuer;
@@ -193,11 +237,13 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     this.now = options.now ?? Date.now;
     this.loginProvider = options.loginProvider ?? 'lumbre';
     this.sumego = options.sumego ?? null;
-    if (this.loginProvider === 'sumego' && !this.sumego) throw new Error('sumego_not_configured');
+    this.sealer = options.sealer ?? null;
+    if (this.loginProvider === 'sumego' && (!this.sumego || !this.sealer)) throw new Error('sumego_not_configured');
     this.pairing = options.pairing ?? new PairingRevocation();
     this.tokens.onFamiliesRemoved((ids) => {
       const removed = ids.map((id) => {
         this.forgetIntrospection(id);
+        this.sumegoRotations.delete(id);
         return { id, bearer: this.grants.get(id) };
       });
       return async () => {
@@ -243,11 +289,29 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     for (const [id, pending] of this.pending) if (pending.expiresAt <= now) this.pending.delete(id);
     for (const [hash, code] of this.codes) {
       if (code.expiresAt > now) continue;
-      this.codes.delete(hash);
-      void this.backchannel.revoke(code.grant.accessToken)
-        .then(() => this.grants.unstage(hash))
-        .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      this.discardCode(hash, code);
     }
+    this.closedLogouts = this.closedLogouts.filter((entry) => entry.until > now);
+  }
+
+  /** Quita un código no canjeado y revoca su concesión upstream, sin esperar. */
+  private discardCode(hash: string, code: AuthorizationCode): void {
+    this.codes.delete(hash);
+    void this.backchannel.revoke(code.grant.accessToken)
+      .then(() => this.grants.unstage(hash))
+      .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+  }
+
+  /**
+   * ¿Cerró un back-channel logout reciente esta identidad? Solo cuenta si el ID token es
+   * anterior o igual al `logout_token`: un login nuevo después de «cerrar en todas partes»
+   * no queda bloqueado (cerrado ante la duda en el mismo segundo).
+   */
+  private loggedOut(identity: FamilyIdentity | null, idTokenIat: number | null): boolean {
+    if (identity === null) return false;
+    const now = this.now();
+    return this.closedLogouts.some((entry) => entry.until > now && logoutMatches(entry.selector, identity) &&
+      (idTokenIat === null || idTokenIat <= entry.iat));
   }
 
   /** Reserva cupos antes de llamar al broker para evitar ráfagas concurrentes. */
@@ -326,7 +390,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const { transactionId } = pending;
     const random = () => randomBytes(32).toString('base64url');
     const login: SumegoLogin = { state: random(), nonce: random(), verifier: random(), cookieHash: '', phase: 'login',
-      idToken: null, email: null, identity: null, formTokenHash: null };
+      idToken: null, email: null, identity: null, idTokenIat: null, refreshToken: null, refreshedAt: null,
+      consentDeadline: null, formTokenHash: null };
     const cookie = random();
     login.cookieHash = sha256(cookie);
     pending.sumego = login;
@@ -398,8 +463,11 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const [key, pending] = entry;
     const login = pending.sumego!;
     if (!this.sameBrowser(req, login)) { sendDeniedPage(res, 400); return; }
+    // Desde aquí, con la cookie de la solicitud, todo final quema la transacción y la cookie se
+    // borra; antes (sin cookie, `state` desconocido) no se toca, porque no es de este navegador.
+    const burn = () => { this.pending.delete(key); res.setHeader('set-cookie', loginCookie('', 0)); };
     const reject = (result: string) => {
-      this.pending.delete(key);
+      burn();
       logEvent({ event: 'oauth.sumego.callback', result });
       sendDeniedPage(res, 400);
     };
@@ -412,24 +480,33 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (code!.length === 0 || code!.length > 4096) { reject('invalid'); return; }
     const { verifier, nonce } = login;
     login.verifier = ''; login.nonce = '';
-    let idToken: string;
+    let tokens: Awaited<ReturnType<SumegoOidc['exchangeCode']>>;
     let claims: Awaited<ReturnType<SumegoOidc['verifyIdToken']>>;
     try {
-      idToken = await sumego.exchangeCode(code!, verifier);
-      claims = await sumego.verifyIdToken(idToken, nonce);
+      tokens = await sumego.exchangeCode(code!, verifier);
+      claims = await sumego.verifyIdToken(tokens.idToken, nonce);
     } catch (failure) {
-      this.pending.delete(key);
+      burn();
       const unavailable = !(failure instanceof SumegoError) || failure.kind === 'unavailable';
       logEvent({ event: 'oauth.sumego.callback', result: unavailable ? 'unavailable' : 'invalid' });
       if (unavailable) sendUnavailablePage(res); else sendDeniedPage(res, 400);
       return;
     }
     if (this.pending.get(key) !== pending || pending.expiresAt <= this.now()) { reject('expired'); return; }
+    const identity = { sub: claims.sub, sid: claims.sid };
+    if (this.loggedOut(identity, claims.iat)) { reject('logged_out'); return; }
     const formToken = randomBytes(32).toString('base64url');
     login.phase = 'consent';
-    login.idToken = idToken;
+    login.idToken = tokens.idToken;
     login.email = claims.email;
-    login.identity = { sub: claims.sub, sid: claims.sid };
+    login.identity = identity;
+    login.idTokenIat = claims.iat;
+    login.refreshToken = tokens.refreshToken;
+    login.refreshedAt = this.now();
+    login.consentDeadline = (claims.iat + ID_TOKEN_ACCEPTED_S - CONSENT_MARGIN_S) * 1000;
+    if (login.consentDeadline <= this.now()) {
+      burn(); logEvent({ event: 'oauth.sumego.callback', result: 'expired' }); sendConsentExpiredPage(res); return;
+    }
     login.formTokenHash = sha256(formToken);
     logEvent({ event: 'oauth.sumego.callback', result: 'consent' });
     sendConsentPage(res, { clientName: pending.clientName, email: claims.email, scope: OAUTH_SCOPE, formToken, redirectUri: pending.redirectUri });
@@ -452,14 +529,25 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const [key, pending] = entry;
     const login = pending.sumego!;
     if (!this.sameBrowser(req, login)) { sendDeniedPage(res, 400); return; }
-    // Un uso: desde aquí el mismo token ya no encuentra la solicitud.
+    // Un uso: desde aquí el mismo token ya no encuentra la solicitud, y la transacción se quema
+    // pase lo que pase (por eso se borra la cookie).
     login.formTokenHash = null;
     const idToken = login.idToken;
     const identity = login.identity;
+    const authorization: SumegoAuthorization | null = identity && login.idTokenIat !== null && login.refreshToken && login.refreshedAt !== null
+      ? { identity, idTokenIat: login.idTokenIat, refreshToken: login.refreshToken, refreshedAt: login.refreshedAt } : null;
     login.idToken = null;
+    login.refreshToken = null;
     res.setHeader('set-cookie', loginCookie('', 0));
-    if (!idToken || !identity || !pending.requestId || pending.createdAt <= await this.revokedBefore()) {
+    if (!idToken || !authorization || !pending.requestId || pending.createdAt <= await this.revokedBefore()) {
       this.pending.delete(key); sendDeniedPage(res, 400); return;
+    }
+    // Lumbre ya no aceptaría este ID token: «no disponible» y volver a conectar.
+    if (login.consentDeadline === null || login.consentDeadline <= this.now()) {
+      this.pending.delete(key); logEvent({ event: 'oauth.consent', result: 'expired' }); sendConsentExpiredPage(res); return;
+    }
+    if (this.loggedOut(authorization.identity, authorization.idTokenIat)) {
+      this.pending.delete(key); logEvent({ event: 'oauth.consent', result: 'logged_out' }); sendDeniedPage(res); return;
     }
     if (pending.claimed || this.codes.size >= MAX_CODES) { this.pending.delete(key); sendUnavailablePage(res); return; }
     pending.claimed = true;
@@ -482,7 +570,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       return;
     }
     try {
-      const target = await this.issueCode(key, pending, grant, identity);
+      // Un logout pudo llegar mientras Lumbre canjeaba.
+      if (this.loggedOut(authorization.identity, authorization.idTokenIat)) throw new Error('logged_out');
+      const target = await this.issueCode(key, pending, grant, authorization);
       logEvent({ event: 'oauth.consent', result: 'approved' });
       res.redirect(302, target);
     } catch {
@@ -498,7 +588,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * solicitud y el emparejado actual, y emite el código OAuth de un uso. Devuelve la URL del
    * callback del cliente; lanza si algo no casa (quien llama revoca la concesión).
    */
-  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, identity: FamilyIdentity | null): Promise<string> {
+  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null): Promise<string> {
     const current = await this.currentBinding();
     if (pending.createdAt <= await this.revokedBefore() || !current ||
       !sameBinding(grant, pending) || !sameBinding(grant, current) ||
@@ -510,7 +600,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     await this.grants.stage(hash, grant.accessToken);
     this.pending.delete(key);
     this.codes.set(hash, { clientId: pending.clientId, redirectUri: pending.redirectUri, challenge: pending.challenge,
-      resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS, identity });
+      resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS,
+      identity: sumego?.identity ?? null, sumego });
     const target = new URL(pending.redirectUri);
     target.searchParams.set('code', code);
     if (pending.state !== undefined) target.searchParams.set('state', pending.state);
@@ -519,14 +610,72 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * Back-channel logout de Sumego ya validado: corta en local las familias de esa sesión o de
-   * ese `sub` (persistido antes de resolver) y el observador de `TokenStore` pide después la
-   * revocación upstream. Lanza si la baja local no se pudo guardar.
+   * Back-channel logout de Sumego ya validado (`iat` del `logout_token` en segundos, `until`
+   * el mismo plazo que su `jti`, en ms):
+   * 1. Apunta el `sid`/`sub` cerrado hasta `until`: el consentimiento, el canje del código y
+   *    `issueFamily` rechazan una identidad cerrada cuyo ID token es anterior o igual.
+   * 2. Descarta las solicitudes y los códigos en vuelo de esa identidad, revocando su
+   *    concesión upstream como `prune`.
+   * 3. Corta en local las familias (persistido antes de resolver); el observador de
+   *    `TokenStore` pide después la revocación upstream. Lanza si la baja no se pudo guardar.
    */
-  async revokeByLogout(selector: LogoutSelector): Promise<number> {
+  async revokeByLogout(selector: LogoutSelector, iat: number, until: number): Promise<number> {
+    this.closedLogouts.push({ selector, iat, until });
+    while (this.closedLogouts.length > MAX_CLOSED_LOGOUTS) this.closedLogouts.shift();
+    for (const [key, pending] of this.pending) {
+      const login = pending.sumego;
+      if (login?.identity && logoutMatches(selector, login.identity) && (login.idTokenIat === null || login.idTokenIat <= iat)) {
+        this.pending.delete(key);
+      }
+    }
+    for (const [hash, code] of this.codes) {
+      if (code.sumego && logoutMatches(selector, code.sumego.identity) && code.sumego.idTokenIat <= iat) this.discardCode(hash, code);
+    }
     const dropped = await this.tokens.dropFamiliesByLogout(selector);
     for (const id of dropped) this.forgetIntrospection(id);
     return dropped.length;
+  }
+
+  /**
+   * Renovación horaria con Sumego dentro de un refresh de `/token` (SPEC.md §12.9), ya en la
+   * cola de la familia. Sin refresh de Sumego (login de Lumbre o v2), nada. Si la última
+   * renovación es de hace menos de `SUMEGO_RENEW_INTERVAL_MS`, nada salvo devolver una
+   * rotación aún sin guardar. Si toca, canjea el refresh en el `token_endpoint`:
+   * - un 4xx que no es 429 (cuenta suspendida, grant revocado, refresh ya usado) corta la
+   *   familia como un `active:false` (`InvalidGrantError`);
+   * - red, 5xx, 429 o fuera de contrato no tocan nada (`ServerError`, el cliente reintenta);
+   * - si vale, el refresh nuevo (Sumego rota siempre) queda en memoria y se devuelve para la
+   *   escritura atómica que rota el refresh de Hebra.
+   */
+  private async renewSumego(familyId: string): Promise<SumegoRefreshState | undefined> {
+    const stored = this.tokens.sumegoRefreshOf(familyId);
+    if (!stored) return undefined;
+    const rotated = this.sumegoRotations.get(familyId);
+    const current = rotated ?? stored;
+    const now = this.now();
+    if (now >= current.renewedAt && now - current.renewedAt < SUMEGO_RENEW_INTERVAL_MS) return rotated;
+    const refreshToken = this.sealer?.open(current.sealedRefresh) ?? null;
+    if (!this.sumego || refreshToken === null) {
+      // Sin cliente o sin poder descifrarlo no hay segunda barrera: cerrado ante la duda.
+      logEvent({ event: 'oauth.sumego.refresh', result: 'unusable' });
+      await this.dropFamily(familyId);
+      throw new InvalidGrantError('La sesión de Sumego no se puede renovar: hay que volver a conectar.');
+    }
+    let next: string;
+    try { next = await this.sumego.refresh(refreshToken); }
+    catch (error) {
+      if (error instanceof SumegoError && error.kind === 'invalid') {
+        logEvent({ event: 'oauth.sumego.refresh', result: 'denied' });
+        await this.dropFamily(familyId);
+        throw new InvalidGrantError('La sesión de Sumego se cerró: hay que volver a conectar.');
+      }
+      logEvent({ event: 'oauth.sumego.refresh', result: 'unavailable' });
+      throw new ServerError('temporarily_unavailable');
+    }
+    const update = { sealedRefresh: this.sealer!.seal(next), renewedAt: this.now() };
+    this.sumegoRotations.set(familyId, update);
+    logEvent({ event: 'oauth.sumego.refresh', result: 'renewed' });
+    return update;
   }
 
   /** `denied` público no consume una solicitud legítima; `approved` solo abre el canje autenticado. */
@@ -691,15 +840,26 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     try { inspected = await this.backchannel.introspect(grant.accessToken); }
     catch { throw new ServerError('Consentimiento temporalmente no disponible.'); }
     if (!inspected || inspected.credentialId !== grant.credentialId || !sameBinding(inspected, grant)) { await cleanup(); return fail(); }
+    // Back-channel logout de esa sesión o persona mientras el código esperaba su canje.
+    const sumego = entry.sumego;
+    const loggedOut = () => sumego !== null && this.loggedOut(sumego.identity, sumego.idTokenIat);
+    if (loggedOut()) { await cleanup(); return fail(); }
+    if (sumego && !this.sealer) { await cleanup(); return fail(); }
     try {
       const { accessToken: _unused, ...metadata } = grant;
       const issued = await this.tokens.issueFamily({ clientId: entry.clientId, scope: OAUTH_SCOPE, resource: entry.resource,
-        grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt, identity: entry.identity }, await this.revokedBefore(),
+        grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt, identity: entry.identity,
+        sumego: sumego ? { sealedRefresh: this.sealer!.seal(sumego.refreshToken), renewedAt: sumego.refreshedAt } : null,
+        loggedOut }, await this.revokedBefore(),
       async (familyId, ids) => { await this.grants.markPromoting(hash, familyId); await this.grants.set(familyId, grant.accessToken, ids); });
       await this.grants.unstage(hash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
       logEvent({ event: 'oauth.token', grant: 'authorization_code', result: 'issued' });
       return this.tokensResponse(issued);
-    } catch { await cleanup(); throw new ServerError('No se pudo guardar la autorización.'); }
+    } catch (error) {
+      await cleanup();
+      if (error instanceof Error && error.message === 'logged_out') return fail();
+      throw new ServerError('No se pudo guardar la autorización.');
+    }
   }
 
   /** Un refresh que no es el vigente de una familia viva: replay, rotación reciente o caducada. Nunca renueva. */
@@ -719,6 +879,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   }
 
   /**
+   * Con login de Sumego, además, la renovación horaria del refresh de Sumego (`renewSumego`).
+   *
    * Refresh con renovación en Lumbre (`/renew`, contrato H-dec4/H31 del 17 oct 2026): antes de
    * entregar tokens se renueva la concesión y su fecha nueva se guarda en la familia en la
    * misma escritura que rota el refresh. `active: false` exige consentimiento nuevo
@@ -742,6 +904,11 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       catch (error) { if (error instanceof InvalidGrantError) throw error; throw new ServerError('Consentimiento temporalmente no disponible.'); }
       const bearer = this.grants.get(familyId);
       if (!bearer) { this.forgetIntrospection(familyId); throw new InvalidGrantError('Refresh token no válido.'); }
+      // Orden (SPEC.md §12.9): introspección fresca en Lumbre (arriba), renovación horaria con
+      // Sumego y, solo si la sesión de Sumego sigue viva, `/renew`, para que una sesión cerrada
+      // no alargue 30 días la concesión. El refresh rotado de Sumego se guarda en la misma
+      // escritura que rota el de Hebra; si algo falla antes, queda en memoria para el reintento.
+      const sumegoUpdate = await this.renewSumego(familyId);
       this.renewing.add(familyId);
       try {
         let renewed: string | null;
@@ -760,7 +927,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
           logEvent({ event: 'oauth.renew', result: 'invalid' });
           throw new ServerError('temporarily_unavailable');
         }
-        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed);
+        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed, sumegoUpdate);
+        // Guardada (o la familia ya no existe): la rotación en memoria ya no hace falta.
+        if (sumegoUpdate) this.sumegoRotations.delete(familyId);
         // La caché y las introspecciones en vuelo eran de la fecha anterior.
         this.forgetIntrospection(familyId);
         // Un replay o una familia caducada la quitan del almacén; una rotación reciente solo fuerza otra consulta.

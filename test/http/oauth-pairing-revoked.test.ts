@@ -161,8 +161,13 @@ describe('oauth-tokens.json v2 → v3', () => {
     expect(await tokens.dropFamiliesByLogout({ sub: 'alguien' })).toEqual([]);
     const saved = JSON.parse(await readFile(file, 'utf8')) as { version: number; families: Array<Record<string, unknown>> };
     expect(saved.version).toBe(3);
-    expect(saved.families).toEqual([{ ...family, sub: null, sid: null }]);
+    expect(saved.families).toEqual([{ ...family, sub: null, sid: null, sumegoRefresh: null, sumegoRenewedAt: null }]);
     const reopened = await TokenStore.open(context.dataDir);
     expect(reopened.liveFamilyCount(0)).toBe(1);
+    // Un v3 de antes de guardar el refresh de Sumego (sin esos dos campos) también carga.
+    await writeFile(file, JSON.stringify({ version: 3, families: [{ ...family, sub: 'alguien', sid: 's' }] }));
+    const older = await TokenStore.open(context.dataDir);
+    expect(older.liveFamilyCount(0)).toBe(1);
+    expect(older.sumegoRefreshOf(family.id)).toBeNull();
   });
 });
