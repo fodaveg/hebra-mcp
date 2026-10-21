@@ -2016,15 +2016,23 @@ sin `initiate_login_uri`.
    `SameSite=Lax`, `Path=/`, 10 min) y guarda su sha256 en la solicitud. Redirige con 302 al
    `authorization_endpoint` de la discovery con PKCE S256. La discovery y el JWKS se leen de
    `<issuer>/.well-known/openid-configuration`, nunca se copian a mano. La discovery se guarda
-   10 min en caché y un fallo se recuerda 30 s, igual que Lumbre.
+   10 min en caché y un fallo se recuerda 30 s, igual que Lumbre. Los scopes son `openid email`:
+   Sumego emite refresh a sus clientes propios sin `offline_access` (su SPEC §4.0.1, y lo
+   comprueban sus e2e), así que no se pide.
 2. `GET /oauth/sumego/callback?code&state&iss`: busca la solicitud por `state`. Exige que la
    cookie sea la suya (comparación en tiempo constante del hash), que no haya caducado y que
    `iss` sea exactamente el issuer (RFC 9207). Con `error=` de Sumego, la solicitud se
    descarta y responde 400 sin redirigir. Canjea el código en el `token_endpoint` con
    `client_secret_basic` y el `code_verifier`. Valida el ID token con `jose`: ES256, JWKS
    remoto en caché, `iss`, `aud` = client_id (y `azp` igual si viene), `exp`, `iat` de 5 min
-   como mucho con 60 s de margen, `nonce` igual al de la solicitud, `sub` presente. Los tokens de Sumego no se
-   guardan ni se registran en logs: solo el ID token, en memoria, hasta el paso 3.
+   como mucho con 60 s de margen, `nonce` igual al de la solicitud, `sub` y `sid` presentes
+   (Sumego siempre manda `sid` a hebra-mcp, que lleva `backchannel_logout_session_required`).
+   La respuesta tiene que traer también el refresh de Sumego: sin él no hay renovación horaria y
+   el login no vale. Ni el ID token ni el refresh se registran en logs; el ID token vive en
+   memoria hasta el paso 3 y el refresh, en memoria hasta guardarse cifrado en la familia
+   (paso 5). La cookie `__Host-hebra_mcp_login` solo se borra cuando se quema la transacción
+   (`state` usado, `iss` o `error=`, canje o ID token que no valen, consentimiento enviado);
+   sin la cookie de esa solicitud o con un `state` desconocido no se toca.
 3. hebra-mcp muestra su página de consentimiento: un único botón «Permitir», con el nombre del
    cliente (Claude o Codex), el email del ID token y el alcance (`hebra:mcp`, la biblioteca
    emparejada). El `POST` lleva un token de formulario de un uso ligado a la solicitud y a la
@@ -2035,6 +2043,13 @@ sin `initiate_login_uri`.
    suma la `redirect_uri` exacta de esa solicitud (la de Claude o el loopback de Codex, ya
    validada en `/authorize`): Chrome y Firefox aplican `form-action` también a la redirección
    que sigue al envío del formulario, y solo con `'self'` bloquearían el 302 final al cliente.
+   Esta página lleva `Referrer-Policy: same-origin` (cabecera y `<meta>`), no el `no-referrer`
+   del resto: con `no-referrer` el navegador manda el POST con `Origin: null` y el filtro de
+   Host/Origin de `src/http/app.ts` lo rechaza con 403. La ruta no entra en
+   `nullOriginPostPaths`: un POST con `Origin: null` sigue siendo 403. Lumbre acepta el ID token
+   hasta `iat` + 5 min (+60 s), así que el «Permitir» vale hasta `iat` + 5 min − 30 s; pasado
+   eso (o si el ID token ya llega tarde al callback), página «no disponible» que pide volver a
+   conectar desde Claude o Codex, sin canjear nada.
 4. Al permitir, hebra-mcp canjea la transacción en Lumbre por backchannel
    (`POST <LUMBRE_APP_ORIGIN>/api/integrations/hebra-mcp/sumego/exchange`, el mismo Bearer
    `HEBRA_MCP_BACKCHANNEL_SECRET`, cuerpo de 16 KiB como máximo) con `{requestId,
@@ -2050,7 +2065,38 @@ sin `initiate_login_uri`.
    momento el código OAuth, el canje, las familias, la introspección y `/renew` siguen el
    camino de hoy.
 5. Cada familia guarda el `sub` y el `sid` del ID token (en `oauth-tokens.json`, que pasa a v3,
-   con migración que deja `sub`/`sid` a `null` en las familias existentes).
+   con migración que deja `sub`/`sid` a `null` en las familias existentes), y el refresh de
+   Sumego CIFRADO con su última renovación (`sumegoRefresh`, `sumegoRenewedAt`). El cifrado es
+   AES-256-GCM con una clave aleatoria de 32 bytes que vive en el almacén de secretos existente
+   (`hebra-mcp-sumego-refresh-key`); el refresh nunca está en claro en el fichero.
+
+**Renovación horaria con Sumego** (segunda barrera obligatoria: Sumego hace un solo intento de
+back-channel logout por cliente, y un 429, un 503 o un fallo de red no se repiten). En cada
+refresh de `/token` de una familia con refresh de Sumego, dentro de la cola por familia que ya
+serializa los refresh, el orden es:
+1. la introspección fresca en Lumbre de §12.2 (si Lumbre ya la revocó, se corta sin llamar a
+   Sumego);
+2. si han pasado 1 h o más desde la última renovación con Sumego, el grant `refresh_token` en el
+   `token_endpoint` con `client_secret_basic`. Un 4xx que no sea 429 (cuenta suspendida, grant
+   revocado, refresh ya usado: `400 invalid_grant`) corta la familia como un `active:false` y da
+   `invalid_grant`. Red, 5xx, 429 o una respuesta fuera de contrato no cortan nada: `server_error`
+   y el mismo refresh vale al reintentar. Va antes de `/renew` para que una sesión cerrada en
+   Sumego no alargue 30 días la concesión de Lumbre;
+3. `/renew` en Lumbre, como hoy;
+4. una sola escritura atómica que rota el refresh de Hebra, guarda la fecha de `/renew` y el
+   refresh rotado de Sumego (Sumego rota siempre) con su fecha.
+
+Si Sumego ya rotó y después falla `/renew` o la escritura, el refresh nuevo de Sumego queda en
+memoria y el reintento lo usa (sin volver a Sumego, porque la renovación es de hace nada). Si el
+proceso cae en ese hueco se pierde: el refresh viejo ya no vale en Sumego y la siguiente
+renovación corta la familia (cerrado ante la duda; hay que volver a conectar). Una familia con
+refresh de Sumego que no se puede descifrar, o sin cliente de Sumego configurado, también se
+corta al tocarle renovar.
+
+Peor caso de exposición si un logout se pierde: el intervalo de renovación (1 h) más la vida del
+access token de Hebra (1 h) más la caché de introspección (30 s), unas 2 h. Un access emitido
+justo antes de cumplirse la hora vale su hora entera, y la familia solo se corta en el refresh
+siguiente, el primero que renueva con Sumego.
 
 **Errores de Lumbre al canjear**: los del contrato de lumbre-mcp. Son `400 invalid_token`,
 `unknown_account` o `invalid_request` (un `sub` distinto del dueño da `invalid_token`), `401
@@ -2072,16 +2118,33 @@ el log, porque significa que el secreto de backchannel no coincide.
 `logout_token`, de servidor a servidor, sin CORS ni cookies). Se valida la firma contra el JWKS
 (solo ES256; rechazados `alg: none`, HS*, y un `kid` que no esté en el JWKS), `iss`,
 `aud` = client_id, `iat` de hace menos de 10 min con 60 s de margen, `exp` obligatorio, `events`
-con `http://schemas.openid.net/event/backchannel-logout`, sin `nonce`, y `sid` o `sub`. El `jti`
-es de un solo uso: su sha256 se guarda hasta el `exp` en `oauth-logout-jtis.json`, escrito de
-forma atómica. Con `sid` se revocan las familias con ese `sid` (si también trae `sub`, solo las
-suyas). Con solo `sub` se revocan todas las familias de ese `sub`. Revocar es lo mismo que
-revocar una familia por OAuth: primero se corta en local y después se pide la revocación upstream
-a Lumbre. El `jti` se apunta después de cortar en local: si el corte falla, la respuesta es 500 y
-el reintento de Sumego vale. Responde 200 sin cuerpo, o 400 si el token no vale. Cupo: 60 por
-minuto y dirección, y como mucho 8 verificaciones de firma a la vez (la siguiente, 503).
-Funciona con cualquier valor del interruptor si hay cliente configurado. Las familias de antes
-de v3 (sin `sub`) solo se cortan con `oauth-revoke-all` o al revocarlas en Lumbre.
+con `http://schemas.openid.net/event/backchannel-logout`, sin `nonce`, y `sid` o `sub`. El
+`logout_token` de un cierre por `sub` (cambio de contraseña, suspensión, «cerrar en todas las
+apps», API de administración) no trae `sid`; uno con `sid` solo llega en el logout iniciado por la
+app. Si el JWKS falla, el fallo se recuerda 30 s: mientras, no se vuelve a pedir (tampoco por un
+`kid` desconocido) y la respuesta es 503. Un `kid` desconocido vuelve a pedir el JWKS como mucho
+cada 30 s. El `jti` es de un solo uso: su sha256 se guarda en `oauth-logout-jtis.json`, escrito
+de forma atómica, hasta `(min(exp, iat + 10 min) + 60 s)`, el último instante en que el token
+aún se acepta con el margen. Con `sid` se revocan las familias con ese `sid` (si también trae
+`sub`, solo las suyas). Con solo `sub` se revocan todas las familias de ese `sub`. Revocar es lo
+mismo que revocar una familia por OAuth: primero se corta en local y después se pide la
+revocación upstream a Lumbre. El logout alcanza también lo que está en vuelo: se descartan las
+solicitudes en el consentimiento y los códigos OAuth emitidos y no canjeados de esa identidad
+(revocando su concesión upstream, como al caducar), y el `sid`/`sub` cerrado se recuerda el mismo
+tiempo que el `jti`. El consentimiento, el canje del código y la creación de la familia (dentro de
+su escritura) rechazan una identidad cerrada cuyo ID token sea anterior o igual al `logout_token`
+(`iat`); un login posterior no queda bloqueado. El `jti` se apunta después de cortar en local:
+si el corte falla, la respuesta es 500. Responde 200 sin cuerpo, o 400 si el token no vale.
+
+Sumego no reintenta, así que un `logout_token` con firma válida nunca consume cupo ni recibe 429,
+y no se pierde por un 503 evitable. El cupo es de 60 FALLOS por minuto y dirección (las IPv6 por
+/64); con el cupo agotado solo pasa a verificar un token que por su forma podría ser de Sumego
+(`alg` ES256 con `kid`, `iss` y `aud` correctos y el evento de logout), y el resto recibe 429. Con
+la tabla de 1024 direcciones llena, una nueva expulsa la más antigua. Hay como mucho 8
+verificaciones de firma a la vez; las siguientes esperan en una cola de 32 durante 5 s como
+mucho, y solo entonces 503. Funciona con cualquier valor del interruptor si hay cliente
+configurado. Las familias de antes de v3 (sin `sub`) solo se cortan con `oauth-revoke-all` o al
+revocarlas en Lumbre.
 
 **Lo que no cambia**: el emparejado (§7 y §12.4) y la clave de la biblioteca. El login nunca da
 la clave. Ni Sumego ni Lumbre la tienen, y un login no crea identidad ni bóveda.

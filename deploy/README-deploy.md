@@ -208,7 +208,11 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    -a` como el resto del fichero, y recrear el contenedor. Volver a `lumbre` es
    quitar o cambiar esa línea. Las dos piezas de Lumbre (`identityProvider` en
    `/requests` y `sumego/exchange`) tienen que estar desplegadas antes de pasar
-   a `sumego`.
+   a `sumego`. Con cliente configurado, el primer arranque crea en el almacén
+   de secretos (`HEBRA_MCP_SECRET_STORE=file`, dentro de `/data`) la clave
+   `hebra-mcp-sumego-refresh-key`, con la que se cifran los refresh de Sumego
+   de `oauth-tokens.json`. Si se pierde, las familias de Sumego se cortan en su
+   siguiente renovación horaria y hay que volver a conectar.
 
    `oauth-tokens.json` pasa a v3 con esta versión (lee un v2 y escribe v3). Una
    versión anterior no lee un v3: volver a la imagen `previous` después de
