@@ -107,7 +107,9 @@ export type SyncLogEventName =
   | 'sync.lease_lost'
   | 'sync.record_error'
   | 'sync.conflict_copy'
-  | 'sync.blob_unreadable';
+  | 'sync.blob_unreadable'
+  // La credencial de emparejado está revocada (SPEC.md §12.9): una vez, al primer 401/403.
+  | 'pairing.revoked';
 
 /** Campos de un evento: escalares, sin contenido de notas. */
 export type SyncLogFields = Record<string, string | number | boolean | null>;
@@ -375,6 +377,7 @@ export class SyncRunner implements SyncStatusSource {
     const result: LibrarySyncResultCode = round?.result ?? 'unknown';
     this.lastRound = { at: this.now(), result };
     if (isRevocation(result)) {
+      if (!this.revokedFlag) this.options.emit?.('pairing.revoked', { source: 'relay' });
       this.revokedFlag = true;
       this.stopTimer();
     }

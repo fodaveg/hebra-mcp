@@ -87,6 +87,10 @@ const ROUTE_LABELS = new Set([
   '/register',
   '/revoke',
   '/oauth/lumbre/callback',
+  // Login con Sumego (D20, SPEC.md §12.9).
+  '/oauth/sumego/callback',
+  '/oauth/sumego/consent',
+  '/oauth/sumego/backchannel-logout',
   '/.well-known/oauth-protected-resource',
   '/.well-known/oauth-protected-resource/mcp',
   '/.well-known/oauth-authorization-server'

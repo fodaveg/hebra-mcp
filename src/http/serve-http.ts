@@ -12,6 +12,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { logEvent } from '../log/logger';
 import type { SecretStore } from '../secrets';
+import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
 import { openServeContext, type OpenServeOptions, type ServeContext } from '../server/serve';
 import { AWAIT_ROUND_TIMEOUT_MS } from '../server/write-context';
 import { createHttpApp, type HttpAuth } from './app';
@@ -55,8 +56,11 @@ export interface StartServeHttpOptions
   drainTimeoutMs?: number;
   /** Comprobación pura: nunca lee ni escribe el almacén ni llama al broker. */
   authConfigured(): boolean;
-  /** La autenticación de `/mcp`, o `null` si no está configurada (y entonces no arranca). */
-  loadAuth(dataDir: string, config: HttpConfig, secrets: SecretStore | null): Promise<HttpAuth | null>;
+  /**
+   * La autenticación de `/mcp`, o `null` si no está configurada (y entonces no arranca).
+   * `pairing` es el estado de emparejado revocado que comparte con `hebra_status` (SPEC.md §12.9).
+   */
+  loadAuth(dataDir: string, config: HttpConfig, secrets: SecretStore | null, pairing: PairingRevocation): Promise<HttpAuth | null>;
 }
 
 export interface ServeHttpHandle {
@@ -134,7 +138,11 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   let server: Server;
   let inFlight: ReturnType<typeof trackInFlight>;
   try {
-    const auth = await options.loadAuth(options.dataDir, options.config, options.secrets);
+    // Emparejado revocado (SPEC.md §12.9): el `revoked` del relé o el `410 pairing_revoked` de
+    // Lumbre que vea el OAuth; `hebra_status` dice lo mismo que la página de `/authorize`.
+    const pairing = new PairingRevocation(() => serve.instance.syncRunner?.revoked ?? false);
+    serve.ctx.status = new PairingStatusSource(serve.ctx.status, pairing);
+    const auth = await options.loadAuth(options.dataDir, options.config, options.secrets, pairing);
     if (!auth) throw new ServeHttpError(
       'auth_not_configured',
       'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'

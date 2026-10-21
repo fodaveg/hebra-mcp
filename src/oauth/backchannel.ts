@@ -53,6 +53,23 @@ function isoInstant(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
+/**
+ * Código de error cerrado de un cuerpo de Lumbre, venga en `error` o en `code`. Solo cuerpos
+ * con esas claves (una o las dos); si traen las dos y no coinciden, no hay código.
+ */
+function errorCode(value: unknown): string | null {
+  const record = object(value, ['error']) ?? object(value, ['code']) ?? object(value, ['error', 'code']);
+  if (!record) return null;
+  const codes = [record.error, record.code].filter((entry) => entry !== undefined);
+  if (!codes.every((entry) => typeof entry === 'string' && entry === codes[0])) return null;
+  return codes[0] as string;
+}
+
+/** Una fecha que `Date.parse` entiende: la misma tolerancia que `request` da a `expiresAt`. */
+function isoInstantOrDate(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value));
+}
+
 function validGrant(record: Record<string, unknown>, resource: string): boolean {
   return validBinding(record) && typeof record.credentialId === 'string' && UUID.test(record.credentialId) &&
     typeof record.clientId === 'string' && isAcceptableOAuthClientId(record.clientId) &&
@@ -81,12 +98,31 @@ function retryAfterSeconds(raw: string | null, now: number): number | undefined 
 /**
  * Una respuesta inesperada no autoriza nada; nunca se devuelve su cuerpo en errores.
  * `rate_limited` es el 429 de Lumbre, con su `Retry-After` en segundos si era válido.
+ * `pairing_revoked` es el `410 {"error":"pairing_revoked"}` de Lumbre (emparejado revocado o
+ * vínculo Blob V2 inactivo; contrato del 21 oct 2026, SPEC.md §12.9). `status` es el código
+ * HTTP de la respuesta, si la hubo: el canje con Sumego distingue «acceso denegado» de «no
+ * disponible» por él.
  */
 export class BackchannelError extends Error {
-  constructor(readonly kind: 'inactive' | 'unavailable' | 'invalid' | 'rate_limited', readonly retryAfter?: number) {
+  constructor(
+    readonly kind: 'inactive' | 'unavailable' | 'invalid' | 'rate_limited' | 'pairing_revoked',
+    readonly retryAfter?: number,
+    readonly status?: number
+  ) {
     super(kind);
   }
 }
+
+/** Entrada del canje con Sumego (`sumego/exchange`); el ID token solo viaja aquí. */
+export interface SumegoExchangeInput {
+  requestId: string;
+  transactionId: string;
+  idToken: string;
+  clientId: string;
+}
+
+/** Tope del cuerpo del canje con Sumego (SPEC.md §12.9). */
+export const MAX_SUMEGO_EXCHANGE_BODY_BYTES = 16 * 1024;
 
 type Fetcher = (input: string | URL, init?: RequestInit) => Promise<Response>;
 
@@ -111,19 +147,32 @@ export class LumbreBackchannel {
     this.api = `${this.appOrigin}/api/integrations/hebra-mcp`;
   }
 
-  private async post(path: string, body: object): Promise<unknown> {
+  private async post(path: string, body: object, maxBodyBytes?: number): Promise<unknown> {
+    const payload = JSON.stringify(body);
+    if (maxBodyBytes !== undefined && Buffer.byteLength(payload) > maxBodyBytes) throw new BackchannelError('invalid');
     let response: Response;
     try {
       response = await this.fetcher(`${this.api}/${path}`, {
         method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(3000),
         headers: { authorization: `Bearer ${this.secret}`, 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(body)
+        body: payload
       });
     } catch { throw new BackchannelError('unavailable'); }
     if (response.status === 429) {
-      throw new BackchannelError('rate_limited', retryAfterSeconds(response.headers.get('retry-after'), Date.now()));
+      throw new BackchannelError('rate_limited', retryAfterSeconds(response.headers.get('retry-after'), Date.now()), 429);
     }
-    if (response.status !== 200) throw new BackchannelError(response.status >= 500 ? 'unavailable' : 'invalid');
+    if (response.status === 410) {
+      // Solo el error cerrado de Lumbre es una revocación; otro 410 es una respuesta inesperada.
+      // `/requests` responde `{error}` y `sumego/exchange` `{error, code}`: se leen los dos campos.
+      const gone = await this.readJson(response).catch(() => null);
+      throw new BackchannelError(errorCode(gone) === 'pairing_revoked' ? 'pairing_revoked' : 'invalid', undefined, 410);
+    }
+    if (response.status !== 200) throw new BackchannelError(response.status >= 500 ? 'unavailable' : 'invalid', undefined, response.status);
+    return this.readJson(response);
+  }
+
+  /** Cuerpo JSON con tope de 64 KiB; cualquier otra cosa es `invalid`. */
+  private async readJson(response: Response): Promise<unknown> {
     if ((response.headers.get('content-type') ?? '').split(';', 1)[0]!.trim() !== 'application/json') throw new BackchannelError('invalid');
     const declared = Number(response.headers.get('content-length'));
     if (Number.isFinite(declared) && declared > 65536) throw new BackchannelError('invalid');
@@ -157,8 +206,36 @@ export class LumbreBackchannel {
     return value as unknown as { requestId: string; authorizationUrl: string; expiresAt: string };
   }
 
+  /**
+   * `/requests` en modo `sumego` (SPEC.md §12.9): el de hoy más `identityProvider` y el
+   * sha256 del `nonce` de Sumego en base64url. Lumbre guarda el nonce con la transacción y
+   * responde exactamente `{requestId, expiresAt}`, sin `authorizationUrl`.
+   */
+  async requestSumego(input: Binding & { transactionId: string; clientId: string; clientName: string; sumegoNonceSha256: string }): Promise<{ requestId: string; expiresAt: string }> {
+    const raw = await this.post('requests', { ...input, resource: this.resource, scope: OAUTH_SCOPE, callbackUri: LUMBRE_CALLBACK, identityProvider: 'sumego' });
+    const value = object(raw, ['requestId', 'expiresAt']);
+    if (!value || typeof value.requestId !== 'string' || !UUID.test(value.requestId) ||
+      !isoInstantOrDate(value.expiresAt)) throw new BackchannelError('invalid');
+    return { requestId: value.requestId, expiresAt: value.expiresAt };
+  }
+
   async exchange(requestId: string, transactionId: string): Promise<Grant> {
-    const value = object(await this.post('exchange', { requestId, transactionId }), ['credentialId', 'accessToken', 'tokenType', 'clientId', 'resource', 'scope', 'accountId', 'pairedCredentialId', 'syncVaultId', 'opaqueDeviceId', 'expiresAt']);
+    return this.grantFrom(await this.post('exchange', { requestId, transactionId }));
+  }
+
+  /**
+   * Canje con el ID token de Sumego (`sumego/exchange`, ruta hermana de la de lumbre-mcp).
+   * Lumbre valida el ID token por su cuenta y responde la misma concesión que `exchange`.
+   * El cuerpo no pasa de 16 KiB; si pasaría, no se envía.
+   */
+  async sumegoExchange(input: SumegoExchangeInput): Promise<Grant> {
+    return this.grantFrom(await this.post('sumego/exchange',
+      { ...input, resource: this.resource, scope: OAUTH_SCOPE }, MAX_SUMEGO_EXCHANGE_BODY_BYTES));
+  }
+
+  /** La concesión de `exchange` y `sumego/exchange`: mismas claves, misma validación. */
+  private grantFrom(raw: unknown): Grant {
+    const value = object(raw, ['credentialId', 'accessToken', 'tokenType', 'clientId', 'resource', 'scope', 'accountId', 'pairedCredentialId', 'syncVaultId', 'opaqueDeviceId', 'expiresAt']);
     if (!value || !validGrant(value, this.resource) || value.tokenType !== 'Bearer' ||
       typeof value.accessToken !== 'string' || !HEX64.test(value.accessToken)) throw new BackchannelError('invalid');
     return value as unknown as Grant;

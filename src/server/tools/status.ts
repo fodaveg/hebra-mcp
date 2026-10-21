@@ -5,14 +5,18 @@
  */
 import type { ToolContext } from '../context';
 import type { HebraStatus } from '../../status/status-source';
+import { PAIRING_REVOKED_REASON } from '../../status/pairing-revocation';
 import { buildCapabilities, type Capabilities } from '../capabilities';
 
 /** `capabilities` (SPEC.md §5): qué hace el servidor, sus límites y lo que no permite,
- *  sin nombres privados ni contenido. `serverVersion` es el de `buildMcpServer`. */
+ *  sin nombres privados ni contenido. `serverVersion` es el de `buildMcpServer`.
+ *  Con `revoked: true`, `revokedReason` dice qué pasó y cómo reemparejar (SPEC.md §12.9);
+ *  si no, no aparece. */
 export async function runStatus(
   ctx: ToolContext,
   serverVersion = 'unknown'
-): Promise<HebraStatus & { capabilities: Capabilities }> {
+): Promise<HebraStatus & { revokedReason?: string; capabilities: Capabilities }> {
   const status = await ctx.status.getStatus();
-  return { ...status, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
+  const reason = status.revoked === true ? { revokedReason: PAIRING_REVOKED_REASON } : {};
+  return { ...status, ...reason, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
 }

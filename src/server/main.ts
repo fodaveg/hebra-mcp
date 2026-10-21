@@ -43,6 +43,7 @@ import {
   loadOAuthHttpAuth,
   oauthHttpAuthConfigured,
   OAuthCliError,
+  readLoginConfig,
   runOAuthRevokeAll,
   runOAuthSetSecret
 } from '../oauth';
@@ -116,13 +117,16 @@ async function serveHttp(): Promise<void> {
   let handle: ServeHttpHandle;
   try {
     const secrets = await openServeSecretStore(dataDir);
+    // Interruptor de login y cliente de Sumego (SPEC.md §12.9): un valor inválido para aquí,
+    // antes de tomar `writer.lock`. `loadOAuthHttpAuth` lo vuelve a leer igual.
+    readLoginConfig();
     handle = await startServeHttp({
       dataDir,
       secrets,
       config: readHttpConfig(),
       version,
       authConfigured: () => oauthHttpAuthConfigured(secrets),
-      loadAuth: (authDataDir, config, secrets) => loadOAuthHttpAuth(authDataDir, config, secrets)
+      loadAuth: (authDataDir, config, secrets, pairing) => loadOAuthHttpAuth(authDataDir, config, secrets, { pairing })
     });
   } catch (error) {
     if (

@@ -1,4 +1,10 @@
-/** OAuth público de Hebra: el SDK conserva clientes, PKCE y tokens; Lumbre aprueba al propietario. */
+/**
+ * OAuth público de Hebra: el SDK conserva clientes, PKCE y tokens; Lumbre aprueba al propietario.
+ * Quién identifica a la persona lo decide `HEBRA_MCP_LOGIN_PROVIDER` (D20, SPEC.md §12.9): con
+ * `lumbre`, el login y el consentimiento de Lumbre de §12.2; con `sumego`, el cliente OIDC
+ * propio de hebra-mcp en Sumego y la página de consentimiento de aquí, y Lumbre emite la
+ * concesión a partir del ID token. Desde la concesión, el camino es el mismo.
+ */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
@@ -9,11 +15,15 @@ import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthToke
 import { decodeRecoveryCode } from '../hebra';
 import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
+import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type Grant, sameBinding } from './backchannel';
 import { ClaudeClientsStore, isAllowedRedirectUri } from './clients';
 import { GrantSecrets } from './grants';
+import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
-import { TokenStore, type IssuedTokens } from './token-store';
+import { sendConsentPage, sendDeniedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
+import { SumegoError, type SumegoOidc } from './sumego';
+import { TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector } from './token-store';
 
 export const OAUTH_SCOPE = 'hebra:mcp';
 const PENDING_TTL_MS = 10 * 60_000;
@@ -33,11 +43,35 @@ const MAX_INTROSPECTIONS = 64;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Cookie del login con Sumego: ata el navegador que empezó `/authorize` al callback y al consentimiento. */
+export const LOGIN_COOKIE = '__Host-hebra_mcp_login';
+const LOGIN_COOKIE_MAX_AGE_S = 600;
+const RANDOM_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+const SUMEGO_CALLBACK_KEYS = new Set(['code', 'state', 'iss', 'error', 'error_description', 'error_uri']);
+/** Errores de Lumbre en `sumego/exchange` que el navegador ve como «acceso denegado». */
+const DENIED_EXCHANGE_STATUS = new Set([400, 403, 404, 409]);
+
+/**
+ * Lo que el login con Sumego guarda en la solicitud pendiente, solo en memoria y de un uso:
+ * `state`, `nonce` y `code_verifier` hasta el callback; el ID token hasta el consentimiento.
+ */
+interface SumegoLogin {
+  state: string;
+  nonce: string;
+  verifier: string;
+  cookieHash: string;
+  phase: 'login' | 'exchanging' | 'consent';
+  idToken: string | null;
+  email: string | null;
+  identity: FamilyIdentity | null;
+  formTokenHash: string | null;
+}
 
 interface PendingAuthorization extends Binding {
   requestId: string | null;
   transactionId: string;
   clientId: string;
+  clientName: string;
   redirectUri: string;
   challenge: string;
   state?: string;
@@ -45,6 +79,8 @@ interface PendingAuthorization extends Binding {
   createdAt: number;
   expiresAt: number;
   claimed: boolean;
+  /** Solo en modo `sumego`. */
+  sumego?: SumegoLogin;
 }
 
 interface AuthorizationCode {
@@ -55,6 +91,8 @@ interface AuthorizationCode {
   grant: Grant;
   issuedAt: number;
   expiresAt: number;
+  /** `sub`/`sid` del ID token de Sumego; `null` con el login de Lumbre. */
+  identity: FamilyIdentity | null;
 }
 
 /** Introspección positiva y coherente de una familia, atada a la concesión con la que se comparó. */
@@ -80,6 +118,21 @@ function equal(a: string, b: string): boolean {
   return x.length === y.length && timingSafeEqual(x, y);
 }
 
+/** El valor de una cookie de la cabecera `Cookie`, o `null`. Sin decodificar: es base64url. */
+function readCookie(req: Request, name: string): string | null {
+  const header = req.headers.cookie;
+  if (typeof header !== 'string') return null;
+  for (const part of header.split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0 && part.slice(0, index).trim() === name) return part.slice(index + 1).trim();
+  }
+  return null;
+}
+
+function loginCookie(value: string, maxAge: number): string {
+  return `${LOGIN_COOKIE}=${value}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+
 export interface HebraOAuthProviderOptions {
   issuer: string;
   resource: string;
@@ -90,6 +143,12 @@ export interface HebraOAuthProviderOptions {
   backchannel: LumbreBackchannel;
   clients?: ClaudeClientsStore;
   now?: () => number;
+  /** `HEBRA_MCP_LOGIN_PROVIDER`; por defecto `lumbre`. Con `sumego`, hace falta `sumego`. */
+  loginProvider?: LoginProvider;
+  /** Cliente OIDC de Sumego, si está configurado. */
+  sumego?: SumegoOidc | null;
+  /** Emparejado revocado (SPEC.md §12.9); `serve-http` comparte el suyo con `hebra_status`. */
+  pairing?: PairingRevocation;
 }
 
 export class HebraOAuthProvider implements OAuthServerProvider {
@@ -118,6 +177,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * Lumbre ya puede introspeccionar con la fecha nueva: no es un desajuste que corte la familia.
    */
   private readonly renewing = new Set<string>();
+  private readonly loginProvider: LoginProvider;
+  private readonly sumego: SumegoOidc | null;
+  readonly pairing: PairingRevocation;
 
   constructor(options: HebraOAuthProviderOptions) {
     this.issuer = options.issuer;
@@ -129,6 +191,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     this.backchannel = options.backchannel;
     this.clients = options.clients ?? new ClaudeClientsStore({ now: options.now });
     this.now = options.now ?? Date.now;
+    this.loginProvider = options.loginProvider ?? 'lumbre';
+    this.sumego = options.sumego ?? null;
+    if (this.loginProvider === 'sumego' && !this.sumego) throw new Error('sumego_not_configured');
+    this.pairing = options.pairing ?? new PairingRevocation();
     this.tokens.onFamiliesRemoved((ids) => {
       const removed = ids.map((id) => {
         this.forgetIntrospection(id);
@@ -204,20 +270,24 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const transactionId = randomBytes(32).toString('base64url');
     const binding = await this.currentBinding();
     if (!binding) { res.status(503).json({ error: 'temporarily_unavailable' }); return; }
+    // Emparejado revocado (SPEC.md §12.9): una página que dice cómo reemparejar, no un 503 JSON.
+    if (this.pairing.isRevoked(binding.pairedCredentialId)) { sendPairingRevokedPage(res); return; }
     const current = [...this.pending.values()];
     if (current.length >= MAX_PENDING || current.filter((entry) => entry.ip === ip).length >= MAX_PENDING_PER_IP ||
       current.filter((entry) => entry.clientId === client.client_id).length >= MAX_PENDING_PER_CLIENT) {
       res.status(429).json({ error: 'rate_limited' }); return;
     }
+    const clientName = (client.client_name || 'Claude').slice(0, 120);
     const pending: PendingAuthorization = {
-      ...binding, requestId: null, transactionId, clientId: client.client_id,
+      ...binding, requestId: null, transactionId, clientId: client.client_id, clientName,
       redirectUri: params.redirectUri, challenge: params.codeChallenge, state: params.state,
       ip, createdAt: this.now(), expiresAt: this.now() + PENDING_TTL_MS, claimed: false
     };
     // El insert ocurre antes de la primera llamada remota.
     this.pending.set(transactionId, pending);
+    if (this.loginProvider === 'sumego') { await this.authorizeWithSumego(pending, binding, res); return; }
     try {
-      const requested = await this.backchannel.request({ ...binding, transactionId, clientId: client.client_id, clientName: (client.client_name || 'Claude').slice(0, 120) });
+      const requested = await this.backchannel.request({ ...binding, transactionId, clientId: client.client_id, clientName });
       if (this.pending.get(transactionId) !== pending || !sameBinding(binding, (await this.currentBinding()) ?? { pairedCredentialId: '', syncVaultId: '', opaqueDeviceId: '' })) {
         this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return;
       }
@@ -226,11 +296,237 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       if (pending.expiresAt <= this.now()) { this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return; }
       logEvent({ event: 'oauth.authorize', result: 'lumbre' });
       res.redirect(302, requested.authorizationUrl);
-    } catch {
+    } catch (error) {
       this.pending.delete(transactionId);
+      if (this.pairingRevokedBy(error, binding)) { sendPairingRevokedPage(res); return; }
       logEvent({ event: 'oauth.authorize', result: 'unavailable' });
       res.status(503).json({ error: 'temporarily_unavailable' });
     }
+  }
+
+  /**
+   * `410 pairing_revoked` de Lumbre: se anota (y `pairing.revoked` sale una vez). Cualquier
+   * otro error, también un 400, no es una revocación.
+   */
+  private pairingRevokedBy(error: unknown, binding: Binding): boolean {
+    if (!(error instanceof BackchannelError) || error.kind !== 'pairing_revoked') return false;
+    this.pairing.markRevoked(binding.pairedCredentialId);
+    return true;
+  }
+
+  /**
+   * `/authorize` en modo `sumego` (SPEC.md §12.9, paso 1): `state`, `nonce` y `code_verifier`
+   * propios, solo en la solicitud; la solicitud se registra en Lumbre con el sha256 del `nonce`;
+   * cookie `__Host-hebra_mcp_login` con su sha256 en la solicitud, y 302 al
+   * `authorization_endpoint` de la discovery. La discovery va antes que Lumbre: si Sumego está
+   * caído, no queda una solicitud huérfana allí.
+   */
+  private async authorizeWithSumego(pending: PendingAuthorization, binding: Binding, res: Response): Promise<void> {
+    const sumego = this.sumego!;
+    const { transactionId } = pending;
+    const random = () => randomBytes(32).toString('base64url');
+    const login: SumegoLogin = { state: random(), nonce: random(), verifier: random(), cookieHash: '', phase: 'login',
+      idToken: null, email: null, identity: null, formTokenHash: null };
+    const cookie = random();
+    login.cookieHash = sha256(cookie);
+    pending.sumego = login;
+    try {
+      const authorizationUrl = await sumego.authorizationUrl({ state: login.state, nonce: login.nonce, codeChallenge: s256(login.verifier) });
+      const requested = await this.backchannel.requestSumego({ ...binding, transactionId, clientId: pending.clientId,
+        clientName: pending.clientName, sumegoNonceSha256: s256(login.nonce) });
+      if (this.pending.get(transactionId) !== pending || !sameBinding(binding, (await this.currentBinding()) ?? { pairedCredentialId: '', syncVaultId: '', opaqueDeviceId: '' })) {
+        this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return;
+      }
+      pending.requestId = requested.requestId;
+      pending.expiresAt = Math.min(pending.expiresAt, Date.parse(requested.expiresAt));
+      if (pending.expiresAt <= this.now()) { this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return; }
+      res.setHeader('set-cookie', loginCookie(cookie, LOGIN_COOKIE_MAX_AGE_S));
+      logEvent({ event: 'oauth.authorize', result: 'sumego' });
+      res.redirect(302, authorizationUrl);
+    } catch (error) {
+      this.pending.delete(transactionId);
+      if (this.pairingRevokedBy(error, binding)) { sendPairingRevokedPage(res); return; }
+      logEvent({ event: 'oauth.authorize', result: 'unavailable' });
+      res.status(503).json({ error: 'temporarily_unavailable' });
+    }
+  }
+
+  /** La solicitud del login con Sumego cuyo `state` es este, comparado en tiempo constante. */
+  private pendingByState(state: string): [string, PendingAuthorization] | null {
+    let found: [string, PendingAuthorization] | null = null;
+    for (const [key, value] of this.pending) {
+      if (value.sumego && equal(sha256(value.sumego.state), sha256(state))) found = [key, value];
+    }
+    return found;
+  }
+
+  /** La solicitud cuyo token de formulario es este (sha256, en tiempo constante). */
+  private pendingByFormToken(token: string): [string, PendingAuthorization] | null {
+    const hash = sha256(token);
+    let found: [string, PendingAuthorization] | null = null;
+    for (const [key, value] of this.pending) {
+      if (value.sumego?.formTokenHash && equal(value.sumego.formTokenHash, hash)) found = [key, value];
+    }
+    return found;
+  }
+
+  /** ¿Trae este navegador la cookie de esta solicitud? */
+  private sameBrowser(req: Request, login: SumegoLogin): boolean {
+    const cookie = readCookie(req, LOGIN_COOKIE);
+    return cookie !== null && RANDOM_TOKEN.test(cookie) && equal(sha256(cookie), login.cookieHash);
+  }
+
+  /**
+   * `GET /oauth/sumego/callback` (SPEC.md §12.9, paso 2). Sin la cookie de la solicitud, no se
+   * consume nada (un tercero con el `state` no puede tumbar el login legítimo). Con ella: el
+   * `state` es de un uso, `iss` tiene que ser exactamente el issuer (RFC 9207) y un `error=`
+   * descarta la solicitud. El código se canjea con `client_secret_basic` y el ID token se valida;
+   * si vale, la página de consentimiento. Nunca redirige al cliente desde aquí.
+   */
+  async handleSumegoCallback(req: Request, res: Response): Promise<void> {
+    this.prune();
+    const sumego = this.sumego;
+    if (!sumego) { res.status(404).type('text/plain').send('No encontrado.'); return; }
+    const { code, state, iss, error } = req.query;
+    if (Object.keys(req.query).some((key) => !SUMEGO_CALLBACK_KEYS.has(key)) || typeof state !== 'string' || state.length > 128 ||
+      (iss !== undefined && typeof iss !== 'string') || (code !== undefined && typeof code !== 'string') ||
+      (error !== undefined && typeof error !== 'string') || (code === undefined) === (error === undefined)) {
+      sendDeniedPage(res, 400); return;
+    }
+    const entry = this.pendingByState(state);
+    if (!entry || entry[1].expiresAt <= this.now()) { sendDeniedPage(res, 400); return; }
+    const [key, pending] = entry;
+    const login = pending.sumego!;
+    if (!this.sameBrowser(req, login)) { sendDeniedPage(res, 400); return; }
+    const reject = (result: string) => {
+      this.pending.delete(key);
+      logEvent({ event: 'oauth.sumego.callback', result });
+      sendDeniedPage(res, 400);
+    };
+    // Un `state` ya usado: la solicitud se descarta entera.
+    if (login.phase !== 'login') { reject('reused'); return; }
+    login.phase = 'exchanging';
+    if (iss !== sumego.issuer) { reject('issuer'); return; }
+    if (error !== undefined) { reject('error'); return; }
+    if (pending.createdAt <= await this.revokedBefore()) { reject('revoked'); return; }
+    if (code!.length === 0 || code!.length > 4096) { reject('invalid'); return; }
+    const { verifier, nonce } = login;
+    login.verifier = ''; login.nonce = '';
+    let idToken: string;
+    let claims: Awaited<ReturnType<SumegoOidc['verifyIdToken']>>;
+    try {
+      idToken = await sumego.exchangeCode(code!, verifier);
+      claims = await sumego.verifyIdToken(idToken, nonce);
+    } catch (failure) {
+      this.pending.delete(key);
+      const unavailable = !(failure instanceof SumegoError) || failure.kind === 'unavailable';
+      logEvent({ event: 'oauth.sumego.callback', result: unavailable ? 'unavailable' : 'invalid' });
+      if (unavailable) sendUnavailablePage(res); else sendDeniedPage(res, 400);
+      return;
+    }
+    if (this.pending.get(key) !== pending || pending.expiresAt <= this.now()) { reject('expired'); return; }
+    const formToken = randomBytes(32).toString('base64url');
+    login.phase = 'consent';
+    login.idToken = idToken;
+    login.email = claims.email;
+    login.identity = { sub: claims.sub, sid: claims.sid };
+    login.formTokenHash = sha256(formToken);
+    logEvent({ event: 'oauth.sumego.callback', result: 'consent' });
+    sendConsentPage(res, { clientName: pending.clientName, email: claims.email, scope: OAUTH_SCOPE, formToken, redirectUri: pending.redirectUri });
+  }
+
+  /**
+   * `POST /oauth/sumego/consent` (SPEC.md §12.9, pasos 3 y 4): el «Permitir». El token de
+   * formulario es de un uso y va con la cookie de la solicitud. Canjea en Lumbre
+   * (`sumego/exchange`) con el ID token; desde la concesión, el camino de hoy. Los errores de
+   * Lumbre, según la tabla de §12.9: siempre se descarta la solicitud y nunca se redirige.
+   */
+  async handleSumegoConsent(req: Request, res: Response): Promise<void> {
+    this.prune();
+    if (!this.sumego) { res.status(404).type('text/plain').send('No encontrado.'); return; }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const token = body.form_token;
+    if (Object.keys(body).length !== 1 || typeof token !== 'string' || !RANDOM_TOKEN.test(token)) { sendDeniedPage(res, 400); return; }
+    const entry = this.pendingByFormToken(token);
+    if (!entry || entry[1].expiresAt <= this.now()) { sendDeniedPage(res, 400); return; }
+    const [key, pending] = entry;
+    const login = pending.sumego!;
+    if (!this.sameBrowser(req, login)) { sendDeniedPage(res, 400); return; }
+    // Un uso: desde aquí el mismo token ya no encuentra la solicitud.
+    login.formTokenHash = null;
+    const idToken = login.idToken;
+    const identity = login.identity;
+    login.idToken = null;
+    res.setHeader('set-cookie', loginCookie('', 0));
+    if (!idToken || !identity || !pending.requestId || pending.createdAt <= await this.revokedBefore()) {
+      this.pending.delete(key); sendDeniedPage(res, 400); return;
+    }
+    if (pending.claimed || this.codes.size >= MAX_CODES) { this.pending.delete(key); sendUnavailablePage(res); return; }
+    pending.claimed = true;
+    let grant: Grant;
+    try {
+      grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId });
+    } catch (error) {
+      this.pending.delete(key);
+      if (this.pairingRevokedBy(error, pending)) { sendPairingRevokedPage(res); return; }
+      const status = error instanceof BackchannelError ? error.status : undefined;
+      // Un 401 es que el secreto de backchannel no coincide con el de Lumbre.
+      if (status === 401) logEvent({ event: 'oauth.sumego.exchange', result: 'unauthorized' });
+      if (status !== undefined && DENIED_EXCHANGE_STATUS.has(status)) {
+        logEvent({ event: 'oauth.sumego.exchange', result: 'denied', status });
+        sendDeniedPage(res);
+      } else {
+        logEvent({ event: 'oauth.sumego.exchange', result: 'unavailable' });
+        sendUnavailablePage(res);
+      }
+      return;
+    }
+    try {
+      const target = await this.issueCode(key, pending, grant, identity);
+      logEvent({ event: 'oauth.consent', result: 'approved' });
+      res.redirect(302, target);
+    } catch {
+      this.pending.delete(key);
+      await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      logEvent({ event: 'oauth.consent', result: 'rejected' });
+      sendDeniedPage(res);
+    }
+  }
+
+  /**
+   * Concesión ya canjeada en Lumbre: comprueba vínculo, cliente, recurso y caducidad contra la
+   * solicitud y el emparejado actual, y emite el código OAuth de un uso. Devuelve la URL del
+   * callback del cliente; lanza si algo no casa (quien llama revoca la concesión).
+   */
+  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, identity: FamilyIdentity | null): Promise<string> {
+    const current = await this.currentBinding();
+    if (pending.createdAt <= await this.revokedBefore() || !current ||
+      !sameBinding(grant, pending) || !sameBinding(grant, current) ||
+      grant.clientId !== pending.clientId || grant.resource !== this.resource || Date.parse(grant.expiresAt) <= this.now()) {
+      throw new Error('binding');
+    }
+    const code = randomBytes(32).toString('base64url');
+    const hash = sha256(code);
+    await this.grants.stage(hash, grant.accessToken);
+    this.pending.delete(key);
+    this.codes.set(hash, { clientId: pending.clientId, redirectUri: pending.redirectUri, challenge: pending.challenge,
+      resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS, identity });
+    const target = new URL(pending.redirectUri);
+    target.searchParams.set('code', code);
+    if (pending.state !== undefined) target.searchParams.set('state', pending.state);
+    target.searchParams.set('iss', this.issuer);
+    return target.href;
+  }
+
+  /**
+   * Back-channel logout de Sumego ya validado: corta en local las familias de esa sesión o de
+   * ese `sub` (persistido antes de resolver) y el observador de `TokenStore` pide después la
+   * revocación upstream. Lanza si la baja local no se pudo guardar.
+   */
+  async revokeByLogout(selector: LogoutSelector): Promise<number> {
+    const dropped = await this.tokens.dropFamiliesByLogout(selector);
+    for (const id of dropped) this.forgetIntrospection(id);
+    return dropped.length;
   }
 
   /** `denied` público no consume una solicitud legítima; `approved` solo abre el canje autenticado. */
@@ -241,7 +537,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const decision = req.query.decision;
     if (keys.length !== 2 || typeof requestId !== 'string' || !UUID.test(requestId) ||
       (decision !== 'approved' && decision !== 'denied')) { res.status(400).json({ error: 'invalid_request' }); return; }
-    const entry = [...this.pending].find(([, value]) => value.requestId === requestId);
+    // Una solicitud del login con Sumego solo se cierra por su propio callback.
+    const entry = [...this.pending].find(([, value]) => value.requestId === requestId && !value.sumego);
     if (!entry || entry[1].expiresAt <= this.now()) { res.status(400).json({ error: 'invalid_grant' }); return; }
     const [key, pending] = entry;
     if (pending.createdAt <= await this.revokedBefore()) {
@@ -253,26 +550,12 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     let grant: Grant | null = null;
     try {
       grant = await this.backchannel.exchange(requestId, pending.transactionId);
-      const current = await this.currentBinding();
-      if (pending.createdAt <= await this.revokedBefore() || !current ||
-        !sameBinding(grant, pending) || !sameBinding(grant, current) ||
-        grant.clientId !== pending.clientId || grant.resource !== this.resource || Date.parse(grant.expiresAt) <= this.now()) {
-        throw new Error('binding');
-      }
-      const code = randomBytes(32).toString('base64url');
-      const hash = sha256(code);
-      await this.grants.stage(hash, grant.accessToken);
-      this.pending.delete(key);
-      this.codes.set(hash, { clientId: pending.clientId, redirectUri: pending.redirectUri, challenge: pending.challenge,
-        resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS });
-      const target = new URL(pending.redirectUri);
-      target.searchParams.set('code', code);
-      if (pending.state !== undefined) target.searchParams.set('state', pending.state);
-      target.searchParams.set('iss', this.issuer);
+      const target = await this.issueCode(key, pending, grant, null);
       logEvent({ event: 'oauth.consent', result: 'approved' });
-      res.redirect(302, target.href);
-    } catch {
+      res.redirect(302, target);
+    } catch (error) {
       this.pending.delete(key);
+      this.pairingRevokedBy(error, pending);
       if (grant) await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       res.status(400).json({ error: 'invalid_grant' });
@@ -411,7 +694,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     try {
       const { accessToken: _unused, ...metadata } = grant;
       const issued = await this.tokens.issueFamily({ clientId: entry.clientId, scope: OAUTH_SCOPE, resource: entry.resource,
-        grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt }, await this.revokedBefore(),
+        grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt, identity: entry.identity }, await this.revokedBefore(),
       async (familyId, ids) => { await this.grants.markPromoting(hash, familyId); await this.grants.set(familyId, grant.accessToken, ids); });
       await this.grants.unstage(hash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
       logEvent({ event: 'oauth.token', grant: 'authorization_code', result: 'issued' });

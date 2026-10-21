@@ -209,6 +209,10 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     await mcp.writer.createNote({ body: '# Después de revocar', privacy: NO_PRIVATE });
     expect(await mcp.runner.requestRound()).toBeNull();
     expect(relay.changesCalls).toBe(calls);
+    // SPEC.md §12.9: `pairing.revoked` una sola vez.
+    expect(mcp.logged.filter((entry) => entry.event === 'pairing.revoked')).toEqual([
+      { event: 'pairing.revoked', fields: { source: 'relay' } }
+    ]);
   });
 
   it('un 403 por el transporte HTTP de Hebra (fetch real inyectado) también revoca', async () => {

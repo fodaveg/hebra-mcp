@@ -16,6 +16,11 @@
  *   con el proveedor de `./provider.ts`, con sus limitadores por IP.
  * - `GET /oauth/lumbre/callback`: recibe la vuelta del consentimiento y
  *   confirma la aprobación por backchannel antes de emitir código.
+ * - Con `HEBRA_MCP_LOGIN_PROVIDER=sumego` (D20, SPEC.md §12.9): `GET /oauth/sumego/callback`
+ *   (vuelta del login de Sumego y página de consentimiento) y `POST /oauth/sumego/consent`
+ *   (el «Permitir»). `./login-config.ts` valida el interruptor y el cliente al arrancar.
+ * - `POST /oauth/sumego/backchannel-logout`: con cualquier valor del interruptor si hay
+ *   cliente de Sumego configurado. Sin cookies ni CORS; su parser de formulario va en la ruta.
  *
  * `requireAuth` es `requireBearerAuth` del SDK: solo la cabecera `Authorization` (nunca un
  * token en la URL), scope `hebra:mcp`, y el 401 con `WWW-Authenticate` que incluye
@@ -28,11 +33,16 @@ import type { HttpAuth } from '../http/app';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
 import type { SecretStore } from '../secrets';
+import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from './backchannel';
+import { BackchannelLogout } from './backchannel-logout';
 import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback } from './clients';
 import { GrantSecrets } from './grants';
+import { readLoginConfig } from './login-config';
+import { LogoutJtiStore } from './logout-jtis';
 import { RevocationFile } from './owner';
 import { HebraOAuthProvider, OAUTH_SCOPE } from './provider';
+import { SUMEGO_CALLBACK_PATH, SUMEGO_CONSENT_PATH, SUMEGO_LOGOUT_PATH, SumegoOidc } from './sumego';
 import { TokenStore } from './token-store';
 
 export interface OAuthHttpAuthOptions {
@@ -42,6 +52,10 @@ export interface OAuthHttpAuthOptions {
   now?: () => number;
   /** Tests: broker HTTPS simulado, sin exponer el secreto. */
   backchannelFetch?: (input: string | URL, init?: RequestInit) => Promise<globalThis.Response>;
+  /** Tests: Sumego simulado (discovery, JWKS y `token_endpoint`). */
+  sumegoFetch?: (input: string | URL, init?: RequestInit) => Promise<globalThis.Response>;
+  /** Emparejado revocado, compartido con `hebra_status` (`serve-http`). */
+  pairing?: PairingRevocation;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -71,7 +85,11 @@ export async function loadOAuthHttpAuth(
   // `HttpConfigError` antes de tocar tokens ni concesiones.
   const backchannel = new LumbreBackchannel(env.HEBRA_MCP_BACKCHANNEL_SECRET!, config.resourceUrl,
     env.LUMBRE_APP_ORIGIN || DEFAULT_LUMBRE_APP_ORIGIN, options.backchannelFetch);
+  // D20: el interruptor y el cliente de Sumego, también antes de tocar nada. Con `sumego` y
+  // un cliente que falte o no valga, `HttpConfigError`: nunca se vuelve en silencio a `lumbre`.
+  const login = readLoginConfig(env);
   const now = options.now ?? Date.now;
+  const sumego = login.oidc ? new SumegoOidc(login.oidc, config.publicOrigin, options.sumegoFetch, now) : null;
   const tokens = await TokenStore.open(dataDir, now);
   const revocations = new RevocationFile(dataDir);
   const grants = await GrantSecrets.open(secrets!, tokens.familyIds());
@@ -87,8 +105,15 @@ export async function loadOAuthHttpAuth(
     secrets: secrets!,
     backchannel,
     clients: new ClaudeClientsStore({ fetch: options.fetch, now }),
-    now
+    now,
+    loginProvider: login.provider,
+    sumego,
+    pairing: options.pairing
   });
+  const logout = sumego
+    ? new BackchannelLogout({ oidc: sumego, jtis: await LogoutJtiStore.open(dataDir, now),
+      revoke: (selector) => provider.revokeByLogout(selector), now })
+    : null;
 
   const protectedResource = {
     resource: config.resourceUrl,
@@ -142,6 +167,29 @@ export async function loadOAuthHttpAuth(
           if (!res.headersSent) res.status(503).json({ error: 'temporarily_unavailable' });
         });
       });
+      if (login.provider === 'sumego') {
+        app.get(SUMEGO_CALLBACK_PATH, (req: Request, res: Response) => {
+          void provider.handleSumegoCallback(req, res).catch(() => {
+            logEvent({ event: 'oauth.sumego.callback', result: 'error' });
+            if (!res.headersSent) res.status(503).type('text/plain').send('No disponible.');
+          });
+        });
+        app.post(SUMEGO_CONSENT_PATH, express.urlencoded({ extended: false, limit: '4kb' }), (req: Request, res: Response) => {
+          void provider.handleSumegoConsent(req, res).catch(() => {
+            logEvent({ event: 'oauth.consent', result: 'error' });
+            if (!res.headersSent) res.status(503).type('text/plain').send('No disponible.');
+          });
+        });
+      }
+      if (logout) {
+        // De servidor a servidor: solo su parser de formulario, sin cookies ni CORS.
+        app.post(SUMEGO_LOGOUT_PATH, express.urlencoded({ extended: false, limit: '16kb' }), (req: Request, res: Response) => {
+          void logout.handle(req, res).catch(() => {
+            logEvent({ event: 'oauth.logout', result: 'error' });
+            if (!res.headersSent) res.status(500).end();
+          });
+        });
+      }
       app.use(
         mcpAuthRouter({
           provider,
