@@ -1979,7 +1979,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C4** Despliegue | Dockerfile, compose, Caddy y runbook para `mcp.hebra.pro`. Toca `/srv/edge`, compartido. | Contenedor sano; `/mcp` sin token 401; metadata PRM/AS accesible; ningún puerto en el host. | C1, C2, C3 |
 | **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
-| **C7** Login con Sumego | §12.9 del lado de hebra-mcp, detrás de `HEBRA_MCP_LOGIN_PROVIDER`. | Las pruebas de §12.9 en verde; con `lumbre`, la suite OAuth de hoy sin cambios; `typecheck` y `check:bundle` en verde. Encender `sumego` en producción espera al endpoint de Lumbre y al cliente de Sumego. | C3 |
+| **C7** Login con Sumego | §12.9 del lado de hebra-mcp, detrás de `HEBRA_MCP_LOGIN_PROVIDER`. | Las pruebas de §12.9 en verde, también la página y el evento de credencial revocada; con `lumbre`, la suite OAuth de hoy sin cambios; `typecheck` y `check:bundle` en verde. Encender `sumego` en producción espera al endpoint de Lumbre y al cliente de Sumego. | C3 |
 
 C1 y C2 van en paralelo.
 
@@ -2081,9 +2081,22 @@ la clave. Ni Sumego ni Lumbre la tienen, y un login no crea identidad ni bóveda
 - Las dos piezas de Lumbre: los campos nuevos de `/requests` y `/api/integrations/hebra-mcp/sumego/exchange`.
   Las hace la sesión de Lumbre siguiendo el contrato que cerró con lumbre-mcp el 21 oct 2026.
 - El alta del cliente en Sumego, que hace la sesión de sumego.
-- Abierto, lo decide Lumbre: si el cierre en todas partes por `sub` (`signOutEverywhere`) debe
-  revocar también la credencial de emparejado de hebra-mcp. Hoy la revoca, y eso dejó caído
-  hebra-mcp el 21 oct 2026 a las 07:46 UTC hasta reemparejar a mano.
+**Credencial de emparejado revocada** (decisión de la sesión de Lumbre, 21 oct 2026). El cierre
+en todas partes por `sub` (`signOutEverywhere`: cerrar todas las sesiones, cambio de contraseña o
+back-channel con solo `sub`) **sigue revocando** la credencial de emparejado de hebra-mcp. Motivo:
+esa credencial actúa en nombre de la persona sobre su biblioteca, y una credencial robada no puede
+sobrevivir al gesto que existe para cortarla. Reemparejar después es el coste asumido. Un logout
+por `sid` no toca el emparejado. A cambio, hebra-mcp no se queda caído sin avisar, como el 21 oct
+2026 desde las 07:46 UTC:
+- Cuando el relé rechaza la credencial, o Lumbre responde 401 o «credencial revocada» en
+  `/requests`, `introspect` o `/renew`, hebra-mcp lo anota en el estado (`revoked: true`, que ya
+  existe) y emite una vez el evento de log `pairing.revoked`.
+- Con el emparejado revocado, `/authorize` no responde un 503 JSON. Muestra una página HTML que
+  dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes y que hay que
+  reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7, `src/pair/pair.ts`), que
+  conserva la identidad y la clave.
+- `hebra_status` devuelve ese mismo motivo.
+- `/healthz` sigue respondiendo 200, porque el proceso está sano.
 
 **Pruebas** (sintéticas, sin red): discovery y JWKS falsos con claves ES256 generadas en el
 test. Cubren:
