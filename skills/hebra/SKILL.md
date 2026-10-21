@@ -43,14 +43,14 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 
 | Dónde | Prefijo de las tools |
 |---|---|
-| Conector remoto de claude.ai (`https://mcp.hebra.pro/mcp`, login con Lumbre) | `mcp__claude_ai_hebra__` |
+| Conector remoto de claude.ai (`https://mcp.hebra.pro/mcp`, login con Lumbre) | `mcp__claude_ai_Hebra__` o `mcp__claude_ai_hebra__` (según cómo se llame el conector en la cuenta) |
 | stdio local (`claude mcp add hebra -- hebra-mcp serve`), si se configura | `mcp__hebra__` |
 
 - Si las tools son diferidas, cárgalas en UNA llamada: `ToolSearch` con `+hebra hebra_`.
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 36 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 39 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las de ficheros sueltos, `hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, `hebra_read_file`, `hebra_replace_file_text`,
