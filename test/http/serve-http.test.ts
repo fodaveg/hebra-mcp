@@ -106,7 +106,9 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
       const parsed = JSON.parse(line) as { event: string; route?: string };
       if (parsed.event === 'http.request') expect(parsed.route).toBe('/mcp');
     }
-  });
+    // Recorre todas las herramientas por HTTP y no mide tiempo: sin tope propio, los 5 s
+    // por defecto de vitest lo cortaban (5047 ms el 21 oct 2026) sin que fallara nada suyo.
+  }, 60_000);
 
   it('dos hebra_append_to_note concurrentes a la misma nota: los dos textos, en orden de llegada', async () => {
     const { test, client } = await startWithTestLibrary();
