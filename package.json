@@ -17,7 +17,7 @@
     "@napi-rs/keyring": "2.1.0",
     "express": "5.2.1",
     "jose": "6.2.13",
-    "zod": "4.6.5"
+    "zod": "4.6.7"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -33,6 +33,6 @@
     "@types/node": "24.10.0",
     "esbuild": "0.25.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
