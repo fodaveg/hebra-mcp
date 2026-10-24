@@ -1997,6 +1997,16 @@ Sumego. Con `sumego` hacen falta `HEBRA_MCP_OIDC_ISSUER` (defecto `https://id.lu
 caracteres, sin CR/LF, vive en `deploy/.env`). Si falta alguna variable o un valor no es válido,
 `serve-http` no arranca; nunca vuelve en silencio a `lumbre`. Los nombres son los de lumbre-mcp.
 
+**Transición de issuer** (SPEC.md §13.6 de Sumego): `HEBRA_MCP_OIDC_ISSUER` solo admite
+`https://id.lumbre.pro` o `https://id.sumego.es`, con comparación exacta de la cadena (otro host,
+barra final, mayúsculas, puerto, ruta o `http:` no arrancan), y cuál está activo lo decide la
+variable. El servidor acepta solo el configurado en discovery, endpoints, `iss` del callback, del
+ID token y del `logout_token`; discovery, JWKS y `token_endpoint` no siguen redirecciones y un 3xx
+es "no disponible", nunca un corte de la familia. Los dos issuers son el mismo proveedor con los
+mismos `sub`, y las familias guardan `sub` y `sid` sin issuer: tras el cambio cada persona sigue
+en su identidad y un logout del issuer nuevo alcanza las familias de antes. Las URI de callback,
+logout y post-logout no cambian.
+
 **Cliente en Sumego** (lo da de alta la sesión de sumego): `hebra-mcp`, confidencial con
 `client_secret_basic`, scopes `openid email`, `redirect_uri` exacta
 `https://mcp.hebra.pro/oauth/sumego/callback`, `backchannel_logout_uri`
