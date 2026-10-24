@@ -5,6 +5,8 @@
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type CryptoKey, type JWK } from 'jose';
@@ -14,7 +16,8 @@ import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE } 
 import { LOGOUT_JTIS_FILE } from '../../src/oauth/logout-jtis';
 import type { HebraOAuthProvider } from '../../src/oauth/provider';
 import { TokenStore } from '../../src/oauth/token-store';
-import { BACKCHANNEL_LOGOUT_EVENT, DISCOVERY_FAILURE_TTL_MS } from '../../src/oauth/sumego';
+import type { OidcClientConfig } from '../../src/oauth/login-config';
+import { BACKCHANNEL_LOGOUT_EVENT, DISCOVERY_FAILURE_TTL_MS, JWKS_TTL_MS, SumegoOidc } from '../../src/oauth/sumego';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
 import { PairingRevocation } from '../../src/status/pairing-revocation';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
@@ -22,7 +25,10 @@ import { startTestHttpApp, type TestHttpApp } from '../fixtures/http-app';
 
 const SECRET = '0123456789abcdef0123456789abcdef';
 const CLIENT_SECRET = 'secreto-del-cliente-de-sumego-0123456789';
-const ISSUER = 'https://id.example.test';
+const LUMBRE_ISSUER = 'https://id.lumbre.pro';
+const SUMEGO_ISSUER = 'https://id.sumego.es';
+/** Issuer configurado (y el que firma los tokens simulados); cada prueba empieza en el defecto. */
+let issuer: string;
 const OIDC_CLIENT_ID = 'hebra-mcp';
 const PAIR_ID = '11111111-1111-4111-8111-111111111111';
 const GRANT_ID = '22222222-2222-4222-8222-222222222222';
@@ -62,6 +68,8 @@ let omitCodeRefresh: boolean;
 let refreshCalls: string[];
 let refreshResponse: (() => Promise<Response>) | null;
 let discoveryResponse: (() => Response) | null;
+let jwksResponse: (() => Response) | null;
+let codeResponse: (() => Response) | null;
 let jwksUp: boolean;
 /** Reloj de la app (y de los tokens firmados aquí): `Date.now()` más esto. */
 let clockOffset: number;
@@ -89,18 +97,19 @@ function newRefresh(): string {
 
 async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Response> {
   const url = new URL(String(input));
-  expect(url.origin).toBe(ISSUER);
+  expect(url.origin).toBe(issuer);
   expect(init?.redirect).toBe('manual');
   if (!sumegoUp) throw new Error('offline');
   if (url.pathname === '/.well-known/openid-configuration') {
     discoveryCount += 1;
     if (discoveryResponse) return discoveryResponse();
-    return json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`,
-      jwks_uri: `${ISSUER}/jwks`, id_token_signing_alg_values_supported: ['ES256'] });
+    return json({ issuer: issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+      jwks_uri: `${issuer}/jwks`, id_token_signing_alg_values_supported: ['ES256'] });
   }
   if (url.pathname === '/jwks') {
     jwksCount += 1;
     if (!jwksUp) return json({ error: 'down' }, 503);
+    if (jwksResponse) return jwksResponse();
     return json({ keys: [publicJwk] });
   }
   if (url.pathname === '/token') {
@@ -114,6 +123,7 @@ async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Res
       if (!liveRefresh.delete(presented)) return json({ error: 'invalid_grant' }, 400);
       return json({ access_token: 'acceso-de-sumego', token_type: 'Bearer', refresh_token: newRefresh(), id_token: 'no-se-usa' });
     }
+    if (codeResponse) return codeResponse();
     const code = form.get('code')!;
     if (!issuedCodes.has(code) || s256(form.get('code_verifier')!) !== currentChallenge) return json({ error: 'invalid_grant' }, 400);
     issuedCodes.delete(code);
@@ -127,7 +137,7 @@ async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Res
 async function idToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256', kid = KID,
   hsSecret: Uint8Array = new TextEncoder().encode('x'.repeat(32))): Promise<string> {
   const now = nowS();
-  const payload: Record<string, unknown> = { iss: ISSUER, aud: OIDC_CLIENT_ID, sub: currentSub, sid: currentSid, email: EMAIL,
+  const payload: Record<string, unknown> = { iss: issuer, aud: OIDC_CLIENT_ID, sub: currentSub, sid: currentSid, email: EMAIL,
     nonce: currentNonce, iat: now, exp: now + 300, ...overrides };
   for (const key of Object.keys(payload)) if (payload[key] === undefined) delete payload[key];
   if (alg === 'none') return new UnsecuredJWT(payload).encode();
@@ -138,7 +148,7 @@ async function idToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | '
 async function logoutToken(overrides: Record<string, unknown> = {}, alg: 'ES256' | 'HS256' | 'none' = 'ES256', kid = KID,
   hsSecret: Uint8Array = new TextEncoder().encode('x'.repeat(32))): Promise<string> {
   const now = nowS();
-  const payload: Record<string, unknown> = { iss: ISSUER, aud: OIDC_CLIENT_ID, iat: now, exp: now + 120, jti: randomUUID(),
+  const payload: Record<string, unknown> = { iss: issuer, aud: OIDC_CLIENT_ID, iat: now, exp: now + 120, jti: randomUUID(),
     events: { [BACKCHANNEL_LOGOUT_EVENT]: {} }, sid: currentSid, ...overrides };
   for (const key of Object.keys(payload)) if (payload[key] === undefined) delete payload[key];
   if (alg === 'none') return new UnsecuredJWT(payload).encode();
@@ -182,7 +192,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
 }
 
 function sumegoEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET, HEBRA_MCP_LOGIN_PROVIDER: 'sumego', HEBRA_MCP_OIDC_ISSUER: ISSUER,
+  return { HEBRA_MCP_BACKCHANNEL_SECRET: SECRET, HEBRA_MCP_LOGIN_PROVIDER: 'sumego', HEBRA_MCP_OIDC_ISSUER: issuer,
     HEBRA_MCP_OIDC_CLIENT_ID: OIDC_CLIENT_ID, HEBRA_MCP_OIDC_CLIENT_SECRET: CLIENT_SECRET, ...extra };
 }
 
@@ -212,6 +222,7 @@ beforeEach(async () => {
   discoveryCount = 0; jwksCount = 0; tokenCalls = []; sumegoUp = true; nextIdToken = null;
   currentNonce = ''; currentChallenge = ''; currentSid = 'sesion-a'; currentSub = SUB; issuedCodes = new Set();
   liveRefresh = new Set(); omitCodeRefresh = false; refreshCalls = []; refreshResponse = null; discoveryResponse = null; jwksUp = true; clockOffset = 0;
+  jwksResponse = null; codeResponse = null; issuer = LUMBRE_ISSUER;
   requestBodies = []; exchangeBodies = []; requestsResponse = null; exchangeResponse = null; revokeCount = 0;
   renewResponse = null; renewCount = 0; grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
   await startApp();
@@ -246,7 +257,7 @@ async function startLogin(): Promise<Login> {
   const res = await authorize(challenge);
   expect(res.status).toBe(302);
   const location = new URL(res.headers.get('location')!);
-  expect(`${location.origin}${location.pathname}`).toBe(`${ISSUER}/authorize`);
+  expect(`${location.origin}${location.pathname}`).toBe(`${issuer}/authorize`);
   expect(location.searchParams.get('client_id')).toBe(OIDC_CLIENT_ID);
   expect(location.searchParams.get('redirect_uri')).toBe(`${app.origin}/oauth/sumego/callback`);
   expect(location.searchParams.get('scope')).toBe('openid email');
@@ -282,7 +293,7 @@ function formTokenOf(html: string): string {
 /** Hasta la página de consentimiento. */
 async function toConsent(login?: Login): Promise<{ login: Login; formToken: string; page: Response; html: string }> {
   const started = login ?? await startLogin();
-  const page = await callback({ code: started.code, state: started.state, iss: ISSUER }, started.cookie);
+  const page = await callback({ code: started.code, state: started.state, iss: issuer }, started.cookie);
   const html = await page.text();
   expect(page.status).toBe(200);
   return { login: started, formToken: formTokenOf(html), page, html };
@@ -401,20 +412,20 @@ describe('ID token', () => {
     it(`${name}: 400 sin consentimiento ni canje en Lumbre`, async () => {
       nextIdToken = make;
       const login = await startLogin();
-      const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+      const res = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
       expect(res.status).toBe(400);
       expect(await res.text()).toContain('Acceso denegado');
       expect(res.headers.get('location')).toBeNull();
       expect(exchangeBodies).toHaveLength(0);
       // La solicitud se descartó: el mismo state ya no vale.
-      expect((await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie)).status).toBe(400);
+      expect((await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie)).status).toBe(400);
     });
   }
 
   it('Sumego caído al canjear: «no disponible»', async () => {
     const login = await startLogin();
     sumegoUp = false;
-    const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+    const res = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
     expect(res.status).toBe(503);
     expect(await res.text()).toContain('No disponible');
   });
@@ -423,7 +434,7 @@ describe('ID token', () => {
 describe('state, cookie e iss', () => {
   it('sin cookie: 400 y la solicitud sigue viva para su navegador', async () => {
     const login = await startLogin();
-    expect((await callback({ code: login.code, state: login.state, iss: ISSUER })).status).toBe(400);
+    expect((await callback({ code: login.code, state: login.state, iss: issuer })).status).toBe(400);
     expect(tokenCalls).toHaveLength(0);
     await toConsent(login);
   });
@@ -431,32 +442,32 @@ describe('state, cookie e iss', () => {
   it('con la cookie de otra solicitud: 400', async () => {
     const first = await startLogin();
     const second = await startLogin();
-    expect((await callback({ code: first.code, state: first.state, iss: ISSUER }, second.cookie)).status).toBe(400);
+    expect((await callback({ code: first.code, state: first.state, iss: issuer }, second.cookie)).status).toBe(400);
     expect(tokenCalls).toHaveLength(0);
   });
 
   it('iss ausente o distinto: 400 y la solicitud se descarta', async () => {
     const first = await startLogin();
     expect((await callback({ code: first.code, state: first.state }, first.cookie)).status).toBe(400);
-    expect((await callback({ code: first.code, state: first.state, iss: ISSUER }, first.cookie)).status).toBe(400);
+    expect((await callback({ code: first.code, state: first.state, iss: issuer }, first.cookie)).status).toBe(400);
     const second = await startLogin();
-    expect((await callback({ code: second.code, state: second.state, iss: `${ISSUER}/` }, second.cookie)).status).toBe(400);
+    expect((await callback({ code: second.code, state: second.state, iss: `${issuer}/` }, second.cookie)).status).toBe(400);
     expect(tokenCalls).toHaveLength(0);
   });
 
   it('reutilizar el state: el segundo callback es 400', async () => {
     const { login } = await toConsent();
     issuedCodes.add(login.code);
-    expect((await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie)).status).toBe(400);
+    expect((await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie)).status).toBe(400);
     expect(tokenCalls).toHaveLength(1);
   });
 
   it('error= de Sumego: 400 sin redirigir y la solicitud se descarta', async () => {
     const login = await startLogin();
-    const res = await callback({ error: 'access_denied', state: login.state, iss: ISSUER }, login.cookie);
+    const res = await callback({ error: 'access_denied', state: login.state, iss: issuer }, login.cookie);
     expect(res.status).toBe(400);
     expect(res.headers.get('location')).toBeNull();
-    expect((await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie)).status).toBe(400);
+    expect((await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie)).status).toBe(400);
   });
 });
 
@@ -603,7 +614,7 @@ describe('back-channel logout', () => {
     await app.close();
     await startApp(sumegoEnv({ HEBRA_MCP_LOGIN_PROVIDER: 'lumbre' }));
     expect((await logout(await logoutToken())).status).toBe(200);
-    expect((await fetch(`${app.origin}/oauth/sumego/callback?state=x&code=y&iss=${ISSUER}`)).status).toBe(404);
+    expect((await fetch(`${app.origin}/oauth/sumego/callback?state=x&code=y&iss=${issuer}`)).status).toBe(404);
   });
 });
 
@@ -653,6 +664,9 @@ describe('configuración', () => {
     ['HEBRA_MCP_OIDC_CLIENT_SECRET', { HEBRA_MCP_OIDC_CLIENT_SECRET: 'corto' }],
     ['HEBRA_MCP_OIDC_CLIENT_SECRET', { HEBRA_MCP_OIDC_CLIENT_SECRET: `${CLIENT_SECRET}\n` }],
     ['HEBRA_MCP_OIDC_ISSUER', { HEBRA_MCP_OIDC_ISSUER: 'http://id.example.test' }],
+    ['HEBRA_MCP_OIDC_ISSUER', { HEBRA_MCP_OIDC_ISSUER: 'https://id.example.test' }],
+    ['HEBRA_MCP_OIDC_ISSUER', { HEBRA_MCP_OIDC_ISSUER: 'https://id.sumego.es/' }],
+    ['HEBRA_MCP_OIDC_ISSUER', { HEBRA_MCP_OIDC_ISSUER: 'https://x.id.sumego.es' }],
     ['HEBRA_MCP_OIDC_CLIENT_ID', { HEBRA_MCP_OIDC_CLIENT_ID: 'con espacio' }],
     ['HEBRA_MCP_LOGIN_PROVIDER', { HEBRA_MCP_LOGIN_PROVIDER: 'Sumego' }]
   ];
@@ -729,7 +743,8 @@ describe('renovación horaria con Sumego (M1)', () => {
   for (const [name, make] of [
     ['red', async () => { throw new Error('offline'); }],
     ['503', async () => json({ error: 'x' }, 503)],
-    ['429', async () => json({ error: 'slow_down' }, 429)]
+    ['429', async () => json({ error: 'slow_down' }, 429)],
+    ['308 (no se sigue)', async () => new Response(null, { status: 308, headers: { location: `${SUMEGO_ISSUER}/token` } })]
   ] as Array<[string, () => Promise<Response>]>) {
     it(`Sumego ${name}: error temporal y la familia sigue; el reintento vale`, async () => {
       const tokens = await fullLogin();
@@ -765,7 +780,7 @@ describe('renovación horaria con Sumego (M1)', () => {
   it('sin refresh de Sumego en el canje del código: login denegado', async () => {
     omitCodeRefresh = true;
     const login = await startLogin();
-    const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+    const res = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
     expect(res.status).toBe(400);
     expect(exchangeBodies).toHaveLength(0);
   });
@@ -786,7 +801,7 @@ describe('consentimiento y vida del ID token (M2)', () => {
   it('un ID token que ya no llega a tiempo da «no disponible» en el callback', async () => {
     nextIdToken = () => idToken({ iat: nowS() - 280 });
     const login = await startLogin();
-    const res = await callback({ code: login.code, state: login.state, iss: ISSUER }, login.cookie);
+    const res = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
     expect(res.status).toBe(503);
     expect(await res.text()).toContain('Vuelve a conectar');
   });
@@ -839,9 +854,9 @@ describe('logout con conexiones en vuelo', () => {
 describe('cookie de login', () => {
   it('sin cookie o con otra no se toca; al quemar la transacción se borra', async () => {
     const login = await startLogin();
-    const foreign = await callback({ code: login.code, state: login.state, iss: ISSUER }, '__Host-hebra_mcp_login=otra');
+    const foreign = await callback({ code: login.code, state: login.state, iss: issuer }, '__Host-hebra_mcp_login=otra');
     expect(foreign.headers.get('set-cookie')).toBeNull();
-    const unknown = await callback({ code: login.code, state: 'desconocido', iss: ISSUER }, login.cookie);
+    const unknown = await callback({ code: login.code, state: 'desconocido', iss: issuer }, login.cookie);
     expect(unknown.headers.get('set-cookie')).toBeNull();
     const burned = await callback({ code: login.code, state: login.state, iss: 'https://otro.example.test' }, login.cookie);
     expect(burned.status).toBe(400);
@@ -901,13 +916,13 @@ describe('JWKS y discovery', () => {
   });
 
   const broken: Array<[string, () => Response]> = [
-    ['endpoints de otro origen', () => json({ issuer: ISSUER, authorization_endpoint: 'https://evil.example.test/authorize',
-      token_endpoint: `${ISSUER}/token`, jwks_uri: `${ISSUER}/jwks` })],
-    ['jwks_uri de otro origen', () => json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`,
-      token_endpoint: `${ISSUER}/token`, jwks_uri: 'https://evil.example.test/jwks' })],
+    ['endpoints de otro origen', () => json({ issuer: issuer, authorization_endpoint: 'https://evil.example.test/authorize',
+      token_endpoint: `${issuer}/token`, jwks_uri: `${issuer}/jwks` })],
+    ['jwks_uri de otro origen', () => json({ issuer: issuer, authorization_endpoint: `${issuer}/authorize`,
+      token_endpoint: `${issuer}/token`, jwks_uri: 'https://evil.example.test/jwks' })],
     ['una redirección (no se sigue)', () => new Response(null, { status: 302, headers: { location: 'https://evil.example.test/conf' } })],
-    ['más de 64 KiB', () => json({ issuer: ISSUER, authorization_endpoint: `${ISSUER}/authorize`, token_endpoint: `${ISSUER}/token`,
-      jwks_uri: `${ISSUER}/jwks`, relleno: 'x'.repeat(70_000) })]
+    ['más de 64 KiB', () => json({ issuer: issuer, authorization_endpoint: `${issuer}/authorize`, token_endpoint: `${issuer}/token`,
+      jwks_uri: `${issuer}/jwks`, relleno: 'x'.repeat(70_000) })]
   ];
   for (const [name, make] of broken) {
     it(`discovery con ${name}: /authorize 503 sin redirigir`, async () => {
@@ -943,5 +958,181 @@ describe('jti (B1) y entregas simultáneas', () => {
     expect((await logout('no-es-un-jwt')).status).toBe(429);
     expect((await logout(await logoutToken({ sid: undefined, sub: SUB }))).status).toBe(200);
     expect(await families()).toHaveLength(0);
+  });
+});
+
+/** Cierra la app y la vuelve a abrir con otro issuer, sobre el mismo directorio de datos. */
+async function restartWith(next: string): Promise<void> {
+  await app.close();
+  issuer = next;
+  await startApp();
+}
+
+// Transición de Sumego (§13.6 de su SPEC): los dos issuers valen como configuración, pero el
+// servidor solo acepta el configurado. `sumegoFetch` comprueba además que toda llamada de
+// servidor a servidor (discovery, JWKS, token) va a su origen y con `redirect: 'manual'`.
+describe.each([
+  [LUMBRE_ISSUER, SUMEGO_ISSUER],
+  [SUMEGO_ISSUER, LUMBRE_ISSUER]
+])('con %s configurado', (configured, other) => {
+  beforeEach(async () => { await restartWith(configured); });
+
+  it('recorrido completo: URL de autorización, discovery, callback con iss, ID token y logout_token', async () => {
+    await fullLogin();
+    expect(discoveryCount).toBe(1);
+    expect(jwksCount).toBe(1);
+    expect(tokenCalls).toHaveLength(1);
+    expect(await families()).toEqual([expect.objectContaining({ sub: SUB, sid: 'sesion-a' })]);
+    expect((await logout(await logoutToken())).status).toBe(200);
+    expect(await families()).toHaveLength(0);
+  });
+
+  it(`callback con iss=${other}: 400 sin canjear y la solicitud se descarta`, async () => {
+    const login = await startLogin();
+    const res = await callback({ code: login.code, state: login.state, iss: other }, login.cookie);
+    expect(res.status).toBe(400);
+    expect(res.headers.get('set-cookie')).toContain('Max-Age=0');
+    expect((await callback({ code: login.code, state: login.state, iss: configured }, login.cookie)).status).toBe(400);
+    expect(tokenCalls).toHaveLength(0);
+  });
+
+  it(`ID token con iss ${other}: 400 sin consentimiento ni canje en Lumbre`, async () => {
+    nextIdToken = () => idToken({ iss: other });
+    const login = await startLogin();
+    const res = await callback({ code: login.code, state: login.state, iss: configured }, login.cookie);
+    expect(res.status).toBe(400);
+    expect(exchangeBodies).toHaveLength(0);
+  });
+
+  it(`logout_token con iss ${other}: 400 por sid y por sub, y la familia sigue`, async () => {
+    await fullLogin();
+    expect((await logout(await logoutToken({ iss: other }))).status).toBe(400);
+    expect((await logout(await logoutToken({ iss: other, sid: undefined, sub: SUB }))).status).toBe(400);
+    expect(await families()).toHaveLength(1);
+  });
+
+  it(`discovery que anuncia ${other} como issuer o como origen de los endpoints: /authorize 503`, async () => {
+    discoveryResponse = () => json({ issuer: other, authorization_endpoint: `${other}/authorize`, token_endpoint: `${other}/token`,
+      jwks_uri: `${other}/jwks` });
+    expect((await authorize(pkce().challenge)).status).toBe(503);
+    await restartWith(configured);
+    discoveryResponse = () => json({ issuer: configured, authorization_endpoint: `${other}/authorize`,
+      token_endpoint: `${configured}/token`, jwks_uri: `${configured}/jwks` });
+    const res = await authorize(pkce().challenge);
+    expect(res.status).toBe(503);
+    expect(res.headers.get('location')).toBeNull();
+    expect(requestBodies).toHaveLength(0);
+  });
+});
+
+describe('redirecciones de Sumego (no se siguen)', () => {
+  it('discovery con 308 hacia el otro issuer: /authorize 503 sin redirigir', async () => {
+    discoveryResponse = () => new Response(null, { status: 308, headers: { location: `${SUMEGO_ISSUER}/.well-known/openid-configuration` } });
+    const res = await authorize(pkce().challenge);
+    expect(res.status).toBe(503);
+    expect(res.headers.get('location')).toBeNull();
+    expect(requestBodies).toHaveLength(0);
+  });
+
+  it('JWKS con 308: el logout_token es 503 (no disponible) y la familia sigue', async () => {
+    await fullLogin();
+    jwksResponse = () => new Response(null, { status: 308, headers: { location: `${SUMEGO_ISSUER}/jwks` } });
+    clockOffset = JWKS_TTL_MS + 1;
+    expect((await logout(await logoutToken())).status).toBe(503);
+    expect(await families()).toHaveLength(1);
+  });
+
+  it('token_endpoint con 308 al canjear el código: no disponible, sin canje en Lumbre', async () => {
+    codeResponse = () => new Response(null, { status: 308, headers: { location: `${SUMEGO_ISSUER}/token` } });
+    const login = await startLogin();
+    const res = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+    expect(res.status).toBe(503);
+    expect(await res.text()).toContain('No disponible');
+    expect(exchangeBodies).toHaveLength(0);
+  });
+
+  it('con el fetch real, un 308 de discovery, token o JWKS no se sigue y es unavailable', async () => {
+    let followed = 0;
+    let origin = '';
+    let discoveryRedirects = false;
+    const server = createServer((req, res) => {
+      if (req.url === '/.well-known/openid-configuration' && discoveryRedirects) {
+        res.writeHead(308, { location: `${origin}/destino` }).end();
+        return;
+      }
+      if (req.url === '/.well-known/openid-configuration') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ issuer: origin, authorization_endpoint: `${origin}/authorize`, token_endpoint: `${origin}/token`,
+          jwks_uri: `${origin}/jwks` }));
+        return;
+      }
+      if (req.url === '/token' || req.url === '/jwks') {
+        res.writeHead(308, { location: `${origin}/destino` }).end();
+        return;
+      }
+      if (req.url === '/destino') followed += 1;
+      res.writeHead(200, { 'content-type': 'application/json' }).end('{}');
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      // Fuera de la lista cerrada a propósito: el issuer de loopback solo existe en este test.
+      const config = { issuer: origin, clientId: OIDC_CLIENT_ID, clientSecret: CLIENT_SECRET } as unknown as OidcClientConfig;
+      const oidc = new SumegoOidc(config, 'https://mcp.hebra.pro');
+      const unavailable = { name: 'SumegoError', kind: 'unavailable' };
+      await expect(oidc.refresh('rt-x')).rejects.toMatchObject(unavailable);
+      await expect(oidc.exchangeCode('codigo', 'verificador')).rejects.toMatchObject(unavailable);
+      await expect(oidc.verifyLogoutToken(await logoutToken())).rejects.toMatchObject(unavailable);
+      expect(followed).toBe(0);
+
+      discoveryRedirects = true;
+      await expect(new SumegoOidc(config, 'https://mcp.hebra.pro').discovery()).rejects.toMatchObject(unavailable);
+      expect(followed).toBe(0);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
+
+describe.each([
+  [LUMBRE_ISSUER, SUMEGO_ISSUER],
+  [SUMEGO_ISSUER, LUMBRE_ISSUER]
+])('de %s a %s: el mismo sub es la misma persona (punto 8 de §13.6 de Sumego)', (before, after) => {
+  beforeEach(async () => { await restartWith(before); });
+
+  it('un logout_token del issuer nuevo con el mismo sub corta la familia creada antes del cambio', async () => {
+    await fullLogin();
+    await restartWith(after);
+    expect(await families()).toEqual([expect.objectContaining({ sub: SUB, sid: 'sesion-a' })]);
+    expect((await logout(await logoutToken({ sid: undefined, sub: SUB }))).status).toBe(200);
+    expect(await families()).toHaveLength(0);
+  });
+
+  it('un login tras el cambio no crea otra identidad: un logout por sub alcanza las dos familias', async () => {
+    await fullLogin();
+    await restartWith(after);
+    currentSid = 'sesion-b';
+    await fullLogin();
+    expect((await families()).map((family) => [family.sub, family.sid])).toEqual([[SUB, 'sesion-a'], [SUB, 'sesion-b']]);
+    // oauth-tokens.json no guarda el issuer: nada distingue una familia de la otra salvo el sid.
+    const raw = await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8');
+    expect(raw).not.toContain('id.lumbre.pro');
+    expect(raw).not.toContain('id.sumego.es');
+    for (const family of await savedFamilies()) {
+      expect(Object.keys(family).filter((key) => /iss/i.test(key))).toEqual([]);
+    }
+    expect((await logout(await logoutToken({ sid: undefined, sub: SUB }))).status).toBe(200);
+    expect(await families()).toHaveLength(0);
+  });
+
+  it('la renovación horaria de una familia de antes del cambio va al issuer nuevo y la familia sigue', async () => {
+    const tokens = await fullLogin();
+    const loginRefresh = [...liveRefresh][0]!;
+    await restartWith(after);
+    clockOffset = HOUR + 1;
+    const res = await refresh(tokens.refresh_token);
+    expect(res.status).toBe(200);
+    expect(refreshCalls).toEqual([loginRefresh]);
+    expect(await families()).toEqual([expect.objectContaining({ sub: SUB, sid: 'sesion-a' })]);
   });
 });
