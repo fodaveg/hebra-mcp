@@ -15,7 +15,10 @@
  *   sin `offline_access`.
  * - Firmas: solo ES256 (`jose`). `alg: none`, HS* y cualquier otro algoritmo se rechazan antes
  *   de buscar clave.
- * - Toda descarga va sin redirecciones, con timeout de 5 s y tope de 64 KiB.
+ * - Toda llamada a Sumego (discovery, JWKS, `token_endpoint`) va al issuer configurado y sin
+ *   seguir redirecciones (`redirect: 'manual'`), con timeout de 5 s y tope de 64 KiB. Un 3xx es
+ *   `unavailable`, nunca `invalid`: tras la transición de §13.6 de Sumego, `id.lumbre.pro`
+ *   responde 308 y eso no puede cortar familias que siguen vivas en el otro issuer.
  *
  * Nada de lo que pasa por aquí (código, `code_verifier`, ID token, `logout_token`, secreto del
  * cliente) se registra ni se devuelve en un error: `SumegoError` solo lleva un código cerrado.
@@ -205,7 +208,10 @@ export class SumegoOidc {
     return url.href;
   }
 
-  /** POST al `token_endpoint` con `client_secret_basic`; red, 5xx y 429 son `unavailable`. */
+  /**
+   * POST al `token_endpoint` con `client_secret_basic`; red, 3xx (no se siguen), 5xx y 429 son
+   * `unavailable`. Un 3xx como `invalid` haría que la renovación horaria cortase la familia.
+   */
   private async tokenRequest(form: Record<string, string>): Promise<Response> {
     const { tokenEndpoint } = await this.discovery();
     let response: Response;
@@ -216,7 +222,9 @@ export class SumegoOidc {
         body: new URLSearchParams(form).toString()
       });
     } catch { throw new SumegoError('unavailable'); }
-    if (response.status >= 500 || response.status === 429) throw new SumegoError('unavailable');
+    if ((response.status >= 300 && response.status < 400) || response.status >= 500 || response.status === 429) {
+      throw new SumegoError('unavailable');
+    }
     return response;
   }
 

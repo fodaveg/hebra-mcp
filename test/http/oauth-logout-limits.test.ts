@@ -10,15 +10,15 @@ import { BackchannelLogout, MAX_CONCURRENT_LOGOUT_VERIFICATIONS, MAX_QUEUED_LOGO
 import type { LogoutJtiStore } from '../../src/oauth/logout-jtis';
 import { BACKCHANNEL_LOGOUT_EVENT, SumegoError, type LogoutClaims, type SumegoOidc } from '../../src/oauth/sumego';
 
-const ISSUER = 'https://id.example.test';
+const ISSUER = 'https://id.sumego.es';
 const CLIENT_ID = 'hebra-mcp';
 
 function b64(value: object): string { return Buffer.from(JSON.stringify(value)).toString('base64url'); }
 
 /** Con forma de `logout_token` de Sumego (la firma la decide el simulado). */
-function plausibleToken(jti: string): string {
+function plausibleToken(jti: string, iss = ISSUER): string {
   const now = Math.floor(Date.now() / 1000);
-  return `${b64({ alg: 'ES256', kid: 'k' })}.${b64({ iss: ISSUER, aud: CLIENT_ID, iat: now, exp: now + 60, jti, sub: 's',
+  return `${b64({ alg: 'ES256', kid: 'k' })}.${b64({ iss, aud: CLIENT_ID, iat: now, exp: now + 60, jti, sub: 's',
     events: { [BACKCHANNEL_LOGOUT_EVENT]: {} } })}.firma`;
 }
 
@@ -62,6 +62,12 @@ describe('cupo', () => {
     // Una firma que no vale con forma plausible sigue verificándose y cuenta como fallo, no 429.
     expect(await post('10.0.0.1', `${plausibleToken('falso').slice(0, -6)}.otra`)).toBe(400);
     expect(await post('10.0.0.1', plausibleToken('valido-tras-cupo'))).toBe(200);
+  });
+
+  it('con el cupo agotado, un token con el otro issuer de Sumego no es plausible: 429', async () => {
+    for (let index = 0; index < 60; index += 1) expect(await post('10.0.0.2', 'basura')).toBe(400);
+    expect(await post('10.0.0.2', plausibleToken('del-otro', 'https://id.lumbre.pro'))).toBe(429);
+    expect(await post('10.0.0.2', plausibleToken('del-configurado'))).toBe(200);
   });
 
   it('las IPv6 cuentan por /64', async () => {
