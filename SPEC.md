@@ -1813,7 +1813,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 ### 12.2 Autenticación (D7, revisada el 5 oct 2026)
 
 - Hebra MCP conserva el OAuth público del SDK: issuer `https://mcp.hebra.pro`, recurso
-  `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR para Claude y Codex, PKCE S256,
+  `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR para Claude y Codex, DCR
+  restringido para Mistral Vibe, PKCE S256,
   state, códigos de un uso, access de una hora y refresh rotatorio. Un refresh reutilizado
   fuera de la ventana de gracia revoca su familia.
 - Caducidad de la familia (decisión del 17 oct 2026, H-dec4/H31 del audit «Lumbre ·
@@ -1848,6 +1849,15 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   normalice URL o redirija errores; el canje del código exige la URI exacta autorizada,
   incluido el puerto. CIMD se descarga sin redirecciones, con timeout de 5 s, límite de
   64 KiB y caché de 5 min/16 entradas. Identificar al cliente nunca concede acceso.
+- **Mistral Vibe** (el CLI de Mistral, decidido el 27 oct 2026: «hazlo como está hecho
+  Claude») entra solo por **DCR restringido**, sin CIMD: un registro cuyo `client_name`
+  es exactamente `Mistral Vibe` (constante del CLI) y cuyos callbacks son todos nativos
+  `http://127.0.0.1[:puerto]/callback` (puerto relajado por RFC 8252, puerto por defecto
+  47823, **nunca** `localhost`, sin credenciales, query ni fragmento) se reduce al cliente
+  fijo `hebra-mcp-vibe` con redirect `http://127.0.0.1/callback`; el resto de la metadata
+  pedida se descarta, como al DCR de Claude. Un registro con ese nombre y callbacks ajenos
+  se rechaza entero; un registro loopback sin ese nombre sigue siendo Codex. El
+  consentimiento muestra «Mistral Vibe».
 - `/authorize` reserva una solicitud y pide consentimiento a Lumbre mediante el backchannel
   `/api/integrations/hebra-mcp/requests`. Lumbre usa su login y su sesión web para mostrar
   cliente, biblioteca y alcance. La respuesta aprobada vuelve a

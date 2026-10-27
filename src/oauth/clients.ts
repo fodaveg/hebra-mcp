@@ -1,6 +1,6 @@
 /**
- * Clientes OAuth que acepta el conector (SPEC.md §12.2): Claude y Codex, siempre
- * públicos (sin `client_secret`, PKCE S256 obligatorio).
+ * Clientes OAuth que acepta el conector (SPEC.md §12.2): Claude, Codex y Mistral Vibe
+ * (Vibe CLI), siempre públicos (sin `client_secret`, PKCE S256 obligatorio).
  *
  * Dos formas de registrarse, porque el SDK de MCP del cliente elige según la metadata del
  * servidor de autorización:
@@ -12,9 +12,10 @@
  *    documento se descarga sin redirecciones, con tope de tiempo y de tamaño, solo de
  *    `claude.ai` o la URL oficial exacta de Codex, y se cachea 5 minutos.
  * 2. **DCR** (registro dinámico, RFC 7591, el `/register` del SDK): por si un cliente no
- *    usa CIMD. Los registros se reducen a clientes fijos: Claude y los tres conjuntos
- *    de hosts loopback de Codex; no hay estado que guardar ni que crezca. Si el registro
- *    pide un `client_secret`, se sustituye por un cliente público
+ *    usa CIMD. Los registros se reducen a clientes fijos: Claude, los tres conjuntos
+ *    de hosts loopback de Codex y Mistral Vibe (su `client_name` constante); no hay
+ *    estado que guardar ni que crezca. Si el registro pide un `client_secret`, se sustituye por
+ *    un cliente público
  *    (RFC 7591 §3.2.1 permite al servidor reemplazar los metadatos pedidos).
  *
  * Ninguno de los dos da acceso por sí solo: la aprobación llega del consentimiento de Lumbre.
@@ -36,6 +37,12 @@ const CODEX_DCR_CLIENTS: Record<string, string[]> = {
   'hebra-mcp-codex-localhost': [CODEX_CALLBACKS[1]!],
   'hebra-mcp-codex-loopback': CODEX_CALLBACKS
 };
+/** `client_id` fijo del DCR restringido de Mistral Vibe (Vibe CLI). */
+export const VIBE_DCR_CLIENT_ID = 'hebra-mcp-vibe';
+/** `client_name` constante del CLI de Vibe: el marcador de su DCR restringido. */
+export const VIBE_CLIENT_NAME = 'Mistral Vibe';
+/** Callback nativo de Vibe: solo `127.0.0.1`, nunca `localhost` (puerto relajado, RFC 8252). */
+export const VIBE_CALLBACK = 'http://127.0.0.1/callback';
 
 const CIMD_HOSTNAME = 'claude.ai';
 const CIMD_TIMEOUT_MS = 5_000;
@@ -65,9 +72,19 @@ export function isCodexCallback(uri: string): boolean {
   return match !== null && match[0] === uri && (match[2] === undefined || Number(match[2]) <= 65535);
 }
 
-/** Codex conserva los hosts publicados/registrados; RFC 8252 solo relaja el puerto. */
+/** Callback de Vibe: HTTP, `127.0.0.1` con puerto válido, ruta `/callback` y nada más. */
+export function isVibeCallback(uri: string): boolean {
+  const match = /^http:\/\/127\.0\.0\.1(?::([1-9][0-9]{0,4}))?\/callback$/.exec(uri);
+  return match !== null && match[0] === uri && (match[1] === undefined || Number(match[1]) <= 65535);
+}
+
+/** Codex y Vibe conservan los hosts publicados/registrados; RFC 8252 solo relaja el puerto. */
 export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: string): boolean {
   if (uri === CLAUDE_CALLBACK) return client.redirect_uris.includes(CLAUDE_CALLBACK);
+  if (client.client_id === VIBE_DCR_CLIENT_ID) {
+    return isVibeCallback(uri) && client.redirect_uris.some((registered) =>
+      isVibeCallback(registered) && redirectUriMatches(uri, registered));
+  }
   if (client.client_id !== CODEX_CIMD_CLIENT_ID && !Object.hasOwn(CODEX_DCR_CLIENTS, client.client_id)) return false;
   return isCodexCallback(uri) && client.redirect_uris.some((registered) =>
     isCodexCallback(registered) && redirectUriMatches(uri, registered));
@@ -75,7 +92,8 @@ export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: st
 
 /** Identidades cerradas aceptadas también en las concesiones autenticadas de Lumbre. */
 export function isAcceptableOAuthClientId(clientId: string): boolean {
-  return clientId === DCR_CLIENT_ID || Object.hasOwn(CODEX_DCR_CLIENTS, clientId) || isAcceptableCimdClientId(clientId);
+  return clientId === DCR_CLIENT_ID || clientId === VIBE_DCR_CLIENT_ID ||
+    Object.hasOwn(CODEX_DCR_CLIENTS, clientId) || isAcceptableCimdClientId(clientId);
 }
 
 /** ¿Es un `client_id` CIMD aceptable? Claude con ruta o la URL exacta de Codex. */
@@ -147,6 +165,7 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
 
   async getClient(clientId: string): Promise<OAuthClientInformationFull | undefined> {
     if (clientId === DCR_CLIENT_ID) return publicClient(DCR_CLIENT_ID, 'Claude');
+    if (clientId === VIBE_DCR_CLIENT_ID) return publicClient(VIBE_DCR_CLIENT_ID, VIBE_CLIENT_NAME, [VIBE_CALLBACK]);
     if (Object.hasOwn(CODEX_DCR_CLIENTS, clientId)) return publicClient(clientId, 'Codex', CODEX_DCR_CLIENTS[clientId]!);
     if (!isAcceptableCimdClientId(clientId)) return undefined;
     const cached = this.cache.get(clientId);
@@ -218,15 +237,26 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
   ): Promise<OAuthClientInformationFull> {
     let registered = publicClient(DCR_CLIENT_ID, 'Claude');
     if (!client.redirect_uris.includes(CLAUDE_CALLBACK)) {
-      const redirects = client.redirect_uris;
-      const callbacks = CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)));
-      const entry = Object.entries(CODEX_DCR_CLIENTS).find(([, values]) =>
-        values.length === callbacks.length && values.every((uri) => callbacks.includes(uri)));
-      if (redirects.length > 0 && redirects.every(isCodexCallback) && entry) {
-        registered = publicClient(entry[0], 'Codex', entry[1]);
+      // Mistral Vibe, como Claude: DCR restringido al cliente fijo del servidor. Su
+      // marcador es el `client_name` constante del CLI; el resto de la metadata pedida
+      // se descarta y los callbacks los decide el servidor (solo `127.0.0.1`).
+      if (client.client_name === VIBE_CLIENT_NAME) {
+        if (client.redirect_uris.length === 0 || !client.redirect_uris.every(isVibeCallback)) {
+          logEvent({ event: 'oauth.register', result: 'rejected' });
+          throw new InvalidClientMetadataError('Mistral Vibe solo registra callbacks nativos en 127.0.0.1 (SPEC.md §12.2).');
+        }
+        registered = publicClient(VIBE_DCR_CLIENT_ID, VIBE_CLIENT_NAME, [VIBE_CALLBACK]);
       } else {
-        logEvent({ event: 'oauth.register', result: 'rejected' });
-        throw new InvalidClientMetadataError('Solo se admiten los callbacks de Claude y Codex (SPEC.md §12.2).');
+        const redirects = client.redirect_uris;
+        const callbacks = CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)));
+        const entry = Object.entries(CODEX_DCR_CLIENTS).find(([, values]) =>
+          values.length === callbacks.length && values.every((uri) => callbacks.includes(uri)));
+        if (redirects.length > 0 && redirects.every(isCodexCallback) && entry) {
+          registered = publicClient(entry[0], 'Codex', entry[1]);
+        } else {
+          logEvent({ event: 'oauth.register', result: 'rejected' });
+          throw new InvalidClientMetadataError('Solo se admiten los callbacks de Claude, Codex y Mistral Vibe (SPEC.md §12.2).');
+        }
       }
     }
     logEvent({ event: 'oauth.register', result: 'ok' });

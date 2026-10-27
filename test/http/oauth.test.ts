@@ -11,7 +11,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
-import { CODEX_CIMD_CLIENT_ID } from '../../src/oauth/clients';
+import { CODEX_CIMD_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID } from '../../src/oauth/clients';
 import { BackchannelError, LumbreBackchannel } from '../../src/oauth/backchannel';
 import { HttpConfigError } from '../../src/http/config';
 import { ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS } from '../../src/oauth/token-store';
@@ -155,9 +155,9 @@ class MemoryOAuthClient implements OAuthClientProvider {
   saved: OAuthTokens | undefined;
   verifier = '';
   authorizationUrl: URL | undefined;
-  constructor(readonly clientMetadataUrl?: string, readonly redirectUrl = CLAUDE_CALLBACK) {}
+  constructor(readonly clientMetadataUrl?: string, readonly redirectUrl = CLAUDE_CALLBACK, readonly clientName?: string) {}
   get clientMetadata(): OAuthClientMetadata {
-    return { client_name: this.redirectUrl === CLAUDE_CALLBACK ? 'Claude' : 'Codex', redirect_uris: [this.redirectUrl], token_endpoint_auth_method: 'none',
+    return { client_name: this.clientName ?? (this.redirectUrl === CLAUDE_CALLBACK ? 'Claude' : 'Codex'), redirect_uris: [this.redirectUrl], token_endpoint_auth_method: 'none',
       grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] };
   }
   state(): string { return 'estado-de-prueba'; }
@@ -290,6 +290,19 @@ describe('consentimiento y vínculo exacto', () => {
     expect((await authorize(pkce().challenge, undefined, auth.info!.client_id, 'http://localhost:54321/callback')).status).toBe(400);
     expect(requestCount).toBe(1);
     await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: auth.info!.client_id });
+  });
+
+  it('Mistral Vibe DCR se reduce al cliente fijo y completa consentimiento, PKCE y herramientas', async () => {
+    const auth = new MemoryOAuthClient(undefined, 'http://127.0.0.1:47823/callback', VIBE_CLIENT_NAME);
+    const client = await sdkFlow(auth);
+    expect(auth.info).toMatchObject({ client_id: VIBE_DCR_CLIENT_ID, client_name: VIBE_CLIENT_NAME,
+      redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none' });
+    expect(requestCount).toBe(1);
+    const result = await client.callTool({ name: 'hebra_status', arguments: {} }) as CallToolResult;
+    expect(JSON.parse(textOf(result))).toMatchObject({ linked: false });
+    await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: VIBE_DCR_CLIENT_ID });
+    // Vibe nunca usa localhost: su cliente fijo no admite ese host.
+    expect((await authorize(pkce().challenge, undefined, VIBE_DCR_CLIENT_ID, 'http://localhost:54321/callback')).status).toBe(400);
   });
 
   it.each([

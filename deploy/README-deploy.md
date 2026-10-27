@@ -9,6 +9,11 @@ la reconexión y QA de Claude por David siguen pendientes. Ver [RELEASE-2026-09-
 El soporte OAuth de Codex admite su CIMD oficial exacto
 `https://chatgpt.com/oauth/codex/client.json` y DCR con los clientes fijos
 `hebra-mcp-codex-127`, `hebra-mcp-codex-localhost` y `hebra-mcp-codex-loopback`.
+Mistral Vibe (el CLI de Mistral) entra por DCR restringido como Claude: un registro
+con `client_name` «Mistral Vibe» y callbacks nativos
+`http://127.0.0.1:<puerto>/callback` (puerto por defecto 47823, nunca `localhost`)
+se reduce al cliente fijo `hebra-mcp-vibe` con redirect `http://127.0.0.1/callback`
+(SPEC.md §12.2). Para conectarlo: `vibe mcp add hebra --url https://mcp.hebra.pro/mcp --transport streamable-http`.
 Su callback es local HTTP, host `127.0.0.1` o `localhost`, ruta `/callback` y puerto
 dinámico; los demás componentes son exactos. El callback entre Lumbre y Hebra MCP
 sigue siendo `https://mcp.hebra.pro/oauth/lumbre/callback`. Publicar requiere que

@@ -1,6 +1,9 @@
 /** Allowlist de clientes públicos: la metadata remota no amplía los callbacks. */
 import { describe, expect, it, vi } from 'vitest';
-import { ClaudeClientsStore, CODEX_CIMD_CLIENT_ID, isAcceptableCimdClientId, isAllowedRedirectUri, isCodexCallback } from '../../src/oauth/clients';
+import {
+  ClaudeClientsStore, CLAUDE_CALLBACK, CODEX_CIMD_CLIENT_ID, isAcceptableCimdClientId, isAcceptableOAuthClientId,
+  isAllowedRedirectUri, isCodexCallback, isVibeCallback, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID
+} from '../../src/oauth/clients';
 
 const callbacks = ['http://127.0.0.1/callback', 'http://localhost/callback'];
 const metadata = (redirects = callbacks) => ({ client_id: CODEX_CIMD_CLIENT_ID,
@@ -72,5 +75,39 @@ describe('clientes OAuth Codex', () => {
       'http://user@localhost/callback', 'http://localhost:00080/callback', 'http://2130706433/callback',
       'http://localhost./callback', 'http://[::1]/callback', 'http://localhost/call%62ack',
       'http://localhost/callback\n', 'http://localhost/callback\r']) expect(isCodexCallback(uri)).toBe(false);
+  });
+});
+
+describe('cliente OAuth Mistral Vibe', () => {
+  it('DCR restringido: client_name exacto y callbacks solo en 127.0.0.1, reducidos al cliente fijo', async () => {
+    const store = new ClaudeClientsStore();
+    const client = await store.registerClient({ client_name: VIBE_CLIENT_NAME,
+      redirect_uris: ['http://127.0.0.1:47823/callback'], token_endpoint_auth_method: 'none' });
+    expect(client).toMatchObject({ client_id: VIBE_DCR_CLIENT_ID, client_name: VIBE_CLIENT_NAME,
+      redirect_uris: ['http://127.0.0.1/callback'], token_endpoint_auth_method: 'none' });
+    expect(await store.getClient(VIBE_DCR_CLIENT_ID)).toMatchObject({ redirect_uris: ['http://127.0.0.1/callback'] });
+    expect(isAcceptableOAuthClientId(VIBE_DCR_CLIENT_ID)).toBe(true);
+    // La metadata pedida no amplía nada: puerto relajado, nunca localhost ni otro host.
+    expect(isAllowedRedirectUri(client, 'http://127.0.0.1:54321/callback')).toBe(true);
+    for (const uri of ['http://localhost:54321/callback', 'http://127.0.0.1:54321/otro',
+      'http://evil.example/callback', CLAUDE_CALLBACK]) expect(isAllowedRedirectUri(client, uri)).toBe(false);
+  });
+
+  it('un registro con el nombre de Vibe pero callbacks ajenos se rechaza entero', async () => {
+    const store = new ClaudeClientsStore();
+    for (const redirects of [[], ['http://localhost:47823/callback'], ['http://127.0.0.1:47823/callback', 'http://evil.example/callback']]) {
+      await expect(store.registerClient({ client_name: VIBE_CLIENT_NAME, redirect_uris: redirects }))
+        .rejects.toThrow();
+    }
+  });
+
+  it('sin el nombre de Vibe, un callback loopback sigue siendo Codex', async () => {
+    const store = new ClaudeClientsStore();
+    const codex = await store.registerClient({ redirect_uris: ['http://127.0.0.1:54321/callback'] });
+    expect(codex.client_id).toBe('hebra-mcp-codex-127');
+    for (const uri of ['http://127.0.0.1:47823/callback', 'http://127.0.0.1/callback']) expect(isVibeCallback(uri)).toBe(true);
+    for (const uri of ['http://localhost:47823/callback', 'http://127.0.0.1/callback?', 'https://127.0.0.1/callback']) {
+      expect(isVibeCallback(uri)).toBe(false);
+    }
   });
 });
