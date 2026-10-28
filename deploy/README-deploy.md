@@ -14,6 +14,12 @@ con `client_name` «Mistral Vibe» y callbacks nativos
 `http://127.0.0.1:<puerto>/callback` (puerto por defecto 47823, nunca `localhost`)
 se reduce al cliente fijo `hebra-mcp-vibe` con redirect `http://127.0.0.1/callback`
 (SPEC.md §12.2). Para conectarlo: `vibe mcp add hebra --url https://mcp.hebra.pro/mcp --transport streamable-http`.
+Le Chat (la web de Mistral) entra también por DCR restringido: un registro con `client_name`
+`mistral-mcp-client` y el callback exacto
+`https://callback.mistral.ai/v1/integrations_auth/oauth2_callback` se reduce al cliente fijo
+`hebra-mcp-lechat` (consentimiento "Le Chat", SPEC.md §12.2). Para conectarlo: Ajustes >
+Conectores > Añadir conector personalizado, URL `https://mcp.hebra.pro/mcp`. El alta de
+`hebra-mcp-lechat` en Lumbre debe estar desplegada antes.
 Su callback es local HTTP, host `127.0.0.1` o `localhost`, ruta `/callback` y puerto
 dinámico; los demás componentes son exactos. El callback entre Lumbre y Hebra MCP
 sigue siendo `https://mcp.hebra.pro/oauth/lumbre/callback`. Publicar requiere que
