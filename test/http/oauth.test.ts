@@ -11,7 +11,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
-import { CODEX_CIMD_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID } from '../../src/oauth/clients';
+import { CODEX_CIMD_CLIENT_ID, LECHAT_CALLBACK, LECHAT_CLIENT_NAME, LECHAT_DCR_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID } from '../../src/oauth/clients';
 import { BackchannelError, LumbreBackchannel } from '../../src/oauth/backchannel';
 import { HttpConfigError } from '../../src/http/config';
 import { ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS } from '../../src/oauth/token-store';
@@ -42,6 +42,7 @@ let approved: boolean;
 let deviceActive: boolean;
 let available: boolean;
 let requestCount: number;
+let requestClientName: string | undefined;
 let exchangeCount: number;
 let introspectCount: number;
 let introspectionResponse: (() => Promise<Response>) | null;
@@ -76,6 +77,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
   const path = new URL(String(input)).pathname.split('/').at(-1);
   if (path === 'requests') {
     requestCount += 1;
+    requestClientName = body.clientName;
     expect(body.opaqueDeviceId).toBe(DEVICE);
     expect(body.pairedCredentialId).toBe(PAIR_ID);
     expect(body.syncVaultId).toBe(VAULT);
@@ -303,6 +305,20 @@ describe('consentimiento y vínculo exacto', () => {
     await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: VIBE_DCR_CLIENT_ID });
     // Vibe nunca usa localhost: su cliente fijo no admite ese host.
     expect((await authorize(pkce().challenge, undefined, VIBE_DCR_CLIENT_ID, 'http://localhost:54321/callback')).status).toBe(400);
+  });
+
+  it('Le Chat DCR se reduce al cliente fijo y completa consentimiento, PKCE y herramientas', async () => {
+    const auth = new MemoryOAuthClient(undefined, LECHAT_CALLBACK, LECHAT_CLIENT_NAME);
+    const client = await sdkFlow(auth);
+    expect(auth.info).toMatchObject({ client_id: LECHAT_DCR_CLIENT_ID, client_name: 'Le Chat',
+      redirect_uris: [LECHAT_CALLBACK], token_endpoint_auth_method: 'none' });
+    expect(auth.info).not.toHaveProperty('application_type', 'native');
+    expect(requestCount).toBe(1);
+    expect(requestClientName).toBe('Le Chat');
+    const result = await client.callTool({ name: 'hebra_status', arguments: {} }) as CallToolResult;
+    expect(JSON.parse(textOf(result))).toMatchObject({ linked: false });
+    await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: LECHAT_DCR_CLIENT_ID });
+    expect((await authorize(pkce().challenge, undefined, LECHAT_DCR_CLIENT_ID, 'https://evil.example/callback')).status).toBe(400);
   });
 
   it.each([

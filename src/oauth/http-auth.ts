@@ -36,7 +36,7 @@ import type { SecretStore } from '../secrets';
 import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from './backchannel';
 import { BackchannelLogout } from './backchannel-logout';
-import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback } from './clients';
+import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback, LECHAT_CALLBACK } from './clients';
 import { GrantSecrets } from './grants';
 import { readLoginConfig } from './login-config';
 import { LogoutJtiStore } from './logout-jtis';
@@ -155,7 +155,7 @@ export async function loadOAuthHttpAuth(
         if (req.method !== 'GET' && req.method !== 'POST') { next(); return; }
         const redirect = (req.method === 'POST' ? req.body : req.query)?.redirect_uri;
         if (redirect !== undefined && (typeof redirect !== 'string' ||
-          (redirect !== CLAUDE_CALLBACK && !isCodexCallback(redirect)))) {
+          (redirect !== CLAUDE_CALLBACK && redirect !== LECHAT_CALLBACK && !isCodexCallback(redirect)))) {
           res.status(400).json({ error: 'invalid_request' }); return;
         }
         next();

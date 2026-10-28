@@ -1814,7 +1814,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 - Hebra MCP conserva el OAuth público del SDK: issuer `https://mcp.hebra.pro`, recurso
   `https://mcp.hebra.pro/mcp`, scope `hebra:mcp`, CIMD/DCR para Claude y Codex, DCR
-  restringido para Mistral Vibe, PKCE S256,
+  restringido para Mistral Vibe y Le Chat, PKCE S256,
   state, códigos de un uso, access de una hora y refresh rotatorio. Un refresh reutilizado
   fuera de la ventana de gracia revoca su familia.
 - Caducidad de la familia (decisión del 17 oct 2026, H-dec4/H31 del audit «Lumbre ·
@@ -1858,6 +1858,15 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   pedida se descarta, como al DCR de Claude. Un registro con ese nombre y callbacks ajenos
   se rechaza entero; un registro loopback sin ese nombre sigue siendo Codex. El
   consentimiento muestra «Mistral Vibe».
+- **Le Chat** (la web de Mistral, conector personalizado OAuth 2.1; encargo de David del
+  28 oct 2026: «hacerlo compatible también») entra solo por **DCR restringido**, como Vibe:
+  un registro cuyo `client_name` es exactamente `mistral-mcp-client` y cuyos `redirect_uris`
+  son exactamente `["https://callback.mistral.ai/v1/integrations_auth/oauth2_callback"]`
+  (comparación de cadena exacta, sin normalizar ni relajar puerto) se reduce al cliente fijo
+  `hebra-mcp-lechat`, llamado `Le Chat`, con ese único redirect; el resto de la metadata
+  pedida se descarta. Ese nombre con otro redirect, o ese redirect con otro nombre, se
+  rechaza entero. El cliente no se marca `native` (es web, HTTPS). El consentimiento muestra
+  «Le Chat».
 - `/authorize` reserva una solicitud y pide consentimiento a Lumbre mediante el backchannel
   `/api/integrations/hebra-mcp/requests`. Lumbre usa su login y su sesión web para mostrar
   cliente, biblioteca y alcance. La respuesta aprobada vuelve a

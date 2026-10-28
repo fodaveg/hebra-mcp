@@ -1,6 +1,6 @@
 /**
- * Clientes OAuth que acepta el conector (SPEC.md §12.2): Claude, Codex y Mistral Vibe
- * (Vibe CLI), siempre públicos (sin `client_secret`, PKCE S256 obligatorio).
+ * Clientes OAuth que acepta el conector (SPEC.md §12.2): Claude, Codex, Mistral Vibe
+ * (Vibe CLI) y Le Chat (web de Mistral), siempre públicos (sin `client_secret`, PKCE S256 obligatorio).
  *
  * Dos formas de registrarse, porque el SDK de MCP del cliente elige según la metadata del
  * servidor de autorización:
@@ -13,7 +13,8 @@
  *    `claude.ai` o la URL oficial exacta de Codex, y se cachea 5 minutos.
  * 2. **DCR** (registro dinámico, RFC 7591, el `/register` del SDK): por si un cliente no
  *    usa CIMD. Los registros se reducen a clientes fijos: Claude, los tres conjuntos
- *    de hosts loopback de Codex y Mistral Vibe (su `client_name` constante); no hay
+ *    de hosts loopback de Codex, Mistral Vibe y Le Chat (su `client_name` constante y su
+ *    callback exacto); no hay
  *    estado que guardar ni que crezca. Si el registro pide un `client_secret`, se sustituye por
  *    un cliente público
  *    (RFC 7591 §3.2.1 permite al servidor reemplazar los metadatos pedidos).
@@ -44,6 +45,15 @@ export const VIBE_CLIENT_NAME = 'Mistral Vibe';
 /** Callback nativo de Vibe: solo `127.0.0.1`, nunca `localhost` (puerto relajado, RFC 8252). */
 export const VIBE_CALLBACK = 'http://127.0.0.1/callback';
 
+/** `client_id` fijo del DCR restringido de Le Chat (la web de Mistral). */
+export const LECHAT_DCR_CLIENT_ID = 'hebra-mcp-lechat';
+/** `client_name` que Le Chat manda al registrarse: el marcador de su DCR restringido. */
+export const LECHAT_CLIENT_NAME = 'mistral-mcp-client';
+/** Nombre que ve el usuario en el consentimiento. */
+export const LECHAT_DISPLAY_NAME = 'Le Chat';
+/** Callback web de Le Chat: coincidencia exacta de cadena, sin relajación de puerto. */
+export const LECHAT_CALLBACK = 'https://callback.mistral.ai/v1/integrations_auth/oauth2_callback';
+
 const CIMD_HOSTNAME = 'claude.ai';
 const CIMD_TIMEOUT_MS = 5_000;
 const CIMD_MAX_BYTES = 64 * 1024;
@@ -59,7 +69,7 @@ function publicClient(clientId: string, clientName: string, redirects = [CLAUDE_
     client_id: clientId,
     client_name: clientName,
     redirect_uris: [...redirects],
-    ...(redirects[0] !== CLAUDE_CALLBACK ? { application_type: 'native' as const } : {}),
+    ...(redirects[0]?.startsWith('http://') ? { application_type: 'native' as const } : {}),
     token_endpoint_auth_method: 'none',
     grant_types: GRANT_TYPES,
     response_types: ['code']
@@ -81,6 +91,9 @@ export function isVibeCallback(uri: string): boolean {
 /** Codex y Vibe conservan los hosts publicados/registrados; RFC 8252 solo relaja el puerto. */
 export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: string): boolean {
   if (uri === CLAUDE_CALLBACK) return client.redirect_uris.includes(CLAUDE_CALLBACK);
+  if (client.client_id === LECHAT_DCR_CLIENT_ID) {
+    return uri === LECHAT_CALLBACK && client.redirect_uris.includes(LECHAT_CALLBACK);
+  }
   if (client.client_id === VIBE_DCR_CLIENT_ID) {
     return isVibeCallback(uri) && client.redirect_uris.some((registered) =>
       isVibeCallback(registered) && redirectUriMatches(uri, registered));
@@ -93,6 +106,7 @@ export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: st
 /** Identidades cerradas aceptadas también en las concesiones autenticadas de Lumbre. */
 export function isAcceptableOAuthClientId(clientId: string): boolean {
   return clientId === DCR_CLIENT_ID || clientId === VIBE_DCR_CLIENT_ID ||
+    clientId === LECHAT_DCR_CLIENT_ID ||
     Object.hasOwn(CODEX_DCR_CLIENTS, clientId) || isAcceptableCimdClientId(clientId);
 }
 
@@ -167,6 +181,7 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
     if (clientId === DCR_CLIENT_ID) return publicClient(DCR_CLIENT_ID, 'Claude');
     if (clientId === VIBE_DCR_CLIENT_ID) return publicClient(VIBE_DCR_CLIENT_ID, VIBE_CLIENT_NAME, [VIBE_CALLBACK]);
     if (Object.hasOwn(CODEX_DCR_CLIENTS, clientId)) return publicClient(clientId, 'Codex', CODEX_DCR_CLIENTS[clientId]!);
+    if (clientId === LECHAT_DCR_CLIENT_ID) return publicClient(LECHAT_DCR_CLIENT_ID, LECHAT_DISPLAY_NAME, [LECHAT_CALLBACK]);
     if (!isAcceptableCimdClientId(clientId)) return undefined;
     const cached = this.cache.get(clientId);
     if (cached && cached.expiresAt > this.now()) return cached.client;
@@ -246,6 +261,14 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
           throw new InvalidClientMetadataError('Mistral Vibe solo registra callbacks nativos en 127.0.0.1 (SPEC.md §12.2).');
         }
         registered = publicClient(VIBE_DCR_CLIENT_ID, VIBE_CLIENT_NAME, [VIBE_CALLBACK]);
+      } else if (client.client_name === LECHAT_CLIENT_NAME || client.redirect_uris.includes(LECHAT_CALLBACK)) {
+        // Le Chat: solo con su client_name Y exactamente su callback; ninguno de los dos vale solo.
+        if (client.client_name !== LECHAT_CLIENT_NAME || client.redirect_uris.length !== 1 ||
+            client.redirect_uris[0] !== LECHAT_CALLBACK) {
+          logEvent({ event: 'oauth.register', result: 'rejected' });
+          throw new InvalidClientMetadataError('Le Chat solo registra su callback oficial exacto (SPEC.md §12.2).');
+        }
+        registered = publicClient(LECHAT_DCR_CLIENT_ID, LECHAT_DISPLAY_NAME, [LECHAT_CALLBACK]);
       } else {
         const redirects = client.redirect_uris;
         const callbacks = CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)));
@@ -255,7 +278,7 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
           registered = publicClient(entry[0], 'Codex', entry[1]);
         } else {
           logEvent({ event: 'oauth.register', result: 'rejected' });
-          throw new InvalidClientMetadataError('Solo se admiten los callbacks de Claude, Codex y Mistral Vibe (SPEC.md §12.2).');
+          throw new InvalidClientMetadataError('Solo se admiten los callbacks de Claude, Codex, Mistral Vibe y Le Chat (SPEC.md §12.2).');
         }
       }
     }

@@ -2,7 +2,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ClaudeClientsStore, CLAUDE_CALLBACK, CODEX_CIMD_CLIENT_ID, isAcceptableCimdClientId, isAcceptableOAuthClientId,
-  isAllowedRedirectUri, isCodexCallback, isVibeCallback, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID
+  isAllowedRedirectUri, isCodexCallback, isVibeCallback, LECHAT_CALLBACK, LECHAT_CLIENT_NAME, LECHAT_DCR_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID
 } from '../../src/oauth/clients';
 
 const callbacks = ['http://127.0.0.1/callback', 'http://localhost/callback'];
@@ -109,5 +109,50 @@ describe('cliente OAuth Mistral Vibe', () => {
     for (const uri of ['http://localhost:47823/callback', 'http://127.0.0.1/callback?', 'https://127.0.0.1/callback']) {
       expect(isVibeCallback(uri)).toBe(false);
     }
+  });
+});
+
+describe('cliente OAuth Le Chat', () => {
+  it('DCR restringido: client_name y callback exactos, reducidos al cliente fijo y sin native', async () => {
+    const store = new ClaudeClientsStore();
+    const client = await store.registerClient({ client_name: LECHAT_CLIENT_NAME, redirect_uris: [LECHAT_CALLBACK],
+      token_endpoint_auth_method: 'none', scope: 'hebra:mcp' });
+    expect(client).toMatchObject({ client_id: LECHAT_DCR_CLIENT_ID, client_name: 'Le Chat',
+      redirect_uris: [LECHAT_CALLBACK], token_endpoint_auth_method: 'none' });
+    expect(client).not.toHaveProperty('application_type', 'native');
+    expect(client).not.toHaveProperty('scope');
+    expect(await store.getClient(LECHAT_DCR_CLIENT_ID)).toMatchObject({ client_name: 'Le Chat', redirect_uris: [LECHAT_CALLBACK] });
+    expect(isAcceptableOAuthClientId(LECHAT_DCR_CLIENT_ID)).toBe(true);
+  });
+
+  it('el nombre de Le Chat con un redirect distinto se rechaza entero', async () => {
+    const store = new ClaudeClientsStore();
+    const bad = [
+      'https://evil.example/v1/integrations_auth/oauth2_callback',
+      'http://callback.mistral.ai/v1/integrations_auth/oauth2_callback',
+      `${LECHAT_CALLBACK}?x=1`, `${LECHAT_CALLBACK}/`, `${LECHAT_CALLBACK}#f`,
+      'https://callback.mistral.ai:8443/v1/integrations_auth/oauth2_callback',
+      'https://CALLBACK.mistral.ai/v1/integrations_auth/oauth2_callback', 'http://127.0.0.1/callback'
+    ];
+    for (const uri of bad) {
+      await expect(store.registerClient({ client_name: LECHAT_CLIENT_NAME, redirect_uris: [uri] })).rejects.toThrow();
+    }
+    await expect(store.registerClient({ client_name: LECHAT_CLIENT_NAME, redirect_uris: [] })).rejects.toThrow();
+    await expect(store.registerClient({ client_name: LECHAT_CLIENT_NAME, redirect_uris: [LECHAT_CALLBACK, 'https://evil.example/cb'] }))
+      .rejects.toThrow();
+  });
+
+  it('el callback de Le Chat con otro client_name se rechaza', async () => {
+    const store = new ClaudeClientsStore();
+    for (const client_name of [undefined, 'Claude', 'Le Chat', 'Mistral Vibe']) {
+      await expect(store.registerClient({ client_name, redirect_uris: [LECHAT_CALLBACK] })).rejects.toThrow();
+    }
+  });
+
+  it('isAllowedRedirectUri es exacto, sin relajación de puerto', async () => {
+    const client = (await new ClaudeClientsStore().getClient(LECHAT_DCR_CLIENT_ID))!;
+    expect(isAllowedRedirectUri(client, LECHAT_CALLBACK)).toBe(true);
+    for (const uri of [`${LECHAT_CALLBACK}/`, `${LECHAT_CALLBACK}?a=b`, CLAUDE_CALLBACK, 'http://127.0.0.1:54321/callback',
+      'https://callback.mistral.ai:443/v1/integrations_auth/oauth2_callback']) expect(isAllowedRedirectUri(client, uri)).toBe(false);
   });
 });
