@@ -361,6 +361,9 @@ documento de vida corta de un proyecto (partes de estado, notas de trabajo de un
 borradores que se van a tirar) van a la carpeta `.05` de la categoría del proyecto, nunca a
 la carpeta del ID del proyecto ni a su raíz. Para `21.11 lumbre`, la `21.05`.
 
+Sin Johnny.Decimal, van a la carpeta que designen el usuario o el repo. Si no hay ninguna,
+pregunta dónde, sin crear tú una carpeta para ellos. Lo que sigue es solo para Johnny.Decimal.
+
 1. **Directamente en la `.05`, sin subcarpetas por proyecto.** Si la `.05` tiene una nota
    léeme con sus reglas (título con fecha, proyecto y asunto; qué va a la papelera al cerrar
    la tarea), léela antes de escribir y síguela. Un changelog no va a la papelera al cerrar
@@ -570,8 +573,9 @@ aplicar o deshacer un lote con `hebra_replace_in_notes` no es una orden del usua
 - **Hebra**: las notas que el usuario pida leer o escribir ahí.
 - **Tareas** → Lumbre (skill `lumbre`) si el usuario lo usa, nunca una lista de tareas en
   una nota de Hebra.
-- **Relevos, changelogs y documentos efímeros** → la `.05` de la categoría del proyecto
-  (apartado "Relevos, changelogs y documentos efímeros").
+- **Relevos, changelogs y documentos efímeros** → con Johnny.Decimal, la `.05` de la
+  categoría del proyecto; sin él, la carpeta que designen el usuario o el repo (apartado
+  "Relevos, changelogs y documentos efímeros").
 - Dónde se registra cualquier otra cosa (decisiones de proyecto, memoria de agentes) lo
   fijan las instrucciones globales del usuario (`CLAUDE.md`, `AGENTS.md`), que mandan sobre
   esta skill.
