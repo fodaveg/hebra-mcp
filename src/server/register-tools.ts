@@ -411,7 +411,16 @@ async function runTool(
   policy: GatePolicy,
   run: (toolCtx: ToolContext) => Promise<unknown>
 ): Promise<ReturnType<typeof toOkResult>> {
-  const finish = (outcome: ToolOutcome): ReturnType<typeof toOkResult> => {
+  /** Toda salida pasa por aquí. En un espacio compartido, `ctx.authorize` es la segunda y
+   *  última validación fresca de la invocación (la primera la hizo `resolve` al elegir el
+   *  espacio): una revocación vista ahora no deja salir ni el resultado ni un error ligado
+   *  al contenido, y lo diferido (logs) no corre. La biblioteca personal no la tiene. */
+  const finish = async (
+    outcome: ToolOutcome,
+    deferred: ReadonlyArray<() => void> = []
+  ): Promise<ReturnType<typeof toOkResult>> => {
+    await ctx.authorize?.();
+    for (const run of deferred) run();
     if (!outcome.ok) {
       logToolError(name, outcome.error.code);
       return toErrorResult(outcome.error);
@@ -419,10 +428,9 @@ async function runTool(
     logToolOk(name, countOf(outcome.value));
     return outcome.value instanceof ToolContent ? outcome.value.result : toOkResult(outcome.value);
   };
-  const unresolved = (): ReturnType<typeof toOkResult> =>
+  const unresolved = (): Promise<ReturnType<typeof toOkResult>> =>
     finish({ ok: false, error: new ToolError('privacy_config_unresolved') });
 
-  await ctx.authorize?.();
   gateStats.calls += 1;
   for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt += 1) {
     let toolCtx: ToolContext;
@@ -454,11 +462,8 @@ async function runTool(
       if (error instanceof ToolError) return finish({ ok: false, error });
       throw error;
     }
-    const accept = async (accepted: ToolOutcome): Promise<ReturnType<typeof toOkResult>> => {
-      await ctx.authorize?.();
-      for (const deferred of toolCtx.deferred ?? []) deferred();
-      return finish(accepted);
-    };
+    const accept = (accepted: ToolOutcome): Promise<ReturnType<typeof toOkResult>> =>
+      finish(accepted, toolCtx.deferred ?? []);
     if (verdict.passed) return accept(outcome);
     if (policy.kind === 'filter') {
       // Una escritura no se repite. Su informe, reducido a lo que resiste el filtro nuevo; un
@@ -474,7 +479,6 @@ async function runTool(
   }
   // Ningún intento pasó: el estado fresco, nunca lo que se leyó.
   gateStats.fresh += 1;
-  await ctx.authorize?.();
   return finish(policy.kind === 'repeat' && policy.fallback ? policy.fallback() : NOT_FOUND_OUTCOME());
 }
 
@@ -504,6 +508,9 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       try {
         const { space, ...fields } = (input ?? {}) as Record<string, unknown>;
         let selected = ctx;
+        // Solo el literal exacto `personal` (u omitirlo) elige la biblioteca personal, que
+        // no consulta al relé. Cualquier otro valor es un UUID que valida `resolve` (la
+        // primera consulta fresca de esta invocación; la segunda, al aceptar en `runTool`).
         if (space !== undefined && space !== 'personal') {
           if (typeof space !== 'string' || !ctx.spaces) throw new ToolError('space_access_denied');
           selected = await ctx.spaces.resolve(space);
@@ -512,7 +519,6 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
         const result = await runTool(selected, name,
           typeof policy === 'function' ? policy(fields, selected) : policy,
           (toolCtx) => run(toolCtx, fields as Input));
-        await selected.authorize?.();
         // Origen explícito también para imágenes/recursos y errores ligados al contenido.
         if (selected.spaceId) return { ...result, content: [
           { type: 'text' as const, text: JSON.stringify({ spaceId: selected.spaceId }) }, ...result.content

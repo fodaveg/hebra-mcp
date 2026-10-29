@@ -28,7 +28,7 @@ async function openSpace(shared = true, bound = true) {
   const directory = mkdtempSync(join(tmpdir(), 'hebra-mcp-space-format-'));
   directories.push(directory);
   const sqlitePath = join(directory, 'library.sqlite');
-  const spaceAccess = { spaceId: '955480b0-c2c3-471f-aa5d-3f37ed46fe68', scope: 'fixture', authorize: async () => {} };
+  const spaceAccess = { spaceId: '955480b0-c2c3-471f-aa5d-3f37ed46fe68', scope: 'fixture', authorize: async () => {}, assertActive: () => {} };
   const port = await openNodeLibraryPort({ sqlitePath, ...(shared ? { spaceAccess } : {}) });
   ports.push(port);
   if (bound) await port.syncStorePort().libraryConnect({

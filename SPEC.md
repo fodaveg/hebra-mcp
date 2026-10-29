@@ -2474,7 +2474,10 @@ visible para los miembros. No se declara QA de producción con estas pruebas loc
 `hebra_list_spaces` devuelve `{spaces:[{spaceId}]}` únicamente con membresía, permiso
 propio y concesión vigentes. Todas las herramientas de contenido aceptan `space?: string`:
 omitirlo o indicar `personal` conserva la biblioteca personal; un UUID selecciona ese espacio.
-Las respuestas compartidas incorporan un primer bloque de texto `{spaceId}` antes del contenido,
+Solo el literal exacto `personal` es la biblioteca personal (su respuesta es la misma que sin
+`space`). Un UUID con el grant apagado, uno inexistente, uno malformado o uno en mayúsculas
+(otro valor cualquiera, `PERSONAL` incluido) responden exactamente igual: `space_access_denied`,
+con el mismo mensaje y la misma forma. Las respuestas compartidas incorporan un primer bloque de texto `{spaceId}` antes del contenido,
 también en adjuntos. No busca una nota en otras bibliotecas ni resuelve títulos entre bases.
 Johnny.Decimal (`hebra_jd_*`) responde `space_not_supported` en espacios. Los comandos de
 workdir siguen siendo personales; abrir con ellos una SQLite compartida responde
@@ -2484,8 +2487,12 @@ El dispositivo registra una pública P-256 estable por origen, credencial y disp
 `PUT /agent-device-key`. La privada vive en la nueva entrada `agent-device-key` de SecretStore,
 que `unpair` borra. En `pair`, el registro precede a toda consulta de biblioteca y a la vista
 previa; la privada solo se guarda después de confirmar, antes de persistir la credencial.
-Al arrancar un vínculo antiguo, el registro precede al primer acceso del transporte. Un relé
-sin esta API falla cerrado; desplegar el relé H-L7 es prerrequisito del consumidor.
+Fuera de `pair`, el registro (también el de un vínculo anterior a H-L7) solo se pide en el
+camino compartido: al listar espacios o al resolver un `space` UUID. La biblioteca personal
+no lo espera ni consulta el catálogo: funciona sin red y con un relé sin esta API, como antes
+de los espacios (corrección del 29 oct 2026; el candidato anterior lo exigía también en el
+sync y las herramientas personales). Un relé sin esta API deja cerrado solo el acceso
+compartido (`space_access_denied`); desplegar el relé H-L7 es prerrequisito de ese camino.
 
 El módulo compartido `spaces/agent-space-grant.ts` de Hebra valida y abre los grants del
 catálogo `GET /spaces/agent-access`, comprobando espacio, bóveda, cuenta, credencial, dispositivo
@@ -2499,9 +2506,15 @@ hash bajo `/tmp/hebra-mcp-<uid>` (directorio propio 0700 verificado) para respet
 ruta Unix; el bloqueo y los datos permanecen en el directorio aislado. Las instancias lectoras
 reenvían al mismo escritor y éste vuelve a autorizar; JDex y workdir quedan cerrados allí.
 
-La autorización se consulta sin caché antes y después de cada herramienta y petición de sync,
-y dentro de FIFO antes de cada mutación. Una respuesta calculada durante una revocación no
-sale. Si un catálogo confirma que un grant ya no existe o ha cambiado, se marca su caché como
+Cada invocación de herramienta en un espacio consulta el catálogo sin caché exactamente dos
+veces: al resolver el selector y al aceptar la respuesta, sea un resultado o un error. Ninguna
+consulta se reutiliza en otra invocación. Cada petición del sync compartido lo consulta antes y
+después, y cada escritura que llega por `writer.sock` al entrar y antes de contestar. Dentro del
+turno FIFO no hay red: antes de cada mutación, y de cada uso de los registros propios del MCP
+(idempotencia, planes de sustitución y del JDex, contenido anterior de un fichero), se mira lo
+ya sabido en local (una revocación vista por este proceso o marcada en disco por otro). Así una
+revocación ya vista no deja escribir, y una latencia del relé no bloquea la cola de escrituras.
+Una respuesta calculada durante una revocación no sale. Si un catálogo confirma que un grant ya no existe o ha cambiado, se marca su caché como
 retirada en disco: no se reactiva su cola al volver a ver el mismo grant, ni tras reiniciar.
 Una concesión nueva usa una base nueva. La falta de red rechaza acceso compartido sin tratarla
 como consentimiento ni borrar datos. La política del servidor sigue siendo la autoridad sobre

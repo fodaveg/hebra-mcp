@@ -139,7 +139,12 @@ function resolveRef(engine: SqliteLibraryEngine, ref: string): LinkResolution {
 export interface SpaceStoreAccess {
   spaceId: string;
   scope: string;
+  /** Validación fresca contra el relé: solo al abrir, nunca dentro del turno FIFO. */
   authorize(): Promise<void>;
+  /** Sin red y síncrona: lanza si una revocación ya se vio (en este proceso o marcada en
+   *  disco por otro). Es la que se mira dentro del turno FIFO antes de cada mutación, para
+   *  que una latencia del relé no bloquee la cola de escrituras. */
+  assertActive(): void;
 }
 
 export interface OpenNodeLibraryOptions {
@@ -307,9 +312,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.writable ? this.queue.run(operation) : Promise.reject(busyOtherInstance());
   }
 
-  /** Se ejecuta dentro del turno FIFO, después de cualquier página de sync pendiente. */
-  private async assertSpaceUserWrite(): Promise<void> {
-    await this.spaceAccess?.authorize();
+  /** Se ejecuta dentro del turno FIFO, después de cualquier página de sync pendiente. Sin
+   *  red: la validación fresca va antes y después de la invocación, fuera de la cola. */
+  private assertSpaceUserWrite(): void {
+    this.spaceAccess?.assertActive();
     try {
       this.engine.assertSpaceUserWrite();
     } catch (error) {
@@ -351,8 +357,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteCreate(folderId?: string | null): Promise<NoteRow> {
-    return this.write(async () => {
-      await this.assertSpaceUserWrite();
+    return this.write(() => {
+      this.assertSpaceUserWrite();
       return this.engine.noteCreate(folderId ?? null);
     });
   }
@@ -362,8 +368,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteSave(input: NoteSaveInput): Promise<NoteSaveResult> {
-    return this.write(async () => {
-      await this.assertSpaceUserWrite();
+    return this.write(() => {
+      this.assertSpaceUserWrite();
       return this.engine.noteSave(input);
     });
   }
@@ -802,10 +808,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * ningún otro método de este puerto (esperaría detrás de sí mismo).
    */
   writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T> {
-    return this.write(async () => {
+    return this.write(() => {
       // H-L7: dentro del mismo turno que la mutación, también tras reiniciar o al
       // recibir una escritura por writer.sock. No basta con parar la subida.
-      await this.assertSpaceUserWrite();
+      this.assertSpaceUserWrite();
       const store: NoteWriteStore = {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
@@ -859,17 +865,27 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
         jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
       };
-      // Revalidación al ejecutar cada mutación, también si el turno esperó bytes de un blob.
+      // Revalidación (local, sin red) al ejecutar cada mutación, también si el turno esperó
+      // bytes de un blob. Los cuatro registros propios del MCP (idempotencia, planes de
+      // sustitución y del JDex, contenido anterior de un fichero) pasan por la misma guarda
+      // en TODOS sus métodos: guardan y devuelven resultados, cuerpos y contenido anterior,
+      // y tras una revocación ya vista no se registra ni se repite nada de esa base.
       if (this.spaceAccess) {
         const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
           'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot']);
-        return operation(new Proxy(store, { get: (target, property) => {
-          const value = Reflect.get(target, property);
-          if (typeof property !== 'string' || !mutations.has(property) || typeof value !== 'function') return value;
-          return async (...args: unknown[]) => { await this.assertSpaceUserWrite(); return Reflect.apply(value, target, args); };
-        } }));
+        const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious']);
+        // Síncrona: no cambia el tipo de lo que devuelve cada método (los registros lo son).
+        const guard = <T extends object>(target: T, all: boolean): T => new Proxy(target, { get: (object, property) => {
+          const value = Reflect.get(object, property);
+          if (typeof property === 'string' && records.has(property) && value && typeof value === 'object') {
+            return guard(value, true);
+          }
+          if (typeof property !== 'string' || typeof value !== 'function' || (!all && !mutations.has(property))) return value;
+          return (...args: unknown[]) => { this.assertSpaceUserWrite(); return Reflect.apply(value, object, args); };
+        } });
+        return operation(guard(store, false));
       }
       return operation(store);
     });

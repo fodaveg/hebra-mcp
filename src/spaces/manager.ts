@@ -1,7 +1,13 @@
 /** Catálogo y bibliotecas aisladas para espacios autorizados al agente H-L7.
- * La caché nunca concede autoridad: cada llamada, mutación y petición al relé la revalida. */
+ * La caché nunca concede autoridad. Cada invocación de herramienta consulta el catálogo
+ * fresco dos veces (al resolver el selector y al aceptar la respuesta), y nunca reutiliza
+ * esa consulta en otra invocación; cada petición del sync compartido y cada escritura que
+ * llega por `writer.sock` también lo consultan. Dentro del turno FIFO solo se mira lo ya
+ * sabido en local (`assertActive`): una revocación ya vista no deja escribir, y una
+ * latencia del relé no bloquea las escrituras de los demás. */
 import { createHash } from 'node:crypto';
-import { access, lstat, mkdir, writeFile } from 'node:fs/promises';
+import { statSync } from 'node:fs';
+import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ServerContext, SpaceRouter } from '../server/context';
 import { ToolError } from '../server/errors';
@@ -64,11 +70,10 @@ export class AgentSpaceManager implements SpaceRouter {
 
   private async catalogue(): Promise<AgentSpaceAccess[]> {
     if (this.closed) throw new ToolError('space_access_denied');
-    await this.device.ensureRegistered();
+    const registration = await this.device.ensureRegistered();
     try {
       const result = catalogueSchema.parse(await this.device.request('/spaces/agent-access'));
       const ids = new Set<string>();
-      const registration = await this.device.ensureRegistered();
       for (const item of result.spaces) {
         const g = item.grant;
         if (
@@ -114,55 +119,68 @@ export class AgentSpaceManager implements SpaceRouter {
     return before.filter((s) => after.has(s.spaceId)).map(({ spaceId }) => ({ spaceId }));
   }
 
+  /** La primera validación fresca de la invocación: el catálogo de ahora mismo. Un UUID
+   * ausente, apagado, malformado o con otra grafía responde igual que uno inexistente. */
   async resolve(spaceId: string): Promise<ServerContext> {
     const item = (await this.catalogue()).find((space) => space.spaceId === spaceId);
     if (!item) throw new ToolError('space_access_denied');
     const key = hash([this.device.paired.connection.apiOrigin, grantHash(item)]);
-    let entry = this.entries.get(key);
-    if (!entry) {
-      const directory = join(this.dataDir, 'spaces', key);
-      entry = {
-        access: item,
-        directory,
-        denied: false
-      };
-      this.entries.set(key, entry);
-      const openingEntry = entry;
-      entry.opening = this.open(entry).catch(async (error: unknown) => {
-        await openingEntry.instance?.close();
-        openingEntry.vaultKey?.fill(0);
-        this.entries.delete(key);
-        throw error;
-      });
+    const existing = this.entries.get(key);
+    if (existing) {
+      // El catálogo de arriba ya retiró la entrada si su grant cambió; otro proceso puede
+      // haberla retirado en disco.
+      this.assertActive(existing);
+      return existing.opening!;
     }
-    if (entry.denied) throw new ToolError('space_access_denied');
-    return entry.opening!;
+    const entry: Entry = {
+      access: item,
+      directory: join(this.dataDir, 'spaces', key),
+      denied: false
+    };
+    this.entries.set(key, entry);
+    entry.opening = this.open(entry).catch(async (error: unknown) => {
+      await entry.instance?.close();
+      entry.vaultKey?.fill(0);
+      this.entries.delete(key);
+      throw error;
+    });
+    return entry.opening;
   }
 
-  private async authorize(entry: Entry): Promise<void> {
+  /** Sin red: lo que este proceso o la marca en disco de otro ya saben. Síncrono, para
+   * poder mirarlo dentro del turno FIFO antes de cada mutación sin cederlo. */
+  private assertActive(entry: Entry): void {
     if (entry.denied || this.closed) throw new ToolError('space_access_denied');
     try {
-      await access(join(entry.directory, 'access-denied'));
+      statSync(join(entry.directory, 'access-denied'));
       entry.denied = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
         throw new ToolError('space_access_denied');
     }
     if (entry.denied) throw new ToolError('space_access_denied');
+  }
+
+  /** Validación fresca: catálogo del relé, sin caché. Nunca dentro del turno FIFO. */
+  private async authorize(entry: Entry): Promise<void> {
+    this.assertActive(entry);
     const spaces = await this.catalogue();
     if (!spaces.some((item) => grantHash(item) === grantHash(entry.access))) {
       await this.deny(entry);
       throw new ToolError('space_access_denied');
     }
+    this.assertActive(entry);
   }
 
+  /** Solo desde `resolve`, que acaba de leer el catálogo fresco: aquí basta lo local. */
   private async open(entry: Entry): Promise<ServerContext> {
-    await this.authorize(entry);
+    this.assertActive(entry);
     const vaultKey = await this.device.openGrant(entry.access);
     entry.vaultKey = vaultKey;
     const { accountId } = await this.device.ensureRegistered();
     const { apiOrigin, readToken, writeToken } = this.device.paired.connection;
     const authorize = () => this.authorize(entry);
+    const assertActive = async () => this.assertActive(entry);
     const identity = { relayOrigin: apiOrigin, syncVaultId: entry.access.syncVaultId };
     const connection = async () => {
       await authorize();
@@ -213,6 +231,13 @@ export class AgentSpaceManager implements SpaceRouter {
             } catch {
               throw new StoreError('space_access_denied');
             }
+          },
+          assertActive: () => {
+            try {
+              this.assertActive(entry);
+            } catch {
+              throw new StoreError('space_access_denied');
+            }
           }
         },
         sync: {
@@ -223,6 +248,9 @@ export class AgentSpaceManager implements SpaceRouter {
           spaceEnvelope: { authorId: accountId },
           ...(this.intervalMs === undefined ? {} : { intervalMs: this.intervalMs })
         },
+        // Lo que llega por writer.sock viene de otro proceso: aquí no hay una invocación
+        // propia que lo haya validado, así que cada petición consulta el catálogo al
+        // entrar y antes de contestar (fuera del turno FIFO).
         writerSocket: (opened) =>
           writerSocketHandlers(localWriteContext(opened, authorize), {
             // El IPC compartido no expone los verbos de workdir (cuerpo completo/JDex).
@@ -250,9 +278,12 @@ export class AgentSpaceManager implements SpaceRouter {
       privacyConfig: privacySource.initial,
       privacyConfigSource: privacySource,
       spaceId: entry.access.spaceId,
+      // La segunda validación fresca de cada invocación (`runTool`, al aceptar).
       authorize,
       status: new RoutedStatusSource(instance, true),
-      write: buildRoutedWriteContext(instance, localWriteContext(instance, authorize))
+      // Dentro de una invocación ya validada por `resolve`: sin red, solo lo ya sabido.
+      // Si esta instancia es lectora, el escritor vuelve a consultar el catálogo.
+      write: buildRoutedWriteContext(instance, localWriteContext(instance, assertActive))
     };
   }
 

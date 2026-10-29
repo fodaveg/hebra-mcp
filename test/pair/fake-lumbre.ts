@@ -90,6 +90,9 @@ export class FakeLumbre {
   private credentialCount = 0;
   readonly agentKeys = new Map<string, { deviceId: string; publicKey: unknown; keyId: string; accountId: string }>();
   readonly agentSpaces = new Map<string, AgentSpaceAccess[]>();
+  /** Con él, `GET /spaces/agent-access` avisa con `entered` y no contesta hasta `released`:
+   *  un relé lento, para comprobar que su latencia no entra en el turno de escritura. */
+  agentAccessHold: { entered(): void; released: Promise<void> } | null = null;
   private readonly deviceIds = new Map<string, string>();
 
   addAgent(userId: string, deviceId: string) {
@@ -294,6 +297,11 @@ export class FakeLumbre {
     if (url.pathname === '/api/integrations/hebra/spaces/agent-access' && method === 'GET') {
       const entry = this.auth(req, 'read');
       if (!entry || !this.agentKeys.has(entry.credentialId)) return json(401, { code: 'credential_revoked' });
+      const hold = this.agentAccessHold;
+      if (hold) {
+        hold.entered();
+        await hold.released;
+      }
       return json(200, { spaces: this.agentSpaces.get(entry.credentialId) ?? [] });
     }
 

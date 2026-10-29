@@ -37,7 +37,7 @@ import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { TrashFilter } from '../privacy/trash-filter';
 import { replaceBodyInTurn, trashConflictCopiesInTurn, type ReplaceBodyTestHooks } from './body-writes';
-import { writeRejected } from './errors';
+import { StoreError, writeRejected } from './errors';
 import { compileGrepPattern, trigramMatch } from './grep';
 import type { GrepBodiesSession, GrepNoteRow } from './grep-sql';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
@@ -465,11 +465,17 @@ export class ReplaceBatch {
    * `UPDATE`, sin leer cuerpos. La llama la instancia al pasar a escritor y en cada
    * `checkWriter` (cada 30 s), además de cada operación de plan. Nunca rechaza: un fallo
    * se anota sin mensaje y lo reintenta la siguiente.
+   *
+   * En la base de un espacio compartido (H-L7), el turno rechaza con `space_not_ready`
+   * hasta que la primera ronda deja el espacio listo (justo al pasar a escritor, antes de
+   * sincronizar), y con `space_access_denied` una vez retirada la concesión. Ninguno es un
+   * fallo de la purga: no hay nada que purgar todavía, o la base ya no se usa. No se anotan.
    */
   async purgeExpired(): Promise<void> {
     try {
       await this.target.writeExclusive(async (store) => store.replacePlans.purgeExpired(Date.now()));
     } catch (error) {
+      if (error instanceof StoreError && (error.code === 'space_not_ready' || error.code === 'space_access_denied')) return;
       logEvent({
         event: 'replace.purge',
         result: 'failed',

@@ -143,6 +143,9 @@ async function readSecretsQuietly(secrets: SecretStore | null) {
 export async function openServeContext(options: OpenServeOptions): Promise<ServeContext> {
   const { dataDir } = options;
   const paired = await readSecretsQuietly(options.secrets);
+  // H-L7: el registro del agente y el catálogo de concesiones solo se piden al usar un
+  // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
+  // red y con un relé sin la API de H-L7, como antes de los espacios.
   const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir) : null;
   const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance) : undefined;
   const linked = paired
@@ -152,12 +155,6 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
         intervalMs: options.syncIntervalMs
       })
     : null;
-  if (linked && device) {
-    const connection = linked.connection;
-    const guarded = async () => { await device.ensureRegistered(); return connection(); };
-    linked.connection = guarded;
-    linked.config.connection = guarded;
-  }
   logEvent({ event: 'serve.start', linked: linked !== null });
   if (linked) {
     // FUGA-SYNC-02 de Hebra: sin registro, la primera ronda recibe 404. Idempotente; un
@@ -193,7 +190,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     // Sin reenvío: si el bloqueo se perdiera (otro proceso lo robó), las escrituras
     // rechazan con `busy_other_instance` en vez de saltar a `writer.sock`.
     const ctx: ServerContext = {
-      spaces, authorize: device ? () => device.ensureRegistered().then(() => {}) : undefined,
+      spaces,
       port: instance.port,
       privacyConfig,
       privacyConfigSource: privacySource,
@@ -211,7 +208,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // está), y `hebra_status` le pregunta a él por el sync.
   const write = buildRoutedWriteContext(instance, localWriteContext(instance), options.forward);
   const ctx: ServerContext = {
-    spaces, authorize: device ? () => device.ensureRegistered().then(() => {}) : undefined,
+    spaces,
     port: instance.port,
     privacyConfig,
     privacyConfigSource: privacySource,
