@@ -60,8 +60,11 @@ export function createSyncStorePort(
     libraryGetBinding: () => read(() => engine.getBinding()),
     librarySetBinding: (binding) => write(() => engine.setBinding(binding)),
     libraryConnect: (input) => write(() => engine.libraryConnect(input)),
+    libraryRebind: (input) => write(() => engine.libraryRebind(input)),
+    syncMinClient: () => read(() => engine.syncMinClient()),
     syncStatus: () => read(() => engine.syncStatus()),
     syncBlobsPending: (limit) => read(() => engine.syncBlobsPending(limit)),
+    syncBlobsRemoteOnly: (after, limit) => read(() => engine.syncBlobsRemoteOnly(after, limit)),
     syncBlobsMarkUploaded: (sha256s) => write(() => engine.syncBlobsMarkUploaded(sha256s)),
     syncBlobsMarkTooLarge: (sha256s) => write(() => engine.syncBlobsMarkTooLarge(sha256s)),
     // En memoria del motor: no escribe en la base, pero solo el escritor sincroniza.

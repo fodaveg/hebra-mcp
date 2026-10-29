@@ -7,6 +7,8 @@
 import type { JdRejectionCode } from '../store/errors';
 
 export type ToolErrorCode =
+  | 'client_outdated'
+  | 'space_not_ready'
   | 'not_found'
   | 'ambiguous_title'
   | 'privacy_config_unresolved'

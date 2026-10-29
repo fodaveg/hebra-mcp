@@ -2426,3 +2426,44 @@ En `test/workdir/`, sobre bibliotecas temporales, nunca la de David:
   como la monta Hebra: reenvío, ronda que trae otra versión y escritor antiguo.
 - Sin verificar aquí: la ronda real con la app de Hebra (segunda mitad de AC4 contra el relé de
   producción) y AC7 (coste), que midió la sonda.
+
+## 14. Espacios compartidos: compatibilidad del consumidor (H-L7, 29 oct 2026)
+
+La decisión de David del 24 oct es MCP apagado por defecto en cada espacio; cada miembro
+lo enciende para su propio agente y los demás ven ese estado. El contrato de Hebra está en
+`docs/privacidad-cifrado.md` §3 bis, decisión 3, y `docs/SPEC-HEBRA-COMO-BEAR.md`
+§19.7, §20.4 y §21.6. Este primer corte prepara el consumidor: **todavía no abre espacios
+desde las herramientas ni completa H-L7**.
+
+- El submódulo aporta el formato vigente de registros. `SyncRunner.spaceEnvelope` conserva
+  `authorId` (la cuenta de 64 hex, no el nombre del agente) y `minClient` en el sobre cifrado.
+  La identidad del agente que debe mostrar la app la tiene que sellar el relé por separado.
+- La vista de sync publica `syncMinClient` al motor; cuando un registro requiere un formato
+  posterior, el motor baja pero no sube. `SyncRunner.clientOutdated()` permite consultar ese
+  estado: el resultado `ok` de la ronda por sí solo no significa que haya subido.
+- Una base marcada como espacio (`meta.space_id`) comprueba `assertSpaceUserWrite` dentro
+  del mismo turno FIFO que la escritura. Abarca el escritor de herramientas y ficheros de
+  trabajo, el destino de `writer.sock` y los métodos directos `noteCreate`/`noteSave`.
+  Un formato futuro devuelve `client_outdated`; sin vínculo válido, `space_not_ready`.
+  La comprobación lee el estado persistido, también después de reabrir el proceso.
+- Las firmas y guardas del motor se reutilizan por tipos (`Pick` y tipos exportados), sin copiar su
+  implementación ni ampliar la superficie de mutaciones permitida por D2.
+
+La barrera de seguridad pendiente vive también en el servidor: las credenciales del agente
+no deben obtener el registro reservado `hebra.reserved/account-key-v1` por el feed ni por
+un conflicto CAS, ni los sobres dirigidos a la cuenta. Una concesión al dispositivo del
+agente debe ser independiente de la privada de la cuenta y dejar de autorizar lecturas y
+escrituras al apagarla o retirar la membresía. Abrir las rutas de gestión de espacios a una
+credencial de agente no sustituye esa concesión.
+
+`test/sync/space-format.node.test.ts` prueba la carrera FIFO, reapertura, ausencia de vínculo,
+compatibilidad del personal y el sobre real con una ronda que frena una subida futura.
+`test/sync/account-key-boundary.node.test.ts` documenta con claves efímeras un límite: quien
+ya tenga la clave personal, una copia antigua del reservado y un sobre antiguo de espacio
+puede abrirlos sin nueva red. No prueba que una cuenta real recibiera esos datos ni que
+pueda pedir sobres nuevos; revocar acceso futuro no borra material ya recibido.
+
+Quedan para el siguiente corte el contrato de concesión del relé, identificación inequívoca
+de credenciales de agente al emparejar, selector y almacenamiento por espacio, comprobación
+de acceso antes y después de cada herramienta, autor sellado como agente y el control propio
+visible para los miembros. No se declara QA de producción con estas pruebas locales.

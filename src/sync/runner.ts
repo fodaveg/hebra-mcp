@@ -106,6 +106,7 @@ export type SyncLogEventName =
   | 'sync.round'
   | 'sync.lease_lost'
   | 'sync.record_error'
+  | 'sync.records_without_rev'
   | 'sync.conflict_copy'
   | 'sync.blob_unreadable'
   // La credencial de emparejado está revocada (SPEC.md §12.9): una vez, al primer 401/403.
@@ -150,6 +151,8 @@ export interface SyncRunnerOptions {
   vaultKey: Uint8Array;
   /** `keyEpoch` está fijo a 1 en todo Hebra (SPEC.md §6.2). */
   keyEpoch?: number;
+  /** H-L7: cuenta del miembro, dentro del sobre de espacio. El relé sella al agente. */
+  spaceEnvelope?: { authorId: string } | null;
   /** Transporte inyectado (tests: `InMemoryLibraryRelay` de Hebra). Si falta, se usa
    *  `HttpLibraryTransport` con `connection`. */
   transport?: LibraryTransport;
@@ -204,6 +207,8 @@ function logFieldsOf(event: LibrarySyncEvent): SyncLogFields {
     }
     case 'sync.record_error':
       return { recordId: event.recordId, code: event.code };
+    case 'sync.records_without_rev':
+      return { count: event.count };
     case 'sync.conflict_copy':
       return { recordId: event.recordId, copyId: event.copyId, row: event.row };
     case 'sync.blob_unreadable':
@@ -253,6 +258,7 @@ export class SyncRunner implements SyncStatusSource {
       identity: options.identity,
       vaultKey: options.vaultKey,
       keyEpoch: options.keyEpoch ?? 1,
+      spaceEnvelope: options.spaceEnvelope,
       blobTransport:
         options.blobTransport !== undefined
           ? options.blobTransport
@@ -299,6 +305,11 @@ export class SyncRunner implements SyncStatusSource {
 
   get revoked(): boolean {
     return this.revokedFlag;
+  }
+
+  /** Formato incompatible visto por la última ronda: se puede bajar, nunca subir. */
+  clientOutdated(): ReturnType<LibrarySyncEngine['clientOutdated']> {
+    return this.engine.clientOutdated();
   }
 
   /** Ronda de arranque y ronda periódica. Idempotente. */

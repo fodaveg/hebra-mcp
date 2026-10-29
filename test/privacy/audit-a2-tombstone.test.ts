@@ -1,7 +1,7 @@
 /**
  * A2 del audit de privacidad adversarial (10 oct 2026, sonda p2): una nota VIVA cuya carpeta
  * es una lápida debajo de una carpeta privada salía en la raíz, con su cuerpo entero. Se
- * llega con un uso normal de Hebra: borrar una subcarpeta privada (`folderTrash` deja la
+ * llegaba con un cliente antiguo de Hebra: borrar una subcarpeta privada (`folderTrash` dejaba la
  * carpeta como lápida y manda sus notas a la papelera sin tocar su `folder_id`) y sacar una
  * nota suya de la papelera (`noteRestore` tampoco lo toca). El motor la enseña en la raíz
  * (la carpeta efectiva de una lápida), y el filtro solo conocía carpetas vivas.
@@ -18,6 +18,7 @@ import { checkoutCommand } from '../../src/workdir/commands';
 import { Workdir } from '../../src/workdir/layout';
 import { capture, opener, removeTempDirs, tempDir, writePrivacy } from '../workdir/helpers';
 import { auditHarness, createNote, NOT_FOUND } from './audit-harness';
+import { legacyFolderTombstone } from '../fixtures/test-library';
 
 const BAIT = 'CEBO_LAPIDA_f6';
 
@@ -38,10 +39,8 @@ describe('A2: una nota viva en una lápida de una carpeta privada sigue oculta',
         const note = await createNote(engine, sub.id, `# Diario de ${BAIT}\n#salud\n${BAIT}: texto privado por carpeta.\n`);
         const blob = await engine.blobPut(new TextEncoder().encode('fichero de sub'), { mime: 'application/pdf' });
         const file = (await engine.fileCreate(sub.id, `${BAIT}.pdf`, blob.sha256)).id;
-        // En Hebra: borrar la carpeta y sacar de la papelera la nota y el fichero.
-        await engine.folderTrash(sub.id);
-        await engine.noteRestore(note.id);
-        await engine.fileRestore(file);
+        // Estado legado recibido por sync: carpeta lápida, nota y fichero vivos.
+        await legacyFolderTombstone(engine, sub.id);
         return { noteId: note.id, fileId: file };
       });
       const row = await h.port.noteRead(noteId);
@@ -101,8 +100,8 @@ describe('A2: una nota viva en una lápida de una carpeta privada sigue oculta',
         const secreto = await engine.folderCreate(library.folders.proyectos, 'Secreto');
         const deeper = await engine.folderCreate(secreto.id, 'Más');
         const note = await createNote(engine, deeper.id, `# Plan ${BAIT}\n${BAIT}\n`);
-        await engine.folderTrash(secreto.id);
-        await engine.noteRestore(note.id);
+        await legacyFolderTombstone(engine, deeper.id);
+        await legacyFolderTombstone(engine, secreto.id);
         // Y vuelve a crear la carpeta con el mismo nombre: la configuración resuelve.
         await engine.folderCreate(library.folders.proyectos, 'Secreto');
         return note.id;

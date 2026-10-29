@@ -16,7 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SqliteLibraryEngine } from '../../src/hebra';
 import { startJd, type JdHarness } from '../fixtures/jd-library';
-import { createNote, lockedBody } from '../fixtures/test-library';
+import { createNote, legacyFolderTombstone, lockedBody } from '../fixtures/test-library';
 
 const PDF = new TextEncoder().encode('%PDF-1.4\n%%EOF\n');
 
@@ -276,20 +276,18 @@ describe('hebra_jd_move (D19): privacidad', () => {
       extraPrivateFolders: [['bandeja', 'v', 't']],
       prepare: async (engine) => {
         const inbox = await engine.folderCreate(null, 'Bandeja');
-        // V/t se borra (lápida) y su nota vuelve de la papelera: queda viva con la carpeta
-        // guardada en la lápida (A2). Una carpeta viva T hace que la ruta configurada resuelva.
+        // Lápida de un cliente antiguo recibida por sync; su nota sigue viva (A2).
+        // Una carpeta viva T hace que la ruta configurada resuelva.
         ids.v = (await engine.folderCreate(inbox.id, 'V')).id;
         const t = await engine.folderCreate(ids.v, 't');
         ids.hiddenA2 = (await createNote(engine, t.id, '# Nota A2 de V\n')).id;
-        await engine.folderTrash(t.id);
-        await engine.noteRestore(ids.hiddenA2);
+        await legacyFolderTombstone(engine, t.id);
         await engine.folderCreate(ids.v, 'T');
         // V2: lo mismo, sin ruta configurada debajo.
         ids.v2 = (await engine.folderCreate(inbox.id, 'V2')).id;
         const t2 = await engine.folderCreate(ids.v2, 't');
         ids.visibleA2 = (await createNote(engine, t2.id, '# Nota A2 de V2\n')).id;
-        await engine.folderTrash(t2.id);
-        await engine.noteRestore(ids.visibleA2);
+        await legacyFolderTombstone(engine, t2.id);
       }
     });
     expect(await h.call('hebra_read_note', { id: ids.hiddenA2 })).toEqual({ isError: true, value: { error: 'not_found' } });

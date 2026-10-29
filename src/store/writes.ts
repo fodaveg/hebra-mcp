@@ -46,6 +46,9 @@ import {
   reorderToggledTasks,
   ROOT_FOLDER_ID,
   type FoldersList,
+  type LibraryPort,
+  type NoteMutationGuard,
+  type FolderMutationGuard,
   type NoteRow,
   type NoteSaveInput,
   type NoteSaveResult,
@@ -107,20 +110,10 @@ export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
  *  (`NoteMutationGuard`, `FolderMutationGuard` de `library/types.ts`, que `node.ts` no
  *  reexporta): la revisión y la carpeta de la nota, o el nombre y el padre GUARDADO de la
  *  carpeta. */
-export interface NoteMutationGuard {
-  revision: { localSeq: number; bodySha256: string };
-  folderId: string;
-}
-export interface FolderMutationGuard {
-  name: string;
-  parentId: string | null;
-}
+export type { NoteMutationGuard, FolderMutationGuard } from '../hebra';
 
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
-export interface NoteWriteStore {
-  noteCreate(folderId?: string | null): Promise<NoteRow>;
-  noteRead(id: string): Promise<NoteRow | null>;
-  noteSave(input: NoteSaveInput): Promise<NoteSaveResult>;
+export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRead' | 'noteSave'> {
   /** Solo el título de unas notas (no lápidas), sin leer su cuerpo: lo que `hasHidden` de un
    *  ID nuevo del JDex (D18, `./jd-port.ts`) mira de las ocultas. */
   noteTitles(ids: readonly string[]): Map<string, string>;

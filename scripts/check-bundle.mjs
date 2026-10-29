@@ -197,7 +197,8 @@ const EXPECTED = {
   props: [],
   hasOpenTasks: false,
   tasks: [],
-  locked: false
+  locked: false,
+  searchBody: null
 };
 const smoke = `
 delete globalThis.navigator;

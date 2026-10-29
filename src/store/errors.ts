@@ -61,6 +61,8 @@ import type { SectionRef } from './sections';
  *   de `hebra_rename_folder` (D9), y el `folder_has_hidden` del motor no sale nunca.
  */
 export type WriteRejectionCode =
+  | 'client_outdated'
+  | 'space_not_ready'
   | 'not_found'
   | 'revision_conflict'
   | 'no_match'
@@ -117,6 +119,8 @@ export type JdRejectionCode =
   | 'folder_has_hidden';
 
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
+  'client_outdated',
+  'space_not_ready',
   'not_found',
   'revision_conflict',
   'no_match',

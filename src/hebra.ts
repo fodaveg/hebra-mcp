@@ -25,6 +25,7 @@ export {
   substringSnippet
 } from '../vendor/hebra/src/lib/library/substring-search';
 export { SEARCH_MARK_START, SEARCH_MARK_END } from '../vendor/hebra/src/lib/library/types';
+export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src/lib/library/types';
 // El error del relé de Blob V2 (lo lanza `HttpBlobRelayV2`, ya empaquetado): `SyncRunner`
 // reconoce con él un 429 al bajar un adjunto y espera antes de reintentar.
 export { BlobRelayV2Error } from '../vendor/hebra/src/lib/vault/blob-v2/memory-transport';

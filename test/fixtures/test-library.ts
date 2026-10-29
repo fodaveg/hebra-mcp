@@ -196,6 +196,11 @@ async function createFile(
   return (await engine.fileCreate(folderId, name, blob.sha256)).id;
 }
 
+/** Simula una lápida recibida de un cliente anterior a la papelera recuperable de carpetas. */
+export async function legacyFolderTombstone(engine: SqliteLibraryEngine, id: string): Promise<void> {
+  await engine.syncApplyPage([{ id, rev: 1, deleted: true, fields: null, plaintextHash: null }]);
+}
+
 export async function createNote(
   engine: SqliteLibraryEngine,
   folderId: string | null,
@@ -291,8 +296,8 @@ export async function buildTestLibrary(
   await engine.noteTrash(trashedNote.id);
 
   // Papelera (ampliación de D2, 30 sep 2026): notas visibles y ocultas en la papelera,
-  // también las que llegaron ahí porque se borró su carpeta (`folderTrash` deja la carpeta
-  // como lápida y no toca el `folder_id` de sus notas).
+  // también las de una carpeta que un cliente antiguo dejó como lápida. `folderTrash`
+  // ahora es recuperable; la lápida histórica se recibe por sync de forma explícita.
   const trashedPublicFolderNote = await createNote(
     engine,
     lumbre.id,
@@ -325,6 +330,7 @@ export async function buildTestLibrary(
     'fichero de una carpeta privada borrada'
   );
   await engine.folderTrash(diarioViejo.id);
+  await legacyFolderTombstone(engine, diarioViejo.id);
   const antiguo = await engine.folderCreate(proyectos.id, 'Antiguo');
   const trashedDeletedPublicFolderNote = await createNote(
     engine,
@@ -338,6 +344,7 @@ export async function buildTestLibrary(
     'fichero de una carpeta pública borrada'
   );
   await engine.folderTrash(antiguo.id);
+  await legacyFolderTombstone(engine, antiguo.id);
 
   // Versiones anteriores: el motor guarda el cuerpo que un guardado sustituye (el primero
   // de una nota, sin esperar los 5 minutos). `createNote` guarda sobre el cuerpo vacío

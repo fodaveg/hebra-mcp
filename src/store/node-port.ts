@@ -68,7 +68,7 @@ import {
   type GrepNoteRow
 } from './grep-sql';
 import type { PrivacyConfig } from '../privacy/config';
-import { busyOtherInstance } from './errors';
+import { busyOtherInstance, StoreError } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import {
   migrateReplacePlansFromLibrary,
@@ -282,6 +282,21 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.writable ? this.queue.run(operation) : Promise.reject(busyOtherInstance());
   }
 
+  /** Se ejecuta dentro del turno FIFO, después de cualquier página de sync pendiente. */
+  private assertSpaceUserWrite(): void {
+    try {
+      this.engine.assertSpaceUserWrite();
+    } catch (error) {
+      if (error instanceof Error && error.message === 'library_space_read_only') {
+        throw new StoreError('client_outdated');
+      }
+      if (error instanceof Error && error.message === 'library_space_not_ready') {
+        throw new StoreError('space_not_ready');
+      }
+      throw error;
+    }
+  }
+
   /** Consulta propia preparada una sola vez por conexión (como `statementFor` de
    *  `./sqlite-conn-node.ts`). La conexión es de `readBigInts`: igual que antes. */
   private prepared(sql: string): StatementSync {
@@ -310,7 +325,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteCreate(folderId?: string | null): Promise<NoteRow> {
-    return this.write(() => this.engine.noteCreate(folderId ?? null));
+    return this.write(() => {
+      this.assertSpaceUserWrite();
+      return this.engine.noteCreate(folderId ?? null);
+    });
   }
 
   async noteRead(id: string): Promise<NoteRow | null> {
@@ -318,7 +336,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteSave(input: NoteSaveInput): Promise<NoteSaveResult> {
-    return this.write(() => this.engine.noteSave(input));
+    return this.write(() => {
+      this.assertSpaceUserWrite();
+      return this.engine.noteSave(input);
+    });
   }
 
   async notesPage(cursor: string | null, limit: number, scope?: NotesScope): Promise<NotesPage> {
@@ -755,8 +776,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * ningún otro método de este puerto (esperaría detrás de sí mismo).
    */
   writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T> {
-    return this.write(() =>
-      operation({
+    return this.write(() => {
+      // H-L7: dentro del mismo turno que la mutación, también tras reiniciar o al
+      // recibir una escritura por writer.sock. No basta con parar la subida.
+      this.assertSpaceUserWrite();
+      return operation({
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
@@ -808,8 +832,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb ?? this.db)),
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
         jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
-      })
-    );
+      });
+    });
   }
 
   /**
