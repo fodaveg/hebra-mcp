@@ -2,10 +2,12 @@
  * TRA-C01 (audit de Hebra, 19 oct): «al actualizar su copia de Hebra, `hebra_grep` y
  * `hebra_replace_in_notes` dejan de ver el texto dentro de `%%` (comentarios de Obsidian),
  * por el prefiltro `notes_trigram`». Regresión sobre una SQLite REAL con el índice completo
- * y marcado con la versión vigente (el estado de después de actualizar): el índice guarda
- * el cuerpo tal cual salvo los destinos de enlaces, así que lo que solo está dentro de
- * `%%…%%` sigue en `notes_trigram` y el prefiltro no descarta esa nota. Si Hebra empezara a
- * quitar los comentarios antes de indexar, estos tests fallarían.
+ * y marcado con la versión vigente (el estado de después de actualizar). Desde TRA-18,
+ * Hebra indexa `search_body` (el cuerpo SIN los comentarios `%%…%%`): `notes_trigram` no
+ * guarda el texto de los comentarios y la búsqueda por palabras no los ve, que es lo
+ * querido. Aun así, `hebra_grep` y `hebra_replace_in_notes` (búsquedas literales sobre el
+ * cuerpo) los encuentran: el prefiltro (`grepSubstringCandidates`) mira también el cuerpo
+ * en bruto de las notas con comentarios.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveToolContext } from '../../src/server/context';
@@ -37,7 +39,7 @@ async function setup(): Promise<{ dataDir: string; writer: Awaited<ReturnType<ty
 }
 
 describe('TRA-C01: el texto dentro de %% se encuentra con el índice completo', () => {
-  it('el índice está completo y guarda el texto de los comentarios', async () => {
+  it('el índice está completo y NO guarda el texto de los comentarios: se encuentra igual', async () => {
     const { dataDir, writer } = await setup();
     const id = await createNote(writer.instance, COMMENTED);
     await createNote(writer.instance, MULTILINE);
@@ -49,10 +51,19 @@ describe('TRA-C01: el texto dentro de %% se encuentra con el índice completo', 
     const candidates = await writer.instance.port.grepCandidates(match, rows.map((row) => row.rowid));
     expect(candidates).not.toBeNull();
     expect([...candidates!]).toEqual([rowid]);
+    // TRA-18: el índice guarda `search_body`, sin los comentarios. El texto del comentario
+    // no está en `notes_trigram`… (0)…
     expect(
       query<{ c: number }>(
         dataDir,
         `SELECT count(*) AS c FROM notes_trigram WHERE notes_trigram MATCH 'body : "remolachaoculta"'`
+      )[0]!.c
+    ).toBe(0);
+    // …y el índice sigue completo: lo VISIBLE sí está en él.
+    expect(
+      query<{ c: number }>(
+        dataDir,
+        `SELECT count(*) AS c FROM notes_trigram WHERE notes_trigram MATCH 'body : "Texto visible"'`
       )[0]!.c
     ).toBe(1);
   });
