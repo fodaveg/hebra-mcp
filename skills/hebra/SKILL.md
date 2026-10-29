@@ -361,11 +361,11 @@ documento de vida corta de un proyecto (partes de estado, notas de trabajo de un
 borradores que se van a tirar) van a la carpeta `.05` de la categoría del proyecto, nunca a
 la carpeta del ID del proyecto ni a su raíz. Para `21.11 lumbre`, la `21.05`.
 
-1. **Una subcarpeta por proyecto dentro de la `.05`, con su nombre sin número**:
-   `21.05 memoria de agentes para productos de software/lumbre/`. Nunca `…/21.11 lumbre/`:
-   `hebra_jd_audit` daría el número repetido como ID duplicado.
-2. **La ruta exacta sale de `hebra_list_folders`.** Si falta la subcarpeta del proyecto,
-   `hebra_create_folder` con el `id` de la `.05` como `parentId`.
+1. **Directamente en la `.05`, sin subcarpetas por proyecto.** Si la `.05` tiene una nota
+   léeme con sus reglas (título con fecha, proyecto y asunto; qué va a la papelera al cerrar
+   la tarea), léela antes de escribir y síguela. Un changelog no va a la papelera al cerrar
+   una tarea: se queda ahí.
+2. **La ruta exacta sale de `hebra_list_folders`.**
 3. **Si la categoría no tiene `.05`**, no la crees: ni a mano (crear un ID es crear antes su
    nota del JDex) ni con `hebra_jd_new_id`, que da el siguiente ID de contenido y nunca un
    `.0x`. Díselo al usuario para que la cree en Hebra y deja el documento pendiente en la
