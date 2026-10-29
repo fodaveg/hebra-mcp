@@ -18,6 +18,7 @@
  * runner (SPEC.md §6.4): nunca el código, el verifier, los tokens, el código de
  * recuperación ni los títulos. Lo que David tiene que leer va a `terminal`.
  */
+import { AgentDevice, prepareAgentDevice, savePreparedAgentDevice } from '../spaces/device';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { decodeRecoveryCode, sanitizeDeviceLabel } from '../hebra';
 import { logEvent } from '../log/logger';
@@ -160,6 +161,9 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
     throw error;
   }
   step('lumbre.exchange', 'ok');
+  let preparedAgent;
+  try { preparedAgent = await prepareAgentDevice(connection, deviceId, fetcher); }
+  catch { throw new PairError('agent_registration_failed'); }
   try {
     await checkPairingAccount({ connection, vault, fetcher });
   } catch (error) {
@@ -172,8 +176,9 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
   let secretsToUse: PairedSecrets;
   let mode: PairResult['mode'];
   if (stored) {
-    await writeConnection(secrets, connection);
     secretsToUse = { connection, ...stored };
+    await savePreparedAgentDevice(secrets, secretsToUse, preparedAgent);
+    await writeConnection(secrets, connection);
     mode = 'credential_renewed';
     step('secrets.save', 'ok');
     terminal.print('Credencial de Lumbre renovada para la biblioteca ya vinculada.');
@@ -196,6 +201,7 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
     };
     // 3. Guardado: los secretos primero; después el relé borra el envoltorio. Si
     // `complete` falla, el envoltorio caduca solo a los 10 minutos (como en Hebra).
+    await savePreparedAgentDevice(secrets, secretsToUse, preparedAgent);
     await writePairedSecrets(secrets, secretsToUse);
     step('secrets.save', 'ok');
     try {
@@ -209,6 +215,8 @@ export async function runPair(options: PairOptions): Promise<PairResult> {
 
   terminal.print('');
   terminal.print('Paso 3 de 3: primera descarga de la biblioteca.');
+  try { await new AgentDevice(secretsToUse, secrets, fetcher, options.dataDir).ensureRegistered(); }
+  catch { throw new PairError('register_failed', 'agent_device'); }
   // La primera `sync.round` del runner: su resultado y cuántos registros bajó.
   let firstRound: { result: string; pulled: number | null } | null = null;
   const linked = await linkedSyncFrom(secretsToUse, {

@@ -82,7 +82,7 @@ import {
   type ReplaceTestHooks
 } from '../store/replace-batch';
 import type { PrivacyConfig } from '../privacy/config';
-import { openNodeLibraryPort, type NodeLibraryPort } from '../store/node-port';
+import { openNodeLibraryPort, type NodeLibraryPort, type SpaceStoreAccess } from '../store/node-port';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -143,6 +143,9 @@ export type WriterRole = 'this' | 'other_instance';
 export type LibrarySyncConfig = Omit<SyncRunnerOptions, 'port'>;
 
 export interface OpenLibraryInstanceOptions {
+  spaceAccess?: SpaceStoreAccess;
+  /** Socket corto en directorio privado para bases compartidas con rutas largas. */
+  socketPath?: string;
   /** Directorio de datos (se crea con 0700 si falta). */
   dataDir: string;
   /** Por defecto, `<dataDir>/library.sqlite`. */
@@ -241,7 +244,7 @@ export class LibraryInstance implements NoteWriteTarget {
 
   /** Ruta de `writer.sock` en el directorio de datos (la del escritor vigente). */
   get writerSocketPath(): string {
-    return join(this.options.dataDir, WRITER_SOCKET_FILE);
+    return this.options.socketPath ?? join(this.options.dataDir, WRITER_SOCKET_FILE);
   }
 
   /** ¿Escucha esta instancia en `writer.sock`? (solo el escritor con `writerSocket`) */
@@ -254,7 +257,8 @@ export class LibraryInstance implements NoteWriteTarget {
       sqlitePath: this.sqlitePath,
       dataDir: this.options.dataDir,
       deviceLabel: this.options.deviceLabel,
-      mode
+      mode,
+      spaceAccess: this.options.spaceAccess
     });
   }
 

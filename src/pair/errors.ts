@@ -16,6 +16,7 @@ export type PairErrorCode =
   | 'not_confirmed'
   | 'confirm_failed'
   | 'no_tty'
+  | 'agent_registration_failed'
   | 'register_failed'
   | 'other_instance_running';
 
@@ -33,6 +34,7 @@ const MESSAGES: Record<PairErrorCode, string> = {
   not_confirmed: 'No has confirmado que sean tus notas. No se ha guardado nada y la solicitud se ha cancelado.',
   confirm_failed: 'No se pudo leer tu respuesta en la terminal (la entrada se cerró antes de confirmar). Ya se había creado una conexión de hebra-mcp en Lumbre: revócala en Lumbre > Integraciones > Hebra. No se ha guardado nada más en este equipo.',
   no_tty: 'pair necesita una terminal interactiva para confirmar que es tu biblioteca; ejecútalo en una terminal, no con el prefijo ! de Claude Code.',
+  agent_registration_failed: 'El relé no aceptó la clave pública del agente. No se han guardado secretos ni leído la biblioteca.',
   register_failed: 'El relé no aceptó el registro de este dispositivo. Los secretos quedan guardados: «hebra-mcp serve» lo reintenta al arrancar.',
   other_instance_running: 'Hay otra instancia de hebra-mcp en marcha sobre este directorio de datos. Cierra las sesiones de Claude que la usan y vuelve a intentarlo.'
 };

@@ -12,6 +12,9 @@
  *   `writer.sock`; las demás le reenvían las escrituras y le preguntan el estado de sync
  *   (`./forward.ts`), y toman el relevo si ya no responde.
  */
+import { StoreError } from '../store/errors';
+import { AgentDevice } from '../spaces/device';
+import { AgentSpaceManager } from '../spaces/manager';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
 import { PrivacyConfigSource } from '../privacy/config-source';
@@ -76,8 +79,8 @@ export interface ServeContext {
  * resultado; si el runner no hizo ronda (revocado o parado), un código en su lugar, para
  * que la herramienta diga `error` y no `not_linked`.
  */
-export function localWriteContext(instance: LibraryInstance): WriteContext {
-  return buildWriteContext({
+export function localWriteContext(instance: LibraryInstance, authorize?: () => Promise<void>): WriteContext {
+  const context = buildWriteContext({
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
     editNote: (input) => instance.editNoteLocal(input),
@@ -112,6 +115,18 @@ export function localWriteContext(instance: LibraryInstance): WriteContext {
         .then((round) => round ?? { result: runner.revoked ? 'revoked' : 'unknown' });
     }
   });
+  if (!authorize) return context;
+  return new Proxy(context, { get: (target, property) => {
+    const value = Reflect.get(target, property);
+    if (typeof value !== 'function' || property === 'onConflictCopy') return value;
+    return async (...args: unknown[]) => {
+      try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      if (property === 'jdNewId' || property === 'jdMove') throw new StoreError('space_access_denied');
+      const result = await Reflect.apply(value, target, args);
+      try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      return result;
+    };
+  } });
 }
 
 async function readSecretsQuietly(secrets: SecretStore | null) {
@@ -128,6 +143,8 @@ async function readSecretsQuietly(secrets: SecretStore | null) {
 export async function openServeContext(options: OpenServeOptions): Promise<ServeContext> {
   const { dataDir } = options;
   const paired = await readSecretsQuietly(options.secrets);
+  const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir) : null;
+  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance) : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
@@ -135,6 +152,12 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
         intervalMs: options.syncIntervalMs
       })
     : null;
+  if (linked && device) {
+    const connection = linked.connection;
+    const guarded = async () => { await device.ensureRegistered(); return connection(); };
+    linked.connection = guarded;
+    linked.config.connection = guarded;
+  }
   logEvent({ event: 'serve.start', linked: linked !== null });
   if (linked) {
     // FUGA-SYNC-02 de Hebra: sin registro, la primera ronda recibe 404. Idempotente; un
@@ -170,13 +193,14 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     // Sin reenvío: si el bloqueo se perdiera (otro proceso lo robó), las escrituras
     // rechazan con `busy_other_instance` en vez de saltar a `writer.sock`.
     const ctx: ServerContext = {
+      spaces, authorize: device ? () => device.ensureRegistered().then(() => {}) : undefined,
       port: instance.port,
       privacyConfig,
       privacyConfigSource: privacySource,
       status: new LibraryInstanceStatusSource(instance, linked !== null),
       write: localWriteContext(instance)
     };
-    return { ctx, instance, linked: linked !== null, close: () => instance.close() };
+    return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
   }
   // `privacyConfig` sin resolver a `PrivacyFilter` aquí: `register-tools.ts` lo hace en
   // CADA llamada, con el almacén tal como esté en ese momento (un filtro construido una
@@ -187,11 +211,12 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // está), y `hebra_status` le pregunta a él por el sync.
   const write = buildRoutedWriteContext(instance, localWriteContext(instance), options.forward);
   const ctx: ServerContext = {
+    spaces, authorize: device ? () => device.ensureRegistered().then(() => {}) : undefined,
     port: instance.port,
     privacyConfig,
     privacyConfigSource: privacySource,
     status: new RoutedStatusSource(instance, linked !== null, options.forward),
     write
   };
-  return { ctx, instance, linked: linked !== null, close: () => instance.close() };
+  return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
 }

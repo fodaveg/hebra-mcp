@@ -81,6 +81,7 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_list_folders', arguments: {} },
     { name: 'hebra_links', arguments: { id: library.publicNoteId } },
     { name: 'hebra_status', arguments: {} },
+    { name: 'hebra_list_spaces', arguments: {} },
     // Las dos de escritura (L3b): el cebo va en `body`/`text`, que nunca se hace eco en el
     // log. En la salida de `hebra_append_to_note` sí: desde D11 trae el final del texto
     // guardado (`appended.tail`), que es del propio cliente; el cebo de privados no.

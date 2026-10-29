@@ -29,3 +29,6 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src
 // El error del relé de Blob V2 (lo lanza `HttpBlobRelayV2`, ya empaquetado): `SyncRunner`
 // reconoce con él un 429 al bajar un adjunto y espera antes de reintentar.
 export { BlobRelayV2Error } from '../vendor/hebra/src/lib/vault/blob-v2/memory-transport';
+
+// H-L7: protocolo compartido de concesiones de dispositivo, sin copiar criptografía.
+export { openAgentSpaceGrant, agentDeviceKeyId, parseAgentSpaceGrant } from '../vendor/hebra/src/lib/spaces/agent-space-grant';

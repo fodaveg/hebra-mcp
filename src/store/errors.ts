@@ -63,6 +63,7 @@ import type { SectionRef } from './sections';
 export type WriteRejectionCode =
   | 'client_outdated'
   | 'space_not_ready'
+  | 'space_access_denied'
   | 'not_found'
   | 'revision_conflict'
   | 'no_match'
@@ -121,6 +122,7 @@ export type JdRejectionCode =
 export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<WriteRejectionCode>([
   'client_outdated',
   'space_not_ready',
+  'space_access_denied',
   'not_found',
   'revision_conflict',
   'no_match',

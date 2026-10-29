@@ -135,7 +135,15 @@ function resolveRef(engine: SqliteLibraryEngine, ref: string): LinkResolution {
   return engine.resolveLink(parsed);
 }
 
+/** Autoridad de una apertura compartida, nunca deducida de la SQLite ni del path. */
+export interface SpaceStoreAccess {
+  spaceId: string;
+  scope: string;
+  authorize(): Promise<void>;
+}
+
 export interface OpenNodeLibraryOptions {
+  spaceAccess?: SpaceStoreAccess;
   /** Ruta del fichero SQLite, o `:memory:` (tests). */
   sqlitePath: string;
   /** Directorio de datos, donde cuelga `blobs/`. Sin él, los adjuntos se guardan en
@@ -176,6 +184,22 @@ export async function openNodeLibraryPort(
     db.close();
     throw error;
   }
+  try {
+    const savedSpace = db.prepare("SELECT value FROM meta WHERE key = 'space_id'").get() as { value: string } | undefined;
+    const savedScope = db.prepare("SELECT value FROM meta WHERE key = 'mcp_agent_scope'").get() as { value: string } | undefined;
+    const access = options.spaceAccess;
+    if (savedSpace && (!access || savedSpace.value !== access.spaceId || savedScope?.value !== access.scope)) {
+      throw new StoreError('space_access_denied');
+    }
+    if (access) {
+      await access.authorize();
+      if (!savedSpace) {
+        if (mode !== 'readWrite' || engine.libraryOpen().notesCount !== 0 || savedScope) throw new StoreError('space_access_denied');
+        db.prepare('INSERT INTO meta(key,value) VALUES (?,?)').run('space_id', access.spaceId);
+        db.prepare('INSERT INTO meta(key,value) VALUES (?,?)').run('mcp_agent_scope', access.scope);
+      }
+    }
+  } catch (error) { db.close(); throw error; }
   if (options.sqlitePath !== ':memory:' && mode === 'readWrite') {
     await secureSqliteFileModes(options.sqlitePath);
   }
@@ -206,7 +230,7 @@ export async function openNodeLibraryPort(
       throw error;
     }
   }
-  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath);
+  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath, options.spaceAccess);
 }
 
 /**
@@ -266,7 +290,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     /** La base de los planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo el escritor. */
     private readonly replacePlansDb: DatabaseSync | null = null,
     /** Ruta de `library.sqlite` (o `:memory:`): de ella cuelga el fichero de los planes que lee un lector. */
-    private readonly librarySqlitePath: string = ':memory:'
+    private readonly librarySqlitePath: string = ':memory:',
+    private readonly spaceAccess?: SpaceStoreAccess
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -283,7 +308,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   /** Se ejecuta dentro del turno FIFO, después de cualquier página de sync pendiente. */
-  private assertSpaceUserWrite(): void {
+  private async assertSpaceUserWrite(): Promise<void> {
+    await this.spaceAccess?.authorize();
     try {
       this.engine.assertSpaceUserWrite();
     } catch (error) {
@@ -325,8 +351,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteCreate(folderId?: string | null): Promise<NoteRow> {
-    return this.write(() => {
-      this.assertSpaceUserWrite();
+    return this.write(async () => {
+      await this.assertSpaceUserWrite();
       return this.engine.noteCreate(folderId ?? null);
     });
   }
@@ -336,8 +362,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   async noteSave(input: NoteSaveInput): Promise<NoteSaveResult> {
-    return this.write(() => {
-      this.assertSpaceUserWrite();
+    return this.write(async () => {
+      await this.assertSpaceUserWrite();
       return this.engine.noteSave(input);
     });
   }
@@ -776,11 +802,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    * ningún otro método de este puerto (esperaría detrás de sí mismo).
    */
   writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T> {
-    return this.write(() => {
+    return this.write(async () => {
       // H-L7: dentro del mismo turno que la mutación, también tras reiniciar o al
       // recibir una escritura por writer.sock. No basta con parar la subida.
-      this.assertSpaceUserWrite();
-      return operation({
+      await this.assertSpaceUserWrite();
+      const store: NoteWriteStore = {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
@@ -832,7 +858,20 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb ?? this.db)),
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
         jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
-      });
+      };
+      // Revalidación al ejecutar cada mutación, también si el turno esperó bytes de un blob.
+      if (this.spaceAccess) {
+        const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
+          'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
+          'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
+          'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot']);
+        return operation(new Proxy(store, { get: (target, property) => {
+          const value = Reflect.get(target, property);
+          if (typeof property !== 'string' || !mutations.has(property) || typeof value !== 'function') return value;
+          return async (...args: unknown[]) => { await this.assertSpaceUserWrite(); return Reflect.apply(value, target, args); };
+        } }));
+      }
+      return operation(store);
     });
   }
 

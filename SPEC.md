@@ -2467,3 +2467,47 @@ Quedan para el siguiente corte el contrato de concesión del relé, identificaci
 de credenciales de agente al emparejar, selector y almacenamiento por espacio, comprobación
 de acceso antes y después de cada herramienta, autor sellado como agente y el control propio
 visible para los miembros. No se declara QA de producción con estas pruebas locales.
+
+
+### H-L7: consumidor de concesiones de dispositivo (candidato 29 oct 2026)
+
+`hebra_list_spaces` devuelve `{spaces:[{spaceId}]}` únicamente con membresía, permiso
+propio y concesión vigentes. Todas las herramientas de contenido aceptan `space?: string`:
+omitirlo o indicar `personal` conserva la biblioteca personal; un UUID selecciona ese espacio.
+Las respuestas compartidas incorporan un primer bloque de texto `{spaceId}` antes del contenido,
+también en adjuntos. No busca una nota en otras bibliotecas ni resuelve títulos entre bases.
+Johnny.Decimal (`hebra_jd_*`) responde `space_not_supported` en espacios. Los comandos de
+workdir siguen siendo personales; abrir con ellos una SQLite compartida responde
+`space_access_denied`. El socket compartido tampoco publica los verbos de workdir.
+
+El dispositivo registra una pública P-256 estable por origen, credencial y dispositivo en
+`PUT /agent-device-key`. La privada vive en la nueva entrada `agent-device-key` de SecretStore,
+que `unpair` borra. En `pair`, el registro precede a toda consulta de biblioteca y a la vista
+previa; la privada solo se guarda después de confirmar, antes de persistir la credencial.
+Al arrancar un vínculo antiguo, el registro precede al primer acceso del transporte. Un relé
+sin esta API falla cerrado; desplegar el relé H-L7 es prerrequisito del consumidor.
+
+El módulo compartido `spaces/agent-space-grant.ts` de Hebra valida y abre los grants del
+catálogo `GET /spaces/agent-access`, comprobando espacio, bóveda, cuenta, credencial, dispositivo
+y huella de pública. Solo entrega la clave del espacio: no usa el recoveryCode personal ni
+consulta sobres o registros de clave de cuenta. El selector no permite activar permisos.
+
+Cada grant tiene su propia SQLite, blobs, índices, planes y configuración de privados bajo
+`spaces/<huella de origen y grant>`. Un marcador persistido ata la SQLite al mismo scope y
+rechaza abrir una copia como personal o con otro scope. El IPC usa un socket con nombre
+hash bajo `/tmp/hebra-mcp-<uid>` (directorio propio 0700 verificado) para respetar el límite de
+ruta Unix; el bloqueo y los datos permanecen en el directorio aislado. Las instancias lectoras
+reenvían al mismo escritor y éste vuelve a autorizar; JDex y workdir quedan cerrados allí.
+
+La autorización se consulta sin caché antes y después de cada herramienta y petición de sync,
+y dentro de FIFO antes de cada mutación. Una respuesta calculada durante una revocación no
+sale. Si un catálogo confirma que un grant ya no existe o ha cambiado, se marca su caché como
+retirada en disco: no se reactiva su cola al volver a ver el mismo grant, ni tras reiniciar.
+Una concesión nueva usa una base nueva. La falta de red rechaza acceso compartido sin tratarla
+como consentimiento ni borrar datos. La política del servidor sigue siendo la autoridad sobre
+lecturas y escrituras; los bytes ya entregados no se pueden recuperar.
+
+Este corte conserva `authorId` de cuenta y `minClient` del sobre. Sigue pendiente el plumbing
+compartido de `authorActorKind` sellado por servidor en transport/sync/SQLite/Rust/UI, asignado
+al lote cliente H-L7, así como el control visual por miembro, la integración del relé y el gate
+combinado final. No acredita cierre de H-L7, publicación ni QA con cuentas reales.

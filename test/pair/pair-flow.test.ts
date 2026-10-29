@@ -153,6 +153,8 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     expect(result).toEqual({ mode: 'linked', register: 'ok', firstSync: 'ok', pulled: TITLES.length });
     expect(fake.requested.some((url) => url.includes('evil.test'))).toBe(false);
     expect(fake.requested).toContain(`${LUMBRE}/api/integrations/hebra/exchange`);
+    expect(fake.requested.findIndex((url) => url.endsWith('/agent-device-key')))
+      .toBeLessThan(fake.requested.findIndex((url) => url.includes('/changes')));
 
     // (6) y (4): el canje llegó sin Origin, con un verifier de 32 bytes o más.
     expect(fake.exchanges).toHaveLength(1);
@@ -170,12 +172,12 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     for (const title of TITLES) expect(terminal.lines).toContain(`  · ${title}`);
 
     // Secretos en el llavero de test, y el dispositivo registrado en la bóveda.
-    expect(secrets.size).toBe(3);
+    expect(secrets.size).toBe(4);
     const paired = await readPairedSecrets(secrets);
-    expect(paired?.connection.credentialId).toBe('cred-mcp-1');
+    expect(paired?.connection.credentialId).toBe('00000000-0000-4000-8000-000000000001');
     expect(paired?.connection.apiOrigin).toBe(LUMBRE);
     expect(paired?.recoveryCode).toBe(recoveryCode);
-    expect(fake.registrations).toEqual([{ syncVaultId: IDENTITY.syncVaultId, credentialId: 'cred-mcp-1' }]);
+    expect(fake.registrations).toEqual([{ syncVaultId: IDENTITY.syncVaultId, credentialId: '00000000-0000-4000-8000-000000000001' }]);
 
     // serve con los secretos: linked:true y la biblioteca descargada.
     const served = await openServeContext({
@@ -208,10 +210,10 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
         lock: { ...LOCK, pid: process.pid + 1 }
       }).catch((error: unknown) => error);
       expect((refused as PairError).code).toBe('other_instance_running');
-      expect(secrets.size).toBe(3);
+      expect(secrets.size).toBe(4);
 
       // Revocación en Lumbre: la siguiente ronda recibe 401 y el estado lo dice.
-      fake.revoke('cred-mcp-1');
+      fake.revoke('00000000-0000-4000-8000-000000000001');
       await served.instance.syncRunner!.requestRound();
       expect(await runStatus(await resolveToolContext(served.ctx))).toMatchObject({
         linked: true,
@@ -224,7 +226,7 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
 
     // unpair: llavero de test y directorio vacíos.
     const unpaired = await runUnpair({ dataDir, secrets, terminal: scriptedTerminal([true]), lock: LOCK });
-    expect(unpaired).toEqual({ confirmed: true, deletedSecrets: 3, removedDataDir: true });
+    expect(unpaired).toEqual({ confirmed: true, deletedSecrets: 4, removedDataDir: true });
     expect(secrets.size).toBe(0);
     expect(existsSync(dataDir)).toBe(false);
 
@@ -272,7 +274,7 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     expect(result.mode).toBe('credential_renewed');
     expect(result.firstSync).toBe('ok');
     expect(fake.exchanges[0].body.deviceId).toBe('6f1c2d3e-4a5b-4c6d-8e7f-0123456789ab');
-    expect((await readPairedSecrets(secrets))?.connection.credentialId).toBe('cred-mcp-1');
+    expect((await readPairedSecrets(secrets))?.connection.credentialId).toBe('00000000-0000-4000-8000-000000000001');
     expect(fake.deviceLinks.rows()).toEqual([]);
   });
 

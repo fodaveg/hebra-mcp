@@ -19,7 +19,7 @@
 export const SECRET_SERVICE = 'hebra-mcp';
 
 /** Las tres entradas del llavero (SPEC.md §6.1), por nombre de cuenta. */
-export const SECRET_KEYS = ['lumbre-connection', 'recovery-code', 'device-identity'] as const;
+export const SECRET_KEYS = ['lumbre-connection', 'recovery-code', 'device-identity', 'agent-device-key'] as const;
 /** Bearers de concesiones OAuth; separado del emparejado para que `unpair` mantenga
  * su semántica y las familias se invaliden por comparación del vínculo. */
 export type SecretKey = (typeof SECRET_KEYS)[number] | 'hebra-mcp-oauth-grants' | 'hebra-mcp-oauth-pending'

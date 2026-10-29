@@ -19,7 +19,15 @@ import type { WriteContext } from './write-context';
  * sin él (solo lectura): `hebra_create_note`/`hebra_append_to_note` son las únicas
  * herramientas que lo necesitan.
  */
+export interface SpaceRouter {
+  list(): Promise<Array<{ spaceId: string }>>;
+  resolve(spaceId: string): Promise<ServerContext>;
+}
+
 export interface ServerContext {
+  spaces?: SpaceRouter;
+  spaceId?: string;
+  authorize?(): Promise<void>;
   port: HebraLibraryPort;
   /** La configuración de privados; con `privacyConfigSource`, la del arranque. */
   privacyConfig: PrivacyConfig;

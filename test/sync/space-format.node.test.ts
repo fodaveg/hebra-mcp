@@ -28,19 +28,13 @@ async function openSpace(shared = true, bound = true) {
   const directory = mkdtempSync(join(tmpdir(), 'hebra-mcp-space-format-'));
   directories.push(directory);
   const sqlitePath = join(directory, 'library.sqlite');
-  const port = await openNodeLibraryPort({ sqlitePath });
+  const spaceAccess = { spaceId: '955480b0-c2c3-471f-aa5d-3f37ed46fe68', scope: 'fixture', authorize: async () => {} };
+  const port = await openNodeLibraryPort({ sqlitePath, ...(shared ? { spaceAccess } : {}) });
   ports.push(port);
-  if (shared) {
-    const db = new DatabaseSync(sqlitePath);
-    db.prepare('INSERT INTO meta(key, value) VALUES (?, ?)').run(
-      'space_id', '955480b0-c2c3-471f-aa5d-3f37ed46fe68'
-    );
-    db.close();
-  }
   if (bound) await port.syncStorePort().libraryConnect({
     binding: { ...IDENTITY, libraryInstance: 'space-format-test' }, relayHasRecords: true
   });
-  return { port, sqlitePath, writer: new NoteWriter(port) };
+  return { port, sqlitePath, spaceAccess, writer: new NoteWriter(port) };
 }
 
 function incoming(minClient: number, rev: number): Parameters<SyncStorePort['syncApplyPage']>[0] {
@@ -71,11 +65,11 @@ describe('formato de espacio en el consumidor MCP', () => {
   });
 
   it('conserva el rechazo al reabrir, sin depender del estado en memoria del runner', async () => {
-    const { port, sqlitePath } = await openSpace();
+    const { port, sqlitePath, spaceAccess } = await openSpace();
     await port.syncStorePort().syncApplyPage(incoming(3, 1));
     await port.closeWhenIdle();
     ports.splice(ports.indexOf(port), 1);
-    const reopened = await openNodeLibraryPort({ sqlitePath });
+    const reopened = await openNodeLibraryPort({ sqlitePath, spaceAccess });
     ports.push(reopened);
     await expect(new NoteWriter(reopened).createNote({ body: '# Nueva', privacy: NO_PRIVATE }))
       .rejects.toMatchObject({ code: 'client_outdated' });

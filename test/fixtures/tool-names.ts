@@ -12,6 +12,7 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_links',
   'hebra_list_folders',
   'hebra_list_notes',
+  'hebra_list_spaces',
   'hebra_list_tags',
   'hebra_move_note',
   'hebra_read_note',

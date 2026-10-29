@@ -20,7 +20,7 @@
  * de llamar al `fetch` de Node, sin tocar el `init`: las cabeceras que ve el servidor son
  * las que manda hebra-mcp. `requested` guarda cada URL LÓGICA pedida.
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import {
@@ -30,6 +30,10 @@ import {
   InMemoryLibraryRelay,
   MemoryDeviceLinkRelay
 } from '../hebra-testing';
+
+import { MultiVaultLibraryRelay } from '../../vendor/hebra/src/lib/library/testing/multi-vault-relay';
+import { agentDeviceKeyId } from '../../src/hebra';
+import type { AgentSpaceAccess } from '../../src/spaces/protocol';
 
 export const LUMBRE = 'https://lumbre.test';
 const LIBRARY_PATH = /^\/api\/integrations\/hebra\/library\/v1\/vaults\/([0-9a-f]{32})\/(changes|records)$/;
@@ -68,6 +72,8 @@ async function readBody(req: IncomingMessage): Promise<Buffer> {
 export class FakeLumbre {
   readonly deviceLinks = new MemoryDeviceLinkRelay({ apiOrigin: LUMBRE });
   readonly relay = new InMemoryLibraryRelay();
+  readonly sharedRelay = new MultiVaultLibraryRelay('unused-control-grant');
+  relayFor(vault: string) { return this.vaultOwners.has(vault) ? this.relay : this.sharedRelay.vault(vault); }
   /** Cuenta con la que «David» aprueba en la página de Lumbre. */
   approvingUser = 'david';
   readonly exchanges: ExchangeSeen[] = [];
@@ -82,6 +88,24 @@ export class FakeLumbre {
   private readonly tokens = new Map<string, TokenEntry>();
   private readonly vaultOwners = new Map<string, string>();
   private credentialCount = 0;
+  readonly agentKeys = new Map<string, { deviceId: string; publicKey: unknown; keyId: string; accountId: string }>();
+  readonly agentSpaces = new Map<string, AgentSpaceAccess[]>();
+  private readonly deviceIds = new Map<string, string>();
+
+  addAgent(userId: string, deviceId: string) {
+    const credentialId = randomUUID();
+    const connection = this.deviceLinks.addCredential({ userId, credentialId, label: 'agent' });
+    this.tokens.set(connection.readToken, { credentialId, userId, kind: 'read' });
+    this.tokens.set(connection.writeToken, { credentialId, userId, kind: 'write' });
+    this.deviceIds.set(credentialId, deviceId);
+    return connection;
+  }
+
+  private mayReadVault(entry: TokenEntry, vault: string): boolean {
+    return this.vaultOwners.get(vault) === entry.userId ||
+      (this.agentSpaces.get(entry.credentialId) ?? []).some((space) => space.syncVaultId === vault);
+  }
+
 
   private constructor(
     private readonly server: Server,
@@ -237,7 +261,8 @@ export class FakeLumbre {
       if (challenge !== pending.challenge) return respond(401, { message: 'no' });
       this.codes.delete(body.code as string);
       this.credentialCount += 1;
-      const credentialId = `cred-mcp-${this.credentialCount}`;
+      const credentialId = `00000000-0000-4000-8000-${String(this.credentialCount).padStart(12, '0')}`;
+      this.deviceIds.set(credentialId, pending.deviceId);
       const connection = this.deviceLinks.addCredential({
         userId: pending.userId,
         credentialId,
@@ -251,6 +276,25 @@ export class FakeLumbre {
         readToken: connection.readToken,
         writeToken: connection.writeToken
       });
+    }
+
+    if (url.pathname === '/api/integrations/hebra/agent-device-key' && method === 'PUT') {
+      const entry = this.auth(req, 'write');
+      if (!entry) return json(401, { code: 'credential_revoked' });
+      const { publicKey } = JSON.parse(raw.toString('utf8'));
+      const keyId = await agentDeviceKeyId(publicKey);
+      const previous = this.agentKeys.get(entry.credentialId);
+      if (previous && previous.keyId !== keyId) return json(409, { code: 'version_conflict' });
+      const deviceId = this.deviceIds.get(entry.credentialId)!;
+      const accountId = createHash('sha256').update(`hebra-account:${entry.userId}`).digest('hex');
+      const record = { publicKey, keyId, deviceId, accountId };
+      this.agentKeys.set(entry.credentialId, record);
+      return json(200, { ...record, credentialId: entry.credentialId, actorKind: 'agent' });
+    }
+    if (url.pathname === '/api/integrations/hebra/spaces/agent-access' && method === 'GET') {
+      const entry = this.auth(req, 'read');
+      if (!entry || !this.agentKeys.has(entry.credentialId)) return json(401, { code: 'credential_revoked' });
+      return json(200, { spaces: this.agentSpaces.get(entry.credentialId) ?? [] });
     }
 
     if (url.pathname.startsWith(DEVICE_LINKS_PATH)) {
@@ -272,9 +316,9 @@ export class FakeLumbre {
       const kind = method === 'GET' ? 'read' : 'write';
       const entry = this.auth(req, kind);
       if (!entry) return json(401, { message: 'Credencial no válida' });
-      if (this.vaultOwners.get(syncVaultId) !== entry.userId) return json(404, { code: 'not_found' });
+      if (!this.mayReadVault(entry, syncVaultId)) return json(404, { code: 'not_found' });
       if (suffix === 'changes' && method === 'GET') {
-        const page = await this.relay.getChanges(
+        const page = await this.relayFor(syncVaultId).getChanges(
           syncVaultId,
           Number(url.searchParams.get('since') ?? 0),
           Number(url.searchParams.get('limit') ?? 500)
@@ -297,7 +341,7 @@ export class FakeLumbre {
             objectIds: string[];
           }>;
         };
-        const result = await this.relay.postRecords(
+        const result = await this.relayFor(syncVaultId).postRecords(
           syncVaultId,
           body.records.map((record) => ({
             ...record,
@@ -329,7 +373,7 @@ export class FakeLumbre {
     if (devices && method === 'POST') {
       const entry = this.auth(req, 'write');
       if (!entry) return json(401, { message: 'Credencial no válida' });
-      if (this.vaultOwners.get(devices[1]) !== entry.userId) return json(404, { code: 'not_found' });
+      if (!this.mayReadVault(entry, devices[1])) return json(404, { code: 'not_found' });
       this.registrations.push({ syncVaultId: devices[1], credentialId: entry.credentialId });
       return { status: 201, headers: {}, body: '' };
     }
