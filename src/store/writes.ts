@@ -1067,8 +1067,9 @@ export class NoteWriter {
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
+      const { operationId } = input;
       log.begin({
-        operationId: input.operationId,
+        operationId,
         fingerprint,
         noteId: input.id,
         targetBodySha256: sha256Hex(body),
@@ -1173,8 +1174,9 @@ export class NoteWriter {
         return { result: unchanged, wrote: false };
       }
 
+      const { operationId } = input;
       log.begin({
-        operationId: input.operationId,
+        operationId,
         fingerprint,
         noteId: input.id,
         targetBodySha256: sha256Hex(version.body),
@@ -1491,8 +1493,9 @@ export class NoteWriter {
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
+      const { operationId } = input;
       log.begin({
-        operationId: input.operationId,
+        operationId,
         fingerprint,
         noteId: input.id,
         targetBodySha256: sha256Hex(body),
