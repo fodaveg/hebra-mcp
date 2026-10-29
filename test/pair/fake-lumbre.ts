@@ -6,8 +6,8 @@
  *   David dentro. Exige un `webOrigin` loopback con IP literal y PKCE S256 (contrato L2a)
  *   y devuelve `callbacks.web` = `<webOrigin>/lumbre/connect?code=<64 hex>&apiOrigin=…`.
  * - `POST /api/integrations/hebra/exchange`: guarda las cabeceras recibidas (para la
- *   obligación 6: sin `Origin`), responde 403 con `Origin`, 401 con verifier incorrecto
- *   (sin quemar el código) y emite la credencial.
+ *   obligación 6: sin `Origin`), responde 403 con `Origin`, 400 sin `clientKind: "agent"`
+ *   (H-L7), 401 con verifier incorrecto (sin quemar el código) y emite la credencial.
  * - `…/device-links…`: lo reenvía tal cual a `MemoryDeviceLinkRelay` de Hebra (el doble
  *   que usan los tests de `device-link` de Hebra), que habla el mismo HTTP que el relé.
  * - `…/library/v1/vaults/{id}/{changes,records}`: el HTTP de `HttpLibraryTransport` sobre
@@ -256,6 +256,8 @@ export class FakeLumbre {
         return json(status, value);
       };
       if (req.headers.origin) return respond(403, { message: 'Origen no autorizado' });
+      // H-L7: Lumbre crea la credencial como agente solo si el canje lo dice.
+      if (body.clientKind !== 'agent') return respond(400, { message: 'clientKind' });
       const pending = typeof body.code === 'string' ? this.codes.get(body.code) : undefined;
       if (!pending || body.deviceId !== pending.deviceId) return respond(401, { message: 'no' });
       const verifier = typeof body.code_verifier === 'string' ? body.code_verifier : '';

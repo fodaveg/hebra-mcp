@@ -1540,6 +1540,8 @@ Comando `hebra-mcp pair`, interactivo en terminal:
      - `/pair` devuelve `callbacks.web` = `http://127.0.0.1:P/lumbre/connect?code=<64 hex>&apiOrigin=…`.
      - Canje: `POST /api/integrations/hebra/exchange` con `{code, deviceId, code_verifier}` y **sin**
        cabecera `Origin` (con `Origin`, 403). Un verifier incorrecto da 401 y no quema el código.
+       Desde H-L7 (decisión de Lumbre, 29 oct 2026) el cuerpo lleva además `clientKind: "agent"`:
+       Lumbre crea la credencial como agente antes de emitir los tokens.
    - **Obligaciones de hebra-mcp** (de la auditoría de Lumbre; cada una con su test en L2):
      1. Ignorar el `apiOrigin` de la query y usar el Lumbre configurado. Mientras el listener escucha,
         cualquier web puede disparar el callback con un `apiOrigin` falso para robar el verifier.

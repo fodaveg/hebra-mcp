@@ -161,6 +161,9 @@ describe('hebra-mcp pair (offline, contra FakeLumbre)', () => {
     const [exchange] = fake.exchanges;
     expect(exchange.status).toBe(200);
     expect(exchange.headers.origin).toBeUndefined();
+    // H-L7: la credencial se pide como agente; los demás campos, los de siempre.
+    expect(Object.keys(exchange.body).sort()).toEqual(['clientKind', 'code', 'code_verifier', 'deviceId']);
+    expect(exchange.body.clientKind).toBe('agent');
     const verifier = exchange.body.code_verifier as string;
     expect(Buffer.from(verifier, 'base64url').byteLength).toBeGreaterThanOrEqual(32);
 

@@ -92,10 +92,12 @@ describe('exchangePairingCode', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].headers.origin).toBeUndefined();
     expect(seen[0].headers['content-type']).toBe('application/json');
+    // H-L7: `clientKind: "agent"` junto a los tres campos de siempre, sin cambiarlos.
     expect(JSON.parse(seen[0].body)).toEqual({
       code: 'ab'.repeat(32),
       deviceId: DEVICE_ID,
-      code_verifier: 'v'.repeat(43)
+      code_verifier: 'v'.repeat(43),
+      clientKind: 'agent'
     });
     expect(connection).toMatchObject({ credentialId: 'c1', readToken: 'r1', writeToken: 'w1', apiOrigin: origin });
   });

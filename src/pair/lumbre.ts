@@ -10,10 +10,11 @@
  *   entero porque va atado a IndexedDB (verifier en `sessionStorage`, `deviceId` en su
  *   almacén); aquí el verifier vive en la memoria de `pair` y muere con él.
  * - `exchangePairingCode`: `POST /api/integrations/hebra/exchange` con
- *   `{code, deviceId, code_verifier}` y SIN cabecera `Origin` (obligación 6: con
- *   `Origin`, Lumbre responde 403). El `fetch` de Node no la pone; aquí solo se manda
- *   `Content-Type`. Siempre contra el Lumbre CONFIGURADO, nunca el `apiOrigin` que llegue
- *   por el callback (obligación 1).
+ *   `{code, deviceId, code_verifier, clientKind: "agent"}` (H-L7: con `clientKind`,
+ *   Lumbre crea la credencial como agente antes de emitir los tokens) y SIN cabecera
+ *   `Origin` (obligación 6: con `Origin`, Lumbre responde 403). El `fetch` de Node no la
+ *   pone; aquí solo se manda `Content-Type`. Siempre contra el Lumbre CONFIGURADO, nunca
+ *   el `apiOrigin` que llegue por el callback (obligación 1).
  * - `checkPairingAccount`: la guarda de `lumbre-pairing.ts` de Hebra con sus tres ramas.
  *   Sin identidad guardada no hay biblioteca atada a ninguna cuenta y se acepta. Con
  *   identidad, un relé distinto se rechaza sin preguntar, y si no se lee la bóveda con la
@@ -94,7 +95,9 @@ export async function exchangePairingCode(input: {
       body: JSON.stringify({
         code: input.code,
         deviceId: input.deviceId,
-        code_verifier: input.verifier
+        code_verifier: input.verifier,
+        // H-L7 (decisión de Lumbre, 29 oct 2026): la credencial nace como agente.
+        clientKind: 'agent'
       }),
       redirect: 'error'
     });
