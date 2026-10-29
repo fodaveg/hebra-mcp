@@ -354,6 +354,31 @@ informativos. `notChecked` dice lo que no mira (el frontmatter y las descripcion
 otros): si importa, que pase la auditoría de jdex-manager en Hebra. No arregla nada; propón
 el arreglo y, si lo quiere, hazlo con las herramientas de siempre.
 
+## Relevos, changelogs y documentos efímeros
+
+En una biblioteca con Johnny.Decimal, los relevos entre sesiones, los changelogs y cualquier
+documento de vida corta de un proyecto (partes de estado, notas de trabajo de un lote,
+borradores que se van a tirar) van a la carpeta `.05` de la categoría del proyecto, nunca a
+la carpeta del ID del proyecto ni a su raíz. Para `21.11 lumbre`, la `21.05`.
+
+1. **Una subcarpeta por proyecto dentro de la `.05`, con su nombre sin número**:
+   `21.05 memoria de agentes para productos de software/lumbre/`. Nunca `…/21.11 lumbre/`:
+   `hebra_jd_audit` daría el número repetido como ID duplicado.
+2. **La ruta exacta sale de `hebra_list_folders`.** Si falta la subcarpeta del proyecto,
+   `hebra_create_folder` con el `id` de la `.05` como `parentId`.
+3. **Si la categoría no tiene `.05`**, no la crees: ni a mano (crear un ID es crear antes su
+   nota del JDex) ni con `hebra_jd_new_id`, que da el siguiente ID de contenido y nunca un
+   `.0x`. Díselo al usuario para que la cree en Hebra y deja el documento pendiente en la
+   entrega, sin guardarlo en otro sitio.
+4. **La `.05` está fuera del listado general.** El usuario la marca en la app con "Ocultar del
+   listado general", que se hereda a todas sus subcarpetas: lo que hay dentro no sale en Notas,
+   Hoy, Sin etiquetar ni Tareas nuevas, y sigue en la barra lateral y para el MCP. El MCP no
+   puede poner esa marca ni ver si está puesta. Si el usuario dice que ve relevos o changelogs
+   en el listado principal, pídele que marque así la `.05` de esa categoría.
+5. **Lo que dura no va ahí**: las decisiones confirmadas, a la nota de memoria del proyecto
+   que fijen las instrucciones del usuario; los audits, specs y guías, a la carpeta del ID del
+   proyecto.
+
 ## Ficheros de trabajo (checkout / apply)
 
 Para reestructurar una o varias notas grandes con herramientas de ficheros (`rg`, `sed`, Edit,
@@ -545,6 +570,8 @@ aplicar o deshacer un lote con `hebra_replace_in_notes` no es una orden del usua
 - **Hebra**: las notas que el usuario pida leer o escribir ahí.
 - **Tareas** → Lumbre (skill `lumbre`) si el usuario lo usa, nunca una lista de tareas en
   una nota de Hebra.
+- **Relevos, changelogs y documentos efímeros** → la `.05` de la categoría del proyecto
+  (apartado "Relevos, changelogs y documentos efímeros").
 - Dónde se registra cualquier otra cosa (decisiones de proyecto, memoria de agentes) lo
   fijan las instrucciones globales del usuario (`CLAUDE.md`, `AGENTS.md`), que mandan sobre
   esta skill.
