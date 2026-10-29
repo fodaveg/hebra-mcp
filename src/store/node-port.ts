@@ -751,6 +751,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => grepNoteRows(this.db));
   }
 
+  /** El prefiltro de subcadena (`grepSubstringCandidates`): el índice, y también el cuerpo
+   *  en bruto de las notas con comentarios de Obsidian, que el índice no guarda (TRA-18). */
   async grepCandidates(match: string, rowids: readonly number[]): Promise<Set<number> | null> {
     return this.read(() => grepSubstringCandidates(this.db, match, rowids));
   }

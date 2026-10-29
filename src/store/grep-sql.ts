@@ -6,10 +6,15 @@
  * esas se lee el cuerpo.
  */
 import type { DatabaseSync } from 'node:sqlite';
-import { SUBSTRING_INDEX_VERSION, type FoldersList } from '../hebra';
+import {
+  searchBodyInUseSql,
+  SUBSTRING_INDEX_VERSION,
+  type FoldersList
+} from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { logEvent } from '../log/logger';
+import { lowerFoldSafeLiteral, trigramMatchLiteral } from './grep';
 import { VISIBILITY_COLUMNS, visibilityEntries } from './privacy-sql';
 
 /** Una nota viva (ni papelera ni lápida), sin su cuerpo: lo que `hebra_grep` necesita para
@@ -124,11 +129,25 @@ export function substringIndexUsable(engineVersion: number, markerVersion: numbe
  * Las notas de `rowids` que PUEDEN casar con un literal, según el índice de subcadena:
  * las que da `match` (`trigramMatch` de `./grep.ts`), las que siguen en la cola del índice
  * (se guardaron y aún no se indexaron) y las que tienen en el cuerpo algo que el índice no
- * guarda tal cual (un enlace con alias, un `[[id:…]]`, un `sha256:…` o un `hebra://…`),
- * donde el literal podría estar sin que el índice lo vea. `null` si el índice no está
- * completo: entonces no se puede usar y se recorre todo.
+ * guarda tal cual, donde el literal podría estar sin que el índice lo vea. `null` si el
+ * índice no está completo o `match` no es una consulta de `trigramMatch`: entonces no se
+ * puede usar y se recorre todo.
  *
- * Solo se lee el cuerpo (para lo último) de las notas de `rowids`, que son las que quien
+ * Lo que el índice no guarda tal cual (TRA-C01):
+ * - Un enlace con alias, un `[[id:…]]`, un `sha256:…` o un `hebra://…`: esas notas se
+ *   suman SIEMPRE, como antes.
+ * - Los comentarios de Obsidian `%%…%%` (TRA-18): el cuerpo indexado de una nota con
+ *   comentarios es su `search_body` (`searchBodyInUseSql` de Hebra), sin ellos. Esas se
+ *   miran en el cuerpo EN BRUTO con `instr(lower(cuerpo), lower(literal))`, que también ve
+ *   el texto de dentro del comentario: una biblioteca sin comentarios no recorre nada más
+ *   que el índice. `lower()` de SQLite solo pliega mayúsculas ASCII; si el literal trae un
+ *   carácter con el que puede dejarse una variante de mayúsculas de JavaScript
+ *   (`lowerFoldSafeLiteral` de `./grep.ts`: la `é` y su `É`, la `k` y el signo Kelvin…),
+ *   esas notas se suman TODAS, como las de antes: el prefiltro es un superconjunto.
+ * - Una base anterior a TRA-18 (un lector de solo lectura que no aplica el esquema, sin
+ *   la columna `search_body`) guarda los comentarios en el índice: no hace falta nada.
+ *
+ * Solo se lee el cuerpo (para esto último) de las notas de `rowids`, que son las que quien
  * llama ya decidió mirar (visibles, sin bloquear): el de una nota oculta nunca. La consulta
  * al índice sí recorre sus entradas (de todas las notas, como `hebra_search`), pero solo
  * devuelve `rowid` y se cruza después con `rowids`.
@@ -150,6 +169,8 @@ function substringCandidatesNow(
   rowids: readonly number[]
 ): Set<number> | null {
   if (!substringIndexComplete(db)) return null;
+  const literal = trigramMatchLiteral(match);
+  if (literal === null) return null;
   const wanted = new Set(rowids);
   const out = new Set<number>();
   const keep = (rows: unknown[]): void => {
@@ -160,6 +181,10 @@ function substringCandidatesNow(
   };
   keep(db.prepare('SELECT rowid AS rid FROM notes_trigram WHERE notes_trigram MATCH ?').all(match));
   keep(db.prepare('SELECT rowid AS rid FROM notes_trigram_pending').all());
+  // ¿Tiene la base la columna `search_body` de TRA-18? Sin ella (un lector sobre una base
+  // que ningún escritor abrió con TRA-18), el índice guarda el cuerpo tal cual, comentarios
+  // incluidos, y basta el índice.
+  const searchBody = db.prepare(`SELECT 1 AS ok FROM pragma_table_info('notes') WHERE name = 'search_body'`).get();
   keep(
     db
       .prepare(
@@ -168,9 +193,16 @@ function substringCandidatesNow(
          WHERE (instr(n.body, '[[') > 0 AND instr(n.body, '|') > 0)
             OR instr(n.body, '[[id:') > 0
             OR instr(n.body, 'sha256:') > 0
-            OR instr(n.body, 'hebra://') > 0`
+            OR instr(n.body, 'hebra://') > 0
+            OR (? AND ${searchBodyInUseSql('n')}
+                AND (instr(lower(n.body), lower(?)) > 0 OR ?))`
       )
-      .all(JSON.stringify(rowids))
+      .all(
+        JSON.stringify(rowids),
+        searchBody === undefined ? 0 : 1,
+        literal,
+        lowerFoldSafeLiteral(literal) ? 0 : 1
+      )
   );
   return out;
 }

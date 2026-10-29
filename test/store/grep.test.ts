@@ -12,10 +12,13 @@ import {
   GREP_LINE_MAX_CHARS,
   lineStarts,
   lineText,
+  lowerFoldSafeChar,
+  lowerFoldSafeLiteral,
   requiredLiteral,
   scanBody,
   sliceLines,
   trigramMatch,
+  trigramMatchLiteral,
   trigramSafeChar
 } from '../../src/store/grep';
 import { headingAtLine, parseHeadings } from '../../src/store/sections';
@@ -139,6 +142,53 @@ describe('prefiltro de subcadena', () => {
     expect(trigramMatch('водка', true)).toBe('body : "водка"');
     expect(trigramMatch('dice "sí"', false)).toBe('body : "dice ""sí"""');
     expect(trigramMatch('Canción', false)).toBe('body : "Canción"');
+  });
+
+  it('trigramMatchLiteral: el literal de la consulta, con comillas, y nada más', () => {
+    expect(trigramMatchLiteral(trigramMatch('Canción', false)!)).toBe('Canción');
+    expect(trigramMatchLiteral(trigramMatch('dice "sí"', false)!)).toBe('dice "sí"');
+    expect(trigramMatchLiteral(trigramMatch('водка', true)!)).toBe('водка');
+    expect(trigramMatchLiteral('body : "abc"')).toBe('abc');
+    expect(trigramMatchLiteral('garbanzos')).toBeNull();
+    // No vale una consulta con más de una frase, ni una que no sale de `trigramMatch`.
+    expect(trigramMatchLiteral('body : "a" OR body : "b"')).toBeNull();
+    expect(trigramMatchLiteral('body : "a" NEAR(b)')).toBeNull();
+    expect(trigramMatchLiteral('body : "')).toBeNull();
+  });
+
+  it('lowerFoldSafe: con lo seguro, lower() de SQLite iguala todo lo que JavaScript iguala', () => {
+    const db = new DatabaseSync(':memory:');
+    try {
+      const lower = (text: string): string => (db.prepare('SELECT lower(?) AS l').get(text) as { l: string }).l;
+      // Medido como el comentario de `lowerFoldSafeChar`: cada letra ASCII que marca
+      // segura (todas menos k, K, s y S) iguala bajo la bandera `iu` a lo que iguala, y
+      // con todo el plano básico eso tiene que plegar igual con `lower()`.
+      let safe = 0;
+      for (const char of 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz') {
+        if (!lowerFoldSafeChar(char)) continue;
+        safe += 1;
+        const re = new RegExp(char, 'iu');
+        for (let other = 0x20; other <= 0xffff; other += 1) {
+          if (other >= 0xd800 && other <= 0xdfff) continue;
+          if (!re.test(String.fromCharCode(other))) continue;
+          expect(lower(String.fromCharCode(other)), `${char} ~ ${other.toString(16)}`).toBe(lower(char));
+        }
+      }
+      expect(safe).toBe(48);
+      // Los inseguros: las dos letras ASCII con pareja fuera de ASCII (el signo Kelvin y
+      // la `ſ` larga) y todo lo que tiene mayúsculas o minúsculas.
+      expect(lowerFoldSafeLiteral('berenjena')).toBe(true);
+      expect(lowerFoldSafeLiteral('boquerones')).toBe(false); // la `s`
+      expect(lowerFoldSafeLiteral('CAMIÓN')).toBe(false);
+      for (const unsafe of ['k', 'K', 's', 'S', 'é', 'É', 'В', 'ß', 'ς']) {
+        expect(lowerFoldSafeChar(unsafe), JSON.stringify(unsafe)).toBe(false);
+      }
+      // Sin mayúsculas, seguro también fuera de ASCII: no hay con qué confundirlo.
+      expect(lowerFoldSafeLiteral('日本語と emoji')).toBe(true);
+      expect(lowerFoldSafeLiteral('')).toBe(true);
+    } finally {
+      db.close();
+    }
   });
 
   it('cada carácter seguro casa en el índice con todo lo que JavaScript iguala a él', () => {

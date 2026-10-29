@@ -323,8 +323,10 @@ export interface HebraLibraryPort {
    *  su `rowid`), en un turno de la cola. Sin filtro: lo aplica la herramienta. */
   grepNotes(): Promise<GrepNoteRow[]>;
   /** `hebra_grep` (D13): de `rowids`, las que pueden casar según el índice de subcadena
-   *  (`grepSubstringCandidates` de `./grep-sql.ts`), o `null` si el índice no está
-   *  completo. Solo lee el cuerpo de las de `rowids`. */
+   *  (`grepSubstringCandidates` de `./grep-sql.ts`; desde TRA-18, el índice no guarda el
+   *  texto de los comentarios `%%…%%`, así que también mira el cuerpo en bruto de esas
+   *  notas), o `null` si el índice no está completo. Solo lee el cuerpo de las de
+   *  `rowids`. */
   grepCandidates(match: string, rowids: readonly number[]): Promise<Set<number> | null>;
   /** `hebra_grep` (D13): el cuerpo de las de `rowids` que siguen vivas, sin bloquear y
    *  visibles con el filtro de `privacy` rehecho en ese mismo turno (`grepVisibleBodies`).

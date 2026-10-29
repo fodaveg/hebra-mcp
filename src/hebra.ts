@@ -24,6 +24,10 @@ export {
   substringResidualSql,
   substringSnippet
 } from '../vendor/hebra/src/lib/library/substring-search';
+// Si el cuerpo indexado de una fila es su `search_body` (TRA-18: el cuerpo sin los
+// comentarios de Obsidian): la condición del prefiltro de `hebra_grep` que mira el cuerpo
+// en bruto de las notas con comentarios (`src/store/grep-sql.ts`).
+export { searchBodyInUseSql } from '../vendor/hebra/src/lib/library/search-body';
 export { SEARCH_MARK_START, SEARCH_MARK_END } from '../vendor/hebra/src/lib/library/types';
 export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src/lib/library/types';
 // El error del relé de Blob V2 (lo lanza `HttpBlobRelayV2`, ya empaquetado): `SyncRunner`

@@ -208,6 +208,8 @@ export async function createNote(
 ): Promise<NoteRow> {
   const created = await engine.noteCreate(folderId);
   const derived = deriveNote(body);
+  // `searchBody` como el escritor de verdad (TRA-18): el cuerpo indexado de una nota con
+  // comentarios de Obsidian es el que va sin ellos.
   await engine.noteSave({
     id: created.id,
     body,
@@ -219,7 +221,8 @@ export async function createNote(
     tags: derived.tags,
     links: derived.links,
     blobRefs: derived.blobRefs,
-    props: derived.props
+    props: derived.props,
+    searchBody: derived.searchBody
   });
   return (await engine.noteRead(created.id))!;
 }
@@ -239,7 +242,8 @@ async function saveBody(engine: SqliteLibraryEngine, id: string, body: string): 
     tags: derived.tags,
     links: derived.links,
     blobRefs: derived.blobRefs,
-    props: derived.props
+    props: derived.props,
+    searchBody: derived.searchBody
   });
 }
 

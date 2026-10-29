@@ -26,7 +26,9 @@
  * Prefiltro: con un literal (o el trozo que toda coincidencia de la expresión contiene,
  * `requiredLiteral`) de al menos tres caracteres, el índice de subcadena de Hebra
  * (`notes_trigram`) da un superconjunto de las notas que pueden casar
- * (`trigramMatch`, `grepSubstringCandidates`), y solo se leen esas. Se comprueba SIEMPRE
+ * (`trigramMatch`, `grepSubstringCandidates`), y solo se leen esas. El índice no guarda el
+ * texto de los comentarios de Obsidian `%%…%%` (TRA-18) ni el de los destinos de enlaces:
+ * esas notas se miran aparte (`grepSubstringCandidates`). Se comprueba SIEMPRE
  * sobre el cuerpo: el índice no guarda texto. Sin índice completo (el relleno de
  * `fillSubstringIndex` no ha terminado, o es un lector sobre una base sin él), o con un
  * patrón con el que el índice se podría dejar notas, se recorren todas.

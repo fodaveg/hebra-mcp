@@ -648,6 +648,53 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     expect(await runGrep(withoutPrivate.ctx, { pattern: 'Garbanzos con' })).toEqual(before);
   });
 
+  it('lo que solo está dentro de un comentario de Obsidian, con el índice completo (TRA-C01)', async () => {
+    // TRA-18: el cuerpo indexado de una nota con comentarios es su `search_body`, sin
+    // ellos. El prefiltro mira también el cuerpo EN BRUTO de esas notas; y como `lower()`
+    // de SQLite no pliega la `Ó` de «CAMIÓN», con un literal así no se descartan.
+    const path = await buildSmallLibrary([
+      '# Con comentario\n\nTexto visible.\n%% berenjena en un comentario %%\nFin.\n',
+      '# Bloque\n\n%%\nCAMIÓN\nen varias líneas\n%%\n',
+      '# Sin comentarios\n\nNada que ver.\n'
+    ]);
+    const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
+    try {
+      const rows = (await port.grepNotes()).sort((left, right) => left.rowid - right.rowid);
+      const rowids = rows.map((row) => row.rowid);
+      const [first, second] = [rows[0]!.id, rows[1]!.id];
+      // El índice guarda el cuerpo sin los comentarios: «berenjena» no está en él.
+      const db = new DatabaseSync(path);
+      try {
+        const hits = db
+          .prepare(`SELECT count(*) AS c FROM notes_trigram WHERE notes_trigram MATCH 'body : "berenjena"'`)
+          .get() as { c: number | bigint };
+        expect(Number(hits.c)).toBe(0);
+      } finally {
+        db.close();
+      }
+      // Un literal ASCII: lo encuentra en el cuerpo en bruto de la nota con comentarios,
+      // y SOLO esa queda como candidata (la del bloque no trae «berenjena»).
+      const exact = await port.grepCandidates(trigramMatch('berenjena', false)!, rowids);
+      expect([...exact!]).toEqual([rowids[0]]);
+      const berenjena = (await allPages(ctx, { pattern: 'berenjena' }))
+        .flatMap((page) => page.matches)
+        .map((match) => [match.id, match.line]);
+      expect(berenjena).toEqual([[first, 4]]);
+      // Con mayúsculas fuera de ASCII: sin distinguir, `camión` encuentra la «CAMIÓN» del
+      // comentario, que `lower()` de SQLite no iguala: las notas con comentarios se quedan.
+      const folded = await port.grepCandidates(trigramMatch('camión', false)!, rowids);
+      expect([...folded!].sort((left, right) => left - right)).toEqual(
+        [rowids[0], rowids[1]].sort((left, right) => left - right)
+      );
+      const camiones = (await allPages(ctx, { pattern: 'camión' }))
+        .flatMap((page) => page.matches)
+        .map((match) => [match.id, match.line]);
+      expect(camiones).toEqual([[second, 4]]);
+    } finally {
+      port.close();
+    }
+  });
+
   it('con el índice, solo se leen las candidatas', async () => {
     const read: number[] = [];
     const port = withoutPrivate.port;

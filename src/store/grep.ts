@@ -12,6 +12,9 @@
  * - **Prefiltro de subcadena** (`trigramMatch`): la consulta de `notes_trigram` (H5 de Hebra)
  *   que da un SUPERCONJUNTO de las notas con alguna coincidencia, o `null` si con este
  *   patrón el índice podría dejarse alguna (entonces se recorre todo). Ver su comentario.
+ *   Desde TRA-18 el índice no guarda el texto de los comentarios `%%…%%`: quien llama
+ *   (`grepSubstringCandidates`) mira también el cuerpo en bruto de esas notas, con
+ *   `trigramMatchLiteral` y `lowerFoldSafeLiteral`.
  */
 
 /** Tope del patrón, en unidades UTF-16. */
@@ -329,15 +332,21 @@ const TRIGRAM_HIDDEN_DELIMITERS = /[[\]|!]/;
  * mayúsculas, salvo ellas), o `null` si con él el índice podría dejarse alguna.
  *
  * Por qué es un superconjunto: el índice guarda el texto VISIBLE del cuerpo
- * (`substringIndexText` de Hebra: el cuerpo con los destinos de enlaces y adjuntos, los
- * `hebra://…` y los `sha256:…` sustituidos por un espacio) plegado carácter a carácter
- * (sin mayúsculas ni tildes). Un literal que aparece en el cuerpo sin tocar ninguno de
- * esos trozos aparece en el texto visible, y su plegado en el plegado del índice. Las
- * excepciones, cada una cerrada aquí o en quien llama:
+ * (`substringIndexText` de Hebra sobre el cuerpo indexado, `indexedBodySql`: el cuerpo tal
+ * cual o, desde TRA-18, sin los comentarios de Obsidian `%%…%%` cuando la fila trae su
+ * `search_body`, y con los destinos de enlaces y adjuntos, los `hebra://…` y los
+ * `sha256:…` sustituidos por un espacio) plegado carácter a carácter (sin mayúsculas ni
+ * tildes). Un literal que aparece en el cuerpo sin tocar ninguno de esos trozos aparece en
+ * el texto visible, y su plegado en el plegado del índice. Las excepciones, cada una
+ * cerrada aquí o en quien llama:
  * - El literal toca un trozo oculto: sin `[`, `]`, `|` ni `!` solo puede caer DENTRO del
  *   destino de un enlace con alias, de un `[[id:…]]`, de un `sha256:…` o de un
  *   `hebra://…` (o empezar en uno). Quien llama suma siempre las notas cuyo cuerpo tiene
- *   alguno (`grepSubstringCandidates`); con esos caracteres en el literal, `null`.
+ *   alguno, y mira el cuerpo en bruto de las notas con comentarios
+ *   (`grepSubstringCandidates`); con esos caracteres en el literal, `null`.
+ * - El literal está solo dentro de un comentario `%%…%%` de una nota con `search_body`
+ *   (TRA-18): el índice no lo guarda. Quien llama lo busca en el cuerpo en bruto de esas
+ *   notas (`grepSubstringCandidates` con `trigramMatchLiteral`).
  * - Sin distinguir mayúsculas, JavaScript iguala caracteres que FTS5 no: solo dentro de
  *   `TRIGRAM_SAFE_RANGES` y fuera de `TRIGRAM_UNSAFE_IGNORING_CASE`.
  * - Menos de `TRIGRAM_MIN_CHARS` caracteres: el índice no encuentra nada.
@@ -350,6 +359,51 @@ export function trigramMatch(required: string | null, caseSensitive: boolean): s
   if (codePoints.length < TRIGRAM_MIN_CHARS) return null;
   if (!codePoints.every((codePoint) => trigramSafeChar(codePoint, caseSensitive))) return null;
   return `body : "${required.replace(/"/g, '""')}"`;
+}
+
+/**
+ * El literal de la consulta `MATCH` que construye `trigramMatch` (`body : "…"`, con las
+ * comillas dobladas), o `null` si `match` no es una de ellas (comprobado reconstruyéndola:
+ * el análisis es exacto). Lo usa `grepSubstringCandidates` para mirar también el cuerpo
+ * en bruto de las notas con comentarios: el índice no guarda su texto (TRA-18).
+ */
+export function trigramMatchLiteral(match: string): string | null {
+  if (!match.startsWith('body : "') || !match.endsWith('"')) return null;
+  const literal = match.slice('body : "'.length, -1).replace(/""/g, '"');
+  if (literal.length === 0) return null;
+  return `body : "${literal.replace(/"/g, '""')}"` === match ? literal : null;
+}
+
+/**
+ * ¿Se puede buscar `char` en un cuerpo en bruto con `instr(lower(cuerpo), lower(literal))`
+ * sin dejar una coincidencia real sin distinguir mayúsculas? `lower()` de SQLite SOLO pliega
+ * las mayúsculas ASCII, y JavaScript (el plegado simple de la bandera `iu`) iguala
+ * caracteres que `lower()` deja distintos: entonces el literal estaría en el cuerpo y la
+ * nota quedaría fuera del prefiltro. Son dos casos (medidos con node:sqlite, barrido del
+ * plano básico; `test/store/grep.test.ts` lo vuelve a medir):
+ * - `k`, `K`, `s` y `S`: su plegado `iu` también trae el signo Kelvin `K` (U+212A) y la
+ *   `ſ` larga (U+017F), que `lower()` no toca. Son las ÚNICAS letras ASCII con pareja
+ *   fuera de ASCII.
+ * - Un carácter con mayúsculas o minúsculas (la `é` y su `É`, la `В` cirílica, la `ß`…):
+ *   `lower()` no las pliega.
+ * El resto es seguro: el ASCII sin esas cuatro letras y los caracteres sin mayúsculas
+ * (cifras, puntuación, CJK, emoji…).
+ */
+export function lowerFoldSafeChar(char: string): boolean {
+  const code = char.codePointAt(0)!;
+  if (code >= 0x20 && code <= 0x7e) {
+    return !(code === 0x6b || code === 0x4b || code === 0x73 || code === 0x53);
+  }
+  return char.toLowerCase() === char && char.toUpperCase() === char;
+}
+
+/**
+ * ¿Se puede buscar TODO `literal` así? Con un carácter que no (`lowerFoldSafeChar`), quien
+ * llama no descarta con el cuerpo en bruto: mira la nota entera (ver
+ * `grepSubstringCandidates`).
+ */
+export function lowerFoldSafeLiteral(literal: string): boolean {
+  return [...literal].every(lowerFoldSafeChar);
 }
 
 /** ¿Es `index` la segunda mitad de un par suplente? Para no cortar un carácter. */
