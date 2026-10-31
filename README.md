@@ -115,6 +115,11 @@ de hasta 8 MB desde D9 (la app corta en 7 514 796 bytes).
 
 ## Emparejar (L2)
 
+El comando `hebra-mcp` es un lanzador en `~/.local/bin` que ejecuta `dist/cli.mjs` con Node 24
+(no `npm link`: el `node` por defecto puede ser otra versión). Cómo instalarlo: apartado
+"Instalar el comando `hebra-mcp`" de `skills/hebra/SKILL.md`. `pair` necesita una terminal
+real (TTY).
+
 ```sh
 hebra-mcp pair [--lumbre https://app.lumbre.pro] [--label "Claude (hebra-mcp)"]
 claude mcp add hebra -- hebra-mcp serve

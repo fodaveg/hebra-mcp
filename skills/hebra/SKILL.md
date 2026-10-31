@@ -66,6 +66,49 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
   `linked`, `revoked`, `lastSyncAt` y `pendingUpload` dicen si el problema es el vínculo o
   el sync, no la búsqueda.
 
+## Instalar el comando `hebra-mcp`
+
+`pair`, `unpair`, `serve`, `checkout` y `apply` se lanzan con el comando `hebra-mcp`. Si
+`command -v hebra-mcp` no devuelve nada (`zsh: command not found: hebra-mcp`), instálalo tú
+antes de seguir, sin pedírselo al usuario: es un lanzador en `~/.local/bin`, que ya está en
+el `PATH` del Mac y de Fedora.
+
+No uses `npm link` ni `npm install -g`: el `bin` arranca con `#!/usr/bin/env node`, y el
+`node` por defecto del shell puede ser otra versión (en el Mac de David, la 22 de nvm).
+`package.json` pide Node 24; el lanzador busca un Node 24 explícito.
+
+1. Comprueba que existen el repo (`~/code/hebra-mcp`, o la ruta en `HEBRA_MCP_REPO`) con
+   `dist/cli.mjs` (si falta, `npm run build` en el repo) y un Node 24 (`nvm install 24` o
+   `node@24` de Homebrew).
+2. Crea el lanzador:
+
+   ```sh
+   mkdir -p ~/.local/bin
+   cat > ~/.local/bin/hebra-mcp <<'LANZADOR'
+   #!/bin/sh
+   # Lanza hebra-mcp (dist/cli.mjs del repo) con Node 24, que es lo que pide su package.json.
+   # El node por defecto del shell puede ser otra versión (nvm): se busca un v24 explícito.
+   REPO="${HEBRA_MCP_REPO:-$HOME/code/hebra-mcp}"
+   NODE=""
+   for n in "$HEBRA_MCP_NODE" "$(command -v node)" "$HOME"/.nvm/versions/node/v24.*/bin/node \
+     /opt/homebrew/opt/node@24/bin/node /usr/local/opt/node@24/bin/node; do
+     [ -n "$n" ] && [ -x "$n" ] && "$n" -v 2>/dev/null | grep -q '^v24\.' && NODE="$n"
+   done
+   [ -n "$NODE" ] || { echo "hebra-mcp: no encuentro Node 24 (nvm install 24 o HEBRA_MCP_NODE=<ruta>)" >&2; exit 1; }
+   [ -f "$REPO/dist/cli.mjs" ] || { echo "hebra-mcp: falta $REPO/dist/cli.mjs (npm run build en el repo)" >&2; exit 1; }
+   exec "$NODE" "$REPO/dist/cli.mjs" "$@"
+   LANZADOR
+   chmod 755 ~/.local/bin/hebra-mcp
+   ```
+
+3. Comprueba: `hebra-mcp` sin argumentos imprime `uso:` con la lista de órdenes.
+
+El lanzador ejecuta el `dist/` del repo: tras un `git pull` con cambios de código, `npm run
+build` en el repo. En Windows (Git Bash) no está probado.
+
+`pair` necesita una terminal real (TTY): con el `!` de Claude Code falla con `no_tty`. Pásale
+al usuario la orden para que la pegue en su terminal.
+
 ## Qué puede y qué no
 
 Por diseño (`SPEC.md` §2, D2): el MCP modifica notas existentes, pero **solo por sustituciones
@@ -398,8 +441,8 @@ hebra-mcp apply                  # devuelve solo las cambiadas e imprime el lote
 hebra-mcp undo --lote <lote>     # si hace falta, deshace ese lote
 ```
 
-Si `hebra-mcp` no está en el `PATH`, es `node <repo de hebra-mcp>/dist/cli.mjs` con las mismas
-órdenes (antes, `npm run build` en ese repo).
+Si `hebra-mcp` no está en el `PATH`, instálalo antes (apartado "Instalar el comando
+`hebra-mcp`").
 
 - **Selección** de `checkout`: `--all`, `--consulta <texto>` (búsqueda), `--titulo <título
   exacto>` o `--carpeta <ruta>` (con sus subcarpetas). `--consulta` y `--titulo` se repiten y se
