@@ -468,10 +468,15 @@ sesión en la nube (§12.7, C6).
   tocar el volumen `hebra-mcp_data`.
 - **Retirar una cuenta**: seguir la secuencia individual anterior sin borrar
   `HEBRA_MCP_DATA_DEVICE`; para `legacy-root`, la raíz contiene además estado
-  global y tampoco es el objetivo de borrado. La superficie operativa concreta
-  de retirada individual aún debe reconciliarse con el núcleo antes del
-  despliegue; este runbook no inventa un comando. En una emergencia sí se puede
-  cerrar temporalmente todo el conector.
+  global y tampoco es el objetivo de borrado. El operador identifica la entrada
+  correcta del registro de cuentas y ejecuta `node dist/cli.mjs account-remove
+  <account-id>` dentro del contenedor, con su usuario y volumen habituales. El
+  ID es opaco (la entrada histórica usa `legacy`), nunca un email ni un `sub`.
+  Con el daemon activo, la orden usa `control/accounts.sock` (0600) y mantiene
+  operativas las otras cuentas. Sin daemon, adquiere el bloqueo global y no abre
+  listener. Un error o timeout no acredita que la retirada haya terminado:
+  comprobar el estado y reintentar la misma cuenta; nunca borrar datos a mano
+  para forzar el cierre. En una emergencia se puede cerrar todo el conector.
 - **Retirar** (por ejemplo, para desmontar el conector remoto por completo):
 
   ```bash

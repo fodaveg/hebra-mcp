@@ -100,7 +100,11 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    mem_limit: 256m
+    # D21: hasta dos contextos personales abiertos. La instancia monousuario
+    # midió 130.6 MiB; el fixture de dos cuentas midió 219.5 MiB incluyendo
+    # Vitest (no equivale a carga real). El VPS tiene margen comprobado para
+    # este techo; el consumo con ambas bibliotecas reales se verifica en QA.
+    mem_limit: 512m
     pids_limit: 128
     healthcheck:
       test: ['CMD-SHELL', 'wget --quiet --spider http://127.0.0.1:8787/healthz || exit 1']

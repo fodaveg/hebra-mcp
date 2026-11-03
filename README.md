@@ -184,6 +184,7 @@ Lumbre comprueba la propiedad de la biblioteca y emite la concesión:
 
 ```sh
 hebra-mcp serve-http            # requiere configuración de backchannel
+hebra-mcp account-remove <account-id> # retira solo la cuenta indicada
 hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
 ```
 
@@ -194,6 +195,9 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   frente al operador con acceso root, que puede leer esas claves y notas.
 - En el contenedor, `oauth-revoke-all` actúa sobre el volumen compartido sin abrir la
   biblioteca; el emparejado y los comandos que sí la abren conservan el bloqueo de escritor.
+- `account-remove` es una operación administrativa local: con el daemon activo usa su
+  socket protegido; sin él toma el bloqueo global y trabaja sin listener HTTP. El ID es
+  el identificador opaco del registro de cuentas, no el email ni el `sub` de Sumego.
 - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`
   (`127.0.0.1`; en el contenedor, `0.0.0.0`), `HEBRA_MCP_PUBLIC_URL`
   (`https://mcp.hebra.pro`), `LUMBRE_APP_ORIGIN` (`https://app.lumbre.pro`: el origen de
