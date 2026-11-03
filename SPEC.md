@@ -2299,6 +2299,21 @@ terminales: continúa una revocación pendiente o limpia uno caducado antes de a
 esa cuenta. El TTL no autoriza a olvidar un efecto remoto sin intentar revocarlo ni a publicar una
 cuenta incompleta.
 
+Antes de canjear el código se persiste la intención con el código y el verifier PKCE S256,
+protegidos como secretos. Lumbre conserva un recibo por credencial, sin esos secretos en claro,
+para recuperar exactamente el resultado de un canje cuya respuesta se perdió. La derivación de
+los tokens depende del código **y del verifier**, con dominios distintos para lectura y escritura;
+conocer solo el código no sustituye a PKCE. El replay comprueba dispositivo, cuenta, tipo de cliente
+y los hashes vigentes de ambos tokens. Nunca recrea una credencial revocada ni sustituye una
+rotada. El recibo desaparece con la credencial; los códigos antiguos sin PKCE no adquieren esta
+capacidad. Los diarios nuevos del conector exigen S256. Un error HTTP genérico no demuestra que el
+canje no ocurrió: conserva la intención bloqueada para resolver su resultado y revocarlo.
+
+El dispositivo Blob V2 se registra ligado a esa credencial antes de pedir la prueba de propiedad.
+La revocación de la credencial corta también el acceso de su dispositivo. La cancelación invalida
+inmediatamente la capacidad de confirmar en memoria y persiste la limpieza pendiente antes de
+intentar el efecto remoto; un fallo de disco no vuelve a habilitar la confirmación.
+
 Antes de enseñar títulos, publicar la asociación o dejar que una herramienta abra el contexto,
 hebra-mcp obtiene de Lumbre una concesión que prueba que el mismo `sub` es propietario del vínculo
 exacto preparado. Solo entonces descarga hasta tres títulos, los presenta como texto sin interpretar
@@ -2354,6 +2369,11 @@ compartidos. Un fallo de red deja la cuenta bloqueada con retirada pendiente y c
 necesario para reintentar; no informa éxito ni
 borra el único medio de revocar. La retirada es idempotente. Reiniciar, repetirla o ver una
 concesión antigua no reduce su generación ni reactiva datos.
+
+La confirmación de revocación remota y el borrado local son fases durables separadas: un reinicio
+después de borrar los secretos no puede exigirlos de nuevo para terminar la retirada. Un fallo de
+persistencia cuyo resultado sea ambiguo mantiene la cuenta bloqueada; no restaura en memoria un
+estado activo que pueda contradecir la lápida ya escrita.
 
 El borrado se limita a esa cuenta. Otra cuenta conserva sus familias, dispositivo, contextos,
 biblioteca y accesos compartidos. Retirar membresía o permiso de un espacio u organización corta
