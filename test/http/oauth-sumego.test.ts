@@ -395,6 +395,28 @@ describe('recorrido con Sumego', () => {
     expect((await provider.verifyAccessToken(replacement.access_token)).account.id).toBe('legacy');
   });
 
+  it('legado sin reclamar y cuenta B activa: login B no consulta ni reclama el legado', async () => {
+    await restartFromV2();
+    const otherGrant = { ...brokerGrant, accountId: '78'.repeat(32),
+      pairedCredentialId: '44444444-4444-4444-8444-444444444444', syncVaultId: 'ef'.repeat(16),
+      opaqueDeviceId: '12'.repeat(16) };
+    const accountB = await accounts.commitAccount({ sub: 'sumego|mikel', grant: otherGrant });
+    const claimLegacy = vi.spyOn(accounts, 'claimLegacy');
+    const secretReads = vi.spyOn(store, 'get');
+    requestBodies = []; exchangeBodies = [];
+    brokerGrant = otherGrant; currentSub = 'sumego|mikel'; currentSid = 'sesion-mikel';
+    const tokens = await fullLogin();
+    expect((await provider.verifyAccessToken(tokens.access_token)).account.id).toBe(accountB.id);
+    expect(requestBodies).toHaveLength(1);
+    expect(requestBodies[0]).toMatchObject({ pairedCredentialId: otherGrant.pairedCredentialId,
+      syncVaultId: otherGrant.syncVaultId, opaqueDeviceId: otherGrant.opaqueDeviceId });
+    expect(claimLegacy).not.toHaveBeenCalled();
+    expect(secretReads.mock.calls.map(([key]) => key)).not.toContain('lumbre-connection');
+    expect(secretReads.mock.calls.map(([key]) => key)).not.toContain('recovery-code');
+    expect(secretReads.mock.calls.map(([key]) => key)).not.toContain('device-identity');
+    expect(accounts.legacyAccount()).toMatchObject({ sub: '__legacy_unclaimed__', state: 'active' });
+  });
+
   it('v2 → reinicio → otro sub no reclama el legado si Lumbre rechaza su propiedad', async () => {
     await restartFromV2();
     const startPairing = vi.fn(async () => '/lumbre/pairing/resume');

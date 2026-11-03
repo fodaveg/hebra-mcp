@@ -421,11 +421,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.status(429).json({ error: 'rate_limited' }); return;
     }
     const transactionId = randomBytes(32).toString('base64url');
-    // El legado sin dueño es el único vínculo que puede conocerse antes del login.
-    // Pedir su transacción aquí no lo adjudica: el claim solo ocurre después de que
-    // Sumego valide `sub` y el broker canjee exactamente esta misma vinculación.
+    // En remoto solo el sub validado elige el vínculo: un legado aún sin reclamar
+    // puede coexistir con cuentas activas. El modo fijo conserva su solicitud histórica.
     const binding = this.loginProvider === 'sumego'
-      ? await this.unclaimedLegacyBinding()
+      ? (this.multiuser ? null : await this.unclaimedLegacyBinding())
       : await this.currentBinding();
     if (this.loginProvider !== 'sumego' && !binding) {
       res.status(503).json({ error: 'temporarily_unavailable' }); return;
