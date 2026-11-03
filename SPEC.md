@@ -30,7 +30,7 @@ comprobada, el 10 oct 2026).
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
-## 3. Decisiones de David (26 sep–19 oct 2026, cerradas; D12, ficheros de trabajo, D13, `hebra_grep` y lectura por líneas, D14, `hebra_replace_in_notes`, y D15, leer y reemplazar ficheros sueltos, el 10 oct 2026; D16, cierre del audit de privacidad adversarial, el 11 oct 2026; D17, crear, renombrar, mover y duplicar ficheros sueltos, el 12 oct 2026; D18, un ID nuevo del JDex y la auditoría Johnny.Decimal, y D19, mover a un ID del JDex, el 19 oct 2026; D20, login con Sumego, el 21 oct 2026)
+## 3. Decisiones de David (26 sep–3 nov 2026, cerradas; D12, ficheros de trabajo, D13, `hebra_grep` y lectura por líneas, D14, `hebra_replace_in_notes`, y D15, leer y reemplazar ficheros sueltos, el 10 oct 2026; D16, cierre del audit de privacidad adversarial, el 11 oct 2026; D17, crear, renombrar, mover y duplicar ficheros sueltos, el 12 oct 2026; D18, un ID nuevo del JDex y la auditoría Johnny.Decimal, y D19, mover a un ID del JDex, el 19 oct 2026; D20, login con Sumego, el 21 oct 2026; D21, conector remoto multiusuario, el 3 nov 2026)
 
 | # | Decisión | Motivo / descartes |
 |---|---|---|
@@ -54,6 +54,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D18 | **Un ID nuevo del JDex y la auditoría Johnny.Decimal** (19 oct 2026, decidido por David: «si, crea las notas y los proyectos», sobre el contrato cerrado con la sesión de jdex-manager; el diseño del lado de hebra-mcp, de la sesión principal). 1) **Reparto**: la lógica JD (qué número toca, el nombre de la nota y de la carpeta, la plantilla, las precondiciones de un plan, qué es un hallazgo) es del **motor puro de jdex-manager**, que hebra-mcp consume como submódulo público (MIT) en `vendor/jdex-manager`, fijado a un SHA e importado solo desde `src/jd/public.ts` (`src/jd.ts`); hebra-mcp pone el `LibraryPort` de ese motor sobre la biblioteca de Hebra (`src/store/jd-port.ts`), la privacidad, el escritor único, la idempotencia y las herramientas. El motor no se parchea desde aquí: lo que no encaja se cuenta a la sesión de jdex-manager. 2) **Alcance**: solo un ID nuevo dentro de una categoría que ya existe: la nota del JDex y, por defecto, la carpeta del ID (`hebra_jd_new_id`), y la auditoría en solo lectura (`hebra_jd_audit`). Fuera: categorías y áreas nuevas, hijos «+» y mover (mover carpetas sigue fuera del MCP, D2 y D9; mover a un ID lo decide David aparte). 3) **La regla del contrato**: lo privado no existe para el MCP. El puerto solo enseña al motor lo visible para quien pide (carpetas, notas vivas fuera de la papelera, cuerpos), y le da un único booleano de lo oculto, `hasHidden(categoría)`, calculado sobre los datos sin filtrar dentro del turno: verdadero si hay en el árbol de la categoría una carpeta oculta, o una nota o un fichero suelto vivo ocultos con el prefijo JD de la categoría; una carpeta oculta en cualquier parte con ese prefijo; una nota oculta, con ese prefijo, en el JDex QUE SE USA (no en otra carpeta); o ese JDex oculto (entonces para todas; si aún no hay JDex, cualquier `00.00` oculta, sin depender del orden de las carpetas). De las notas ocultas solo se leen los títulos, por SQL y sin el cuerpo, para que el tiempo de respuesta no dependa del tamaño de lo oculto. **Revisión de seguridad del 19 oct 2026** (sobre a4fac60): `jdexFolderId` (y el de `hebra_jd_audit`) solo vale si nombra una carpeta visible cuyo nombre lleva el prefijo `00.00` de algún sistema (`extractJdPrefix` del motor); si no, `jdex_not_found`, como sin JDex: con cualquier carpeta como JDex, la regla de las notas del JDex era un oráculo de las notas ocultas de la carpeta que eligiera el agente. La plantilla de la simulación también es una precondición: su `local_seq` se guarda con el plan, y al aplicar tiene que seguir visible y sin cambios (`plan_stale`). El puerto solo lista carpetas que el filtro conoce, y `readNote` de una nota que no conoce da `{body: null}`. Con él el motor rechaza la categoría (`category_has_hidden`) sin decir qué ni qué número está ocupado. Ningún error, recuento ni mensaje revela lo oculto: los códigos del motor salen tal cual y su `message`, nunca. 4) **Dos pasos**, como D14: `simulate` no escribe nada y guarda el plan del motor (`NewIdPlan`, JSON plano) en el escritor; `apply` con el `planId` y un `operationId` nuevo ejecuta `applyPlan` del motor en UN turno del escritor, que vuelve a comprobar las precondiciones (`plan_stale` sin escribir) y asegura cada escritura, así que el reintento con el mismo `operationId` completa lo que falte sin duplicar. El plan nunca se acepta del agente. | Descartado: reimplementar la numeración y las plantillas en hebra-mcp (divergiría del plugin de Hebra; el motor da el mismo plan, lo prueba `tests/hebra/jdex-create-parity.test.ts` de jdex-manager). Descartado: dejar fuera las categorías con algo oculto solo en parte (el siguiente número delataría el oculto). Descartado: guardar los planes en `library.sqlite` (ver §5: moverían la época de privacidad de un lector). Coste asumido: `category_has_hidden` confirma, a quien lo pide, que la categoría tiene algo que no ve (sin decir qué); la auditoría no comprueba el frontmatter (hebra-mcp no tiene un analizador de YAML, B4 de D15). |
 | D19 | **Mover a un ID del JDex** (19 oct 2026, decidido por David: «deberia entrar el move, no?», tras D18; el contrato, cerrado con la sesión de jdex-manager; el diseño del lado de hebra-mcp, de la sesión principal). **Sustituye en parte el punto 5 de D2 y D9**, que dejaban mover carpetas fuera del MCP: 1) `hebra_jd_move` archiva una nota, un fichero suelto o una carpeta entera dentro de la carpeta de un ID del JDex (o de una subcarpeta suya, un nivel), creando la carpeta del ID y la subcarpeta si faltan, y con `as` otro nombre; mover carpetas solo es posible por aquí: **no hay un `hebra_move_folder` genérico**, borrar carpetas sigue fuera, y `hebra_move_note` y `hebra_move_file` no cambian. Una carpeta de primer nivel no se mueve (`source_not_found` del motor). 2) **Reparto**, como D18: la lógica (`planMoveIntoId`, `applyMovePlan`, `planUndoMove`, `applyUndoMovePlan` de `move-into-id.ts`) es del motor de jdex-manager; hebra-mcp pone el `LibraryMovePort` (`src/store/jd-move-port.ts`), la privacidad, el escritor único, la idempotencia y la herramienta. Ni `applyMovePlan` ni `applyUndoMovePlan` capturan excepciones: los `move*` del puerto devuelven `{ok: false}` si la pieza ya no está como se esperaba o el destino no existe o no se ve (`plan_stale` al aplicar; `skipped` con `refused` al deshacer) y lanzan los demás rechazos de Hebra. Al aplicar, `plan_stale` sale con cualquier cambio desde la simulación, de la configuración o del contenido: las precondiciones del motor (el JDex, la carpeta del ID, la pieza donde estaba, un homónimo nuevo) y la regla de configuración de una carpeta. 3) **Tres pasos**: `simulate` (no escribe nada; el plan, JSON plano, se guarda en el escritor), `apply` con `planId` y `operationId` (un turno del escritor; el reintento completa lo que falte) y `undo` con el `planId` aplicado y otro `operationId`, durante 7 días (el plan aplicado se guarda 7 días en `jd-plans.sqlite`, nunca en `library.sqlite`; el inverso lo calcula `planUndoMove` al pedirlo). 4) **Privacidad**, la de D18 más: lo que se mueve y el destino tienen que ser visibles (si no, como lo que no existe). **Revisión de seguridad del 19 oct 2026** (decisión de la sesión principal, con el precedente de D9): una CARPETA solo se rechaza por la configuración, con la regla de `planRenameFolder` y su mismo error, `folder_unavailable`: una ruta privada configurada por debajo de la suya, su ruta nueva o la de una descendiente en una ruta privada, o un homónimo oculto en el destino. Lo que tenga dentro no decide nada: el MCP mueve, junto con la carpeta, contenido oculto que no ve (notas por etiqueta privada, bloqueadas, ficheros ocultos por la regla (b) de D10, carpetas de la memoria de A3), que sigue oculto en su sitio nuevo, igual que ya hace `hebra_rename_folder` al cambiar su ruta. Antes se rechazaba con `folder_has_hidden` mirando el contenido, y simular era un oráculo de qué carpeta visible tenía algo oculto que además distinguía homónimas (deshacía M4 de D16): ese código ya no sale nunca. Lo oculto que depende de la RUTA (una carpeta a la que resuelve una ruta configurada; las notas vivas de A2 y las de la papelera y los ficheros que se juzgan subiendo por las lápidas hasta una carpeta de dentro) solo existe con una ruta privada configurada por debajo de la de la carpeta, y eso ya la rechaza. Una nota o un fichero cuyo destino no se puede usar por la privacidad (un nombre o unos bytes que lo dejarían oculto) responden UN error genérico, `destination_unavailable`, como `file_name_unavailable` (D17); crear la subcarpeta o la carpeta del ID, el `folder_unavailable` de `hebra_create_folder`. | Descartado: un `hebra_move_folder` genérico (abriría mover carpetas fuera del sistema JD, y sus errores revelarían carpetas privadas, la razón de la opción A de D2). Descartado: borrar las carpetas creadas al deshacer (el motor no las borra; borrar carpetas sigue fuera). Descartado: rechazar una carpeta por lo oculto que tenga dentro (el oráculo de arriba). Coste asumido, sin ningún bit nuevo sobre lo oculto: los ya declarados de D18 (`category_has_hidden` cuando hay que crear la carpeta del ID), de D9 (`folder_unavailable` confirma la configuración y, a quien adivine el nombre exacto, un homónimo oculto en el destino) y de D17 (`destination_unavailable`, a quien adivine el nombre o los bytes que enlaza una nota oculta); el contenido oculto de una carpeta se mueve con ella sin que el agente lo sepa; una nota bloqueada no se mueve (la guarda de `noteMoveIfUnchanged` del motor excluye las bloqueadas: `plan_stale`). |
 | D20 | **Login con Sumego** (21 oct 2026, decidido por David: «el mcp se tiene que conectar con sumego igual que el resto de apps», transmitido por la sesión de sumego; el diseño del lado de hebra-mcp, de la sesión principal, alineado con lumbre-mcp). **Revisa D7**: hebra-mcp conserva su OAuth público hacia Claude y Codex, pero identifica a la persona con su propio cliente OIDC de Sumego (`hebra-mcp`, confidencial) en vez de con el login y el consentimiento de Lumbre. Lumbre sigue emitiendo la concesión, ahora a partir del ID token de Sumego (§12.9). | Descartado: pasar por el BFF de Lumbre como `hebra-web` (hebra-mcp tiene servidor y secreto propio, como las demás apps). Descartado: que hebra-mcp autorice solo con el `sub` sin Lumbre (no sabe qué cuenta es dueña del emparejado y se perdería la revocación visible en Lumbre). |
+| D21 | **Conector remoto multiusuario** (3 nov 2026). David acepta que el servidor remoto guarde la clave de cada biblioteca conectada y fija este límite: cada persona solo puede acceder a su biblioteca personal y al contenido compartido para el que tenga membresía y permiso en sus espacios u organizaciones; pertenecer a un espacio u organización nunca abre la biblioteca personal de otro miembro. **Revisa D6, D7 y D20**: el `sub` validado de Sumego identifica a la persona, pero Lumbre tiene que confirmar además que esa persona es propietaria del vínculo exacto `pairedCredentialId`/`syncVaultId`/`opaqueDeviceId`. Cada cuenta tiene contexto, SQLite, blobs, secretos, configuración de privados, escritor, sync y espacios aislados. El emparejado de una cuenta nueva se inicia desde el conector, se aprueba en su Hebra y solo se persiste después de comprobar la propiedad y confirmar hasta tres títulos. El dispositivo actual de David se conserva sin reemparejar y solo se asocia mediante una prueba de propiedad; retirar una persona bloquea, drena y revoca antes de borrar exclusivamente sus datos. Contrato en §12.10. | Descartados: una biblioteca global para todas las sesiones; elegir por email, `clientId`, cabeceras o argumentos MCP; asignar la biblioteca heredada al primer login; ampliar CORS del relé para resolver el retorno del emparejado; alargar la validez del ID token para cubrir una aprobación lenta; y volver al binario monousuario como rollback después de aceptar cuentas nuevas si pudiera reasignarlas o resucitar una revocación. |
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
@@ -1775,10 +1776,13 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.1 Transporte
 
-- Subcomando nuevo `serve-http`: Streamable HTTP sin estado, un `McpServer` nuevo por petición sobre el
-  mismo `ServerContext` (`build-server.ts`), igual que lumbre-mcp (`http.ts:44-51`).
-- En el contenedor corre un único proceso que atiende a todas las sesiones de claude.ai y siempre es el
-  escritor. `writer.sock` y el bloqueo siguen existiendo por el Mac (§8), donde hay un proceso por sesión.
+- Subcomando nuevo `serve-http`: Streamable HTTP sin estado, un `McpServer` nuevo por petición. Hasta
+  D21 todas las peticiones compartían el mismo `ServerContext`; D21 lo sustituye en la vía remota por
+  la selección autenticada de un contexto de cuenta (§12.10). El cuerpo MCP nunca selecciona cuenta.
+- En el contenedor corre un único proceso que atiende a todas las sesiones de claude.ai. Hasta D21
+  abría un único escritor; con D21 administra un escritor y un aislamiento completos por cuenta
+  (§12.10). `writer.sock` y el bloqueo local siguen existiendo en el Mac (§8), donde hay un proceso
+  por sesión.
 - `serve`, `pair` y `unpair` por stdio no cambian.
 - Implementado en C2 (`src/http/`):
   - `POST /mcp` con credencial, que se comprueba antes de leer el cuerpo. `GET` y `DELETE /mcp`
@@ -1938,13 +1942,15 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.4 Emparejado
 
-- El listener tiene que estar en `127.0.0.1` de la máquina del navegador (§7), así que no se empareja
-  dentro del contenedor.
-- Se empareja en el Mac como dispositivo **nuevo**: `pair` con `HEBRA_MCP_DATA_DIR` temporal, almacén de
-  ficheros y `--label "Claude remoto"`. David aprueba en Hebra > Ajustes > Sincronización. El directorio
-  se copia al volumen por `scp` y se borra del Mac.
+- El procedimiento de C5, anterior a D21, exige un listener en `127.0.0.1` de la máquina del navegador
+  (§7), empareja en el Mac como dispositivo **nuevo** y copia su directorio al volumen. Se conserva como
+  antecedente y como vía de recuperación del dispositivo heredado de David, pero no sirve para dar de
+  alta otra cuenta en el conector multiusuario.
+- D21 añade el emparejado web por cuenta de §12.10, iniciado desde `/authorize` y aprobado en Hebra >
+  Ajustes > Sincronización, sin listener en la máquina de la persona ni copia manual del directorio.
 - Nunca se copia la identidad del llavero del Mac: serían dos motores con el mismo dispositivo.
-- No hace falta cambiar Lumbre ni Hebra.
+- El emparejado web reutiliza el protocolo de Hebra, pero requiere el retorno exacto de Lumbre descrito
+  en §12.10. No amplía el CORS del relé.
 
 ### 12.5 Despliegue
 
@@ -1989,6 +1995,16 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 3. `grep` de las notas-cebo en `docker logs` y en el log de Caddy da 0.
 4. `/mcp` sin token responde 401 y `oauth-revoke-all` corta el acceso.
 5. La suite stdio sigue en verde.
+6. Dos cuentas autenticadas, incluso con los mismos UUID de nota y `operationId`, no cruzan búsquedas,
+   lecturas, escrituras, adjuntos, versiones, planes, errores, privados, JDex ni resultados repetidos.
+7. Mikel solo puede abrir su biblioteca personal y el contenido compartido para el que tenga membresía,
+   permiso del recurso y permiso propio del agente en sus espacios u organizaciones. Compartir un
+   espacio u organización con David no permite enumerar, buscar, leer ni modificar la biblioteca
+   personal de David.
+8. El dispositivo, los access y los refresh existentes de David siguen funcionando sin reemparejar;
+   otra identidad no puede adquirir ese vínculo heredado.
+9. Retirar una cuenta corta solo sus tokens, dispositivo, contextos y datos; otra cuenta sigue leyendo,
+   escribiendo y renovando. Una petición en vuelo, un reinicio o un rollback no reactivan la retirada.
 
 ### 12.8 Lotes
 
@@ -2001,6 +2017,10 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C5** Emparejado remoto | §12.4. | Dispositivo nuevo en Hebra con `opaqueDeviceId` distinto del del Mac; `hebra_status` con `linked: true`. | C4 |
 | **C6** QA real | §12.7 en la biblioteca de David. | Aceptación de David. | C5 |
 | **C7** Login con Sumego | §12.9 del lado de hebra-mcp, detrás de `HEBRA_MCP_LOGIN_PROVIDER`. | Las pruebas de §12.9 en verde, también la página y el evento de credencial revocada; con `lumbre`, la suite OAuth de hoy sin cambios; `typecheck` y `check:bundle` en verde. Encender `sumego` en producción espera al endpoint de Lumbre y al cliente de Sumego. | C3 |
+| **C8** Aislamiento por cuenta | Registro persistente y administrador de contextos de §12.10; selección después de autenticar. | Pruebas negativas de §12.10 con dos cuentas, reinicio, aperturas concurrentes y fallos parciales; ningún dato ni resultado cruza cuentas. | C7 |
+| **C9** Emparejado web | Alta por cuenta, retorno acotado de Lumbre, aprobación en Hebra, propiedad y confirmación de títulos. | Replays, navegador distinto, vencimiento, cambio de `sub`, doble alta, cancelación y fallos parciales quedan cerrados sin cuenta activa ni secretos cruzados. | C8 y retorno de Lumbre |
+| **C10** Migración y retirada | Vínculo heredado de David y retirada por persona de §12.10. | David conserva access/refresh; retirar A durante cualquier frontera no afecta a B y no se revierte tras reiniciar. | C8, C9 |
+| **C11** QA multiusuario | §12.7 con David y Mikel; personal, espacios y organizaciones se verifican por separado. | David conserva su acceso; Mikel empareja la suya y solo ve contenido compartido autorizado; revisión de seguridad y gate del mismo candidato. | C10, relé H-L7 y permisos reales |
 
 C1 y C2 van en paralelo.
 
@@ -2177,8 +2197,11 @@ mucho, y solo entonces 503. Funciona con cualquier valor del interruptor si hay 
 configurado. Las familias de antes de v3 (sin `sub`) solo se cortan con `oauth-revoke-all` o al
 revocarlas en Lumbre.
 
-**Lo que no cambia**: el emparejado (§7 y §12.4) y la clave de la biblioteca. El login nunca da
-la clave. Ni Sumego ni Lumbre la tienen, y un login no crea identidad ni bóveda.
+**Lo que no cambia hasta D21**: el login nunca entrega la clave de la biblioteca y ni Sumego ni
+Lumbre la tienen. D21 sustituye el emparejado manual del conector remoto por el alta web de
+§12.10: el servidor obtiene y guarda la clave solo tras la aprobación en Hebra, la comprobación de
+propiedad por Lumbre y la confirmación de la persona. Un login por sí solo sigue sin crear una
+identidad ni una bóveda.
 
 **Pendiente fuera de hebra-mcp**:
 - Las dos piezas de Lumbre: los campos nuevos de `/requests` y `/api/integrations/hebra-mcp/sumego/exchange`.
@@ -2213,6 +2236,157 @@ test. Cubren:
 - Que el `jti` no se consuma si falla el corte.
 - Con el interruptor en `lumbre`, el recorrido de §12.2 sin cambios.
 - Que ningún log contenga `code`, ID token, `logout_token` ni el secreto del cliente.
+
+### 12.10 Conector remoto multiusuario (D21, 3 nov 2026)
+
+Esta sección sustituye para `serve-http` el contexto, el emparejado y el vínculo únicos de
+§§12.1, 12.4 y 12.9. `serve`, `pair`, `unpair` y los ficheros de trabajo locales conservan su
+contrato. La implementación no se considera terminada hasta superar la aceptación negativa con
+dos cuentas antes de admitir la segunda biblioteca en producción.
+
+#### Identidad, vínculo y selección de contexto
+
+Una petición personal pertenece a un único `sub` validado por Sumego y a un único vínculo exacto
+confirmado por Lumbre: `pairedCredentialId`, `syncVaultId` y `opaqueDeviceId`. Los cuatro valores
+forman la autoridad de la petición. El email es presentación; `clientId`, cabeceras, parámetros de
+URL y argumentos MCP no eligen cuenta ni biblioteca.
+
+La familia OAuth guarda el `sub` y el vínculo con el que se emitió. La verificación del access
+transporta esa identidad autenticada hasta el selector de contexto. Solo después de validar el
+token se resuelve la cuenta y se crea el `McpServer` de la petición. Toda emisión, canje, refresh,
+introspección y `/renew` exige que el vínculo siga perteneciendo al mismo `sub`; cambiar un campo,
+un dispositivo o una bóveda corta la familia. Una herramienta no puede cambiar de cuenta durante
+su ejecución.
+
+Cada cuenta tiene una raíz opaca derivada de una identidad validada, no de datos elegidos por el
+cliente. Bajo ella viven su SQLite, blobs, secretos, configuración de privados, registro de
+operaciones y planes, escritor, bloqueo, sync, estado de revocación y `AgentSpaceManager`. No se
+cambia una variable global de directorio entre peticiones ni se comparte un `SecretStore` de
+biblioteca. La apertura y las escrituras de secretos se serializan por cuenta; publicar una
+identidad nueva es atómico. Hay límites configurados por cuenta y globales para familias, altas
+pendientes y contextos abiertos. Alcanzarlos rechaza una alta o apertura antes de reservar más
+estado; no expulsa un escritor con peticiones en curso. El apagado deja de adquirir contextos,
+drena todos los adquiridos y cierra cada escritor y sync.
+
+La biblioteca personal de una cuenta nunca se obtiene por pertenecer a un espacio u organización.
+Los espacios y organizaciones se resuelven desde el contexto de esa cuenta y requieren, además de
+la membresía, la concesión del recurso y el permiso propio de su agente. Un permiso compartido no
+habilita otro espacio ni una biblioteca personal. El camino compartido conserva las dos
+comprobaciones por herramienta de §14; sin relé H-L7 o sin permiso, falla cerrado sin afectar a la
+biblioteca personal.
+
+#### Alta y emparejado web
+
+`/authorize` valida primero cliente, callback, PKCE, recurso, scope y cupos. Inicia Sumego sin
+exigir un vínculo previo. Después del callback valida el ID token y fija el `sub`. Si la cuenta no
+tiene biblioteca, crea una transacción de alta de un uso y empieza el protocolo de credencial de
+agente de Lumbre que usa `DeviceLinkRequester`; la persona aprueba el dispositivo en Hebra.
+
+hebra-mcp entrega a Lumbre `webOrigin` con el origen exacto `https://mcp.hebra.pro`, sin barra final,
+ruta, query ni fragmento. Lumbre construye desde él el callback
+`https://mcp.hebra.pro/lumbre/connect#code=…`; no acepta del cliente una URL de callback completa.
+Una página mínima de ese origen elimina el fragmento de la URL y lo envía por `POST` al mismo
+origen. La página lleva cookie de transacción, token de formulario de un uso, CSP sin recursos
+externos, `Cache-Control: no-store`, protección de origen y límites de cuerpo. El código, los secretos y los
+títulos no entran en URLs posteriores ni logs. Lumbre admite este retorno HTTPS exacto solo en el
+resolver de `webOrigin`; no se añade `https://mcp.hebra.pro` a una lista que amplíe el CORS del relé.
+
+La identidad del dispositivo se prepara en un diario de alta aislado, con directorio 0700 y
+ficheros 0600. El diario puede conservar los identificadores y secretos mínimos necesarios para
+revocar un efecto remoto y reanudar la limpieza después de una caída; lleva estado explícito, TTL y
+ninguna ruta que pueda resolver como cuenta activa. Al arrancar, hebra-mcp recupera los diarios no
+terminales: continúa una revocación pendiente o limpia uno caducado antes de admitir otra alta para
+esa cuenta. El TTL no autoriza a olvidar un efecto remoto sin intentar revocarlo ni a publicar una
+cuenta incompleta.
+
+Antes de enseñar títulos, publicar la asociación o dejar que una herramienta abra el contexto,
+hebra-mcp obtiene de Lumbre una concesión que prueba que el mismo `sub` es propietario del vínculo
+exacto preparado. Solo entonces descarga hasta tres títulos, los presenta como texto sin interpretar
+y pide confirmación. Confirmar publica atómicamente secretos, vínculo y registro de cuenta; abre el
+contexto y reanuda el OAuth original. Cancelar, caducar o fallar revoca lo que se haya creado y
+elimina el diario cuando alcanza un estado terminal. Si la revocación remota no está disponible, la
+alta queda bloqueada y pendiente de limpieza, nunca activa.
+
+El ID token aceptado por Lumbre conserva el plazo de §12.9. Si caduca mientras la persona aprueba
+el dispositivo, hebra-mcp inicia otra autenticación con `nonce` nuevo y exige el mismo `sub`; puede
+conservar únicamente la preparación temporal ligada a esa cuenta. Un `sub` distinto cancela y
+limpia el alta. No se amplía el plazo, no se reutiliza un ID token consumido y la nueva
+autenticación no cambia el cliente, callback, recurso ni scope originales.
+
+#### Migración del dispositivo de David
+
+El directorio actual queda inicialmente en su sitio como entrada heredada explícita con
+`storage: "legacy-root"`; las cuentas nuevas usan `storage: "account-dir"`. Se conservan SQLite,
+blobs, secretos, privados, dispositivo, store OAuth, grants, claves de cifrado de refresh y
+registros de revocación. La migración es repetible y asocia la entrada heredada solo con un `sub` y
+vínculo cuya propiedad haya demostrado Lumbre. Nunca se asigna al primer login, por email ni por el
+orden de las familias.
+
+Las familias antiguas sin `sub` solo pueden seguir resolviendo el vínculo heredado exacto que ya
+autorizaron. No adquieren otra cuenta ni sirven para abrir una alta nueva. Access y refresh
+existentes de David deben seguir funcionando sin reemparejar; si no se puede demostrar la
+propiedad, la migración se detiene sin reasignar ni borrar datos.
+
+La raíz heredada contiene además `oauth-tokens.json`, la clave global de cifrado de refresh y el
+registro multiusuario. Retirar a David nunca elimina esa raíz completa. Antes de implementar la
+retirada se mantiene un inventario versionado de TODO el estado personal de `legacy-root`: SQLite y
+blobs de la biblioteca; secretos de emparejado y dispositivo; configuración y memoria de privados;
+espacios; planes, registros de idempotencia, cachés y temporales; el contenido personal de
+`jd-plans.sqlite`; diarios de alta o retirada; y entradas de David dentro de almacenes compartidos.
+Después de revocar se borra únicamente lo que ese inventario atribuye a David. Se conserva solo el
+control global identificado de forma expresa: store OAuth y sus claves globales, registro de cuentas,
+generaciones y lápidas de retirada, y entradas de otras cuentas. Un fichero o fila sin clasificación
+detiene el borrado; no se presume global ni personal por su ubicación.
+
+#### Revocación y retirada
+
+Cerrar una sesión OAuth, revocar una concesión, revocar el dispositivo y retirar una cuenta son
+operaciones distintas. Un logout ordinario corta las familias que le correspondan y no borra la
+biblioteca. La retirada persiste primero una marca y generación de bloqueo: desde ese instante no
+se adquieren contextos, no se emiten ni refrescan tokens y ninguna operación en vuelo puede publicar
+una respuesta o escritura posterior como vigente.
+
+Después se invalidan pendientes, códigos y familias; se drenan peticiones, escritor y sync; y se
+revoca en Lumbre la credencial de esa instalación. Solo tras confirmar la revocación remota se
+borran los datos personales identificados por el registro: toda la raíz para `account-dir`, o el
+inventario completo atribuido a David para `legacy-root`, incluidas sus filas en almacenes
+compartidos. Un fallo de red deja la cuenta bloqueada con retirada pendiente y conserva lo
+necesario para reintentar; no informa éxito ni
+borra el único medio de revocar. La retirada es idempotente. Reiniciar, repetirla o ver una
+concesión antigua no reduce su generación ni reactiva datos.
+
+El borrado se limita a esa cuenta. Otra cuenta conserva sus familias, dispositivo, contextos,
+biblioteca y accesos compartidos. Retirar membresía o permiso de un espacio u organización corta
+ese contenido compartido conforme a §14, sin borrar ni abrir bibliotecas personales.
+
+#### Despliegue, rollback y pruebas obligatorias
+
+Antes de migrar se hace una copia consistente y cifrada del volumen y se comprueba su restauración
+en un entorno aislado. El rollback conserva los directorios de cuentas nuevas y las generaciones de
+retirada. Una versión que no entiende el registro multiusuario no vuelve a servir tráfico: puede
+cerrar temporalmente el conector, pero no reasignar cuentas a David ni restaurar una instantánea por
+encima de escrituras o revocaciones posteriores.
+
+El candidato conserva el pin versionado de `vendor/hebra`; un checkout local distinto no cambia el
+contrato ni entra por accidente en el candidato. Si el pin no aporta el protocolo H-L7 requerido,
+se actualiza mediante un cambio explícito y revisado, nunca reutilizando un checkout ajeno.
+
+Las pruebas usan dos cuentas con UUID de nota, `spaceId` y `operationId` deliberadamente iguales y
+cubren búsqueda, lectura, escritura, adjuntos, versiones, planes, idempotencia, errores, privados,
+JDex, sync y espacios. Cubren dos primeras aperturas y dos altas simultáneas; fallo de disco y de
+apertura; caída en cada frontera entre un efecto remoto, la escritura del diario y la publicación o
+limpieza local, con recuperación al arrancar; caída en cada frontera de retirada; callback de otro navegador, replay,
+doble confirmación, cancelación, vencimiento y cambio de `sub`; refresh de A mientras B opera; y
+revocación de A durante autorización, emisión, introspección, refresh, sync y escritura. A no puede
+ver ni alterar nada de B y B sigue funcionando al retirar A.
+
+La aceptación real comprueba por separado: biblioteca personal de David; biblioteca personal de
+Mikel; un espacio compartido autorizado; una organización autorizada; un espacio u organización
+sin permiso; y el caso en que David y Mikel comparten membresía pero Mikel intenta enumerar,
+buscar, leer y modificar la biblioteca personal de David. Todos esos intentos fallan sin revelar
+títulos, IDs, recuentos ni diferencias de error. Antes del despliegue se mide el consumo con dos
+bibliotecas y sus espacios bajo el límite vigente del contenedor; el límite solo se cambia con esa
+evidencia. El mismo candidato pasa revisión de seguridad, pruebas afectadas y el gate completo.
 
 ## 13. Ficheros de trabajo con vuelta (D12, 10 oct 2026)
 
