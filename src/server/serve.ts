@@ -165,7 +165,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // H-L7: el registro del agente y el catálogo de concesiones solo se piden al usar un
   // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
   // red y con un relé sin la API de H-L7, como antes de los espacios.
-  const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir) : null;
+  const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive) : null;
   const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance, assertActive) : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {

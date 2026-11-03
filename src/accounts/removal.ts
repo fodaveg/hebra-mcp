@@ -111,6 +111,10 @@ async function lockAccountLibraries(directory: string): Promise<{
   };
   try {
     await acquire(directory);
+    const keyDirectory = join(directory, 'agent-key-lock');
+    try {
+      if ((await lstat(keyDirectory)).isDirectory()) await acquire(keyDirectory);
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     const spaces = join(directory, 'spaces');
     let entries;
     try { entries = await readdir(spaces, { withFileTypes: true }); directories.add(spaces); }

@@ -141,12 +141,15 @@ export class AgentDevice {
     readonly paired: PairedSecrets,
     private readonly secrets: SecretStore,
     private readonly fetcher: Fetcher = globalThis.fetch.bind(globalThis),
-    private readonly dataDir?: string
+    private readonly dataDir?: string,
+    private readonly assertAccountActive?: () => void
   ) {}
 
   /** Ningún proceso ya abierto sigue sirviendo la caché después de cambiar de vínculo. */
   async assertPairing(): Promise<void> {
+    this.assertAccountActive?.();
     const current = await readPairedSecrets(this.secrets);
+    this.assertAccountActive?.();
     if (!current || pairingFingerprint(current) !== pairingFingerprint(this.paired))
       throw new ToolError('space_access_denied');
   }
@@ -189,15 +192,20 @@ export class AgentDevice {
 
   private async withKeyLock(): Promise<AgentRegistration> {
     if (!this.dataDir) throw new ToolError('space_access_denied');
+    this.assertAccountActive?.();
     const directory = join(this.dataDir, 'agent-key-lock');
     await mkdir(directory, { recursive: true, mode: 0o700 });
+    this.assertAccountActive?.();
     const lock = new WriterLock({ dataDir: directory, releaseOnExit: false });
     const deadline = Date.now() + 15_000;
-    while (!lock.tryAcquire()) {
+    while (true) {
+      this.assertAccountActive?.();
+      if (lock.tryAcquire()) break;
       if (Date.now() >= deadline) throw new ToolError('space_access_denied');
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     try {
+      this.assertAccountActive?.();
       return await this.register();
     } finally {
       lock.release();
@@ -210,6 +218,7 @@ export class AgentDevice {
     const binding = keyBinding(this.paired);
     let raw: StoredAgentKey | null = null;
     const stored = await this.secrets.get('agent-device-key');
+    this.assertAccountActive?.();
     if (stored) {
       try {
         raw = JSON.parse(stored);
@@ -219,7 +228,9 @@ export class AgentDevice {
     }
     if (!raw || raw.binding !== binding) {
       raw = { binding, privateKey: await generatePrivateKey() };
+      this.assertAccountActive?.();
       await this.secrets.set('agent-device-key', JSON.stringify(raw));
+      this.assertAccountActive?.();
     }
     try {
       const { kty, crv, x, y } = raw.privateKey;
@@ -231,17 +242,20 @@ export class AgentDevice {
         false,
         ['deriveBits']
       );
+      this.assertAccountActive?.();
       const registration = await validateRegistration(
         await this.request('/agent-device-key', 'PUT', { publicKey }),
         this.paired.connection,
         this.paired.device.lumbreDeviceId,
         publicKey
       );
+      this.assertAccountActive?.();
       if (raw.accountId && registration.accountId !== raw.accountId) throw new Error();
       await this.secrets.set(
         'agent-device-key',
         JSON.stringify({ ...raw, accountId: registration.accountId })
       );
+      this.assertAccountActive?.();
       this.registration = registration;
       return registration;
     } catch {
@@ -263,7 +277,7 @@ export class AgentDevice {
     )
       throw new ToolError('space_access_denied');
     try {
-      return new Uint8Array(
+      const key = new Uint8Array(
         await openAgentSpaceGrant({
           grant: g,
           privateKey: this.privateKey!,
@@ -277,6 +291,9 @@ export class AgentDevice {
           }
         })
       );
+      try { this.assertAccountActive?.(); }
+      catch (error) { key.fill(0); throw error; }
+      return key;
     } catch {
       throw new ToolError('space_access_denied');
     }

@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { deferred } from '../fixtures/deferred';
 /** Consumidor H-L7 real: HTTP local, MCP, SQLite y sobres cifrados. Sin cuentas reales. */
+import { AccountContexts } from '../../src/accounts/contexts';
+import { AccountRemovalService } from '../../src/accounts/removal';
 import { AccountRegistry } from '../../src/accounts/registry';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readdir, rm } from 'node:fs/promises';
@@ -12,7 +14,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildMcpServer } from '../../src/server/build-server';
 import { openServeContext, type OpenServeOptions, type ServeContext } from '../../src/server/serve';
-import { MemorySecretStore, writePairedSecrets, type PairedSecrets } from '../../src/secrets';
+import { MemorySecretStore, openFileSecretStore, writePairedSecrets, type PairedSecrets } from '../../src/secrets';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { sealAgentSpaceGrant } from '../../vendor/hebra/src/lib/spaces/agent-space-grant';
 import { validatePublicJwk } from '../../vendor/hebra/src/lib/spaces/account-key';
@@ -283,6 +285,54 @@ describe('herramientas MCP por espacio', () => {
         instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
       })
     ).rejects.toMatchObject({ code: 'space_access_denied' });
+  });
+
+  it('retirement cannot erase a reader key registration and let it recreate secrets', async () => {
+    const registry = await AccountRegistry.open(directory);
+    const account = await registry.claimLegacy({ sub: 'alice', grant: {
+      active: true, credentialId: randomUUID(), clientId: 'hebra-mcp-claude',
+      resource: 'https://mcp.hebra.pro/mcp', scope: 'hebra:mcp', accountId: 'a'.repeat(64),
+      expiresAt: '2026-12-01T00:00:00.000Z', pairedCredentialId: paired.connection.credentialId,
+      syncVaultId: PERSONAL_VAULT, opaqueDeviceId: paired.device.opaqueDeviceId
+    } });
+    const fileSecrets = openFileSecretStore(directory);
+    await writePairedSecrets(fileSecrets, paired);
+    const entered = deferred();
+    const resume = deferred();
+    const setSecret = fileSecrets.set.bind(fileSecrets);
+    fileSecrets.set = async (key, value) => {
+      if (key === 'agent-device-key') { entered.resolve(); await resume.promise; }
+      await setSecret(key, value);
+    };
+    const reader = await openServeContext({ dataDir: directory, secrets: fileSecrets,
+      fetcher: fake.fetcher, syncIntervalMs: null, instance: { checkIntervalMs: null,
+        lock: { pid: process.pid + 10_000, isAlive: () => true, releaseOnExit: false } } });
+    expect(reader.instance.role).toBe('other_instance');
+    const registration = reader.ctx.spaces!.list();
+    const registered = registration.then(() => null, (error: unknown) => error);
+    const service = new AccountRemovalService({ dataDir: directory, registry,
+      contexts: new AccountContexts(registry, async () => { throw new Error('unexpected_open'); }),
+      oauth: { invalidateAccount: async () => 1 }, revokeDevice: async () => undefined,
+      legacySecrets: fileSecrets });
+    try {
+      await entered.promise;
+      // The daemon writer drains; the independent reader still holds agent-key-lock.
+      await served.close();
+      const outcome = await service.remove(account).then(() => null, (error: unknown) => error);
+      const removedBeforeResume = registry.findById(account.id)?.state === 'removed';
+      resume.resolve();
+      await registered;
+      const resurrected = removedBeforeResume && (await fileSecrets.get('agent-device-key')) !== null;
+      expect({ code: outcome instanceof Error ? outcome.message : null, resurrected })
+        .toEqual({ code: 'account_writer_busy', resurrected: false });
+      await service.remove(account);
+      expect(registry.findById(account.id)?.state).toBe('removed');
+      expect(await fileSecrets.get('agent-device-key')).toBeNull();
+    } finally {
+      resume.resolve();
+      await registered;
+      await reader.close();
+    }
   });
 
   it('a reader cannot open a new shared cache after another registry retires the account', async () => {
