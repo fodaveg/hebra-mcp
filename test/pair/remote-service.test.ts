@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeRecoveryCode, type DeviceLinkPoll, type LumbreConnection } from '../../src/hebra';
 import type { ActiveGrant, Binding } from '../../src/oauth/backchannel';
+import { PairError } from '../../src/pair/errors';
 import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
 import type { RemoteLinkRequest } from '../../src/pair/remote/link';
 import {
@@ -39,7 +40,10 @@ describe('RemotePairingService', () => {
     });
   });
 
-  afterEach(async () => { await rm(root, { recursive: true, force: true }); });
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await rm(root, { recursive: true, force: true });
+  });
 
   it('usa el callback exacto, comprueba dueño antes del preview y no persiste títulos', async () => {
     const calls: string[] = [];
@@ -158,6 +162,26 @@ describe('RemotePairingService', () => {
     await expect(service.confirm(started.id, cancelForm)).rejects.toMatchObject({ code: 'invalid_session' });
   });
 
+  it('falla cerrado en memoria si el disco no puede persistir cleanup-pending', async () => {
+    const publish = vi.fn(async () => ({ id: 'account', generation: 1 }));
+    const service = createService({ link: fakeLink(recoveryCode, []), publish });
+    const started = await service.start(startInput());
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    await service.poll(started.id, await currentAuth(service, started));
+    const cancelForm = await currentAuth(service, started);
+    const write = journals.write.bind(journals);
+    const writeSpy = vi.spyOn(journals, 'write').mockImplementation(async (journal) => {
+      if (journal.phase === 'cleanup-pending') throw new Error('disk_full');
+      return write(journal);
+    });
+
+    await expect(service.cancel(started.id, cancelForm)).rejects.toThrow('disk_full');
+    expect((await journals.read(started.id))?.phase).toBe('confirmation');
+    writeSpy.mockRestore();
+    await expect(service.confirm(started.id, cancelForm)).rejects.toMatchObject({ code: 'invalid_session' });
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it('recovery revoca el staging huérfano pero conserva una cuenta ya publicada', async () => {
     const revoke = vi.fn(async () => undefined);
     const first = createService({ link: fakeLink(recoveryCode, []), revoke });
@@ -196,6 +220,27 @@ describe('RemotePairingService', () => {
     await expect(recovered.recover()).resolves.toEqual({ cleaned: 1, pending: 0 });
     expect(revoke).toHaveBeenCalledOnce();
   });
+
+  it.each([401, 404])(
+    'conserva exchange-pending ante un rechazo HTTP %s ambiguo en recovery',
+    async (status) => {
+      const rejected = () => { throw new PairError('exchange_rejected', status); };
+      const first = createService({
+        link: fakeLink(recoveryCode, []),
+        exchangeCode: async () => rejected()
+      });
+      const pending = await first.start(startInput());
+      await expect(first.receiveCredential(pending.id, auth(pending, pending.formToken), 'durable-code'))
+        .rejects.toMatchObject({ code: 'unavailable' });
+
+      const recovered = createService({
+        link: fakeLink(recoveryCode, []),
+        exchangeCode: async () => rejected()
+      });
+      await expect(recovered.recover()).resolves.toEqual({ cleaned: 0, pending: 1 });
+      expect((await journals.read(pending.id))?.phase).toBe('exchange-pending');
+    }
+  );
 
   it('si publicar falla, revoca y retira la raíz huérfana antes de olvidar el diario', async () => {
     const revoke = vi.fn(async () => undefined);

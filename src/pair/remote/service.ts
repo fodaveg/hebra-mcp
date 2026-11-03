@@ -9,7 +9,6 @@ import {
   savePreparedAgentDevice
 } from '../../spaces/device';
 import { DEFAULT_PAIR_LABEL } from '../pair';
-import { PairError } from '../errors';
 import {
   DEFAULT_LUMBRE_ORIGIN,
   exchangePairingCode,
@@ -253,12 +252,8 @@ export class RemotePairingService {
           fetcher: this.fetcher,
           now: this.now
         });
-      } catch (error) {
+      } catch {
         this.runtime.delete(id);
-        if (error instanceof PairError && error.code === 'exchange_rejected') {
-          await this.options.publisher.cleanupOrphan(journal);
-          await this.options.journals.remove(id);
-        }
         throw new RemotePairingError('unavailable');
       }
       journal.connection = connection;
@@ -441,12 +436,11 @@ export class RemotePairingService {
           journal.phase = 'cleanup-pending';
           journal.updatedAt = new Date(this.now()).toISOString();
           await this.options.journals.write(journal);
-        } catch (error) {
-          if (error instanceof PairError && error.code === 'exchange_rejected') {
-            await this.options.publisher.cleanupOrphan(journal);
-            await this.options.journals.remove(journal.id);
-            cleaned += 1;
-          } else pending += 1;
+        } catch {
+          // 400/401/404/410 genéricos pueden venir de proxy, rollback o infraestructura.
+          // Sin un resultado cerrado que pruebe «nunca existió» o «ya revocada», el intent
+          // se conserva y bloquea otra alta.
+          pending += 1;
           continue;
         }
       }
@@ -528,11 +522,11 @@ export class RemotePairingService {
 
   private async cleanup(journal: RemotePairingJournal): Promise<void> {
     const link = this.runtime.get(journal.id)?.link;
+    // El proceso falla cerrado incluso si el disco falla al persistir el bloqueo.
+    this.runtime.delete(journal.id);
     journal.phase = 'cleanup-pending';
     journal.updatedAt = new Date(this.now()).toISOString();
     await this.options.journals.write(journal);
-    // Desde este punto no queda preview, grant ni enlace capaz de confirmar/publicar.
-    this.runtime.delete(journal.id);
     try { await link?.cancel(); } catch { /* Caduca en el relé. */ }
     if (journal.connection && journal.cleanupRequired) {
       try {
@@ -551,10 +545,11 @@ export class RemotePairingService {
 
   /** Falla del rename/registro: revoca primero y no olvida un orphan no retirado. */
   private async abortPublish(journal: RemotePairingJournal): Promise<void> {
+    // No se conserva capacidad de publicar aunque falle el fsync del bloqueo.
+    this.runtime.delete(journal.id);
     journal.phase = 'cleanup-pending';
     journal.updatedAt = new Date(this.now()).toISOString();
     await this.options.journals.write(journal);
-    this.runtime.delete(journal.id);
     try {
       if (journal.connection && journal.cleanupRequired) {
         await this.revoke(journal.connection, this.fetcher);
