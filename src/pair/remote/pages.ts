@@ -3,7 +3,7 @@ import type { Response } from 'express';
 import type { PairingPreview } from './types';
 
 const BASE_CSP = "default-src 'none'; form-action 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
-const STYLE = `:root{color-scheme:light dark;--bg:#f6f4ef;--card:#fff;--text:#20201e;--muted:#686762;--accent:#315c4c;--danger:#922f35;--line:#dedbd2}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,sans-serif}main{width:min(100% - 2rem,38rem);margin:clamp(1.5rem,8vh,5rem) auto;padding:clamp(1.25rem,4vw,2.25rem);background:var(--card);border:1px solid var(--line);border-radius:1rem;box-shadow:0 .5rem 2rem #00000010}h1{font-size:clamp(1.55rem,5vw,2.2rem);line-height:1.15;margin:.2rem 0 1rem}p{margin:.8rem 0;color:var(--muted)}ul{padding-left:1.4rem;overflow-wrap:anywhere}form{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1.4rem}button{min-height:44px;padding:.65rem 1.1rem;border:0;border-radius:.55rem;background:var(--accent);color:white;font:600 1rem system-ui;cursor:pointer}button.secondary{background:transparent;color:var(--danger);border:1px solid currentColor}button:focus-visible{outline:3px solid #e59a32;outline-offset:3px}.meta{font-size:.9rem}.empty{font-style:italic}@media(prefers-color-scheme:dark){:root{--bg:#181a18;--card:#222522;--text:#f0efe9;--muted:#bbb9b0;--accent:#4e806d;--danger:#ff9ca3;--line:#3b403b}}`;
+const STYLE = `:root{color-scheme:light dark;--bg:#f6f4ef;--card:#fff;--text:#20201e;--muted:#686762;--accent:#315c4c;--danger:#922f35;--line:#dedbd2}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.55 system-ui,-apple-system,sans-serif}main{width:min(100% - 2rem,38rem);margin:clamp(1.5rem,8vh,5rem) auto;padding:clamp(1.25rem,4vw,2.25rem);background:var(--card);border:1px solid var(--line);border-radius:1rem;box-shadow:0 .5rem 2rem #00000010}h1{font-size:clamp(1.55rem,5vw,2.2rem);line-height:1.15;margin:.2rem 0 1rem}p{margin:.8rem 0;color:var(--muted)}ul{padding-left:1.4rem;overflow-wrap:anywhere}form{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1.4rem}button,.continue{min-height:44px;padding:.65rem 1.1rem;border:0;border-radius:.55rem;background:var(--accent);color:white;font:600 1rem system-ui;cursor:pointer}.continue{display:inline-flex;align-items:center;text-decoration:none}button.secondary{background:transparent;color:var(--danger);border:1px solid currentColor}button:focus-visible,.continue:focus-visible{outline:3px solid #e59a32;outline-offset:3px}.meta{font-size:.9rem}.empty{font-style:italic}@media(prefers-color-scheme:dark){:root{--bg:#181a18;--card:#222522;--text:#f0efe9;--muted:#bbb9b0;--accent:#4e806d;--danger:#ff9ca3;--line:#3b403b}}`;
 
 export function escapeRemoteHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => ({
@@ -64,6 +64,29 @@ export function sendPreviewPage(res: Response, formToken: string, preview: Pairi
     `<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(formToken)}<button class="secondary" type="submit">No, cancelar</button></form>`;
   securityHeaders(res);
   res.status(200).type('html').send(document('Confirma tu biblioteca', body));
+}
+
+/** Rompe la cadena de redirect del POST: `form-action` no bloquea el clic posterior. */
+export function sendContinuePage(
+  res: Response,
+  title: string,
+  message: string,
+  location: string,
+  label: string
+): void {
+  let href: string;
+  try {
+    if (location.startsWith('/') && !location.startsWith('//')) href = location;
+    else {
+      const url = new URL(location);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
+      href = url.toString();
+    }
+  } catch { throw new Error('invalid_oauth_continuation'); }
+  const body = `<p>${escapeRemoteHtml(message)}</p>` +
+    `<p><a class="continue" href="${escapeRemoteHtml(href)}">${escapeRemoteHtml(label)}</a></p>`;
+  securityHeaders(res, BASE_CSP.replace("form-action 'self'; ", ''));
+  res.status(200).type('html').send(document(title, body));
 }
 
 export function sendRemotePairingMessage(

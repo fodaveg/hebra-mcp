@@ -6,12 +6,18 @@ import express, {
 } from 'express';
 import {
   sendBridgePage,
+  sendContinuePage,
   sendPreviewPage,
   sendRemotePairingMessage,
   sendWaitingPage
 } from './pages';
 import { REMOTE_PAIRING_ORIGIN, RemotePairingService } from './service';
-import { RemotePairingError, type CommittedAccount, type RemotePairingSession } from './types';
+import {
+  RemotePairingError,
+  type CommittedAccount,
+  type RemotePairingFormAuthorization,
+  type RemotePairingSession
+} from './types';
 
 export const REMOTE_PAIRING_COOKIE = '__Host-hebra_mcp_pair';
 
@@ -45,14 +51,16 @@ function requireOrigin(req: Request): void {
   if (req.get('origin') !== REMOTE_PAIRING_ORIGIN) throw new RemotePairingError('invalid_form');
 }
 
-async function authorizedSession(req: Request, service: RemotePairingService): Promise<RemotePairingSession> {
+async function authorizedSession(req: Request, service: RemotePairingService): Promise<{
+  session: RemotePairingSession;
+  authorization: RemotePairingFormAuthorization;
+}> {
   requireOrigin(req);
   const cookie = cookieValue(req);
   if (!cookie) throw new RemotePairingError('invalid_session');
   const session = await service.sessionForCookie(cookie);
   if (!session) throw new RemotePairingError('invalid_session');
-  await service.authorizeForm(session.id, cookie, bodyString(req, 'form_token'));
-  return session;
+  return { session, authorization: { cookie, formToken: bodyString(req, 'form_token') } };
 }
 
 function clearCookie(res: Response): void {
@@ -89,9 +97,9 @@ export function createRemotePairingRouter(
     try {
       const cookie = cookieValue(req);
       if (!cookie) throw new RemotePairingError('invalid_session');
-      const session = await service.sessionForCookie(cookie);
-      if (!session) throw new RemotePairingError('invalid_session');
-      sendBridgePage(res, await service.formToken(session.id));
+      const page = await service.pageForCookie(cookie);
+      if (!page) throw new RemotePairingError('invalid_session');
+      sendBridgePage(res, page.formToken);
     } catch (error) { handleError(res, error); }
   });
 
@@ -99,24 +107,24 @@ export function createRemotePairingRouter(
     try {
       const cookie = cookieValue(req);
       if (!cookie) throw new RemotePairingError('invalid_session');
-      const session = await service.sessionForCookie(cookie);
-      if (!session) throw new RemotePairingError('invalid_session');
-      sendWaitingPage(res, await service.formToken(session.id));
+      const page = await service.pageForCookie(cookie);
+      if (!page) throw new RemotePairingError('invalid_session');
+      sendWaitingPage(res, page.formToken);
     } catch (error) { handleError(res, error); }
   });
 
   router.post('/lumbre/connect', form, async (req, res) => {
     try {
-      const session = await authorizedSession(req, service);
-      await service.receiveCredential(session.id, bodyString(req, 'code'));
+      const { session, authorization } = await authorizedSession(req, service);
+      await service.receiveCredential(session.id, authorization, bodyString(req, 'code'));
       sendWaitingPage(res, await service.formToken(session.id));
     } catch (error) { handleError(res, error); }
   });
 
   router.post('/lumbre/pairing/poll', form, async (req, res) => {
     try {
-      const session = await authorizedSession(req, service);
-      const status = await service.poll(session.id);
+      const { session, authorization } = await authorizedSession(req, service);
+      const status = await service.poll(session.id, authorization);
       if (status.kind === 'waiting') {
         sendWaitingPage(res, await service.formToken(session.id), status.remainingMs);
       } else if (status.kind === 'preview') {
@@ -127,7 +135,9 @@ export function createRemotePairingRouter(
           expectedSub: session.sub,
           pairingSessionId: session.id
         }, res);
-        if (location) res.redirect(303, location);
+        if (location) sendContinuePage(res, 'Vuelve a identificarte',
+          'Continúa con la misma cuenta para terminar la conexión.', location,
+          'Continuar con Sumego');
         else sendRemotePairingMessage(res, 401, 'Vuelve a identificarte', 'Inicia sesión de nuevo con la misma cuenta para continuar.');
       }
     } catch (error) { handleError(res, error); }
@@ -136,11 +146,14 @@ export function createRemotePairingRouter(
   router.post('/lumbre/pairing/confirm', form, async (req, res) => {
     let session: RemotePairingSession | null = null;
     try {
-      session = await authorizedSession(req, service);
-      const account = await service.confirm(session.id);
+      const authorized = await authorizedSession(req, service);
+      session = authorized.session;
+      const account = await service.confirm(session.id, authorized.authorization);
       const location = await hooks.resumeOauth({ oauthRequestId: session.oauthRequestId, account });
       clearCookie(res);
-      res.redirect(303, location);
+      sendContinuePage(res, 'Biblioteca conectada',
+        'La biblioteca está conectada. Continúa para volver a tu aplicación.', location,
+        'Continuar');
     } catch (error) {
       if (session) await hooks.cancelOauth({ oauthRequestId: session.oauthRequestId }).catch(() => undefined);
       handleError(res, error);
@@ -149,9 +162,9 @@ export function createRemotePairingRouter(
 
   router.post('/lumbre/pairing/cancel', form, async (req, res) => {
     try {
-      const session = await authorizedSession(req, service);
-      await service.cancel(session.id);
-      await hooks.cancelOauth({ oauthRequestId: session.oauthRequestId });
+      const { session, authorization } = await authorizedSession(req, service);
+      try { await service.cancel(session.id, authorization); }
+      finally { await hooks.cancelOauth({ oauthRequestId: session.oauthRequestId }); }
       clearCookie(res);
       sendRemotePairingMessage(res, 200, 'Conexión cancelada', 'No se ha conectado ninguna biblioteca.');
     } catch (error) { handleError(res, error); }

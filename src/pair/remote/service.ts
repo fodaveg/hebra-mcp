@@ -3,11 +3,13 @@ import { chmod, mkdir } from 'node:fs/promises';
 import { decodeRecoveryCode, sanitizeDeviceLabel } from '../../hebra';
 import { sameBinding, type Binding } from '../../oauth/backchannel';
 import { openFileSecretStore, writePairedSecrets, type PairedSecrets } from '../../secrets';
+import { linkedSyncFrom, registerLinkedDevice } from '../../sync/linked';
 import {
   prepareAgentDevice,
   savePreparedAgentDevice
 } from '../../spaces/device';
 import { DEFAULT_PAIR_LABEL } from '../pair';
+import { PairError } from '../errors';
 import {
   DEFAULT_LUMBRE_ORIGIN,
   exchangePairingCode,
@@ -22,6 +24,7 @@ import {
   type OwnershipVerifier,
   type PairingPreview,
   type RemotePairingJournal,
+  type RemotePairingFormAuthorization,
   type RemotePairingPublisher,
   type RemotePairingSession,
   type RemotePairingStatus,
@@ -54,6 +57,7 @@ export interface RemotePairingServiceOptions {
   prepareAgent?: typeof prepareAgentDevice;
   startLink?: typeof startRemoteLink;
   revoke?: typeof revokeRemoteCredential;
+  registerDevice?: (paired: PairedSecrets, fetcher: Fetcher) => Promise<string>;
 }
 
 export interface StartRemotePairingInput {
@@ -95,6 +99,7 @@ export class RemotePairingService {
   private readonly prepareAgent: typeof prepareAgentDevice;
   private readonly startLink: typeof startRemoteLink;
   private readonly revoke: typeof revokeRemoteCredential;
+  private readonly registerDevice: (paired: PairedSecrets, fetcher: Fetcher) => Promise<string>;
 
   constructor(private readonly options: RemotePairingServiceOptions) {
     this.publicOrigin = options.publicOrigin ?? REMOTE_PAIRING_ORIGIN;
@@ -105,6 +110,10 @@ export class RemotePairingService {
     this.prepareAgent = options.prepareAgent ?? prepareAgentDevice;
     this.startLink = options.startLink ?? startRemoteLink;
     this.revoke = options.revoke ?? revokeRemoteCredential;
+    this.registerDevice = options.registerDevice ?? (async (paired, fetcher) => {
+      const linked = await linkedSyncFrom(paired, { fetcher });
+      return linked ? registerLinkedDevice(linked, fetcher) : 'account_mismatch';
+    });
   }
 
   async start(input: StartRemotePairingInput): Promise<StartedRemotePairing> {
@@ -156,10 +165,32 @@ export class RemotePairingService {
   async sessionForCookie(cookie: string): Promise<RemotePairingSession | null> {
     for (const [id, runtime] of this.runtime) {
       if (runtime.cookie !== cookie) continue;
-      const journal = await this.requireJournal(id);
-      if (!equalDigest(journal.cookieHash, cookie)) return null;
-      await this.ensureAlive(journal);
-      return this.sessionOf(journal);
+      return this.exclusive(id, async () => {
+        const current = this.runtime.get(id);
+        if (!current || current.cookie !== cookie) return null;
+        const journal = await this.requireJournal(id);
+        if (!equalDigest(journal.cookieHash, cookie)) return null;
+        await this.ensureAlive(journal);
+        return this.sessionOf(journal);
+      });
+    }
+    return null;
+  }
+
+  async pageForCookie(cookie: string): Promise<{
+    session: RemotePairingSession;
+    formToken: string;
+  } | null> {
+    for (const [id, runtime] of this.runtime) {
+      if (runtime.cookie !== cookie) continue;
+      return this.exclusive(id, async () => {
+        const current = this.runtime.get(id);
+        if (!current || current.cookie !== cookie) return null;
+        const journal = await this.requireJournal(id);
+        if (!equalDigest(journal.cookieHash, cookie)) return null;
+        await this.ensureAlive(journal);
+        return { session: this.sessionOf(journal), formToken: current.csrf };
+      });
     }
     return null;
   }
@@ -169,21 +200,23 @@ export class RemotePairingService {
   }
 
   async formToken(id: string): Promise<string> {
-    const token = this.runtime.get(id)?.csrf;
-    if (!token) throw new RemotePairingError('invalid_session');
-    return token;
+    return this.exclusive(id, async () => {
+      const journal = await this.requireJournal(id);
+      await this.ensureAlive(journal);
+      return this.requireRuntime(id).csrf;
+    });
   }
 
-  async authorizeForm(id: string, cookie: string, formToken: string): Promise<void> {
-    const [journal, runtime] = await Promise.all([
-      this.requireJournal(id),
-      Promise.resolve(this.runtime.get(id))
-    ]);
+  private async authorizeFormLocked(
+    journal: RemotePairingJournal,
+    runtime: RuntimePairing,
+    authorization: RemotePairingFormAuthorization
+  ): Promise<void> {
+    const { cookie, formToken } = authorization;
     if (
-      !runtime || runtime.cookie !== cookie || runtime.csrf !== formToken ||
+      runtime.cookie !== cookie || runtime.csrf !== formToken ||
       !equalDigest(journal.cookieHash, cookie) || !equalDigest(journal.csrfHash, formToken)
     ) throw new RemotePairingError('invalid_form');
-    await this.ensureAlive(journal);
     // Cada POST consume su token antes de ejecutar cualquier efecto remoto.
     runtime.csrf = randomBytes(32).toString('base64url');
     journal.csrfHash = digest(runtime.csrf);
@@ -191,24 +224,60 @@ export class RemotePairingService {
     await this.options.journals.write(journal);
   }
 
-  async receiveCredential(id: string, code: string): Promise<void> {
+  async receiveCredential(
+    id: string,
+    authorization: RemotePairingFormAuthorization,
+    code: string
+  ): Promise<void> {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
       await this.ensureAlive(journal);
+      const runtime = this.requireRuntime(id);
+      await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase !== 'credential') throw new RemotePairingError('replayed');
       if (!code || code.length > 4_096) throw new RemotePairingError('invalid_form');
-      const connection = await this.exchangeCode({
-        apiOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
-        code,
-        deviceId: journal.deviceId,
-        verifier: journal.verifier,
-        fetcher: this.fetcher,
-        now: this.now
-      });
-      journal.connection = connection;
+      // El intent queda durable ANTES del efecto remoto. Sin idempotencia/revocación por
+      // deviceId, una respuesta perdida no se puede clasificar como «sin efecto».
+      journal.phase = 'exchange-pending';
       journal.cleanupRequired = true;
+      journal.pairingCode = code;
       journal.updatedAt = new Date(this.now()).toISOString();
       await this.options.journals.write(journal);
+      let connection;
+      try {
+        connection = await this.exchangeCode({
+          apiOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
+          code,
+          deviceId: journal.deviceId,
+          verifier: journal.verifier,
+          fetcher: this.fetcher,
+          now: this.now
+        });
+      } catch (error) {
+        this.runtime.delete(id);
+        if (error instanceof PairError && error.code === 'exchange_rejected') {
+          await this.options.publisher.cleanupOrphan(journal);
+          await this.options.journals.remove(id);
+        }
+        throw new RemotePairingError('unavailable');
+      }
+      journal.connection = connection;
+      journal.pairingCode = undefined;
+      journal.phase = 'credential';
+      journal.updatedAt = new Date(this.now()).toISOString();
+      try {
+        await this.options.journals.write(journal);
+      } catch {
+        this.runtime.delete(id);
+        try {
+          await this.revoke(connection, this.fetcher);
+          journal.phase = 'cancelled';
+          journal.cleanupRequired = false;
+          await this.options.journals.write(journal);
+          await this.options.journals.remove(id);
+        } catch { /* El intent durable bloquea una reactivación hasta recovery. */ }
+        throw new RemotePairingError('unavailable');
+      }
       try {
         journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher);
         const link = await this.startLink({
@@ -216,7 +285,7 @@ export class RemotePairingService {
           label: DEFAULT_PAIR_LABEL,
           fetcher: this.fetcher
         });
-        this.requireRuntime(id).link = link;
+        runtime.link = link;
         journal.phase = 'approval';
         journal.updatedAt = new Date(this.now()).toISOString();
         await this.options.journals.write(journal);
@@ -227,11 +296,15 @@ export class RemotePairingService {
     });
   }
 
-  async poll(id: string): Promise<RemotePairingStatus> {
+  async poll(
+    id: string,
+    authorization: RemotePairingFormAuthorization
+  ): Promise<RemotePairingStatus> {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
       await this.ensureAlive(journal);
       const runtime = this.requireRuntime(id);
+      await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase === 'confirmation' && runtime.preview) {
         return { kind: 'preview', preview: runtime.preview };
       }
@@ -279,11 +352,15 @@ export class RemotePairingService {
     });
   }
 
-  async confirm(id: string): Promise<Awaited<ReturnType<RemotePairingPublisher['publish']>>> {
+  async confirm(
+    id: string,
+    authorization: RemotePairingFormAuthorization
+  ): Promise<Awaited<ReturnType<RemotePairingPublisher['publish']>>> {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
       await this.ensureAlive(journal);
       const runtime = this.requireRuntime(id);
+      await this.authorizeFormLocked(journal, runtime, authorization);
       if (
         journal.phase !== 'confirmation' || !runtime.preview || !runtime.ownership ||
         !journal.connection || !journal.preparedAgent || !journal.paired
@@ -325,9 +402,12 @@ export class RemotePairingService {
     });
   }
 
-  async cancel(id: string): Promise<void> {
+  async cancel(id: string, authorization: RemotePairingFormAuthorization): Promise<void> {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
+      await this.ensureAlive(journal);
+      const runtime = this.requireRuntime(id);
+      await this.authorizeFormLocked(journal, runtime, authorization);
       await this.cleanup(journal);
     });
   }
@@ -347,7 +427,35 @@ export class RemotePairingService {
         cleaned += 1;
         continue;
       }
+      if (journal.phase === 'exchange-pending' && !journal.connection && journal.pairingCode) {
+        try {
+          journal.connection = await this.exchangeCode({
+            apiOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
+            code: journal.pairingCode,
+            deviceId: journal.deviceId,
+            verifier: journal.verifier,
+            fetcher: this.fetcher,
+            now: this.now
+          });
+          journal.pairingCode = undefined;
+          journal.phase = 'cleanup-pending';
+          journal.updatedAt = new Date(this.now()).toISOString();
+          await this.options.journals.write(journal);
+        } catch (error) {
+          if (error instanceof PairError && error.code === 'exchange_rejected') {
+            await this.options.publisher.cleanupOrphan(journal);
+            await this.options.journals.remove(journal.id);
+            cleaned += 1;
+          } else pending += 1;
+          continue;
+        }
+      }
       if (!journal.connection || !journal.cleanupRequired) {
+        if (journal.cleanupRequired) {
+          // Efecto remoto desconocido: no se borra ni se admite otra alta para este sub.
+          pending += 1;
+          continue;
+        }
         await this.options.publisher.cleanupOrphan(journal);
         await this.options.journals.remove(journal.id);
         cleaned += 1;
@@ -382,6 +490,10 @@ export class RemotePairingService {
       syncVaultId: recovered.syncVaultId,
       opaqueDeviceId: paired.device.opaqueDeviceId
     };
+    if (await this.registerDevice(paired, this.fetcher) !== 'ok') {
+      await this.cleanup(journal);
+      throw new RemotePairingError('unavailable');
+    }
     let ownership: VerifiedOwnership;
     try {
       ownership = await this.options.ownership.verify({
@@ -415,13 +527,17 @@ export class RemotePairingService {
   }
 
   private async cleanup(journal: RemotePairingJournal): Promise<void> {
-    try { await this.runtime.get(journal.id)?.link?.cancel(); } catch { /* Caduca en el relé. */ }
+    const link = this.runtime.get(journal.id)?.link;
+    journal.phase = 'cleanup-pending';
+    journal.updatedAt = new Date(this.now()).toISOString();
+    await this.options.journals.write(journal);
+    // Desde este punto no queda preview, grant ni enlace capaz de confirmar/publicar.
+    this.runtime.delete(journal.id);
+    try { await link?.cancel(); } catch { /* Caduca en el relé. */ }
     if (journal.connection && journal.cleanupRequired) {
       try {
         await this.revoke(journal.connection, this.fetcher);
       } catch {
-        journal.updatedAt = new Date(this.now()).toISOString();
-        await this.options.journals.write(journal);
         throw new RemotePairingError('unavailable');
       }
     }
@@ -435,14 +551,16 @@ export class RemotePairingService {
 
   /** Falla del rename/registro: revoca primero y no olvida un orphan no retirado. */
   private async abortPublish(journal: RemotePairingJournal): Promise<void> {
+    journal.phase = 'cleanup-pending';
+    journal.updatedAt = new Date(this.now()).toISOString();
+    await this.options.journals.write(journal);
+    this.runtime.delete(journal.id);
     try {
       if (journal.connection && journal.cleanupRequired) {
         await this.revoke(journal.connection, this.fetcher);
       }
       await this.options.publisher.cleanupOrphan(journal);
     } catch {
-      journal.updatedAt = new Date(this.now()).toISOString();
-      await this.options.journals.write(journal);
       throw new RemotePairingError('unavailable');
     }
     journal.phase = 'cancelled';

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { sendBridgePage, sendPreviewPage } from '../../src/pair/remote/pages';
+import { sendBridgePage, sendContinuePage, sendPreviewPage } from '../../src/pair/remote/pages';
 
 describe('páginas del emparejado remoto', () => {
   it('puentea solo el fragmento con CSP nonce y sin recursos externos', () => {
@@ -25,6 +25,17 @@ describe('páginas del emparejado remoto', () => {
     expect(response.body).toContain('Sin título');
     expect(response.body).toContain('/lumbre/pairing/cancel');
     expect(response.body).toContain('min-height:44px');
+  });
+
+  it('rompe el redirect del POST con un clic explícito y rechaza esquemas activos', () => {
+    const response = fakeResponse();
+    sendContinuePage(response.res, 'Continúa', 'Vuelve a la aplicación',
+      'https://client.example/callback?code=abc&state=def', 'Continuar');
+    expect(response.body).toContain('href="https://client.example/callback?code=abc&amp;state=def"');
+    expect(response.body).not.toContain('http-equiv="refresh"');
+    expect(response.headers['content-security-policy']).not.toContain('form-action');
+    expect(() => sendContinuePage(fakeResponse().res, 'No', 'No',
+      'javascript:alert(1)', 'No')).toThrow('invalid_oauth_continuation');
   });
 });
 

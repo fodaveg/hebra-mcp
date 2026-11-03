@@ -5,10 +5,12 @@ import type { PreparedAgentDevice } from '../../spaces/device';
 
 export type RemotePairingPhase =
   | 'credential'
+  | 'exchange-pending'
   | 'approval'
   | 'owner-check'
   | 'confirmation'
   | 'committing'
+  | 'cleanup-pending'
   | 'finished'
   | 'cancelled';
 
@@ -27,6 +29,7 @@ export interface RemotePairingJournal {
   identityExpiresAt: string;
   deviceId: string;
   verifier: string;
+  pairingCode?: string;
   connection?: LumbreConnection;
   preparedAgent?: PreparedAgentDevice;
   paired?: PairedSecrets;
@@ -52,6 +55,11 @@ export interface RemotePairingSession {
   oauthRequestId: string;
   sub: string;
   expiresAt: string;
+}
+
+export interface RemotePairingFormAuthorization {
+  cookie: string;
+  formToken: string;
 }
 
 export interface CommittedAccount {

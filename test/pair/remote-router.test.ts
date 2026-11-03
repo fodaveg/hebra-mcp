@@ -16,8 +16,7 @@ describe('router del emparejado remoto', () => {
 
   it('rechaza callback sin cookie y POST desde otro origen antes de consumir el formulario', async () => {
     const service = {
-      sessionForCookie: vi.fn(async () => null),
-      authorizeForm: vi.fn(async () => undefined)
+      sessionForCookie: vi.fn(async () => null)
     } as unknown as RemotePairingService;
     const app = express();
     app.use(createRemotePairingRouter(service, {
@@ -42,7 +41,6 @@ describe('router del emparejado remoto', () => {
     });
     expect(crossed.status).toBe(403);
     expect(service.sessionForCookie).not.toHaveBeenCalled();
-    expect(service.authorizeForm).not.toHaveBeenCalled();
   });
 
   async function listen(app: express.Express): Promise<string> {
