@@ -4,15 +4,18 @@
  * broker cerrado de siempre. Sin red.
  */
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import type { Response as ExpressResponse } from 'express';
 import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type CryptoKey, type JWK } from 'jose';
 import { encodeRecoveryCode } from '../../src/hebra';
+import { RemotePairingService, RemotePairingJournalStore } from '../../src/pair/remote';
 import type { AccountRegistry } from '../../src/accounts';
 import { HttpConfigError } from '../../src/http/config';
+import { createHttpApp } from '../../src/http/app';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE } from '../../src/oauth';
 import { LOGOUT_JTIS_FILE } from '../../src/oauth/logout-jtis';
 import type { HebraOAuthProvider } from '../../src/oauth/provider';
@@ -345,7 +348,7 @@ describe('recorrido con Sumego', () => {
       return 'https://mcp.hebra.pro/lumbre/pairing/resume';
     });
     provider.attachRemotePairing({ start: startPairing,
-      resumeIdentity: async () => undefined });
+      resumeIdentity: async () => undefined, abandon: async () => undefined });
     currentSub = 'sumego|mikel'; currentSid = 'sesion-mikel';
     const login = await startLogin();
     expect(requestBodies).toHaveLength(0);
@@ -354,6 +357,121 @@ describe('recorrido con Sumego', () => {
     expect(returned.headers.get('location')).toBe('https://mcp.hebra.pro/lumbre/pairing/resume');
     expect(startPairing).toHaveBeenCalledOnce();
     expect(accounts.findBySub('sumego|mikel')).toBeNull();
+  });
+
+  async function restartFromV2(): Promise<{ access_token: string; refresh_token: string }> {
+    const existing = await fullLogin();
+    const file = join(context.dataDir, OAUTH_TOKENS_FILE);
+    const saved = JSON.parse(await readFile(file, 'utf8')) as { families: Array<Record<string, unknown>> };
+    for (const family of saved.families) {
+      delete family.sub; delete family.sid; delete family.sumegoRefresh; delete family.sumegoRenewedAt;
+    }
+    await writeFile(file, JSON.stringify({ version: 2, families: saved.families }));
+    await rm(join(context.dataDir, 'accounts-v1.json'));
+    const auth = await loadOAuthHttpAuth(context.dataDir, app.config, store, {
+      backchannelFetch: broker, sumegoFetch, env: sumegoEnv(), pairing, multiuser: true,
+      now: () => Date.now() + clockOffset
+    });
+    if (!auth) throw new Error('auth absent');
+    provider = auth.provider; accounts = auth.accounts;
+    app.server.removeAllListeners('request');
+    app.server.on('request', createHttpApp({ ctx: context.serverContext, version: 'test', config: app.config, auth }));
+    expect(accounts.legacyAccount()).toMatchObject({ sub: '__legacy_unclaimed__', state: 'active' });
+    return existing;
+  }
+
+  it('v2 → reinicio → nuevo login propietario conserva el legado y sus familias existentes', async () => {
+    const existing = await restartFromV2();
+    const startPairing = vi.fn(async () => '/lumbre/pairing/resume');
+    provider.attachRemotePairing({ start: startPairing, resumeIdentity: async () => undefined, abandon: async () => undefined });
+    const second = await fullLogin();
+    expect(startPairing).not.toHaveBeenCalled();
+    expect(accounts.legacyAccount()).toMatchObject({ id: 'legacy', sub: SUB, state: 'active' });
+    expect((await provider.verifyAccessToken(existing.access_token)).account.id).toBe('legacy');
+    expect((await provider.verifyAccessToken(second.access_token)).account.id).toBe('legacy');
+    const refreshed = await refresh(existing.refresh_token);
+    expect(refreshed.status).toBe(200);
+    const replacement = await refreshed.json() as { access_token: string };
+    expect((await provider.verifyAccessToken(replacement.access_token)).account.id).toBe('legacy');
+  });
+
+  it('v2 → reinicio → otro sub no reclama el legado si Lumbre rechaza su propiedad', async () => {
+    await restartFromV2();
+    const startPairing = vi.fn(async () => '/lumbre/pairing/resume');
+    provider.attachRemotePairing({ start: startPairing, resumeIdentity: async () => undefined, abandon: async () => undefined });
+    currentSub = 'sumego|mikel';
+    exchangeResponse = async () => json({ error: 'wrong_account' }, 403);
+    const { login, formToken } = await toConsent();
+    const denied = await consent(formToken, login.cookie);
+    expect(denied.status).toBe(403);
+    expect(exchangeBodies).toHaveLength(2); // Login de la familia v2 y prueba explícita de propiedad.
+    expect(accounts.legacyAccount()).toMatchObject({ sub: '__legacy_unclaimed__', state: 'active' });
+    expect(accounts.findBySub(currentSub)).toBeNull();
+    expect(startPairing).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('reauth con sub distinto limpia el alta por el provider real (revocación falla=%s)', async (revokeFails) => {
+    await accounts.claimLegacy({ sub: 'otro-owner-del-legado', grant: brokerGrant });
+    const journals = new RemotePairingJournalStore(join(context.dataDir, 'provider-pairing'));
+    const connection = { credentialId: PAIR_ID, readToken: 'read-pairing', writeToken: 'write-pairing',
+      apiOrigin: 'https://app.lumbre.pro', connectedAt: new Date().toISOString() };
+    const recoveryCode = await encodeRecoveryCode({ relayOrigin: connection.apiOrigin, syncVaultId: VAULT,
+      keyEpoch: 1, vaultKey: new Uint8Array(32).fill(7) });
+    const revoke = vi.fn(async () => { if (revokeFails) throw new Error('offline'); });
+    const cancel = vi.fn(async () => undefined);
+    const publish = vi.fn(async () => ({ id: 'should-not-publish', generation: 1 }));
+    const service = new RemotePairingService({ journals, now: () => Date.now() + clockOffset,
+      exchangeCode: async () => connection,
+      prepareAgent: async (_connection, deviceId) => ({
+        privateKey: { kty: 'EC', crv: 'P-256', d: 'private', x: 'x', y: 'y' },
+        registration: { credentialId: PAIR_ID, deviceId, accountId: ACCOUNT, actorKind: 'agent', keyId: 'key',
+          publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' } }
+      }),
+      startLink: async () => ({ createdAt: new Date().toISOString(), initialRemainingMs: 600_000,
+        poll: async () => ({ kind: 'granted', recoveryCode, approverLabel: 'owner', approverSyncVaultId: VAULT,
+          approverVaultCreatedAt: '2026-01-01T00:00:00.000Z', vaultCount: 1 }),
+        verify: async () => { throw new Error('should-not-preview'); }, complete: async () => undefined, cancel }),
+      revoke,
+      ownership: { verify: async () => { throw new Error('should-not-verify'); } },
+      publisher: { publish, findCommitted: async () => null, cleanupOrphan: async () => undefined }
+    });
+    let started!: Awaited<ReturnType<RemotePairingService['start']>>;
+    let oauthRequestId = '';
+    const hooks = {
+      async start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string }) {
+        oauthRequestId = input.oauthRequestId;
+        started = await service.start({ ...input, identityExpiresAt: new Date(Date.now() + 1_000).toISOString() });
+        return '/lumbre/pairing/resume';
+      },
+      resumeIdentity: async (input: { pairingSessionId: string; sub: string; identityExpiresAt: string }) =>
+        service.resumeIdentity(input.pairingSessionId, input.sub, input.identityExpiresAt),
+      abandon: (id: string, request: string) => service.abandon(id, request)
+    };
+    provider.attachRemotePairing(hooks);
+    const login = await startLogin();
+    expect((await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie)).status).toBe(303);
+    await service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'one-use-code');
+    clockOffset = 2_000;
+    expect(await service.poll(started.id, { cookie: started.cookie, formToken: await service.formToken(started.id) }))
+      .toEqual({ kind: 'reauthenticate' });
+    let reauthCookie = '';
+    const location = new URL(await provider.reauthenticateRemote({ oauthRequestId, expectedSub: SUB,
+      pairingSessionId: started.id }, { append(_name: string, value: string) { reauthCookie = value.split(';')[0]!; } } as ExpressResponse));
+    currentNonce = location.searchParams.get('nonce')!;
+    currentChallenge = location.searchParams.get('code_challenge')!;
+    currentSub = 'sumego|mikel';
+    const code = 'another-sumego-code'; issuedCodes.add(code);
+    const denied = await callback({ code, state: location.searchParams.get('state')!, iss: issuer }, reauthCookie);
+    expect(denied.status).toBe(400);
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(publish).not.toHaveBeenCalled();
+    await expect(service.formToken(started.id)).rejects.toMatchObject({ code: revokeFails ? 'invalid_session' : 'not_found' });
+    if (revokeFails) {
+      expect(await journals.read(started.id)).toMatchObject({ phase: 'cleanup-pending', cleanupRequired: true });
+    } else {
+      expect(await journals.read(started.id)).toBeNull();
+      expect(cancel).toHaveBeenCalledOnce();
+    }
   });
 
   it('authorize → Sumego → consentimiento → código OAuth → familia con sub y sid', async () => {

@@ -82,7 +82,8 @@ export async function openRemotePairing(options: OpenRemotePairingOptions): Prom
       setRemotePairingCookie(res, started.cookie);
       return started.authorizationUrl;
     },
-    resumeIdentity: (input) => service.resumeIdentity(input.pairingSessionId, input.sub, input.identityExpiresAt)
+    resumeIdentity: (input) => service.resumeIdentity(input.pairingSessionId, input.sub, input.identityExpiresAt),
+    abandon: (id, oauthRequestId) => service.abandon(id, oauthRequestId)
   });
   const router = createRemotePairingRouter(service, {
     resumeOauth: (input) => options.provider.resumeRemoteAuthorization(input),

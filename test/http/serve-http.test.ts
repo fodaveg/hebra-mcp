@@ -19,7 +19,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { MAX_MCP_BODY_BYTES } from '../../src/http/app';
 import { AccountRegistry, accountControlDir, accountDataDir, requestAccountRemoval } from '../../src/accounts';
 import { encodeRecoveryCode } from '../../src/hebra';
-import type { OAuthHttpAuth } from '../../src/oauth/http-auth';
+import { loadOAuthHttpAuth, type OAuthHttpAuth } from '../../src/oauth/http-auth';
 import { GrantSecrets } from '../../src/oauth/grants';
 import { MemorySecretStore, openFileSecretStore, writePairedSecrets } from '../../src/secrets';
 import { httpConfigFor } from '../../src/http/config';
@@ -296,6 +296,31 @@ describe('arranque de serve-http', () => {
     dirs.push(dir);
     return dir;
   }
+
+  it('OAuth real monousuario cierra su escritor y permite reabrir la misma raíz', async () => {
+    const dataDir = tempDataDir();
+    const secrets = new MemorySecretStore();
+    const config = httpConfigFor('http://127.0.0.1', 0);
+    const options = { dataDir, secrets, config, version: 'test', multiuser: false,
+      authConfigured: () => true,
+      loadAuth: (dir: string) => loadOAuthHttpAuth(dir, config, secrets, {
+        env: { HEBRA_MCP_BACKCHANNEL_SECRET: 'a'.repeat(32) }, multiuser: false
+      }),
+      instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
+    };
+    const first = await startServeHttp(options);
+    handles.push(first);
+    // Siempre cerrar, incluso si la regresión deja el contexto raíz fuera del manager.
+    try {
+      expect(existsSync(join(dataDir, 'writer.lock'))).toBe(true);
+      await first.close();
+      expect(existsSync(join(dataDir, 'writer.lock'))).toBe(false);
+      expect(first.contexts).toBeNull();
+      const reopened = await startServeHttp(options);
+      handles.push(reopened);
+      expect(existsSync(join(dataDir, 'writer.lock'))).toBe(true);
+    } finally { await first.serve?.close(); }
+  });
 
   it('sin autenticación configurada no arranca ni abre la biblioteca', async () => {
     const dataDir = tempDataDir();

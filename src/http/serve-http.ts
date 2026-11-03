@@ -199,7 +199,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       'auth_not_configured',
       'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
     );
-    registry = 'accounts' in auth && auth.accounts instanceof AccountRegistry ? auth.accounts : null;
+    registry = options.multiuser && 'accounts' in auth && auth.accounts instanceof AccountRegistry ? auth.accounts : null;
     if (registry) {
       const activeRegistry = registry;
       contexts = new AccountContexts(activeRegistry, async (account) => {

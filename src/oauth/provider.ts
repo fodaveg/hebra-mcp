@@ -202,6 +202,7 @@ export interface HebraOAuthProviderOptions {
 export interface RemotePairingOAuthHooks {
   start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string }, res: Response): Promise<string>;
   resumeIdentity(input: { pairingSessionId: string; sub: string; identityExpiresAt: string }): Promise<void>;
+  abandon(pairingSessionId: string, oauthRequestId: string): Promise<void>;
 }
 
 export interface AccountAuthInfo extends AuthInfo { account: AuthorizedAccount }
@@ -312,6 +313,14 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     } catch { return null; }
   }
 
+  /** El legado sin sub solo puede probar el vínculo local exacto, nunca uno elegido por el login. */
+  private async unclaimedLegacyBinding(): Promise<Binding | null> {
+    const legacy = this.accounts.legacyAccount();
+    if (legacy && (legacy.state !== 'active' || legacy.sub !== '__legacy_unclaimed__')) return null;
+    const current = await this.currentBinding();
+    return current && (!legacy || sameBinding(legacy.binding, current)) ? current : null;
+  }
+
   /** Compatibilidad monousuario: el vínculo local sigue siendo la autoridad del contexto fijo. */
   private async legacySingleUser(grant: Binding): Promise<AuthorizedAccount | null> {
     if (this.multiuser) return null;
@@ -416,7 +425,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     // Pedir su transacción aquí no lo adjudica: el claim solo ocurre después de que
     // Sumego valide `sub` y el broker canjee exactamente esta misma vinculación.
     const binding = this.loginProvider === 'sumego'
-      ? (!this.accounts.legacyAccount() ? await this.currentBinding() : null)
+      ? await this.unclaimedLegacyBinding()
       : await this.currentBinding();
     if (this.loginProvider !== 'sumego' && !binding) {
       res.status(503).json({ error: 'temporarily_unavailable' }); return;
@@ -606,7 +615,14 @@ export class HebraOAuthProvider implements OAuthServerProvider {
 
     const identityExpiresAt = new Date(login.consentDeadline).toISOString();
     if (login.remotePairingId) {
-      if (!login.expectedSub || claims.sub !== login.expectedSub || !this.remotePairing) {
+      if (!this.remotePairing) { reject('unavailable'); return; }
+      if (!login.expectedSub || claims.sub !== login.expectedSub) {
+        // La identidad nueva no puede conservar la credencial preparada para otra persona.
+        // El diario valida también la transacción OAuth original antes de limpiar.
+        try { await this.remotePairing.abandon(login.remotePairingId, pending.transactionId); }
+        catch { /* El servicio conserva cualquier revocación pendiente y bloquea el runtime. */ }
+        await this.cancelRemoteAuthorization(pending.transactionId).catch(() =>
+          logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
         reject('wrong_account'); return;
       }
       try {
@@ -624,7 +640,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (account?.state === 'removing') { reject('account_removing'); return; }
     let binding: Binding | null = account?.state === 'active' ? account.binding : null;
     // Migración explícita del único legado: solo se prueba su vínculo si aún no tiene dueño.
-    if (!binding && !this.accounts.legacyAccount()) binding = await this.currentBinding();
+    if (!binding) binding = await this.unclaimedLegacyBinding();
     if (binding && pending.requestId) {
       if (!pending.binding || !sameBinding(binding, pending.binding)) { reject('binding_changed'); return; }
     } else if (binding) {
@@ -735,8 +751,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const { accessToken: _bearer, ...activeFields } = grant;
     const active: ActiveGrant = { ...activeFields, active: true };
     let account = this.accounts.authorize(active, sumego?.identity.sub ?? null);
-    if (!account && sumego && !this.accounts.legacyAccount()) {
-      const current = await this.currentBinding();
+    if (!account && sumego) {
+      const current = await this.unclaimedLegacyBinding();
       if (current && sameBinding(current, grant)) {
         account = await this.accounts.claimLegacy({ sub: sumego.identity.sub, grant: active });
       }
