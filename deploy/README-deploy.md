@@ -484,6 +484,14 @@ sesión en la nube (§12.7, C6).
   listener. Un error o timeout no acredita que la retirada haya terminado:
   comprobar el estado y reintentar la misma cuenta; nunca borrar datos a mano
   para forzar el cierre. En una emergencia se puede cerrar todo el conector.
+  Si devuelve `account_writer_busy`, la cuenta queda bloqueada y conserva los
+  datos necesarios para reintentar: cerrar el escritor que aún utiliza esa
+  biblioteca o sus espacios antes de repetir la orden. Antes de retirar una
+  cuenta, actualizar o detener también cualquier lector stdio/workdir antiguo
+  que comparta esos datos; las versiones anteriores no consultan la marca
+  durable de retirada al abrir una caché o guardar claves. La actualización del
+  contenedor cierra sus procesos antiguos, pero no los de otros contenedores o
+  procesos externos que usen el mismo volumen.
 - **Retirar** (por ejemplo, para desmontar el conector remoto por completo):
 
   ```bash
