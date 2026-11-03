@@ -521,7 +521,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
           (toolCtx) => run(toolCtx, fields as Input));
         // Origen explícito también para imágenes/recursos y errores ligados al contenido.
         if (selected.spaceId) return { ...result, content: [
-          { type: 'text' as const, text: JSON.stringify({ spaceId: selected.spaceId }) }, ...result.content
+          { type: 'text' as const, text: JSON.stringify({ spaceId: selected.spaceId, name: selected.spaceName?.() ?? null }) }, ...result.content
         ] };
         return result;
       } catch (error) {
@@ -534,7 +534,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
 
   server.registerTool('hebra_list_spaces', {
     title: 'Espacios autorizados al agente',
-    description: 'Lista solo los espacios con permiso y concesión vigentes para este agente. No incluye los apagados. Usa spaceId como selector space; omitir space siempre elige personal.',
+    description: 'Lista solo los espacios con permiso y concesión vigentes para este agente, con su `spaceId` y su `name` (null si no se puede leer). No incluye los apagados. Usa spaceId como selector space; omitir space siempre elige personal. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
     inputSchema: {}, annotations: READ_ONLY
   }, gated('hebra_list_spaces', async () => ({ spaces: await ctx.spaces?.list() ?? [] })));
 

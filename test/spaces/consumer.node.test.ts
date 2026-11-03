@@ -9,7 +9,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { buildMcpServer } from '../../src/server/build-server';
@@ -32,6 +32,7 @@ import { NoteWriter } from '../../src/store/writes';
 import { StoreError } from '../../src/store/errors';
 import { NO_PRIVATE } from '../fixtures/no-private';
 import type { AgentSpaceAccess } from '../../src/spaces/protocol';
+import { writeSpaceMeta } from '../../vendor/hebra/src/lib/spaces/space-key-check';
 
 const SPACE = '351f12d0-dd49-48a6-b84c-301e16c9d64a';
 const SHARED_VAULT = '22'.repeat(16);
@@ -160,6 +161,71 @@ afterEach(async () => {
   await fake?.close();
   await rm(directory, { recursive: true, force: true });
   for (const d of extras) await rm(d, { recursive: true, force: true });
+});
+
+const SPACE_NAME = 'Dualhand secreto';
+async function seedMeta(key: Uint8Array = SHARED) {
+  await writeSpaceMeta(
+    fake.relayFor(SHARED_VAULT),
+    { syncVaultId: SHARED_VAULT, keyEpoch: 1, vaultKey: key },
+    { schema: 1, name: SPACE_NAME, createdAt: '2026-01-01T00:00:00.000Z' }
+  );
+}
+const probes = () =>
+  fake.requested.filter((url) => url.includes(SHARED_VAULT) && url.endsWith('/records')).length;
+function listed(result: unknown): Array<{ spaceId: string; name: string | null }> {
+  const content = (result as { content: Array<{ text: string }> }).content;
+  return JSON.parse(content[0]!.text).spaces;
+}
+
+describe('nombre de los espacios', () => {
+  it('hebra_list_spaces trae el nombre del registro de alta', async () => {
+    await grant();
+    await seedMeta();
+    expect(listed(await call('hebra_list_spaces'))).toEqual([{ spaceId: SPACE, name: SPACE_NAME }]);
+  });
+
+  it('sin meta, o con un meta que no abre con la clave, el nombre es null y el listado no falla', async () => {
+    await grant();
+    expect(listed(await call('hebra_list_spaces'))).toEqual([{ spaceId: SPACE, name: null }]);
+    await seedMeta(new Uint8Array(32).fill(99));
+    const result = await call('hebra_list_spaces');
+    expect(result.isError).not.toBe(true);
+    expect(listed(result)).toEqual([{ spaceId: SPACE, name: null }]);
+  });
+
+  it('una segunda llamada no vuelve a leer el meta', async () => {
+    await grant();
+    await seedMeta();
+    await call('hebra_list_spaces');
+    const before = probes();
+    expect(before).toBeGreaterThan(0);
+    expect(listed(await call('hebra_list_spaces'))[0]!.name).toBe(SPACE_NAME);
+    expect(probes()).toBe(before);
+  });
+
+  it('el bloque de origen lleva spaceId y name', async () => {
+    await grant();
+    await seedMeta();
+    const shared = (await call('hebra_read_note', { space: SPACE, id: NOTE })) as {
+      content: Array<{ text: string }>;
+    };
+    expect(JSON.parse(shared.content[0]!.text)).toEqual({ spaceId: SPACE, name: SPACE_NAME });
+  });
+
+  it('el nombre no aparece en los logs', async () => {
+    await grant();
+    await seedMeta();
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      await call('hebra_list_spaces');
+      await call('hebra_read_note', { space: SPACE, id: NOTE });
+      const logged = (spy.mock.calls as unknown as [string][]).map(([line]) => line).join('\n');
+      expect(logged).not.toContain(SPACE_NAME);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 describe('herramientas MCP por espacio', () => {

@@ -21,6 +21,7 @@ import {
   RoutedStatusSource,
   writerSocketHandlers
 } from '../server/forward';
+import { HttpLibraryTransport, readSpaceMeta } from '../hebra';
 import { AgentDevice } from './device';
 import { catalogueSchema, type AgentSpaceAccess } from './protocol';
 
@@ -59,6 +60,9 @@ interface Entry {
 
 export class AgentSpaceManager implements SpaceRouter {
   private readonly entries = new Map<string, Entry>();
+  /** Nombre de cada espacio por origen y hash del grant: si el grant cambia, se vuelve a
+   * leer. Es contenido del usuario: nunca se loguea. Los fallos no se guardan. */
+  private readonly names = new Map<string, string>();
   private closed = false;
   constructor(
     readonly device: AgentDevice,
@@ -116,10 +120,59 @@ export class AgentSpaceManager implements SpaceRouter {
     await writeFile(join(entry.directory, 'access-denied'), '', { mode: 0o600 });
   }
 
-  async list(): Promise<Array<{ spaceId: string }>> {
+  private nameKey(item: AgentSpaceAccess): string {
+    return hash([this.device.paired.connection.apiOrigin, grantHash(item)]);
+  }
+
+  /** El nombre del espacio, de la caché o leído del registro de alta con la clave `key`
+   * (la de una entrada ya abierta) o con la que abre el grant, que se borra al acabar.
+   * Pasa por la misma comprobación fresca del grant que el `fetch` de `open()`. Cualquier
+   * fallo (meta ausente, relé que rechaza el sondeo, sobre que no abre) deja `null`, sin
+   * detalle. */
+  private async readName(item: AgentSpaceAccess, key?: Uint8Array): Promise<string | null> {
+    const cacheKey = this.nameKey(item);
+    const cached = this.names.get(cacheKey);
+    if (cached !== undefined) return cached;
+    let own: Uint8Array | undefined;
+    try {
+      const vaultKey = key ?? (own = await this.device.openGrant(item));
+      const { apiOrigin, readToken, writeToken } = this.device.paired.connection;
+      const check = async () => {
+        const fresh = await this.catalogue();
+        if (!fresh.some((s) => grantHash(s) === grantHash(item))) throw new Error();
+      };
+      const guardedFetch: typeof fetch = async (input, init) => {
+        await check();
+        const response = await this.fetcher(input, { ...init, redirect: 'error' });
+        await check();
+        return response;
+      };
+      const transport = new HttpLibraryTransport(
+        async () => ({ apiOrigin, readToken, writeToken }),
+        guardedFetch
+      );
+      const meta = await readSpaceMeta(transport, {
+        syncVaultId: item.syncVaultId,
+        keyEpoch: 1,
+        vaultKey
+      });
+      if (!meta) return null;
+      this.names.set(cacheKey, meta.name);
+      return meta.name;
+    } catch {
+      return null;
+    } finally {
+      own?.fill(0);
+    }
+  }
+
+  async list(): Promise<Array<{ spaceId: string; name: string | null }>> {
     const before = await this.catalogue();
     const after = new Set((await this.catalogue()).map((s) => s.spaceId));
-    return before.filter((s) => after.has(s.spaceId)).map(({ spaceId }) => ({ spaceId }));
+    const items = before.filter((s) => after.has(s.spaceId));
+    const out: Array<{ spaceId: string; name: string | null }> = [];
+    for (const item of items) out.push({ spaceId: item.spaceId, name: await this.readName(item) });
+    return out;
   }
 
   /** La primera validación fresca de la invocación: el catálogo de ahora mismo. Un UUID
@@ -127,7 +180,7 @@ export class AgentSpaceManager implements SpaceRouter {
   async resolve(spaceId: string): Promise<ServerContext> {
     const item = (await this.catalogue()).find((space) => space.spaceId === spaceId);
     if (!item) throw new ToolError('space_access_denied');
-    const key = hash([this.device.paired.connection.apiOrigin, grantHash(item)]);
+    const key = this.nameKey(item);
     const existing = this.entries.get(key);
     if (existing) {
       // El catálogo de arriba ya retiró la entrada si su grant cambió; otro proceso puede
@@ -278,11 +331,15 @@ export class AgentSpaceManager implements SpaceRouter {
     }
     await instance.whenReady();
     await authorize();
+    // Sin red de más si el listado ya lo leyó; si falla, el bloque de origen lleva null.
+    await this.readName(entry.access, vaultKey);
+    const nameKey = this.nameKey(entry.access);
     return {
       port: instance.port,
       privacyConfig: privacySource.initial,
       privacyConfigSource: privacySource,
       spaceId: entry.access.spaceId,
+      spaceName: () => this.names.get(nameKey) ?? null,
       // La segunda validación fresca de cada invocación (`runTool`, al aceptar).
       authorize,
       status: new RoutedStatusSource(instance, true),

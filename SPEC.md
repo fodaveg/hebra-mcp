@@ -2673,14 +2673,19 @@ visible para los miembros. No se declara QA de producción con estas pruebas loc
 
 ### H-L7: consumidor de concesiones de dispositivo (candidato 29 oct 2026)
 
-`hebra_list_spaces` devuelve `{spaces:[{spaceId}]}` únicamente con membresía, permiso
+`hebra_list_spaces` devuelve `{spaces:[{spaceId, name}]}` (`name: string | null`) únicamente con membresía, permiso
 propio y concesión vigentes. Todas las herramientas de contenido aceptan `space?: string`:
 omitirlo o indicar `personal` conserva la biblioteca personal; un UUID selecciona ese espacio.
 Solo el literal exacto `personal` es la biblioteca personal (su respuesta es la misma que sin
 `space`). Un UUID con el grant apagado, uno inexistente, uno malformado o uno en mayúsculas
 (otro valor cualquiera, `PERSONAL` incluido) responden exactamente igual: `space_access_denied`,
-con el mismo mensaje y la misma forma. Las respuestas compartidas incorporan un primer bloque de texto `{spaceId}` antes del contenido,
-también en adjuntos. No busca una nota en otras bibliotecas ni resuelve títulos entre bases.
+con el mismo mensaje y la misma forma. Las respuestas compartidas incorporan un primer bloque de texto `{spaceId, name}` antes del contenido,
+también en adjuntos.
+El `name` es el del registro de alta del espacio (`readSpaceMeta`: un sondeo `postRecords` sin escritura,
+cifrado con la clave del espacio, que se abre con el grant y se borra al acabar); se guarda en memoria
+por hash del grant y se vuelve a leer si el grant cambia. Si el meta falta, no abre o el relé rechaza
+el sondeo, es `null`, sin hacer fallar el listado ni revelar el motivo. Es contenido del usuario: nunca
+entra en un log. No busca una nota en otras bibliotecas ni resuelve títulos entre bases.
 Johnny.Decimal (`hebra_jd_*`) responde `space_not_supported` en espacios. Los comandos de
 workdir siguen siendo personales; abrir con ellos una SQLite compartida responde
 `space_access_denied`. El socket compartido tampoco publica los verbos de workdir.

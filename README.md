@@ -97,7 +97,7 @@ Estado a 3 de noviembre de 2026: el servidor MCP tiene 40 herramientas
   `operationId`) y `undo` (7 días). Una carpeta solo se rechaza por la configuración de
   privados, con el `folder_unavailable` de `hebra_rename_folder`; lo privado que tenga dentro
   se mueve con ella y sigue oculto, como al renombrarla.
-- Espacios compartidos (H-L7): `hebra_list_spaces` devuelve solo los espacios para los que
+- Espacios compartidos (H-L7): `hebra_list_spaces` devuelve (con `spaceId` y `name`) solo los espacios para los que
   esa cuenta tiene membresía, concesión y permiso propio del agente. Las herramientas de
   contenido aceptan `space`; sin él trabajan en la biblioteca personal de la cuenta
   autenticada. Pertenecer a un espacio u organización nunca abre la biblioteca personal de

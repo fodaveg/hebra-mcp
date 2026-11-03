@@ -20,13 +20,15 @@ import type { WriteContext } from './write-context';
  * herramientas que lo necesitan.
  */
 export interface SpaceRouter {
-  list(): Promise<Array<{ spaceId: string }>>;
+  list(): Promise<Array<{ spaceId: string; name: string | null }>>;
   resolve(spaceId: string): Promise<ServerContext>;
 }
 
 export interface ServerContext {
   spaces?: SpaceRouter;
   spaceId?: string;
+  /** Nombre del espacio compartido (cacheado; `null` si no se pudo leer). Contenido del usuario: nunca a logs. */
+  spaceName?: () => string | null;
   authorize?(): Promise<void>;
   port: HebraLibraryPort;
   /** La configuración de privados; con `privacyConfigSource`, la del arranque. */

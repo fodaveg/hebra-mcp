@@ -35,4 +35,6 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src
 export { BlobRelayV2Error } from '../vendor/hebra/src/lib/vault/blob-v2/memory-transport';
 
 // H-L7: protocolo compartido de concesiones de dispositivo, sin copiar criptografía.
+// El nombre de un espacio vive cifrado en su registro de alta; se lee con la sonda de Hebra.
+export { readSpaceMeta } from '../vendor/hebra/src/lib/spaces/space-key-check';
 export { openAgentSpaceGrant, agentDeviceKeyId, parseAgentSpaceGrant } from '../vendor/hebra/src/lib/spaces/agent-space-grant';
