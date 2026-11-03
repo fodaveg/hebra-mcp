@@ -10,7 +10,9 @@ Johnny.Decimal y archivar notas, ficheros o carpetas dentro de un ID; nunca purg
 la papelera, borrar carpetas ni moverlas fuera de un ID, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
-vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
+vincula como un dispositivo más de la biblioteca. En el conector remoto, el servidor es
+ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
+notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
 Estado a 3 de noviembre de 2026: el servidor MCP tiene 40 herramientas
 (detalle en `SPEC.md` §5):
@@ -188,7 +190,8 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
 - `HEBRA_MCP_BACKCHANNEL_SECRET` (32–512 caracteres) es exclusivo de Hebra MCP y se
   provisiona en ambos servidores sin versionar su valor. Ningún login entrega la clave de
   biblioteca: cada persona aprueba su dispositivo en Hebra y el servidor guarda la clave en
-  su directorio aislado del volumen cifrado.
+  su directorio aislado del volumen cifrado. El aislamiento separa cuentas, pero no protege
+  frente al operador con acceso root, que puede leer esas claves y notas.
 - En el contenedor, `oauth-revoke-all` actúa sobre el volumen compartido sin abrir la
   biblioteca; el emparejado y los comandos que sí la abren conservan el bloqueo de escritor.
 - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`

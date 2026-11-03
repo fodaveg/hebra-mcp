@@ -229,11 +229,13 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    de `oauth-tokens.json`. Si se pierde, las familias de Sumego se cortan en su
    siguiente renovación horaria y hay que volver a conectar.
 
-   Antes de publicar D21, comprobar que el volumen contiene el registro de
-   cuentas, las generaciones y tumbas de revocación, y los diarios recuperables
-   del alta. Un reinicio debe completar o limpiar cada alta incompleta sin
-   publicar una cuenta activa. Una copia o imagen antigua no puede sobrescribir
-   escrituras ni revocaciones posteriores.
+   Antes de la primera migración D21, crear una copia cifrada consistente del
+   estado monousuario y ensayar su restauración en un entorno aislado. Después
+   del primer arranque D21, comprobar que el volumen ya contiene el registro de
+   cuentas y las generaciones o tumbas de revocación. Un reinicio debe completar
+   o limpiar cada diario de alta incompleto sin publicar una cuenta activa. Una
+   copia o imagen antigua no puede sobrescribir escrituras ni revocaciones
+   posteriores.
 
 5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.
@@ -464,9 +466,12 @@ sesión en la nube (§12.7, C6).
 - **Actualizar**: repetir "Publicar una versión nueva" desde el paso 1. El
   `up -d --build` con la misma imagen reconstruida sustituye el contenedor sin
   tocar el volumen `hebra-mcp_data`.
-- **Retirar una cuenta**: seguir la secuencia individual anterior. Nunca se
-  baja el servicio ni se borra `HEBRA_MCP_DATA_DEVICE`; para `legacy-root`, la
-  raíz contiene además estado global y tampoco es el objetivo de borrado.
+- **Retirar una cuenta**: seguir la secuencia individual anterior sin borrar
+  `HEBRA_MCP_DATA_DEVICE`; para `legacy-root`, la raíz contiene además estado
+  global y tampoco es el objetivo de borrado. La superficie operativa concreta
+  de retirada individual aún debe reconciliarse con el núcleo antes del
+  despliegue; este runbook no inventa un comando. En una emergencia sí se puede
+  cerrar temporalmente todo el conector.
 - **Retirar** (por ejemplo, para desmontar el conector remoto por completo):
 
   ```bash
@@ -514,9 +519,10 @@ revocaciones más recientes. Tras crear o retirar cuentas, una imagen
 monousuario es incompatible con ese estado: se conserva para diagnóstico, no
 para arrancarla contra la copia restaurada.
 
-Pendiente, fuera del alcance de C4: decidir si se quiere un backup cifrado
-propio (mismo patrón `age` que los otros dos scripts) para `hebra-mcp_data`, o
-si se acepta el mismo riesgo que ya se acepta hoy para `lumbre-mcp_state`.
+D21 exige una copia cifrada consistente y un ensayo de recuperación antes de
+la primera migración. Sigue pendiente el job periódico que mantenga esa copia
+después del despliegue; aceptar el riesgo histórico de `lumbre-mcp_state` no
+sustituye ese prerrequisito de D21.
 
 ## Evidencia histórica y verificación actual
 
