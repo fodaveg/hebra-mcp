@@ -153,6 +153,23 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   let controlServer: AccountControlServer | null = null;
   let controlKey: string | null = null;
   let controlRegistered = false;
+  let acceptingRemovals = true;
+  const removalJobs = new Set<Promise<void>>();
+  const removeById = (id: string): Promise<void> => {
+    if (!acceptingRemovals) return Promise.reject(new Error('removal_shutdown'));
+    const job = (async () => {
+      if (!removal) throw new Error('multiuser_not_configured');
+      const account = registry?.findById(id);
+      if (!account) throw new Error('account_not_found');
+      await removal.remove(account);
+    })();
+    removalJobs.add(job);
+    void job.finally(() => removalJobs.delete(job)).catch(() => undefined);
+    return job;
+  };
+  const drainRemovalJobs = async (): Promise<void> => {
+    while (removalJobs.size > 0) await Promise.allSettled([...removalJobs]);
+  };
   try {
     // El modo monousuario conserva el orden de robustez histórico: toma el writer lock
     // antes de recuperar OAuth. Solo producción multiusuario puede diferir la apertura,
@@ -215,11 +232,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         } });
       await removal.resumePending();
       if (!options.maintenance) {
-        controlServer = await openAccountControlServer(options.dataDir, async (id) => {
-          const account = activeRegistry.findById(id);
-          if (!account) throw new Error('account_not_found');
-          await removal!.remove(account);
-        });
+        controlServer = await openAccountControlServer(options.dataDir, removeById);
       }
     } else {
       if (!serve) throw new ServeHttpError('auth_not_configured', 'El modo multiusuario requiere autenticación por cuenta.');
@@ -232,7 +245,9 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     inFlight = trackInFlight(server);
     if (!options.maintenance) await listen(server, options.config.port, options.config.listenHost);
   } catch (error) {
+    acceptingRemovals = false;
     await controlServer?.close();
+    await drainRemovalJobs();
     if (contexts) await contexts.close();
     else await serve?.close();
     controlLock?.release();
@@ -249,13 +264,11 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     server,
     contexts,
     removeAccount(id) {
-      if (!removal) return Promise.reject(new Error('multiuser_not_configured'));
-      const account = registry?.findById(id);
-      if (!account) return Promise.reject(new Error('account_not_found'));
-      return removal.remove(account);
+      return removeById(id);
     },
     close() {
       closing ??= (async () => {
+        acceptingRemovals = false;
         // Primero, que ninguna escritura en curso siga esperando su ronda: la respuesta
         // sale ya (con `sync: "pending"` donde lo haya).
         if (contexts) contexts.beginShutdown();
@@ -271,6 +284,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         await closed;
         logEvent({ event: 'serve_http.closed', drained });
         await controlServer?.close();
+        await drainRemovalJobs();
         if (contexts) await contexts.close();
         else await serve?.close();
         controlLock?.release();

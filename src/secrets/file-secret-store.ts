@@ -26,13 +26,14 @@
  */
 import { randomUUID } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { SecretKey, SecretStore } from './secret-store';
 
 /** Nombre del fichero dentro del directorio de datos. */
 const FILE_NAME = 'secrets.json';
 
 type StoredSecrets = Partial<Record<SecretKey, string>>;
+const mutationQueues = new Map<string, Promise<void>>();
 
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
@@ -56,8 +57,20 @@ function parseStoredSecrets(raw: string): StoredSecrets {
 }
 
 export class FileSecretStore implements SecretStore {
+  private readonly queueKey: string;
   /** `path`: ruta del JSON, normalmente `fileSecretStorePath(dataDir)`. */
-  constructor(private readonly path: string) {}
+  constructor(private readonly path: string) { this.queueKey = resolve(path); }
+
+  /** Serializa el read-modify-write entre todas las instancias del mismo fichero. */
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const prior = mutationQueues.get(this.queueKey) ?? Promise.resolve();
+    const current = prior.then(operation);
+    const tail = current.then(() => undefined, () => undefined);
+    mutationQueues.set(this.queueKey, tail);
+    return current.finally(() => {
+      if (mutationQueues.get(this.queueKey) === tail) mutationQueues.delete(this.queueKey);
+    });
+  }
 
   private async readAll(): Promise<StoredSecrets> {
     let raw: string;
@@ -96,17 +109,21 @@ export class FileSecretStore implements SecretStore {
   }
 
   async set(key: SecretKey, value: string): Promise<void> {
-    const values = await this.readAll();
-    values[key] = value;
-    await this.writeAll(values);
+    await this.mutate(async () => {
+      const values = await this.readAll();
+      values[key] = value;
+      await this.writeAll(values);
+    });
   }
 
   async delete(key: SecretKey): Promise<boolean> {
-    const values = await this.readAll();
-    if (!(key in values)) return false;
-    delete values[key];
-    await this.writeAll(values);
-    return true;
+    return this.mutate(async () => {
+      const values = await this.readAll();
+      if (!(key in values)) return false;
+      delete values[key];
+      await this.writeAll(values);
+      return true;
+    });
   }
 }
 

@@ -22,6 +22,8 @@ export async function openAccountControlServer(
   const path = socketPath(dataDir);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await rm(path, { force: true });
+  const jobs = new Set<Promise<void>>();
+  let closing = false;
   const server = createServer((socket) => {
     let body = '';
     let handled = false;
@@ -30,6 +32,7 @@ export async function openAccountControlServer(
     socket.setTimeout(CONTROL_TIMEOUT_MS, () => socket.destroy());
     socket.on('data', (chunk: string) => {
       if (handled) return;
+      if (closing) { handled = true; respond({ ok: false, code: 'unavailable' }); return; }
       body += chunk;
       if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) { handled = true; respond({ ok: false, code: 'invalid_request' }); return; }
       const newline = body.indexOf('\n');
@@ -40,10 +43,12 @@ export async function openAccountControlServer(
         if (input.op !== 'remove-account' || typeof input.id !== 'string' || input.id.length > 128) {
           respond({ ok: false, code: 'invalid_request' }); return;
         }
-        void removeAccount(input.id).then(() => respond({ ok: true }), (error: unknown) => {
+        const job = removeAccount(input.id);
+        jobs.add(job);
+        void job.then(() => respond({ ok: true }), (error: unknown) => {
           const message = error instanceof Error ? error.message : '';
           respond({ ok: false, code: SAFE_ERRORS.has(message) ? message : 'remove_failed' });
-        });
+        }).finally(() => jobs.delete(job));
       } catch { respond({ ok: false, code: 'invalid_request' }); }
     });
     socket.on('error', () => undefined);
@@ -59,7 +64,9 @@ export async function openAccountControlServer(
     throw new Error('control_socket_permissions');
   }
   return { async close() {
+    closing = true;
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    while (jobs.size > 0) await Promise.allSettled([...jobs]);
     await rm(path, { force: true });
   } };
 }

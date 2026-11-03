@@ -118,6 +118,40 @@ describe('FileSecretStore', () => {
     await expect(store.delete('recovery-code')).resolves.toBe(false);
   });
 
+  it('serializa read-modify-write entre dos instancias del mismo fichero', async () => {
+    const dataDir = await tmpDataDir();
+    const deleting = openFileSecretStore(dataDir);
+    const granting = openFileSecretStore(dataDir);
+    await deleting.set('lumbre-connection', 'personal-a');
+
+    type Internals = {
+      readAll(): Promise<Record<string, string>>;
+      writeAll(values: Record<string, string>): Promise<void>;
+    };
+    const a = deleting as unknown as Internals;
+    const b = granting as unknown as Internals;
+    const writeA = a.writeAll.bind(a);
+    const readB = b.readAll.bind(b);
+    let releaseWrite!: () => void;
+    const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let enteredWrite!: () => void;
+    const writeEntered = new Promise<void>((resolve) => { enteredWrite = resolve; });
+    let bRead = false;
+    a.writeAll = async (values) => { enteredWrite(); await writeGate; await writeA(values); };
+    b.readAll = async () => { bRead = true; return readB(); };
+
+    const removePersonal = deleting.delete('lumbre-connection');
+    await writeEntered;
+    const addGrant = granting.set('hebra-mcp-oauth-grants', 'grant-b');
+    await Promise.resolve();
+    expect(bRead).toBe(false);
+    releaseWrite();
+    await Promise.all([removePersonal, addGrant]);
+
+    expect(await granting.get('lumbre-connection')).toBeNull();
+    expect(await granting.get('hebra-mcp-oauth-grants')).toBe('grant-b');
+  });
+
   it('`unpair` (clearPairedSecrets) deja el almacén de fichero vacío', async () => {
     const dataDir = await tmpDataDir();
     const store: FileSecretStore = openFileSecretStore(dataDir);
