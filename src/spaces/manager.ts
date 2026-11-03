@@ -252,7 +252,7 @@ export class AgentSpaceManager implements SpaceRouter {
         // propia que lo haya validado, así que cada petición consulta el catálogo al
         // entrar y antes de contestar (fuera del turno FIFO).
         writerSocket: (opened) =>
-          writerSocketHandlers(localWriteContext(opened, authorize), {
+          writerSocketHandlers(localWriteContext(opened, authorize, { denyJdex: true }), {
             // El IPC compartido no expone los verbos de workdir (cuerpo completo/JDex).
             status: async () => {
               await authorize();
@@ -283,7 +283,10 @@ export class AgentSpaceManager implements SpaceRouter {
       status: new RoutedStatusSource(instance, true),
       // Dentro de una invocación ya validada por `resolve`: sin red, solo lo ya sabido.
       // Si esta instancia es lectora, el escritor vuelve a consultar el catálogo.
-      write: buildRoutedWriteContext(instance, localWriteContext(instance, assertActive))
+      write: buildRoutedWriteContext(
+        instance,
+        localWriteContext(instance, assertActive, { denyJdex: true })
+      )
     };
   }
 

@@ -81,7 +81,11 @@ export interface ServeContext {
  * resultado; si el runner no hizo ronda (revocado o parado), un código en su lugar, para
  * que la herramienta diga `error` y no `not_linked`.
  */
-export function localWriteContext(instance: LibraryInstance, authorize?: () => Promise<void>): WriteContext {
+export function localWriteContext(
+  instance: LibraryInstance,
+  authorize?: () => Promise<void>,
+  options: { denyJdex?: boolean } = {}
+): WriteContext {
   const context = buildWriteContext({
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
@@ -117,14 +121,20 @@ export function localWriteContext(instance: LibraryInstance, authorize?: () => P
         .then((round) => round ?? { result: runner.revoked ? 'revoked' : 'unknown' });
     }
   });
-  if (!authorize) return context;
+  if (!authorize && !options.denyJdex) return context;
   return new Proxy(context, { get: (target, property) => {
     const value = Reflect.get(target, property);
     if (typeof value !== 'function' || property === 'onConflictCopy') return value;
     return async (...args: unknown[]) => {
-      try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      if (authorize) {
+        try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      }
+      if (options.denyJdex && (property === 'jdNewId' || property === 'jdMove'))
+        throw new StoreError('space_access_denied');
       const result = await Reflect.apply(value, target, args);
-      try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      if (authorize) {
+        try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
+      }
       return result;
     };
   } });
