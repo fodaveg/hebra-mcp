@@ -6,6 +6,10 @@ El cambio se desplegó el 28 sep 2026 con Hebra MCP `e36e72a` y broker Lumbre
 `dfdc34f`. El inicio OAuth público DCR + PKCE llega al consentimiento de Lumbre;
 la reconexión y QA de Claude por David siguen pendientes. Ver [RELEASE-2026-09-28.md](RELEASE-2026-09-28.md).
 
+D21 convierte el conector en multiusuario: Sumego identifica a la persona, Lumbre comprueba la
+propiedad del dispositivo y la bóveda, y cada cuenta abre su propio contexto. Este runbook describe
+el candidato; no acredita que D21 esté desplegado ni que el QA con David y Mikel haya ocurrido.
+
 El soporte OAuth de Codex admite su CIMD oficial exacto
 `https://chatgpt.com/oauth/codex/client.json` y DCR con los clientes fijos
 `hebra-mcp-codex-127`, `hebra-mcp-codex-localhost` y `hebra-mcp-codex-loopback`.
@@ -46,7 +50,7 @@ no prueban publicación, login real ni acceso a la biblioteca en producción.
 | `HEBRA_MCP_HTTP_PORT` | Puerto de escucha | `8787` | `src/http/config.ts` |
 | `HEBRA_MCP_PUBLIC_URL` | Origen público: issuer OAuth y base del recurso (`<origen>/mcp`) | `https://mcp.hebra.pro` | `src/http/config.ts` |
 | `LUMBRE_APP_ORIGIN` | Origen de Lumbre: destino del backchannel y único origen admitido en la URL de consentimiento. Tiene que ser el mismo que Lumbre usa para construirla (`ORIGIN` o uno de `LUMBRE_PUBLIC_ORIGINS`); `https` sin ruta, query ni credenciales (`http` solo en loopback). Uno inválido impide arrancar | `https://app.lumbre.pro` | `src/oauth/backchannel.ts` |
-| `HEBRA_MCP_LOGIN_PROVIDER` | Quién identifica a la persona en `/authorize` (D20, SPEC.md §12.9): `lumbre` (login y consentimiento de Lumbre, §12.2) o `sumego` (cliente OIDC propio en Sumego y consentimiento en hebra-mcp). Otro valor impide arrancar; con `sumego` y el cliente incompleto tampoco arranca, nunca vuelve en silencio a `lumbre` | `lumbre` | `src/oauth/login-config.ts` |
+| `HEBRA_MCP_LOGIN_PROVIDER` | Quién identifica a la persona en `/authorize` (D20/D21, SPEC.md §§12.9–12.10): `sumego` es el modo de producción multiusuario; `lumbre` conserva la compatibilidad anterior. Otro valor impide arrancar; con `sumego` y el cliente incompleto tampoco arranca, nunca vuelve en silencio a `lumbre` | `lumbre` en código; producción fija `sumego` | `src/oauth/login-config.ts` |
 | `HEBRA_MCP_OIDC_ISSUER` | Issuer de Sumego; su discovery (`/.well-known/openid-configuration`) da los endpoints y el JWKS. Solo admite, escrito exactamente así, `https://id.lumbre.pro` o `https://id.sumego.es` (transición de §13.6 de la SPEC de Sumego); otro valor, también con barra final, mayúsculas, puerto o ruta, impide arrancar. El servidor acepta solo el configurado y no sigue redirecciones; las URI de callback y de logout no cambian con él | `https://id.lumbre.pro` | `src/oauth/login-config.ts` |
 | `HEBRA_MCP_OIDC_CLIENT_ID` | Cliente confidencial de hebra-mcp en Sumego | `hebra-mcp` | `src/oauth/login-config.ts` |
 | `HEBRA_MCP_OIDC_CLIENT_SECRET` | Secreto de ese cliente (`client_secret_basic`); 32–512 caracteres, sin CR/LF. Vive SOLO en el `deploy/.env` del servidor. Obligatorio con `sumego`; con `lumbre`, si está, monta el back-channel logout | ninguno | `src/oauth/login-config.ts` |
@@ -62,7 +66,7 @@ runbook, sustituidos ahora por los reales.
 | Servicio | un directorio propio en el VPS de Lumbre (mismo servidor que `lumbre-app` y `lumbre-mcp`) | copia de `dist/`, `package.json`, `package-lock.json` y `deploy/`, subida por `rsync` |
 | Contenedor | `hebra-mcp` | `node dist/cli.mjs serve-http`, escucha en 8787, usuario sin root |
 | Borde | `mcp-hebra-pro.caddy` en el `conf.d` del Caddy compartido (`/srv/edge` del VPS, el mismo borde que ya sirve Lumbre, Vega, fodaveg y las demos) | Caddy termina TLS y hace proxy, sin exponer `/healthz` |
-| Estado | volumen `hebra-mcp_data` en bind a `HEBRA_MCP_DATA_DEVICE`, en el volumen cifrado del servidor | SQLite, `config.json` de privados, secretos de fichero (C1) y store OAuth (C3), todo en el mismo directorio |
+| Estado | volumen `hebra-mcp_data` en bind a `HEBRA_MCP_DATA_DEVICE`, en el volumen cifrado del servidor | Control OAuth y registro multiusuario en la raíz; biblioteca heredada de David en `legacy-root`; cuentas nuevas en directorios aislados con SQLite, blobs, privados, secretos, escritor, sync y espacios propios |
 
 El contenedor **no publica puertos al host**: Caddy lo alcanza por el DNS de
 la red Docker externa `edge` (`hebra-mcp:8787`), igual que `lumbre-app` y
@@ -197,27 +201,27 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
      docker image prune -f --filter label=com.docker.compose.project=hebra-mcp"
    ```
 
-   Volver atrás: `docker tag hebra-mcp:previous hebra-mcp:latest` y
-   `docker compose --env-file deploy/.env -f deploy/compose.yml up -d --no-build`.
-   Solo sirve si la versión anterior lee el estado que dejó la nueva (SQLite y
-   ficheros de planes); no se guardan imágenes más viejas porque volver
-   semanas atrás sobre datos de hoy no es una vuelta atrás segura.
+   La imagen `previous` sirve para diagnóstico, no garantiza una vuelta atrás.
+   En cuanto D21 haya creado o retirado una cuenta, una versión monousuario no
+   puede interpretar de forma segura el registro, los diarios ni las
+   revocaciones nuevos. En ese caso se cierra el conector y se corrige hacia
+   delante; no se arranca `previous` contra el volumen actual.
 
    Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en
    `deploy/.env` privado con el mismo valor que el broker Lumbre. También se
    puede ejecutar desde `deploy/` con `--env-file .env`. `compose.yml` exige
-   su presencia; el valor no se copia al repositorio. El dispositivo remoto ya
-   debe estar emparejado mediante el procedimiento C5. Si falta configuración,
-   `serve-http` sale cerrado.
+   su presencia; el valor no se copia al repositorio. El emparejado histórico
+   de David se conserva en su raíz original; cada cuenta nueva se incorpora
+   desde el conector con el procedimiento D21 de este runbook. Si falta
+   configuración, `serve-http` sale cerrado.
 
-   Login con Sumego (D20, SPEC.md §12.9): el interruptor va en `lumbre` por
-   defecto, así que este código se puede publicar antes de que exista el
-   cliente en Sumego. Para pasar a `sumego`, añadir al `deploy/.env` privado
+   Login con Sumego (D20-D21, SPEC.md §§12.9-12.10): el despliegue multiusuario
+   usa `sumego`. Añadir al `deploy/.env` privado
    `HEBRA_MCP_LOGIN_PROVIDER=sumego` y `HEBRA_MCP_OIDC_CLIENT_SECRET=<secreto
    del cliente hebra-mcp en Sumego>` (y `HEBRA_MCP_OIDC_ISSUER` o
    `HEBRA_MCP_OIDC_CLIENT_ID` solo si no son los de por defecto), con `sudo tee
-   -a` como el resto del fichero, y recrear el contenedor. Volver a `lumbre` es
-   quitar o cambiar esa línea. Las dos piezas de Lumbre (`identityProvider` en
+   -a` como el resto del fichero, y recrear el contenedor. Las dos piezas de
+   Lumbre (`identityProvider` en
    `/requests` y `sumego/exchange`) tienen que estar desplegadas antes de pasar
    a `sumego`. Con cliente configurado, el primer arranque crea en el almacén
    de secretos (`HEBRA_MCP_SECRET_STORE=file`, dentro de `/data`) la clave
@@ -225,10 +229,11 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    de `oauth-tokens.json`. Si se pierde, las familias de Sumego se cortan en su
    siguiente renovación horaria y hay que volver a conectar.
 
-   `oauth-tokens.json` pasa a v3 con esta versión (lee un v2 y escribe v3). Una
-   versión anterior no lee un v3: volver a la imagen `previous` después de
-   arrancar esta corta todas las familias OAuth y Claude y Codex tienen que
-   volver a conectar (las notas, el emparejado y la clave no se tocan).
+   Antes de publicar D21, comprobar que el volumen contiene el registro de
+   cuentas, las generaciones y tumbas de revocación, y los diarios recuperables
+   del alta. Un reinicio debe completar o limpiar cada alta incompleta sin
+   publicar una cuenta activa. Una copia o imagen antigua no puede sobrescribir
+   escrituras ni revocaciones posteriores.
 
 5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.
@@ -303,7 +308,8 @@ sin saltos de línea. Se transmite solo por TLS en `Authorization: Bearer`.
 el valor en este runbook, en Compose ni en los logs. El proceso debe conservar
 su emparejado existente: el login no sustituye la clave de biblioteca.
 
-Al revocar todas las familias locales, ejecutar sobre el volumen activo:
+Para una emergencia global que corte todas las familias locales, ejecutar
+sobre el volumen activo:
 
 ```bash
 ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
@@ -311,59 +317,66 @@ ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
   node dist/cli.mjs oauth-revoke-all"
 ```
 
-Esto mueve `oauth-revocations-v2.json` y corta los access/refresh locales.
-La revocación de concesiones concretas se gestiona en
+`oauth-revoke-all` no retira una cuenta individual: mueve
+`oauth-revocations-v2.json` y corta los access/refresh locales de todo el
+servicio. La revocación de concesiones concretas se gestiona en
 `https://app.lumbre.pro/integrations/hebra-mcp`; un `active: false` corta su
 familia local en el siguiente acceso. Revocar el emparejado o el dispositivo
 Blob V2 también impide abrir notas cacheadas. No borra claves ni SQLite.
 
-## Emparejado remoto (C5, SPEC.md §12.4)
+Son operaciones distintas:
 
-El listener OAuth de emparejado de Hebra necesita `127.0.0.1` de la máquina
-del navegador (§7 de la SPEC), así que el contenedor **no se empareja
-directamente**. El procedimiento es en el Mac:
+- cerrar sesión revoca la familia OAuth de ese cliente, no la biblioteca;
+- retirar membresía o un grant corta solo el recurso compartido correspondiente;
+- retirar una cuenta bloquea entradas nuevas, drena las operaciones en curso,
+  revoca el emparejado remoto y solo entonces elimina su estado personal. Para
+  David se conserva la raíz y todo estado de control global identificado; se
+  eliminan únicamente sus datos personales inventariados: SQLite, blobs,
+  secretos de emparejado, privados, espacios, planes, idempotencia, cachés,
+  temporales, contenido personal de `jd-plans.sqlite`, diarios y sus entradas
+  en almacenes compartidos. Un elemento sin clasificar detiene el borrado.
 
-1. Emparejar como dispositivo **nuevo**, con un directorio de datos temporal y
-   almacén de secretos en fichero (para poder copiarlo, ya que el llavero del
-   Mac no es portable):
+No se usa `oauth-revoke-all` como sustituto de esa retirada individual.
 
-   ```bash
-   HEBRA_MCP_DATA_DIR=/tmp/hebra-mcp-pair-remoto \
-     HEBRA_MCP_SECRET_STORE=file \
-     hebra-mcp pair --label "Claude remoto"
-   ```
+## Emparejado remoto multiusuario (D21, SPEC.md §12.10)
 
-   David aprueba el emparejado en Hebra > Ajustes > Sincronización, igual que
-   con cualquier otro dispositivo nuevo.
+El alta se hace desde el propio conector; no se crea un dispositivo temporal
+en el Mac ni se copian secretos por `scp` o `rsync`:
 
-2. Copiar el directorio resultante al volumen del contenedor (**nunca** la
-   identidad del llavero del Mac: serían dos motores compartiendo el mismo
-   `opaqueDeviceId`, algo que la SPEC prohíbe explícitamente en §12.4):
+1. El conector detecta que el `sub` autenticado con Sumego aún no tiene cuenta
+   y abre el alta. Lumbre recibe el origen exacto
+   `https://mcp.hebra.pro` (sin barra final) y construye el retorno
+   `/lumbre/connect#code`; la página elimina el fragmento y envía el código por
+   `POST /lumbre/connect` al mismo origen.
+2. La persona aprueba en su Hebra el dispositivo y la custodia remota de la
+   clave. El servidor valida que la biblioteca pertenece al mismo `sub` antes
+   de mostrar títulos, asociar la cuenta o publicarla como activa.
+3. Tras validar la propiedad, el conector puede mostrar como máximo tres
+   títulos de esa biblioteca para confirmar que es la correcta. La
+   confirmación termina el alta y las conexiones siguientes reutilizan la
+   cuenta aislada.
 
-   ```bash
-   rsync -az /tmp/hebra-mcp-pair-remoto/ "$HEBRA_MCP_HOST:/tmp/hebra-mcp-import/"
-   ssh "$HEBRA_MCP_HOST" "docker run --rm \
-     -v hebra-mcp_data:/data -v /tmp/hebra-mcp-import:/import:ro \
-     alpine sh -c 'cp -a /import/. /data/ && chown -R 1000:1000 /data'"
-   ssh "$HEBRA_MCP_HOST" "rm -rf /tmp/hebra-mcp-import"
-   ```
+La página usa `POST /lumbre/pairing/poll`, `/confirm` o `/cancel`; si la
+identidad caduca durante la aprobación, la reautenticación vuelve por
+`GET /lumbre/pairing/resume` y debe conservar el mismo `sub`. Son rutas del
+flujo web, no comandos de administración ni flags nuevos de la CLI.
 
-3. Reiniciar el contenedor para que recoja el directorio importado y **borrar
-   el directorio temporal del Mac**:
+La preparación usa un directorio aislado en modo `0700`, ficheros `0600` y un
+diario durable con TTL. Si el proceso cae en la frontera entre el efecto remoto
+y la persistencia local, el arranque siguiente reanuda la revocación o limpia
+el alta; nunca publica una asociación o cuenta activa antes de validar la
+propiedad. Puede conservar solo los secretos mínimos necesarios para revocar el
+alta abandonada.
 
-   ```bash
-   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
-     docker compose --env-file deploy/.env -f deploy/compose.yml restart mcp"
-   rm -rf /tmp/hebra-mcp-pair-remoto
-   ```
+La cuenta histórica de David sigue en `legacy-root`: no se mueve a un
+subdirectorio ni se borra la raíz, porque allí convive estado de control global.
+Las cuentas nuevas usan directorios propios.
 
-4. Verificar con `hebra_status` desde claude.ai: `linked: true` y un
-   `opaqueDeviceId` **distinto** del dispositivo del Mac (criterio de cierre de
-   C5).
-
-`config.json` de privados (§6.3) vive también en ese directorio: si se edita
-tras la copia, hay que reiniciar el contenedor para que se recargue (se lee
-solo al arrancar, SPEC.md §12.5).
+Para que una cuenta vea espacios u organizaciones (H-L7) deben estar
+desplegados el catálogo y los grants del relay. Además hacen falta, a la vez,
+la membresía vigente, el grant del recurso y el permiso del agente de esa
+persona. Pertenecer a una organización no abre bibliotecas personales. Si la
+ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
 
 ## Cambiar el fragmento de Caddy
 
@@ -451,6 +464,9 @@ sesión en la nube (§12.7, C6).
 - **Actualizar**: repetir "Publicar una versión nueva" desde el paso 1. El
   `up -d --build` con la misma imagen reconstruida sustituye el contenedor sin
   tocar el volumen `hebra-mcp_data`.
+- **Retirar una cuenta**: seguir la secuencia individual anterior. Nunca se
+  baja el servicio ni se borra `HEBRA_MCP_DATA_DEVICE`; para `legacy-root`, la
+  raíz contiene además estado global y tampoco es el objetivo de borrado.
 - **Retirar** (por ejemplo, para desmontar el conector remoto por completo):
 
   ```bash
@@ -483,12 +499,20 @@ nuevo de este lote**: es el mismo hueco que ya tiene hoy el volumen `state` de
 `lumbre-mcp` (que guarda un secreto equivalente en gravedad — `oauth.key` +
 `oauth-store.json` — y su propio README lo señala como "unidad de backup" sin
 que exista ningún job que la copie). Perder el volumen `hebra-mcp_data` sin
-backup significa: rehacer el emparejado remoto completo (C5) y que todos los
-clientes OAuth (claude.ai) tengan que reautorizar.
+backup significa perder el registro y el aislamiento de todas las cuentas,
+sus bibliotecas remotas, diarios y revocaciones, y obliga a que todos los
+clientes OAuth reautoricen.
 
 Desde el 19 oct 2026 el directorio de datos está en el volumen cifrado del
 servidor (`HEBRA_MCP_DATA_DEVICE`), así que cualquier copia que se haga de él
 debe salir cifrada también.
+
+Una copia consistente de D21 incluye el registro global, los directorios por
+cuenta, `legacy-root`, los diarios de alta y retirada, y las generaciones o
+tumbas de revocación. Restaurarla no autoriza a sobrescribir escrituras ni
+revocaciones más recientes. Tras crear o retirar cuentas, una imagen
+monousuario es incompatible con ese estado: se conserva para diagnóstico, no
+para arrancarla contra la copia restaurada.
 
 Pendiente, fuera del alcance de C4: decidir si se quiere un backup cifrado
 propio (mismo patrón `age` que los otros dos scripts) para `hebra-mcp_data`, o
@@ -498,7 +522,10 @@ si se acepta el mismo riesgo que ya se acepta hoy para `lumbre-mcp_state`.
 
 Las pruebas locales de Docker del 26 sep 2026 acreditaron el método antiguo
 de secreto del dueño; sus salidas están en el historial de Git y no acreditan
-este cambio de login. Para otra publicación, ejecutar `npm run check`,
+el login ni el aislamiento de D21. Para otra publicación, ejecutar `npm run check`,
 `docker compose --env-file deploy/.env -f deploy/compose.yml config --quiet`
-y el recorrido real de SPEC.md §12.7. Registrar por separado build, despliegue,
-servicio servido y QA con Claude. Ninguno se infiere de un checkout local.
+y el recorrido real de SPEC.md §§12.7 y 12.10 sobre el mismo candidato.
+Registrar por separado build, despliegue, servicio servido y QA con Claude.
+La aceptación incluye David y Mikel, bibliotecas personales aisladas, espacio
+compartido y organización autorizada; nunca una personal ajena. Ninguna de
+esas pruebas se infiere de un checkout local ni de un `/healthz` verde.

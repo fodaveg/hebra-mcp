@@ -12,7 +12,7 @@ la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar p
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. Detalle completo en `SPEC.md`.
 
-Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 39 herramientas
+Estado a 3 de noviembre de 2026: el servidor MCP tiene 40 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -95,14 +95,19 @@ Estado a 19 de octubre de 2026 (versión 0.4.0): el servidor MCP tiene 39 herram
   `operationId`) y `undo` (7 días). Una carpeta solo se rechaza por la configuración de
   privados, con el `folder_unavailable` de `hebra_rename_folder`; lo privado que tenga dentro
   se mueve con ella y sigue oculto, como al renombrarla.
+- Espacios compartidos (H-L7): `hebra_list_spaces` devuelve solo los espacios para los que
+  esa cuenta tiene membresía, concesión y permiso propio del agente. Las herramientas de
+  contenido aceptan `space`; sin él trabajan en la biblioteca personal de la cuenta
+  autenticada. Pertenecer a un espacio u organización nunca abre la biblioteca personal de
+  otro miembro.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).
 
 Emparejado con Hebra por `pair`/`unpair` y llavero del sistema. Corre por dos vías: local
 por stdio (`hebra-mcp serve`) y como conector remoto para claude.ai en
-`https://mcp.hebra.pro`, con login OAuth mediante Lumbre. Falta el QA real de David sobre
-su propia biblioteca desde claude.ai (lote C6 de `SPEC.md` §12). Para que un adjunto de
+`https://mcp.hebra.pro`. El conector remoto identifica a cada persona con Sumego y Lumbre
+comprueba que esa cuenta sea propietaria del dispositivo y la bóveda que autoriza. Para que un adjunto de
 5 MiB quepa en el conector remoto, el borde (`deploy/mcp-hebra-pro.caddy`) admite cuerpos
 de hasta 8 MB desde D9 (la app corta en 7 514 796 bytes).
 
@@ -172,8 +177,8 @@ ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
 
 Para claude.ai (web, móvil y sesiones en la nube), hebra-mcp corre como servidor HTTP en
 un contenedor del servidor de Lumbre, en `https://mcp.hebra.pro` (`SPEC.md` §12). Claude
-o Codex se conectan mediante el OAuth público de Hebra MCP; Lumbre autentica al propietario y
-muestra el consentimiento:
+o Codex se conectan mediante el OAuth público de Hebra MCP. Sumego identifica a la persona;
+Lumbre comprueba la propiedad de la biblioteca y emite la concesión:
 
 ```sh
 hebra-mcp serve-http            # requiere configuración de backchannel
@@ -181,8 +186,9 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
 ```
 
 - `HEBRA_MCP_BACKCHANNEL_SECRET` (32–512 caracteres) es exclusivo de Hebra MCP y se
-  provisiona en ambos servidores sin versionar su valor. El servidor necesita su
-  dispositivo ya emparejado; el login de Lumbre no entrega la clave de biblioteca.
+  provisiona en ambos servidores sin versionar su valor. Ningún login entrega la clave de
+  biblioteca: cada persona aprueba su dispositivo en Hebra y el servidor guarda la clave en
+  su directorio aislado del volumen cifrado.
 - En el contenedor, `oauth-revoke-all` actúa sobre el volumen compartido sin abrir la
   biblioteca; el emparejado y los comandos que sí la abren conservan el bloqueo de escritor.
 - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN`
@@ -191,7 +197,7 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   Lumbre, el mismo que su `ORIGIN`; la URL de consentimiento de otro origen se rechaza) y,
   para los secretos del dispositivo, `HEBRA_MCP_SECRET_STORE=file`.
 - En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. El navegador
-  pasa por el login y consentimiento de Lumbre; Claude recibe un access token de 1 h y un
+  pasa por Sumego y por el consentimiento de hebra-mcp; Claude recibe un access token de 1 h y un
   refresh rotatorio. La autorización caduca 30 días después de aprobarla o del último
   refresh, que la renueva en Lumbre; caducada, hay que volver a aprobarla. La gestión de
   concesiones está en `/integrations/hebra-mcp` de Lumbre.
@@ -201,8 +207,43 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   login y consentimiento; el servidor no entrega acceso por registrar al cliente.
   El soporte local debe publicarse también en el broker de Lumbre antes de usarlo;
   las pruebas sintéticas no acreditan el login real de Codex en producción.
-- `serve-http` siempre es el escritor único: si otro proceso tiene `writer.lock`, no
-  arranca.
+- Cada cuenta tiene su propia SQLite, blobs, secretos, privados, escritor y sync. El token
+  autenticado selecciona la cuenta antes de ejecutar una herramienta; el cuerpo MCP no puede
+  elegirla. David conserva su dispositivo y sus tokens anteriores sin reemparejar.
+
+### Primera conexión remota
+
+Si la cuenta todavía no tiene biblioteca en el servidor, el propio flujo de conexión inicia
+el emparejado. La persona entra con Sumego, aprueba el dispositivo en Hebra > Ajustes >
+Sincronización y confirma hasta tres títulos de su biblioteca. Solo después queda activa la
+cuenta. Ya no se crea un dispositivo temporal en el Mac ni se copia por `scp` al servidor.
+
+Una alta interrumpida queda aislada y bloqueada; al reiniciar, el servidor reanuda su limpieza
+o revocación. Repetir la conexión no publica dos cuentas ni mezcla secretos.
+
+### Qué puede ver cada persona
+
+- Su biblioteca personal.
+- Los espacios y el contenido de organizaciones para los que tenga membresía, concesión del
+  recurso y permiso propio del agente.
+- Nunca la biblioteca personal de otra persona, aunque compartan espacio u organización.
+
+Quitar una membresía o un permiso corta solo ese contenido compartido. Cerrar sesión corta las
+familias OAuth correspondientes; no borra la biblioteca. Retirar una cuenta es otra operación:
+primero la bloquea, drena y revoca, y después borra únicamente sus datos. `oauth-revoke-all`
+sigue siendo una revocación global de emergencia y no equivale a retirar una persona.
+
+### Preguntas frecuentes
+
+**¿Mikel puede ver la biblioteca de David si ambos están en la misma organización?** No. Solo
+ve su biblioteca y el contenido compartido que sus permisos autoricen.
+
+**¿David tiene que emparejar otra vez?** No. La migración conserva su dispositivo y las familias
+OAuth existentes; si no se puede demostrar la propiedad del vínculo heredado, se detiene sin
+reasignar ni borrar datos.
+
+**¿Un healthcheck verde prueba el aislamiento?** No. El cierre exige las pruebas negativas de
+dos cuentas de `SPEC.md` §12.10 y QA separado de biblioteca personal, espacios y organizaciones.
 
 ## Clonar
 
