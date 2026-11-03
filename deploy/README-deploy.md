@@ -8,7 +8,9 @@ la reconexión y QA de Claude por David siguen pendientes. Ver [RELEASE-2026-09-
 
 D21 convierte el conector en multiusuario: Sumego identifica a la persona, Lumbre comprueba la
 propiedad del dispositivo y la bóveda, y cada cuenta abre su propio contexto. Este runbook describe
-el candidato; no acredita que D21 esté desplegado ni que el QA con David y Mikel haya ocurrido.
+la operación del conector. D21 se desplegó el 3 nov 2026 con código `4e33b17`: se verificaron
+la continuidad de la conexión existente de David, su biblioteca personal y `dualhand`.
+La prueba con la cuenta real de Mikel sigue pendiente; las pruebas sintéticas no la sustituyen.
 
 El soporte OAuth de Codex admite su CIMD oficial exacto
 `https://chatgpt.com/oauth/codex/client.json` y DCR con los clientes fijos
@@ -423,25 +425,30 @@ import conf.d/*.caddy
 Un `log { output discard }` puesto solo en el fragmento del sitio SOLO tapa
 `http.log.access.mcp_hebra`; lo que vuelca la URI completa en un 502 o timeout
 es `http.log.error.mcp_hebra`, y el `include` que lo atrapa no se admite dentro
-del bloque `log` de un sitio, solo en el global. Ver la nota "PENDIENTE DE
-MEDIR" dentro de `mcp-hebra-pro.caddy`: esto no se ha comprobado todavía contra
-el servidor real; el despliegue del 28 sep 2026 no incluyó esa prueba. Queda
-repetir, en una ventana de diagnóstico autorizada, la prueba que `lumbre-mcp`
-documenta (parar el contenedor, pedir una URL con datos falsos y revisar el log
-del borde).
+del bloque `log` de un sitio, solo en el global. El 3 nov 2026 se añadió y
+validó este descarte global en el servidor. Durante la migración D21 se paró
+el contenedor y una petición con marcador ficticio recibió 502; el marcador
+no apareció en dos lecturas del log del borde separadas tres segundos.
+Repetir esa comprobación si cambia la configuración del proxy. La anotación
+histórica del fragmento sobre la medición pendiente corresponde al despliegue
+del 28 sep 2026, que no incluyó esa prueba.
 
 ## Verificar la aceptación de C4
 
-Criterio de cierre de C4 (SPEC.md §12.8): contenedor sano, `/mcp` sin token da
-401, metadata PRM/AS accesible, ningún puerto en el host.
+Criterio de cierre de C4 (SPEC.md §12.8): contenedor sano, `POST /mcp` sin token
+da 401, metadata PRM/AS accesible, ningún puerto en el host.
 
 ```bash
 # 1. Contenedor sano (Docker ya corre el healthcheck; esto lo confirma desde fuera)
 ssh "$HEBRA_MCP_HOST" "docker inspect --format '{{.State.Health.Status}}' hebra-mcp"
 # → healthy
 
-# 2. /mcp sin token: 401 con WWW-Authenticate que incluya resource_metadata
-curl -si https://mcp.hebra.pro/mcp | grep -i '^\(HTTP\|WWW-Authenticate\)'
+# 2. POST /mcp sin token: 401 con WWW-Authenticate que incluya resource_metadata
+# GET /mcp da 405: no sirve para comprobar el rechazo de autenticación.
+curl -si -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  https://mcp.hebra.pro/mcp | grep -i '^\(HTTP\|WWW-Authenticate\)'
 # → HTTP/2 401
 # → www-authenticate: Bearer resource_metadata="https://mcp.hebra.pro/.well-known/oauth-protected-resource..."
 
