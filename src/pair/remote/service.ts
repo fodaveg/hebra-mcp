@@ -123,10 +123,16 @@ export class RemotePairingService {
     if (!input.oauthRequestId || !input.sub || !validFuture(input.identityExpiresAt, this.now())) {
       throw new RemotePairingError('invalid_session');
     }
-    const existing = (await this.options.journals.list()).find(
-      (journal) => journal.sub === input.sub && !['finished', 'cancelled'].includes(journal.phase)
-    );
-    if (existing) throw new RemotePairingError('replayed');
+    for (const candidate of await this.options.journals.list()) {
+      if (candidate.sub !== input.sub || ['finished', 'cancelled'].includes(candidate.phase)) continue;
+      await this.exclusive(candidate.id, async () => {
+        const existing = await this.options.journals.read(candidate.id);
+        if (!existing || ['finished', 'cancelled'].includes(existing.phase)) return;
+        if (validFuture(existing.expiresAt, this.now())) throw new RemotePairingError('replayed');
+        // El TTL retira el intento anterior solo tras resolver sus efectos remotos.
+        await this.cleanup(existing);
+      });
+    }
     const id = randomUUID();
     const cookie = randomBytes(32).toString('base64url');
     const csrf = randomBytes(32).toString('base64url');
@@ -383,6 +389,7 @@ export class RemotePairingService {
           journalId: id
         });
       } catch {
+        this.runtime.delete(id);
         const committed = await this.options.publisher.findCommitted(journal);
         if (committed) account = committed;
         else {
@@ -390,13 +397,16 @@ export class RemotePairingService {
           throw new RemotePairingError('unavailable');
         }
       }
+      // La cuenta publicada ya no pertenece al alta cancelable, incluso si falla el disco.
+      this.runtime.delete(id);
       journal.phase = 'finished';
       journal.cleanupRequired = false;
       journal.committedAccountId = account.id;
       journal.updatedAt = new Date(this.now()).toISOString();
-      await this.options.journals.write(journal);
-      await this.options.journals.remove(id);
-      this.runtime.delete(id);
+      try {
+        await this.options.journals.write(journal);
+        await this.options.journals.remove(id);
+      } catch { /* Recovery reconoce la publicación durable antes de limpiar el diario. */ }
       return { kind: 'confirmed', account };
     });
   }
@@ -407,6 +417,15 @@ export class RemotePairingService {
       await this.ensureAlive(journal);
       const runtime = this.requireRuntime(id);
       await this.authorizeFormLocked(journal, runtime, authorization);
+      await this.cleanup(journal);
+    });
+  }
+
+  /** Callback OAuth autenticado: solo puede abandonar la transacción original enlazada. */
+  async abandon(id: string, oauthRequestId: string): Promise<void> {
+    return this.exclusive(id, async () => {
+      const journal = await this.requireJournal(id);
+      if (journal.oauthRequestId !== oauthRequestId) throw new RemotePairingError('invalid_session');
       await this.cleanup(journal);
     });
   }
@@ -423,54 +442,12 @@ export class RemotePairingService {
   async recover(): Promise<{ cleaned: number; pending: number }> {
     let cleaned = 0;
     let pending = 0;
-    for (const journal of await this.options.journals.list()) {
-      if (journal.phase === 'finished' || journal.phase === 'cancelled') {
-        await this.options.journals.remove(journal.id);
-        cleaned += 1;
-        continue;
-      }
-      if (await this.options.publisher.findCommitted(journal)) {
-        await this.options.journals.remove(journal.id);
-        cleaned += 1;
-        continue;
-      }
-      if (journal.phase === 'exchange-pending' && !journal.connection && journal.pairingCode) {
-        try {
-          journal.connection = await this.exchangeCode({
-            apiOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
-            code: journal.pairingCode,
-            deviceId: journal.deviceId,
-            verifier: journal.verifier,
-            fetcher: this.fetcher,
-            now: this.now
-          });
-          journal.pairingCode = undefined;
-          journal.phase = 'cleanup-pending';
-          journal.updatedAt = new Date(this.now()).toISOString();
-          await this.options.journals.write(journal);
-        } catch {
-          // 400/401/404/410 genéricos pueden venir de proxy, rollback o infraestructura.
-          // Sin un resultado cerrado que pruebe «nunca existió» o «ya revocada», el intent
-          // se conserva y bloquea otra alta.
-          pending += 1;
-          continue;
-        }
-      }
-      if (!journal.connection || !journal.cleanupRequired) {
-        if (journal.cleanupRequired) {
-          // Efecto remoto desconocido: no se borra ni se admite otra alta para este sub.
-          pending += 1;
-          continue;
-        }
-        await this.options.publisher.cleanupOrphan(journal);
-        await this.options.journals.remove(journal.id);
-        cleaned += 1;
-        continue;
-      }
+    for (const candidate of await this.options.journals.list()) {
       try {
-        await this.revoke(journal.connection, this.fetcher);
-        await this.options.publisher.cleanupOrphan(journal);
-        await this.options.journals.remove(journal.id);
+        await this.exclusive(candidate.id, async () => {
+          const journal = await this.options.journals.read(candidate.id);
+          if (journal) await this.cleanup(journal);
+        });
         cleaned += 1;
       } catch {
         pending += 1;
@@ -537,6 +514,32 @@ export class RemotePairingService {
     const link = this.runtime.get(journal.id)?.link;
     // El proceso falla cerrado incluso si el disco falla al persistir el bloqueo.
     this.runtime.delete(journal.id);
+    // Publicar es irreversible para el alta: nunca revocar una cuenta ya registrada.
+    if (journal.phase === 'finished' || journal.phase === 'cancelled' ||
+      await this.options.publisher.findCommitted(journal)) {
+      await this.options.journals.remove(journal.id);
+      return;
+    }
+    if (journal.cleanupRequired && !journal.connection) {
+      // Un error HTTP genérico no prueba que el canje no ocurrió. Conservar el intent
+      // hasta recuperar exactamente su resultado y poder revocarlo.
+      if (journal.phase !== 'exchange-pending' || !journal.pairingCode) {
+        throw new RemotePairingError('unavailable');
+      }
+      try {
+        journal.connection = await this.exchangeCode({
+          apiOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
+          code: journal.pairingCode,
+          deviceId: journal.deviceId,
+          verifier: journal.verifier,
+          fetcher: this.fetcher,
+          now: this.now
+        });
+        journal.pairingCode = undefined;
+      } catch {
+        throw new RemotePairingError('unavailable');
+      }
+    }
     journal.phase = 'cleanup-pending';
     journal.updatedAt = new Date(this.now()).toISOString();
     await this.options.journals.write(journal);
@@ -548,6 +551,7 @@ export class RemotePairingService {
         throw new RemotePairingError('unavailable');
       }
     }
+    await this.options.publisher.cleanupOrphan(journal);
     journal.phase = 'cancelled';
     journal.cleanupRequired = false;
     journal.updatedAt = new Date(this.now()).toISOString();
@@ -558,25 +562,11 @@ export class RemotePairingService {
 
   /** Falla del rename/registro: revoca primero y no olvida un orphan no retirado. */
   private async abortPublish(journal: RemotePairingJournal): Promise<void> {
-    // No se conserva capacidad de publicar aunque falle el fsync del bloqueo.
-    this.runtime.delete(journal.id);
-    journal.phase = 'cleanup-pending';
-    journal.updatedAt = new Date(this.now()).toISOString();
-    await this.options.journals.write(journal);
     try {
-      if (journal.connection && journal.cleanupRequired) {
-        await this.revoke(journal.connection, this.fetcher);
-      }
-      await this.options.publisher.cleanupOrphan(journal);
+      await this.cleanup(journal);
     } catch {
       throw new RemotePairingError('unavailable');
     }
-    journal.phase = 'cancelled';
-    journal.cleanupRequired = false;
-    journal.updatedAt = new Date(this.now()).toISOString();
-    await this.options.journals.write(journal);
-    await this.options.journals.remove(journal.id);
-    this.runtime.delete(journal.id);
   }
 
   private sessionOf(journal: RemotePairingJournal): RemotePairingSession {
