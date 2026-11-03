@@ -102,7 +102,9 @@ export class RemotePairingError extends Error {
       | 'replayed'
       | 'not_ready'
       | 'denied'
-      | 'unavailable'
+      | 'unavailable',
+    /** Motivo cerrado para el log (nunca mensajes, tokens, sub ni email). */
+    readonly reason?: string
   ) {
     super(code);
     this.name = 'RemotePairingError';

@@ -4,8 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeRecoveryCode, type DeviceLinkPoll, type LumbreConnection } from '../../src/hebra';
 import type { ActiveGrant, Binding } from '../../src/oauth/backchannel';
-import { PairError } from '../../src/pair/errors';
-import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
+import { PairError } from '../../src/pair/errors';import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
 import type { RemoteLinkRequest } from '../../src/pair/remote/link';
 import {
   REMOTE_PAIRING_ORIGIN,
@@ -298,6 +297,51 @@ describe('RemotePairingService', () => {
     expect(await service.sessionForCookie(started.cookie)).toBeNull();
   });
 
+  it.each(['credential', 'approval'] as const)(
+    'un login nuevo del mismo sub antes del TTL sustituye al diario %s sin terminar', async (phase) => {
+      const revoke = vi.fn(async () => undefined);
+      const service = createService({ link: fakeLink(recoveryCode, []), revoke });
+      const started = await service.start(startInput());
+      if (phase === 'approval') await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      const replacement = await service.start(startInput());
+      expect(replacement.id).not.toBe(started.id);
+      expect(await journals.read(started.id)).toBeNull();
+      expect(await service.sessionForCookie(started.cookie)).toBeNull();
+      expect(await service.sessionForCookie(replacement.cookie)).not.toBeNull();
+      expect(revoke).toHaveBeenCalledTimes(phase === 'approval' ? 1 : 0);
+    });
+
+  it('sustituir un intento no revoca una cuenta ya publicada', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const cleanupOrphan = vi.fn(async () => undefined);
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke, cleanupOrphan,
+      findCommitted: async () => ({ id: 'account-david', generation: 1 }) });
+    const started = await service.start(startInput());
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    await service.start(startInput());
+    expect(revoke).not.toHaveBeenCalled();
+    expect(cleanupOrphan).not.toHaveBeenCalled();
+  });
+
+  it('si el intento anterior no se puede resolver, el error lleva un motivo cerrado sin secretos', async () => {
+    let clock = NOW;
+    const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 410); });
+    const service = createService({ link: fakeLink(recoveryCode, []), now: () => clock, exchangeCode });
+    const started = await service.start(startInput());
+    await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'secret-code'))
+      .rejects.toMatchObject({ code: 'unavailable', reason: 'exchange_failed:exchange_rejected:410' });
+    const outcomes = [] as unknown[];
+    for (const tick of [1_000, REMOTE_PAIRING_TTL_MS + 1]) {
+      clock = NOW + tick;
+      outcomes.push(await service.start(startInput(new Date(clock + 60_000).toISOString())).catch((error) => error));
+    }
+    // Sin idempotencia, un canje ambiguo bloquea la alta (SPEC §12.9): el motivo lo dice.
+    for (const error of outcomes) {
+      expect(error).toMatchObject({ code: 'unavailable', reason: 'cleanup_exchange_recover_failed:exchange_rejected:410' });
+      expect(JSON.stringify(error)).not.toContain('secret-code');
+    }
+  });
+
   it('TTL no olvida un canje ambiguo si sigue sin poder recuperar su resultado', async () => {
     let clock = NOW;
     const exchangeCode = vi.fn(async () => { throw new Error('offline'); });
@@ -406,9 +450,16 @@ describe('RemotePairingService', () => {
     expect((await journals.read(started.id))?.phase).toBe('cleanup-pending');
     expect(await service.sessionForCookie(started.cookie)).toBeNull();
     const outcomes = await Promise.allSettled([service.start(replacementInput), service.start(replacementInput)]);
-    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+    // Dos logins simultáneos del mismo sub: gana el último y solo queda un diario vivo.
+    const live = [];
+    for (const outcome of outcomes) {
+      if (outcome.status === 'fulfilled' && await service.sessionForCookie(outcome.value.cookie)) live.push(outcome.value.id);
+    }
+    expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(2);
+    expect(live).toHaveLength(1);
     expect(revoke).toHaveBeenCalledTimes(2);
     expect(await journals.list()).toHaveLength(1);
+    expect((await journals.list())[0]!.id).toBe(live[0]);
   });
 
   function createService(input: {

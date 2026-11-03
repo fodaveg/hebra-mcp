@@ -8,6 +8,7 @@ import {
   prepareAgentDevice,
   savePreparedAgentDevice
 } from '../../spaces/device';
+import { PairError } from '../errors';
 import { DEFAULT_PAIR_LABEL } from '../pair';
 import {
   DEFAULT_LUMBRE_ORIGIN,
@@ -87,6 +88,12 @@ function validFuture(value: string, now: number): boolean {
   return Number.isFinite(time) && time > now;
 }
 
+/** Detalle cerrado de un fallo remoto: clase y estado/código del relé, nunca el mensaje. */
+function errorDetail(error: unknown): string {
+  if (error instanceof PairError) return `${error.code}${error.detail === undefined ? '' : `:${error.detail}`}`;
+  return error instanceof Error ? error.name : 'unknown';
+}
+
 /** Orquesta el emparejado sin confiar nunca en identidad ni sesión recibidas del formulario. */
 export class RemotePairingService {
   private readonly runtime = new Map<string, RuntimePairing>();
@@ -128,8 +135,10 @@ export class RemotePairingService {
       await this.exclusive(candidate.id, async () => {
         const existing = await this.options.journals.read(candidate.id);
         if (!existing || ['finished', 'cancelled'].includes(existing.phase)) return;
-        if (validFuture(existing.expiresAt, this.now())) throw new RemotePairingError('replayed');
-        // El TTL retira el intento anterior solo tras resolver sus efectos remotos.
+        // Un login nuevo y válido del mismo `sub` sustituye al intento anterior sin terminar,
+        // caducado o no: el usuario legítimo ya probó su identidad con un ID token nuevo y el
+        // intento previo queda inutilizado (runtime borrado). `cleanup` solo retira el intento
+        // tras resolver sus efectos remotos (revoca la credencial, nunca una cuenta publicada).
         await this.cleanup(existing);
       });
     }
@@ -258,9 +267,9 @@ export class RemotePairingService {
           fetcher: this.fetcher,
           now: this.now
         });
-      } catch {
+      } catch (error) {
         this.runtime.delete(id);
-        throw new RemotePairingError('unavailable');
+        throw new RemotePairingError('unavailable', `exchange_failed:${errorDetail(error)}`);
       }
       journal.connection = connection;
       journal.pairingCode = undefined;
@@ -524,7 +533,7 @@ export class RemotePairingService {
       // Un error HTTP genérico no prueba que el canje no ocurrió. Conservar el intent
       // hasta recuperar exactamente su resultado y poder revocarlo.
       if (journal.phase !== 'exchange-pending' || !journal.pairingCode) {
-        throw new RemotePairingError('unavailable');
+        throw new RemotePairingError('unavailable', `cleanup_no_recoverable_intent:${journal.phase}`);
       }
       try {
         journal.connection = await this.exchangeCode({
@@ -536,8 +545,8 @@ export class RemotePairingService {
           now: this.now
         });
         journal.pairingCode = undefined;
-      } catch {
-        throw new RemotePairingError('unavailable');
+      } catch (error) {
+        throw new RemotePairingError('unavailable', `cleanup_exchange_recover_failed:${errorDetail(error)}`);
       }
     }
     journal.phase = 'cleanup-pending';
@@ -548,7 +557,7 @@ export class RemotePairingService {
       try {
         await this.revoke(journal.connection, this.fetcher);
       } catch {
-        throw new RemotePairingError('unavailable');
+        throw new RemotePairingError('unavailable', 'cleanup_revoke_failed');
       }
     }
     await this.options.publisher.cleanupOrphan(journal);

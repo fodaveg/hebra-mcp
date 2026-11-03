@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type CryptoKey, type JWK } from 'jose';
 import { encodeRecoveryCode } from '../../src/hebra';
-import { RemotePairingService, RemotePairingJournalStore } from '../../src/pair/remote';
+import { RemotePairingError, RemotePairingService, RemotePairingJournalStore } from '../../src/pair/remote';
 import type { AccountRegistry } from '../../src/accounts';
 import { HttpConfigError } from '../../src/http/config';
 import { createHttpApp } from '../../src/http/app';
@@ -357,6 +357,24 @@ describe('recorrido con Sumego', () => {
     expect(returned.headers.get('location')).toBe('https://mcp.hebra.pro/lumbre/pairing/resume');
     expect(startPairing).toHaveBeenCalledOnce();
     expect(accounts.findBySub('sumego|mikel')).toBeNull();
+  });
+
+  it('si el emparejamiento remoto falla, el log da el motivo cerrado y ni sub ni email', async () => {
+    await accounts.claimLegacy({ sub: SUB, grant: brokerGrant });
+    provider.attachRemotePairing({
+      start: async () => { throw new RemotePairingError('unavailable', 'cleanup_revoke_failed'); },
+      resumeIdentity: async () => undefined, abandon: async () => undefined });
+    currentSub = 'sumego|mikel'; currentSid = 'sesion-mikel';
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const login = await startLogin();
+      const returned = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+      expect(returned.status).toBe(400);
+      const lines = stderr.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes('oauth.sumego.callback'));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toEqual({ event: 'oauth.sumego.callback', result: 'unavailable',
+        reason: 'RemotePairingError:unavailable:cleanup_revoke_failed' });
+    } finally { stderr.mockRestore(); }
   });
 
   async function restartFromV2(): Promise<{ access_token: string; refresh_token: string }> {

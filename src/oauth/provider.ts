@@ -155,6 +155,19 @@ function grantFingerprint(grant: ActiveGrant): string {
 
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function s256(value: string): string { return createHash('sha256').update(value, 'ascii').digest('base64url'); }
+/**
+ * Motivo cerrado de un fallo para el log: clase y `kind`/`code`/`reason` de los errores propios
+ * (`SumegoError:unavailable`, `RemotePairingError:unavailable:cleanup_revoke_failed`). Nunca el
+ * mensaje, que podría arrastrar un token, un `sub` o un email.
+ */
+function failureReason(failure: unknown): string {
+  if (!(failure instanceof Error)) return 'unknown';
+  const detail = (failure as { kind?: unknown; code?: unknown; reason?: unknown });
+  const parts = [failure.name, detail.kind, detail.code, detail.reason]
+    .filter((part): part is string => typeof part === 'string' && /^[\w:.-]{1,80}$/.test(part));
+  return parts.join(':') || 'unknown';
+}
+
 function equal(a: string, b: string): boolean {
   const x = Buffer.from(a); const y = Buffer.from(b);
   return x.length === y.length && timingSafeEqual(x, y);
@@ -570,9 +583,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     // Desde aquí, con la cookie de la solicitud, todo final quema la transacción y la cookie se
     // borra; antes (sin cookie, `state` desconocido) no se toca, porque no es de este navegador.
     const burn = () => { this.pending.delete(key); res.setHeader('set-cookie', loginCookie('', 0)); };
-    const reject = (result: string) => {
+    const reject = (result: string, reason?: string) => {
       burn();
-      logEvent({ event: 'oauth.sumego.callback', result });
+      logEvent(reason === undefined ? { event: 'oauth.sumego.callback', result }
+        : { event: 'oauth.sumego.callback', result, reason });
       sendDeniedPage(res, 400);
     };
     // Un `state` ya usado: la solicitud se descarta entera.
@@ -592,7 +606,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     } catch (failure) {
       burn();
       const unavailable = !(failure instanceof SumegoError) || failure.kind === 'unavailable';
-      logEvent({ event: 'oauth.sumego.callback', result: unavailable ? 'unavailable' : 'invalid' });
+      logEvent({ event: 'oauth.sumego.callback', result: unavailable ? 'unavailable' : 'invalid',
+        reason: failureReason(failure) });
       if (unavailable) sendUnavailablePage(res); else sendDeniedPage(res, 400);
       return;
     }
@@ -629,8 +644,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
           sub: claims.sub, identityExpiresAt });
         res.append('set-cookie', loginCookie('', 0));
         res.redirect(303, '/lumbre/pairing/resume');
-      } catch {
-        reject('unavailable');
+      } catch (failure) {
+        reject('unavailable', failureReason(failure));
       }
       return;
     }
@@ -646,17 +661,17 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       try { await this.requestSumegoFor(pending, binding); }
       catch (failure) {
         if (this.pairingRevokedBy(failure, binding)) { burn(); sendPairingRevokedPage(res); return; }
-        reject('unavailable'); return;
+        reject('unavailable', failureReason(failure)); return;
       }
     } else {
-      if (!this.remotePairing) { reject('unavailable'); return; }
+      if (!this.remotePairing) { reject('unavailable', 'remote_pairing_not_attached'); return; }
       try {
         const location = await this.remotePairing.start({ oauthRequestId: pending.transactionId,
           sub: claims.sub, identityExpiresAt }, res);
         res.append('set-cookie', loginCookie('', 0));
         res.redirect(303, location);
-      } catch {
-        reject('unavailable');
+      } catch (failure) {
+        reject('unavailable', failureReason(failure));
       }
       return;
     }

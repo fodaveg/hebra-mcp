@@ -2297,7 +2297,13 @@ revocar un efecto remoto y reanudar la limpieza después de una caída; lleva es
 ninguna ruta que pueda resolver como cuenta activa. Al arrancar, hebra-mcp recupera los diarios no
 terminales: continúa una revocación pendiente o limpia uno caducado antes de admitir otra alta para
 esa cuenta. El TTL no autoriza a olvidar un efecto remoto sin intentar revocarlo ni a publicar una
-cuenta incompleta.
+cuenta incompleta. Un login nuevo y válido del mismo `sub` (ID token nuevo) sustituye al alta sin
+terminar de esa cuenta aunque no haya caducado (3 nov 2026, incidente de la segunda cuenta): el
+intento anterior pierde su sesión en memoria y se limpia con las mismas garantías (revoca su
+credencial, nunca una cuenta ya publicada, y si no puede resolver el efecto remoto el login falla
+sin olvidarlo). Cuando ese login falla, el log del callback lleva `reason` con la clase y el motivo
+cerrado del error (p. ej. `RemotePairingError:unavailable:cleanup_revoke_failed`), nunca el mensaje,
+tokens, `sub` ni email.
 
 Antes de canjear el código se persiste la intención con el código y el verifier PKCE S256,
 protegidos como secretos. Lumbre conserva un recibo por credencial, sin esos secretos en claro,
