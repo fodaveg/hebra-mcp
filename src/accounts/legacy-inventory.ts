@@ -43,7 +43,11 @@ export async function eraseLegacyAccountData(options: LegacyInventoryOptions): P
   if (unknown.length > 0) throw new Error('legacy_inventory_unknown');
 
   await options.cleanupShared?.();
-  for (const key of SECRET_KEYS) await options.secrets.delete(key);
+  if (options.secrets.deleteKeysAndTemporaryFiles) {
+    await options.secrets.deleteKeysAndTemporaryFiles(SECRET_KEYS);
+  } else {
+    for (const key of SECRET_KEYS) await options.secrets.delete(key);
+  }
   for (const name of entries) {
     if (personalEntry(name)) await rm(join(options.dataDir, name), { recursive: true, force: true });
   }

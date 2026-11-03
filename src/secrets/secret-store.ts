@@ -31,6 +31,9 @@ export interface SecretStore {
   set(key: SecretKey, value: string): Promise<void>;
   /** `true` si había algo que borrar. */
   delete(key: SecretKey): Promise<boolean>;
+  /** Los stores de fichero pueden cerrar una retirada personal borrando las claves y
+   *  cualquier temporal exacto bajo la misma exclusión que sus escrituras. */
+  deleteKeysAndTemporaryFiles?(keys: readonly SecretKey[]): Promise<void>;
 }
 
 /** Para tests: nada sale del proceso. */

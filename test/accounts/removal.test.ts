@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -6,7 +6,7 @@ import { AccountContexts } from '../../src/accounts/contexts';
 import { AccountRegistry, accountDataDir } from '../../src/accounts/registry';
 import { AccountRemovalService } from '../../src/accounts/removal';
 import type { ActiveGrant } from '../../src/oauth/backchannel';
-import { MemorySecretStore } from '../../src/secrets';
+import { MemorySecretStore, openFileSecretStore } from '../../src/secrets';
 
 const dirs: string[] = [];
 const grant: ActiveGrant = { active: true, credentialId: '00000000-0000-4000-8000-000000000001',
@@ -63,6 +63,38 @@ describe('AccountRemovalService', () => {
     expect(await secrets.get('hebra-mcp-sumego-refresh-key')).toBe('global');
     expect(await readFile(join(dataDir, 'oauth-tokens.json'), 'utf8')).toBe('global');
     await expect(readFile(join(dataDir, 'library.sqlite'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('mantiene la retirada legacy pendiente si no puede barrer un temporal sensible', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-removal-'));
+    dirs.push(dataDir);
+    const registry = await AccountRegistry.open(dataDir);
+    const account = await registry.claimLegacy({ sub: 'david', grant });
+    const secrets = openFileSecretStore(dataDir);
+    await secrets.set('recovery-code', 'hebra-recovery-v2:personal-a');
+    const cleanup = secrets.deleteKeysAndTemporaryFiles.bind(secrets);
+    let failCleanup = true;
+    secrets.deleteKeysAndTemporaryFiles = async (keys) => {
+      if (!failCleanup) return cleanup(keys);
+      await writeFile(join(dataDir, '.secrets.json.failed.tmp'), JSON.stringify({
+        'recovery-code': 'hebra-recovery-v2:personal-a'
+      }), { mode: 0o600 });
+      throw new Error('temporary_cleanup_failed');
+    };
+    const service = new AccountRemovalService({ dataDir, registry,
+      contexts: new AccountContexts(registry, async () => { throw new Error('unexpected_open'); }),
+      oauth: { invalidateAccount: async () => 1 }, revokeDevice: async () => undefined,
+      legacySecrets: secrets });
+
+    await expect(service.remove(account)).rejects.toThrow('temporary_cleanup_failed');
+    expect(registry.findById(account.id)).toMatchObject({
+      state: 'removing', removalPhase: 'remote-revoked'
+    });
+
+    failCleanup = false;
+    await service.resumePending();
+    expect(registry.findById(account.id)).toMatchObject({ state: 'removed' });
+    expect(await readdir(dataDir)).not.toContain('.secrets.json.failed.tmp');
   });
 
   it('reanuda tras borrar datos sin intentar revocar otra vez una credencial ya eliminada', async () => {

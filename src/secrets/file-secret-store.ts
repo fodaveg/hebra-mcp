@@ -25,12 +25,13 @@
  * formado.
  */
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, readdir, rename, rm, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { SecretKey, SecretStore } from './secret-store';
 
 /** Nombre del fichero dentro del directorio de datos. */
 const FILE_NAME = 'secrets.json';
+const TEMPORARY_FILE = /^\.secrets\.json\..+\.tmp$/;
 
 type StoredSecrets = Partial<Record<SecretKey, string>>;
 const mutationQueues = new Map<string, Promise<void>>();
@@ -95,12 +96,29 @@ export class FileSecretStore implements SecretStore {
     const tmpPath = join(dir, `.${FILE_NAME}.${randomUUID()}.tmp`);
     const handle = await open(tmpPath, 'w', 0o600);
     try {
-      await handle.writeFile(JSON.stringify(values));
-      await handle.sync();
-    } finally {
-      await handle.close();
+      try {
+        await handle.writeFile(JSON.stringify(values));
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      await rename(tmpPath, this.path);
+    } catch (error) {
+      // El temporal contiene el snapshot completo, incluidas claves que otra operación
+      // puede estar retirando. Nunca lo dejes como inventario personal residual si
+      // write/sync/close/rename falla.
+      try {
+        await unlink(tmpPath);
+      } catch (cleanupError) {
+        if (!isEnoent(cleanupError)) {
+          throw new AggregateError(
+            [error, cleanupError],
+            'No se pudo publicar ni retirar el temporal del almacén de secretos'
+          );
+        }
+      }
+      throw error;
     }
-    await rename(tmpPath, this.path);
   }
 
   async get(key: SecretKey): Promise<string | null> {
@@ -123,6 +141,34 @@ export class FileSecretStore implements SecretStore {
       delete values[key];
       await this.writeAll(values);
       return true;
+    });
+  }
+
+  /** Cierre de retirada legacy: elimina claves personales y temporales sensibles en
+   *  una sola sección crítica. Una escritura concurrente del store espera al barrido. */
+  async deleteKeysAndTemporaryFiles(keys: readonly SecretKey[]): Promise<void> {
+    await this.mutate(async () => {
+      const values = await this.readAll();
+      let changed = false;
+      for (const key of keys) {
+        if (key in values) {
+          delete values[key];
+          changed = true;
+        }
+      }
+      if (changed) await this.writeAll(values);
+
+      const dir = dirname(this.path);
+      let entries: string[];
+      try {
+        entries = await readdir(dir);
+      } catch (error) {
+        if (isEnoent(error)) return;
+        throw error;
+      }
+      for (const name of entries) {
+        if (TEMPORARY_FILE.test(name)) await rm(join(dir, name));
+      }
     });
   }
 }

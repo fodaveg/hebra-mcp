@@ -55,6 +55,43 @@ describe('FileSecretStore', () => {
     expect(entries).toEqual(['secrets.json']);
   });
 
+  it('retira el temporal con secretos si la publicación atómica falla', async () => {
+    const dataDir = await tmpDataDir();
+    const path = fileSecretStorePath(dataDir);
+    // Un directorio en el destino fuerza a fallar `rename` después de haber escrito y
+    // sincronizado el snapshot sensible en el temporal.
+    await mkdir(path, { mode: 0o700 });
+    const store = openFileSecretStore(dataDir);
+    type Internals = { writeAll(values: Record<string, string>): Promise<void> };
+
+    await expect((store as unknown as Internals).writeAll({
+      'recovery-code': 'hebra-recovery-v2:still-sensitive'
+    })).rejects.toBeDefined();
+
+    expect(await readdir(dataDir)).toEqual(['secrets.json']);
+  });
+
+  it('borra claves personales y temporales exactos bajo la misma cola', async () => {
+    const dataDir = await tmpDataDir();
+    const path = fileSecretStorePath(dataDir);
+    const store = openFileSecretStore(dataDir);
+    await store.set('recovery-code', 'hebra-recovery-v2:personal-a');
+    await store.set('hebra-mcp-oauth-grants', 'grant-b');
+    await writeFile(join(dataDir, '.secrets.json.stale.tmp'), JSON.stringify({
+      'recovery-code': 'hebra-recovery-v2:personal-a'
+    }), { mode: 0o600 });
+    await writeFile(join(dataDir, '.unrelated.tmp'), 'keep', { mode: 0o600 });
+
+    await store.deleteKeysAndTemporaryFiles(['recovery-code']);
+
+    expect(await store.get('recovery-code')).toBeNull();
+    expect(await store.get('hebra-mcp-oauth-grants')).toBe('grant-b');
+    expect(await readdir(dataDir)).toEqual(['.unrelated.tmp', 'secrets.json']);
+    expect(JSON.parse(await readFile(path, 'utf8'))).toEqual({
+      'hebra-mcp-oauth-grants': 'grant-b'
+    });
+  });
+
   it('corrige permisos de un directorio y fichero preexistentes más abiertos', async () => {
     const dataDir = await tmpDataDir();
     const path = fileSecretStorePath(dataDir);
