@@ -11,6 +11,23 @@ const connection: LumbreConnection = {
 };
 
 describe('revokeRemoteCredential', () => {
+  it('manda Content-Type: application/json (SvelteKit rechaza un DELETE sin él como formulario)', async () => {
+    let seen: { method?: string; contentType: string | null; body: unknown } | null = null;
+    await revokeRemoteCredential(connection, async (_url, init) => {
+      seen = { method: init?.method, contentType: new Headers(init?.headers).get('content-type'), body: init?.body };
+      return Response.json({ ok: true });
+    });
+    expect(seen).toEqual({ method: 'DELETE', contentType: 'application/json', body: '{}' });
+  });
+
+  it('el fallo lleva el estado HTTP y nunca el cuerpo', async () => {
+    const failure = await revokeRemoteCredential(connection, async () =>
+      Response.json({ message: 'Cross-site DELETE form submissions are forbidden' }, { status: 403 }))
+      .catch((error) => error);
+    expect(failure).toMatchObject({ name: 'RevokeError', status: 403, message: 'pairing_revoke_failed' });
+    expect(JSON.stringify(failure)).not.toContain('Cross-site');
+  });
+
   it('solo acepta una revocación positiva inequívoca', async () => {
     await expect(revokeRemoteCredential(connection, async () => Response.json({ ok: true })))
       .resolves.toBeUndefined();

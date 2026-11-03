@@ -18,7 +18,7 @@ import {
 } from '../lumbre';
 import { RemotePairingJournalStore } from './journal';
 import { startRemoteLink, type RemoteLinkRequest } from './link';
-import { revokeRemoteCredential } from './revoke';
+import { revokeRemoteCredential, RevokeError } from './revoke';
 import {
   RemotePairingError,
   type OwnershipVerifier,
@@ -556,8 +556,9 @@ export class RemotePairingService {
     if (journal.connection && journal.cleanupRequired) {
       try {
         await this.revoke(journal.connection, this.fetcher);
-      } catch {
-        throw new RemotePairingError('unavailable', 'cleanup_revoke_failed');
+      } catch (error) {
+        throw new RemotePairingError('unavailable',
+          error instanceof RevokeError ? `cleanup_revoke_failed:${error.status}` : 'cleanup_revoke_failed');
       }
     }
     await this.options.publisher.cleanupOrphan(journal);

@@ -6,6 +6,7 @@ import { encodeRecoveryCode, type DeviceLinkPoll, type LumbreConnection } from '
 import type { ActiveGrant, Binding } from '../../src/oauth/backchannel';
 import { PairError } from '../../src/pair/errors';import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
 import type { RemoteLinkRequest } from '../../src/pair/remote/link';
+import { RevokeError } from '../../src/pair/remote/revoke';
 import {
   REMOTE_PAIRING_ORIGIN,
   REMOTE_PAIRING_TTL_MS,
@@ -340,6 +341,15 @@ describe('RemotePairingService', () => {
       expect(error).toMatchObject({ code: 'unavailable', reason: 'cleanup_exchange_recover_failed:exchange_rejected:410' });
       expect(JSON.stringify(error)).not.toContain('secret-code');
     }
+  });
+
+  it('si la revocación del intento anterior falla, el motivo incluye el estado HTTP', async () => {
+    const revoke = vi.fn(async () => { throw new RevokeError(403); });
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke });
+    const started = await service.start(startInput());
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    await expect(service.start(startInput()))
+      .rejects.toMatchObject({ code: 'unavailable', reason: 'cleanup_revoke_failed:403' });
   });
 
   it('TTL no olvida un canje ambiguo si sigue sin poder recuperar su resultado', async () => {

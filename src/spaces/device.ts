@@ -167,7 +167,9 @@ export class AgentDevice {
           signal: AbortSignal.timeout(15_000),
           headers: {
             Authorization: `Bearer ${method === 'GET' ? this.paired.connection.readToken : this.paired.connection.writeToken}`,
-            ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+            // Todo método que cambia datos lleva `Content-Type: application/json`, con o sin
+            // cuerpo: sin él SvelteKit lo rechaza como formulario cross-site (403).
+            ...(body === undefined && method === 'GET' ? {} : { 'Content-Type': 'application/json' })
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) })
         }
