@@ -204,6 +204,66 @@ describe('nombre de los espacios', () => {
     expect(probes()).toBe(before);
   });
 
+  it('un nombre caduca a los 10 minutos y se ve el renombrado; el bloque de origen no hace red', async () => {
+    await grant();
+    await seedMeta();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect(listed(await call('hebra_list_spaces'))[0]!.name).toBe(SPACE_NAME);
+      await served.ctx.spaces!.resolve(SPACE); // el espacio ya abierto: el bloque no abre nada
+      // Renombrado: el registro de alta pasa a otro nombre (rev nueva con la misma clave).
+      const rename = async () => {
+        const recordKey = await deriveRecordKey({ vaultKey: SHARED, syncVaultId: SHARED_VAULT, keyEpoch: 1 });
+        const { encodeReservedEnvelope } = await import('../../vendor/hebra/src/lib/library/reserved-sync');
+        const { SPACE_META_RECORD_ID } = await import('../../vendor/hebra/src/lib/spaces/space-key-check');
+        const envelope = await encodeReservedEnvelope({
+          recordKey,
+          syncVaultId: SHARED_VAULT,
+          recordId: SPACE_META_RECORD_ID,
+          data: { schema: 1, name: 'Nombre nuevo', createdAt: '2026-01-01T00:00:00.000Z' }
+        });
+        const current = (await fake.relayFor(SHARED_VAULT).postRecords(SHARED_VAULT, [
+          { id: SPACE_META_RECORD_ID, baseRev: Number.MAX_SAFE_INTEGER, deleted: true, envelope: null, objectIds: [] }
+        ])).records[0] as { current?: { rev: number } };
+        await fake.relayFor(SHARED_VAULT).postRecords(SHARED_VAULT, [
+          { id: SPACE_META_RECORD_ID, baseRev: current.current!.rev, deleted: false, envelope, objectIds: [] }
+        ]);
+      };
+      await rename();
+      vi.setSystemTime(Date.now() + 9 * 60_000);
+      expect(listed(await call('hebra_list_spaces'))[0]!.name).toBe(SPACE_NAME);
+      vi.setSystemTime(Date.now() + 2 * 60_000);
+      const before = probes();
+      // Con el nombre caducado, el bloque de origen da el último conocido sin sondear.
+      const read = (await call('hebra_read_note', { space: SPACE, id: NOTE })) as { content: Array<{ text: string }> };
+      expect(JSON.parse(read.content[0]!.text).name).toBe(SPACE_NAME);
+      expect(probes()).toBe(before);
+      expect(listed(await call('hebra_list_spaces'))[0]!.name).toBe('Nombre nuevo');
+      expect(probes()).toBeGreaterThan(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('un fallo no se repite antes de 60 segundos y sí después', async () => {
+    await grant();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      expect(listed(await call('hebra_list_spaces'))[0]!.name).toBeNull();
+      const first = probes();
+      expect(first).toBeGreaterThan(0);
+      vi.setSystemTime(Date.now() + 59_000);
+      await call('hebra_list_spaces');
+      expect(probes()).toBe(first);
+      await seedMeta();
+      vi.setSystemTime(Date.now() + 2_000);
+      expect(listed(await call('hebra_list_spaces'))[0]!.name).toBe(SPACE_NAME);
+      expect(probes()).toBeGreaterThan(first);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('el bloque de origen lleva spaceId y name', async () => {
     await grant();
     await seedMeta();

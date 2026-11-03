@@ -25,6 +25,10 @@ import { HttpLibraryTransport, readSpaceMeta } from '../hebra';
 import { AgentDevice } from './device';
 import { catalogueSchema, type AgentSpaceAccess } from './protocol';
 
+/** Cuánto vale un nombre leído, y cuánto un fallo o un meta ausente. */
+const NAME_TTL_MS = 10 * 60_000;
+const NAME_FAILURE_TTL_MS = 60_000;
+
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 /** JSONB puede reordenar las propiedades; eso no cambia la concesión ni su caché. */
 function grantHash(item: AgentSpaceAccess): string {
@@ -60,9 +64,14 @@ interface Entry {
 
 export class AgentSpaceManager implements SpaceRouter {
   private readonly entries = new Map<string, Entry>();
-  /** Nombre de cada espacio por origen y hash del grant: si el grant cambia, se vuelve a
-   * leer. Es contenido del usuario: nunca se loguea. Los fallos no se guardan. */
-  private readonly names = new Map<string, string>();
+  /** Nombre de cada espacio por origen y hash del grant. Es contenido del usuario: nunca
+   * se loguea. `value` vale hasta `until` (10 min un nombre leído, 60 s un fallo o un meta
+   * ausente, para no repetir el sondeo en cada listado); `last` es el último nombre leído,
+   * que el bloque de origen sigue dando sin red aunque haya caducado. */
+  private readonly names = new Map<
+    string,
+    { value: string | null; until: number; last: string | null }
+  >();
   private closed = false;
   constructor(
     readonly device: AgentDevice,
@@ -70,7 +79,8 @@ export class AgentSpaceManager implements SpaceRouter {
     private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly intervalMs?: number | null,
     private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>,
-    private readonly assertAccountActive?: () => void
+    private readonly assertAccountActive?: () => void,
+    private readonly now: () => number = () => Date.now()
   ) {}
 
   private async catalogue(): Promise<AgentSpaceAccess[]> {
@@ -132,7 +142,15 @@ export class AgentSpaceManager implements SpaceRouter {
   private async readName(item: AgentSpaceAccess, key?: Uint8Array): Promise<string | null> {
     const cacheKey = this.nameKey(item);
     const cached = this.names.get(cacheKey);
-    if (cached !== undefined) return cached;
+    if (cached && this.now() < cached.until) return cached.value;
+    const remember = (value: string | null) => {
+      this.names.set(cacheKey, {
+        value,
+        until: this.now() + (value === null ? NAME_FAILURE_TTL_MS : NAME_TTL_MS),
+        last: value ?? cached?.last ?? null
+      });
+      return value;
+    };
     let own: Uint8Array | undefined;
     try {
       const vaultKey = key ?? (own = await this.device.openGrant(item));
@@ -156,11 +174,9 @@ export class AgentSpaceManager implements SpaceRouter {
         keyEpoch: 1,
         vaultKey
       });
-      if (!meta) return null;
-      this.names.set(cacheKey, meta.name);
-      return meta.name;
+      return remember(meta?.name ?? null);
     } catch {
-      return null;
+      return remember(null);
     } finally {
       own?.fill(0);
     }
@@ -339,7 +355,7 @@ export class AgentSpaceManager implements SpaceRouter {
       privacyConfig: privacySource.initial,
       privacyConfigSource: privacySource,
       spaceId: entry.access.spaceId,
-      spaceName: () => this.names.get(nameKey) ?? null,
+      spaceName: () => this.names.get(nameKey)?.last ?? null,
       // La segunda validación fresca de cada invocación (`runTool`, al aceptar).
       authorize,
       status: new RoutedStatusSource(instance, true),
