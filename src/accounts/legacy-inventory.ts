@@ -30,6 +30,8 @@ export interface LegacyInventoryOptions {
   secrets: SecretStore;
   /** Limpia diarios/filas personales en stores globales añadidos por otros módulos. */
   cleanupShared?(): Promise<void>;
+  /** La retirada conserva sus mutex hasta terminar de publicar la fase durable. */
+  eraseEntry?(path: string): Promise<void>;
 }
 
 /**
@@ -49,6 +51,10 @@ export async function eraseLegacyAccountData(options: LegacyInventoryOptions): P
     for (const key of SECRET_KEYS) await options.secrets.delete(key);
   }
   for (const name of entries) {
-    if (personalEntry(name)) await rm(join(options.dataDir, name), { recursive: true, force: true });
+    if (personalEntry(name)) {
+      const path = join(options.dataDir, name);
+      if (options.eraseEntry) await options.eraseEntry(path);
+      else await rm(path, { recursive: true, force: true });
+    }
   }
 }

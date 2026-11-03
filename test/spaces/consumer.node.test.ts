@@ -1,4 +1,8 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { deferred } from '../fixtures/deferred';
 /** Consumidor H-L7 real: HTTP local, MCP, SQLite y sobres cifrados. Sin cuentas reales. */
+import { AccountRegistry } from '../../src/accounts/registry';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { cp, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -279,6 +283,51 @@ describe('herramientas MCP por espacio', () => {
         instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
       })
     ).rejects.toMatchObject({ code: 'space_access_denied' });
+  });
+
+  it('a reader cannot open a new shared cache after another registry retires the account', async () => {
+    await grant();
+    const registry = await AccountRegistry.open(directory);
+    const account = await registry.claimLegacy({ sub: 'alice', grant: {
+      active: true, credentialId: randomUUID(), clientId: 'hebra-mcp-claude',
+      resource: 'https://mcp.hebra.pro/mcp', scope: 'hebra:mcp', accountId: 'a'.repeat(64),
+      expiresAt: '2026-12-01T00:00:00.000Z', pairedCredentialId: paired.connection.credentialId,
+      syncVaultId: PERSONAL_VAULT, opaqueDeviceId: paired.device.opaqueDeviceId
+    } });
+    const entered = deferred();
+    const resume = deferred();
+    const fetcher: Fetcher = async (input, init) => {
+      const response = await fake.fetcher(input, init);
+      if (String(input).endsWith('/spaces/agent-access')) {
+        entered.resolve();
+        await resume.promise;
+      }
+      return response;
+    };
+    const reader = await openServeContext({ dataDir: directory, secrets, fetcher,
+      syncIntervalMs: null, instance: { checkIntervalMs: null,
+        lock: { pid: process.pid + 10_000, isAlive: () => true, releaseOnExit: false } } });
+    expect(reader.instance.role).toBe('other_instance');
+    const opening = reader.ctx.spaces!.resolve(SPACE);
+    const outcome = opening.then(() => null, (error: unknown) => error);
+    try {
+      await entered.promise;
+      // Real external remover: the reader receives no in-memory notification.
+      const remover = spawn(process.execPath, ['--experimental-transform-types', '--input-type=module', '-e', `
+        const { AccountRegistry } = await import(process.argv[1]);
+        const registry = await AccountRegistry.open(process.argv[2]);
+        await registry.beginRemoval(JSON.parse(process.argv[3]));
+      `, new URL('../../src/accounts/registry.ts', import.meta.url).href, directory,
+      JSON.stringify({ id: account.id, generation: account.generation })], { stdio: 'ignore' });
+      expect((await once(remover, 'exit'))[0]).toBe(0);
+      expect(registry.findById(account.id)?.state).toBe('active');
+      resume.resolve();
+      expect(await outcome).toBeInstanceOf(Error);
+      await expect(readdir(join(directory, 'spaces'))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      resume.resolve();
+      await reader.close();
+    }
   });
 
   it('el lector reenvía por IPC al escritor, que rechaza tras apagar y nunca permite JDex', async () => {

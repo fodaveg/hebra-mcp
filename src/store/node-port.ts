@@ -148,6 +148,8 @@ export interface SpaceStoreAccess {
 }
 
 export interface OpenNodeLibraryOptions {
+  /** Guardia local de la cuenta dueña, también dentro del turno de escritura. */
+  assertActive?: () => void;
   spaceAccess?: SpaceStoreAccess;
   /** Ruta del fichero SQLite, o `:memory:` (tests). */
   sqlitePath: string;
@@ -235,7 +237,7 @@ export async function openNodeLibraryPort(
       throw error;
     }
   }
-  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath, options.spaceAccess);
+  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath, options.spaceAccess, options.assertActive);
 }
 
 /**
@@ -296,7 +298,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     private readonly replacePlansDb: DatabaseSync | null = null,
     /** Ruta de `library.sqlite` (o `:memory:`): de ella cuelga el fichero de los planes que lee un lector. */
     private readonly librarySqlitePath: string = ':memory:',
-    private readonly spaceAccess?: SpaceStoreAccess
+    private readonly spaceAccess?: SpaceStoreAccess,
+    private readonly assertAccountActive?: () => void
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -315,6 +318,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** Se ejecuta dentro del turno FIFO, después de cualquier página de sync pendiente. Sin
    *  red: la validación fresca va antes y después de la invocación, fuera de la cola. */
   private assertSpaceUserWrite(): void {
+    this.assertAccountActive?.();
     this.spaceAccess?.assertActive();
     try {
       this.engine.assertSpaceUserWrite();
@@ -872,7 +876,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       // sustitución y del JDex, contenido anterior de un fichero) pasan por la misma guarda
       // en TODOS sus métodos: guardan y devuelven resultados, cuerpos y contenido anterior,
       // y tras una revocación ya vista no se registra ni se repite nada de esa base.
-      if (this.spaceAccess) {
+      if (this.spaceAccess || this.assertAccountActive) {
         const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',

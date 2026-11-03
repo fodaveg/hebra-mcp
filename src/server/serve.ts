@@ -12,6 +12,7 @@
  *   `writer.sock`; las demás le reenvían las escrituras y le preguntan el estado de sync
  *   (`./forward.ts`), y toman el relevo si ya no responde.
  */
+import { accountAccessGuard } from '../accounts/registry';
 import { StoreError } from '../store/errors';
 import { AgentDevice } from '../spaces/device';
 import { AgentSpaceManager } from '../spaces/manager';
@@ -54,6 +55,8 @@ export interface OpenServeOptions {
   writerOnly?: boolean;
   /** Guardia fresca de la cuenta dueña. Se comprueba también al publicar cada resultado. */
   authorize?: () => Promise<void>;
+  /** Sin red: vuelve a comprobar la cuenta dentro de cada turno y mutación. */
+  assertActive?: () => void;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -153,12 +156,17 @@ async function readSecretsQuietly(secrets: SecretStore | null) {
 
 export async function openServeContext(options: OpenServeOptions): Promise<ServeContext> {
   const { dataDir } = options;
+  const diskAccess = accountAccessGuard(dataDir);
+  const assertActive = () => { diskAccess(); options.assertActive?.(); };
+  const authorize = async () => { assertActive(); await options.authorize?.(); assertActive(); };
+  assertActive();
   const paired = await readSecretsQuietly(options.secrets);
+  assertActive();
   // H-L7: el registro del agente y el catálogo de concesiones solo se piden al usar un
   // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
   // red y con un relé sin la API de H-L7, como antes de los espacios.
   const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir) : null;
-  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance) : undefined;
+  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance, assertActive) : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
@@ -185,13 +193,15 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     sync: linked?.config ?? null,
     // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
     // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
-    writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened), opened),
+    writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened, authorize), opened),
     beforeSyncRound: async (port) => {
+      assertActive();
       // Una configuración rota no anota nada (las herramientas ya responden
       // `privacy_config_unresolved`); un fallo aquí no para la ronda.
       await privacyWithMemory(port, await privacySource.current());
     },
-    ...options.instance
+    ...options.instance,
+    assertActive
   });
   if (options.writerOnly) {
     if (instance.role !== 'this') {
@@ -206,8 +216,8 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       privacyConfig,
       privacyConfigSource: privacySource,
       status: new LibraryInstanceStatusSource(instance, linked !== null),
-      authorize: options.authorize,
-      write: localWriteContext(instance, options.authorize)
+      authorize,
+      write: localWriteContext(instance, authorize)
     };
     return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
   }
@@ -218,10 +228,10 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // resuelve ya y las escrituras siguen funcionando sobre la SQLite local.
   // En un lector, las escrituras se reenvían al escritor (o toman el relevo si ya no
   // está), y `hebra_status` le pregunta a él por el sync.
-  const write = buildRoutedWriteContext(instance, localWriteContext(instance), options.forward);
+  const write = buildRoutedWriteContext(instance, localWriteContext(instance, authorize), options.forward);
   const ctx: ServerContext = {
     spaces,
-    authorize: options.authorize,
+    authorize,
     port: instance.port,
     privacyConfig,
     privacyConfigSource: privacySource,

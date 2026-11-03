@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { ActiveGrant, Binding } from '../oauth/backchannel';
 import type { AccountRecord, AccountRef, AuthorizedAccount, VerifiedOwnership } from './types';
 
@@ -249,3 +250,32 @@ export function accountDataDir(root: string, account: AuthorizedAccount): string
   return account.storage === 'legacy-root' ? root : join(root, 'accounts', account.id);
 }
 
+/** Local authority for stdio/workdir and shared caches, including other processes.
+ * An unregistered standalone library remains usable. Once bound, absence, removal or a
+ * different generation fails closed; deleting personal data cannot erase this tombstone.
+ */
+export function accountAccessGuard(dataDir: string): () => void {
+  const directory = resolve(dataDir);
+  const accountId = basename(dirname(directory)) === 'accounts' && UUID.test(basename(directory))
+    ? basename(directory) : null;
+  const root = accountId ? dirname(dirname(directory)) : directory;
+  let expected: AccountRef | null = null;
+  return () => {
+    let parsed: Partial<AccountsFile>;
+    try { parsed = JSON.parse(readFileSync(accountFile(root), 'utf8')) as Partial<AccountsFile>; }
+    catch (error) {
+      if (isEnoent(error) && !expected && !accountId) return;
+      throw new Error('account_inactive');
+    }
+    if (parsed.version !== FILE_VERSION || !Array.isArray(parsed.accounts) ||
+      !parsed.accounts.every(validRecord) || !validRecords(parsed.accounts)) throw new Error('accounts_invalid');
+    const record = parsed.accounts.find((entry) => accountId ? entry.id === accountId : entry.storage === 'legacy-root');
+    if (!record) {
+      if (expected || accountId) throw new Error('account_inactive');
+      return;
+    }
+    if (record.state !== 'active' || (expected &&
+      (expected.id !== record.id || expected.generation !== record.generation))) throw new Error('account_inactive');
+    expected ??= { id: record.id, generation: record.generation };
+  };
+}

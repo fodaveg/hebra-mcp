@@ -65,14 +65,17 @@ export class AgentSpaceManager implements SpaceRouter {
     private readonly dataDir: string,
     private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly intervalMs?: number | null,
-    private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>
+    private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>,
+    private readonly assertAccountActive?: () => void
   ) {}
 
   private async catalogue(): Promise<AgentSpaceAccess[]> {
+    this.assertAccountActive?.();
     if (this.closed) throw new ToolError('space_access_denied');
     const registration = await this.device.ensureRegistered();
     try {
       const result = catalogueSchema.parse(await this.device.request('/spaces/agent-access'));
+      this.assertAccountActive?.();
       const ids = new Set<string>();
       for (const item of result.spaces) {
         const g = item.grant;
@@ -150,6 +153,7 @@ export class AgentSpaceManager implements SpaceRouter {
   /** Sin red: lo que este proceso o la marca en disco de otro ya saben. Síncrono, para
    * poder mirarlo dentro del turno FIFO antes de cada mutación sin cederlo. */
   private assertActive(entry: Entry): void {
+    this.assertAccountActive?.();
     if (entry.denied || this.closed) throw new ToolError('space_access_denied');
     try {
       statSync(join(entry.directory, 'access-denied'));
@@ -222,6 +226,7 @@ export class AgentSpaceManager implements SpaceRouter {
         dataDir: entry.directory,
         socketPath,
         ...this.instanceOptions,
+        assertActive: this.assertAccountActive,
         spaceAccess: {
           spaceId: entry.access.spaceId,
           scope: hash([apiOrigin, grantHash(entry.access)]),

@@ -85,8 +85,8 @@ export class AccountContexts {
     entry.draining = true;
     if (entry.leases > 0) await new Promise<void>((resolve) => entry.idle.push(resolve));
     const context = await entry.opening;
-    this.entries.delete(ref.id);
     await context.close();
+    this.entries.delete(ref.id);
   }
 
   async close(): Promise<void> {

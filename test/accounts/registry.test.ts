@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AccountRegistry } from '../../src/accounts/registry';
+import { AccountRegistry, accountAccessGuard, accountDataDir } from '../../src/accounts/registry';
 import type { ActiveGrant } from '../../src/oauth/backchannel';
 
 const dirs: string[] = [];
@@ -23,6 +23,30 @@ async function registry(): Promise<AccountRegistry> {
 }
 
 describe('AccountRegistry', () => {
+  it.each(['legacy-root', 'account-dir'] as const)('relee la lápida %s sin depender del registro en memoria', async (storage) => {
+    const store = await registry();
+    const directory = dirs.at(-1)!;
+    const account = storage === 'legacy-root'
+      ? await store.claimLegacy({ sub: 'owner', grant: grant('a'.repeat(64), '01') })
+      : await store.commitAccount({ sub: 'owner', grant: grant('a'.repeat(64), '01') });
+    const guard = accountAccessGuard(accountDataDir(directory, account));
+    expect(guard).not.toThrow();
+    const remover = await AccountRegistry.open(directory);
+    const removing = await remover.beginRemoval(account);
+    expect(() => store.assertActive(account)).not.toThrow();
+    expect(guard).toThrow('account_inactive');
+    await remover.advanceRemoval(removing, 'data-erased');
+    await remover.finishRemoval(removing);
+    expect(accountAccessGuard(accountDataDir(directory, account))).toThrow('account_inactive');
+    await rm(join(directory, 'accounts-v1.json'));
+    expect(guard).toThrow('account_inactive');
+  });
+
+  it('una biblioteca standalone sigue permitida sin registro multiusuario', async () => {
+    await registry();
+    expect(accountAccessGuard(dirs.at(-1)!)).not.toThrow();
+  });
+
   it('el legado solo se reclama por el mismo sub, accountId y binding', async () => {
     const store = await registry();
     const original = grant('a'.repeat(64), '01');

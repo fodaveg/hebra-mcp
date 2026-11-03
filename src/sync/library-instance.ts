@@ -143,6 +143,8 @@ export type WriterRole = 'this' | 'other_instance';
 export type LibrarySyncConfig = Omit<SyncRunnerOptions, 'port'>;
 
 export interface OpenLibraryInstanceOptions {
+  /** Guardia local de la cuenta, conservada al abrir o tomar el relevo del escritor. */
+  assertActive?: () => void;
   spaceAccess?: SpaceStoreAccess;
   /** Socket corto en directorio privado para bases compartidas con rutas largas. */
   socketPath?: string;
@@ -218,7 +220,9 @@ export class LibraryInstance implements NoteWriteTarget {
   }
 
   static async open(options: OpenLibraryInstanceOptions): Promise<LibraryInstance> {
+    options.assertActive?.();
     await mkdir(options.dataDir, { recursive: true, mode: 0o700 });
+    options.assertActive?.();
     const lock = new WriterLock({ dataDir: options.dataDir, ...options.lock });
     const sqlitePath = options.sqlitePath ?? join(options.dataDir, LIBRARY_SQLITE_FILE);
     const instance = new LibraryInstance(options, lock, sqlitePath);
@@ -253,12 +257,14 @@ export class LibraryInstance implements NoteWriteTarget {
   }
 
   private async openPort(mode: 'readWrite' | 'readOnly'): Promise<NodeLibraryPort> {
+    this.options.assertActive?.();
     return openNodeLibraryPort({
       sqlitePath: this.sqlitePath,
       dataDir: this.options.dataDir,
       deviceLabel: this.options.deviceLabel,
       mode,
-      spaceAccess: this.options.spaceAccess
+      spaceAccess: this.options.spaceAccess,
+      assertActive: this.options.assertActive
     });
   }
 

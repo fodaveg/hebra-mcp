@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -18,6 +20,78 @@ const grant: ActiveGrant = { active: true, credentialId: '00000000-0000-4000-800
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true }); });
 
 describe('AccountRemovalService', () => {
+  it.each([['account-dir', 'personal'], ['legacy-root', 'personal'], ['account-dir', 'shared'],
+    ['legacy-root', 'shared']] as const)('conserva %s y secretos con escritor externo %s', async (storage, scope) => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-removal-'));
+    dirs.push(dataDir);
+    const registry = await AccountRegistry.open(dataDir);
+    const account = storage === 'legacy-root'
+      ? await registry.claimLegacy({ sub: 'david', grant })
+      : await registry.commitAccount({ sub: 'mikel', grant });
+    const personal = accountDataDir(dataDir, account);
+    await mkdir(personal, { recursive: true });
+    await writeFile(join(personal, 'library.sqlite'), 'personal');
+    const secrets = new MemorySecretStore();
+    await secrets.set('recovery-code', 'keep-for-retry');
+    const writerDir = scope === 'shared' ? join(personal, 'spaces', 'cached-grant') : personal;
+    await mkdir(writerDir, { recursive: true });
+    // A real process owns the same on-disk lock used by stdio/workdir writers.
+    const child = spawn(process.execPath, ['-e', `
+      require('node:fs').writeFileSync(process.argv[1], JSON.stringify({
+        pid: process.pid, nonce: 'external-writer', startedAt: new Date().toISOString()
+      }), { flag: 'wx', mode: 0o600 });
+      process.send('ready');
+      process.on('message', () => process.exit(0));
+    `, join(writerDir, 'writer.lock')], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+    await once(child, 'message');
+    let revoked = false;
+    const service = new AccountRemovalService({ dataDir, registry,
+      contexts: new AccountContexts(registry, async () => { throw new Error('unexpected_open'); }),
+      oauth: { invalidateAccount: async () => 1 },
+      revokeDevice: async () => { revoked = true; }, legacySecrets: secrets });
+    try {
+      await expect(service.remove(account)).rejects.toThrow('account_writer_busy');
+      expect(registry.findById(account.id)?.state).toBe('removing');
+      expect(revoked).toBe(false);
+      expect(await readFile(join(personal, 'library.sqlite'), 'utf8')).toBe('personal');
+      expect(await secrets.get('recovery-code')).toBe('keep-for-retry');
+    } finally {
+      const exited = once(child, 'exit');
+      child.send('stop');
+      await exited;
+    }
+    await service.remove(account);
+    expect(registry.findById(account.id)?.state).toBe('removed');
+  });
+
+  it('retiene los mutex hasta publicar data-erased y removed', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'hebra-removal-'));
+    dirs.push(dataDir);
+    const registry = await AccountRegistry.open(dataDir);
+    const account = await registry.commitAccount({ sub: 'mikel', grant });
+    const personal = accountDataDir(dataDir, account);
+    const shared = join(personal, 'spaces', 'cached-grant');
+    await mkdir(shared, { recursive: true });
+    await writeFile(join(personal, 'library.sqlite'), 'personal');
+    await writeFile(join(shared, 'library.sqlite'), 'shared');
+    const assertLocks = async () => {
+      for (const dir of [personal, shared]) {
+        expect(JSON.parse(await readFile(join(dir, 'writer.lock'), 'utf8')).pid).toBe(process.pid);
+      }
+    };
+    const advance = registry.advanceRemoval.bind(registry);
+    registry.advanceRemoval = async (ref, phase) => { await assertLocks(); return advance(ref, phase); };
+    const finish = registry.finishRemoval.bind(registry);
+    registry.finishRemoval = async (ref) => { await assertLocks(); return finish(ref); };
+    const service = new AccountRemovalService({ dataDir, registry,
+      contexts: new AccountContexts(registry, async () => { throw new Error('unexpected_open'); }),
+      oauth: { invalidateAccount: async () => 1 }, revokeDevice: assertLocks,
+      legacySecrets: new MemorySecretStore() });
+    await service.remove(account);
+    await expect(readdir(personal)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(registry.findById(account.id)?.state).toBe('removed');
+  });
+
   it('no borra hasta confirmar la revocación y reanuda la lápida tras reiniciar', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'hebra-removal-'));
     dirs.push(dataDir);

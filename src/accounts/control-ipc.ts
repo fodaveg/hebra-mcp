@@ -6,7 +6,7 @@ const CONTROL_DIR = 'control';
 const CONTROL_SOCKET = 'accounts.sock';
 const MAX_REQUEST_BYTES = 4_096;
 const CONTROL_TIMEOUT_MS = 15_000;
-const SAFE_ERRORS = new Set(['account_not_found', 'account_inactive', 'multiuser_not_configured']);
+const SAFE_ERRORS = new Set(['account_not_found', 'account_inactive', 'multiuser_not_configured', 'account_writer_busy']);
 
 export function accountControlDir(dataDir: string): string { return join(dataDir, CONTROL_DIR); }
 function socketPath(dataDir: string): string { return join(accountControlDir(dataDir), CONTROL_SOCKET); }
@@ -76,6 +76,9 @@ export async function requestAccountRemoval(dataDir: string, id: string): Promis
   return new Promise<boolean>((resolve, reject) => {
     const socket = createConnection(socketPath(dataDir));
     let body = '';
+    // EOF is terminal even when the peer sent no complete response frame.
+    socket.once('end', () => reject(new Error('control_response_incomplete')));
+    socket.once('close', () => reject(new Error('control_response_incomplete')));
     socket.setEncoding('utf8');
     socket.setTimeout(CONTROL_TIMEOUT_MS, () => { socket.destroy(); reject(new Error('control_timeout')); });
     socket.once('connect', () => socket.write(`${JSON.stringify({ op: 'remove-account', id })}\n`));

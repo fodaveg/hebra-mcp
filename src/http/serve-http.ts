@@ -207,7 +207,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         const secrets = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
         const opened = await openServeContext({ dataDir, secrets,
           fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
-          writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); } });
+          writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
+          assertActive: () => { activeRegistry.assertActive(account); } });
         opened.instance.deferSignalRelease();
         if (account.storage === 'legacy-root') serve = opened;
         const accountPairing = account.storage === 'legacy-root' ? pairing :
