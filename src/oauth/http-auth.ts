@@ -30,9 +30,11 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { HttpAuth } from '../http/app';
+import { AccountRegistry } from '../accounts';
+import { decodeRecoveryCode } from '../hebra';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
-import type { SecretStore } from '../secrets';
+import { readPairedSecrets, type SecretStore } from '../secrets';
 import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from './backchannel';
 import { BackchannelLogout } from './backchannel-logout';
@@ -58,10 +60,14 @@ export interface OAuthHttpAuthOptions {
   /** Emparejado revocado, compartido con `hebra_status` (`serve-http`). */
   pairing?: PairingRevocation;
   env?: NodeJS.ProcessEnv;
+  /** Producción remota: los tokens publican la cuenta autenticada a `/mcp`. */
+  multiuser?: boolean;
 }
 
 export interface OAuthHttpAuth extends HttpAuth {
   provider: HebraOAuthProvider;
+  accounts: AccountRegistry;
+  lumbreOrigin: string;
 }
 
 export function protectedResourceMetadataUrl(config: HttpConfig): string {
@@ -92,10 +98,30 @@ export async function loadOAuthHttpAuth(
   const now = options.now ?? Date.now;
   const sumego = login.oidc ? new SumegoOidc(login.oidc, config.publicOrigin, options.sumegoFetch, now) : null;
   const tokens = await TokenStore.open(dataDir, now);
+  const accounts = await AccountRegistry.open(dataDir);
   const revocations = new RevocationFile(dataDir);
   const grants = await GrantSecrets.open(secrets!, tokens.familyIds());
   await GrantSecrets.recoverPending(secrets!, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
   await grants.recoverOrphans(tokens.familyIds(), (token) => backchannel.revoke(token));
+  if (options.multiuser && !accounts.legacyAccount()) {
+    const paired = await readPairedSecrets(secrets!);
+    if (paired) {
+      const recovered = await decodeRecoveryCode(paired.recoveryCode);
+      const candidate = tokens.legacyCandidate({ pairedCredentialId: paired.connection.credentialId,
+        syncVaultId: recovered.syncVaultId, opaqueDeviceId: paired.device.opaqueDeviceId });
+      const bearer = candidate ? grants.get(candidate.familyId) : null;
+      if (candidate && bearer) {
+        const inspected = await backchannel.introspect(bearer);
+        if (inspected && inspected.credentialId === candidate.grant.credentialId &&
+          inspected.accountId === candidate.grant.accountId &&
+          inspected.pairedCredentialId === candidate.grant.pairedCredentialId &&
+          inspected.syncVaultId === candidate.grant.syncVaultId &&
+          inspected.opaqueDeviceId === candidate.grant.opaqueDeviceId) {
+          await accounts.bootstrapLegacy({ sub: candidate.sub, grant: inspected });
+        }
+      }
+    }
+  }
   logEvent({ event: 'oauth.start', families: tokens.liveFamilyCount(await revocations.current()) });
   const provider = new HebraOAuthProvider({
     issuer: config.publicOrigin,
@@ -110,7 +136,9 @@ export async function loadOAuthHttpAuth(
     loginProvider: login.provider,
     sumego,
     pairing: options.pairing,
-    sealer: sumego ? await RefreshSealer.open(secrets!) : null
+    sealer: sumego ? await RefreshSealer.open(secrets!) : null,
+    accounts,
+    multiuser: options.multiuser
   });
   const logout = sumego
     ? new BackchannelLogout({ oidc: sumego, jtis: await LogoutJtiStore.open(dataDir, now),
@@ -148,6 +176,11 @@ export async function loadOAuthHttpAuth(
 
   return {
     provider,
+    accounts,
+    lumbreOrigin: backchannel.appOrigin,
+    account: options.multiuser ? (req: Request) => {
+      return (req as Request & { auth?: { account?: import('../accounts').AuthorizedAccount } }).auth?.account ?? null;
+    } : undefined,
     install(app: Express) {
       // Antes del SDK: URL() normaliza aliases y su matcher ignora userinfo/hash.
       // También los errores de parámetros deben evitar redirects a esas URI.

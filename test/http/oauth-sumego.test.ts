@@ -11,10 +11,12 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type CryptoKey, type JWK } from 'jose';
 import { encodeRecoveryCode } from '../../src/hebra';
+import type { AccountRegistry } from '../../src/accounts';
 import { HttpConfigError } from '../../src/http/config';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE } from '../../src/oauth';
 import { LOGOUT_JTIS_FILE } from '../../src/oauth/logout-jtis';
 import type { HebraOAuthProvider } from '../../src/oauth/provider';
+import type { ActiveGrant } from '../../src/oauth/backchannel';
 import { TokenStore } from '../../src/oauth/token-store';
 import type { OidcClientConfig } from '../../src/oauth/login-config';
 import { BACKCHANNEL_LOGOUT_EVENT, DISCOVERY_FAILURE_TTL_MS, JWKS_TTL_MS, SumegoOidc } from '../../src/oauth/sumego';
@@ -46,6 +48,7 @@ const json = (value: object, status = 200, headers: Record<string, string> = {})
 let context: TestContext;
 let app: TestHttpApp;
 let provider: HebraOAuthProvider;
+let accounts: AccountRegistry;
 let store: MemorySecretStore;
 let pairing: PairingRevocation;
 let stderrSpy: ReturnType<typeof vi.spyOn>;
@@ -85,6 +88,7 @@ let grantExpiresAt: string;
 let revokeCount: number;
 let requestId: string;
 let transactionId: string;
+let brokerGrant: ActiveGrant;
 
 function s256(value: string): string { return createHash('sha256').update(value).digest('base64url'); }
 function nowS(): number { return Math.floor((Date.now() + clockOffset) / 1000); }
@@ -173,13 +177,11 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     if (exchangeResponse) return exchangeResponse();
     expect(Object.keys(body).sort()).toEqual(['clientId', 'idToken', 'requestId', 'resource', 'scope', 'transactionId']);
     if (body.requestId !== requestId || body.transactionId !== transactionId) return json({ code: 'transaction_not_found' }, 404);
-    return json({ credentialId: GRANT_ID, accessToken: UPSTREAM, tokenType: 'Bearer', clientId: body.clientId, resource: body.resource,
-      scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE,
-      expiresAt: grantExpiresAt });
+    return json({ ...brokerGrant, active: undefined, accessToken: UPSTREAM, tokenType: 'Bearer',
+      clientId: body.clientId, resource: body.resource, expiresAt: grantExpiresAt });
   }
   if (path === 'introspect') {
-    return json({ active: true, credentialId: GRANT_ID, clientId: DCR_CLIENT_ID, resource: app.config.resourceUrl, scope: 'hebra:mcp',
-      accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT, opaqueDeviceId: DEVICE, expiresAt: grantExpiresAt });
+    return json({ ...brokerGrant, active: true, clientId: DCR_CLIENT_ID, resource: app.config.resourceUrl, expiresAt: grantExpiresAt });
   }
   if (path === 'renew') {
     renewCount += 1;
@@ -202,6 +204,7 @@ async function startApp(env: NodeJS.ProcessEnv = sumegoEnv()): Promise<void> {
       now: () => Date.now() + clockOffset });
     if (!auth) throw new Error('auth absent');
     provider = auth.provider;
+    accounts = auth.accounts;
     return auth;
   });
 }
@@ -225,6 +228,9 @@ beforeEach(async () => {
   jwksResponse = null; codeResponse = null; issuer = LUMBRE_ISSUER;
   requestBodies = []; exchangeBodies = []; requestsResponse = null; exchangeResponse = null; revokeCount = 0;
   renewResponse = null; renewCount = 0; grantExpiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+  brokerGrant = { active: true, credentialId: GRANT_ID, clientId: DCR_CLIENT_ID, resource: 'https://mcp.hebra.pro/mcp',
+    scope: 'hebra:mcp', accountId: ACCOUNT, pairedCredentialId: PAIR_ID, syncVaultId: VAULT,
+    opaqueDeviceId: DEVICE, expiresAt: grantExpiresAt };
   await startApp();
 });
 
@@ -254,6 +260,7 @@ interface Login { state: string; cookie: string; code: string; verifier: string 
 /** `/authorize` hasta Sumego: el 302, la cookie y un código de Sumego listo para el callback. */
 async function startLogin(): Promise<Login> {
   const { verifier, challenge } = pkce();
+  const requestsBefore = requestBodies.length;
   const res = await authorize(challenge);
   expect(res.status).toBe(302);
   const location = new URL(res.headers.get('location')!);
@@ -266,9 +273,13 @@ async function startLogin(): Promise<Login> {
   expect(cookieHeader).toMatch(/^__Host-hebra_mcp_login=[A-Za-z0-9_-]{43}; Max-Age=600; Path=\/; HttpOnly; Secure; SameSite=Lax$/);
   currentNonce = location.searchParams.get('nonce')!;
   currentChallenge = location.searchParams.get('code_challenge')!;
-  const last = requestBodies.at(-1)!;
-  expect(last.identityProvider).toBe('sumego');
-  expect(last.sumegoNonceSha256).toBe(s256(currentNonce));
+  // El legado aún sin dueño puede abrir la solicitud antes del callback. Una cuenta
+  // ya reclamada espera a conocer `sub` para seleccionar exactamente su binding.
+  if (requestBodies.length > requestsBefore) {
+    const last = requestBodies.at(-1)!;
+    expect(last.identityProvider).toBe('sumego');
+    expect(last.sumegoNonceSha256).toBe(s256(currentNonce));
+  }
   const code = randomBytes(24).toString('base64url');
   issuedCodes.add(code);
   return { state: location.searchParams.get('state')!, cookie: `__Host-hebra_mcp_login=${/=([^;]+)/.exec(cookieHeader)![1]}`, code, verifier };
@@ -327,6 +338,24 @@ function logout(token: string): Promise<Response> {
 }
 
 describe('recorrido con Sumego', () => {
+  it('Mikel primero no prueba ni reclama la raíz heredada de David: inicia su propia alta', async () => {
+    await accounts.claimLegacy({ sub: SUB, grant: brokerGrant });
+    const startPairing = vi.fn(async (_input: unknown, res: { append(name: string, value: string): void }) => {
+      res.append('set-cookie', '__Host-hebra_mcp_pair=pairing; Secure; HttpOnly; Path=/; SameSite=Lax');
+      return 'https://mcp.hebra.pro/lumbre/pairing/resume';
+    });
+    provider.attachRemotePairing({ start: startPairing,
+      resumeIdentity: async () => undefined });
+    currentSub = 'sumego|mikel'; currentSid = 'sesion-mikel';
+    const login = await startLogin();
+    expect(requestBodies).toHaveLength(0);
+    const returned = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+    expect(returned.status).toBe(303);
+    expect(returned.headers.get('location')).toBe('https://mcp.hebra.pro/lumbre/pairing/resume');
+    expect(startPairing).toHaveBeenCalledOnce();
+    expect(accounts.findBySub('sumego|mikel')).toBeNull();
+  });
+
   it('authorize → Sumego → consentimiento → código OAuth → familia con sub y sid', async () => {
     const { login, formToken, page, html } = await toConsent();
     expect(page.headers.get('content-type')).toMatch(/^text\/html/);
@@ -539,6 +568,11 @@ describe('back-channel logout', () => {
     await fullLogin();
     currentSid = 'sesion-b';
     await fullLogin();
+    const other = { ...brokerGrant, credentialId: '92222222-2222-4222-8222-222222222222',
+      accountId: '78'.repeat(32), pairedCredentialId: '91111111-1111-4111-8111-111111111111',
+      syncVaultId: 'ef'.repeat(16), opaqueDeviceId: '90'.repeat(16) };
+    await accounts.commitAccount({ sub: 'otra-persona', grant: other });
+    brokerGrant = other;
     currentSub = 'otra-persona'; currentSid = 'sesion-c';
     await fullLogin();
     expect((await families()).map((family) => family.sid)).toEqual(['sesion-a', 'sesion-b', 'sesion-c']);

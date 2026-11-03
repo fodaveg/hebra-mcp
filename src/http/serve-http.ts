@@ -1,19 +1,25 @@
 /**
  * `hebra-mcp serve-http` (SPEC.md §12.1): el conector remoto de claude.ai. Un único
- * proceso atiende a todas las sesiones y SIEMPRE es el escritor: toma `writer.lock` como
- * `serve` y, si otro proceso vivo lo tiene, no arranca (`writer_lock_held`). Nunca
- * reenvía por `writer.sock` (`openServeContext({ writerOnly: true })`).
+ * proceso atiende a todas las sesiones y cada contexto abierto es el escritor único de su
+ * cuenta. Si otro proceso tiene su `writer.lock`, esa apertura falla (`writer_lock_held`).
+ * Nunca reenvía por `writer.sock` (`openServeContext({ writerOnly: true })`).
  *
- * Orden de arranque: preflight de configuración sin efectos; después el contexto
- * adquiere el bloqueo de escritor; solo entonces se abre el OAuth mutable y el listener.
- * Cualquier fallo posterior cierra el contexto y suelta el bloqueo.
+ * Orden de arranque: preflight de configuración, OAuth/registro global y listener. Los
+ * contextos se abren bajo demanda después de autenticar la cuenta; cualquier fallo de
+ * arranque cierra los que se hubieran adquirido.
  */
 import { createServer, type Server } from 'node:http';
+import { mkdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { logEvent } from '../log/logger';
-import type { SecretStore } from '../secrets';
+import { WriterLock } from '../lock';
+import { openFileSecretStore, readPairedSecrets, type SecretStore } from '../secrets';
+import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir, openRemotePairing,
+  accountControlDir, openAccountControlServer, type AccountControlServer, type RemotePairingRuntime } from '../accounts';
+import { revokeRemoteCredential } from '../pair/remote/revoke';
+import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
-import { openServeContext, type OpenServeOptions, type ServeContext } from '../server/serve';
+import { openServeContext, WriterRequiredError, type OpenServeOptions, type ServeContext } from '../server/serve';
 import { AWAIT_ROUND_TIMEOUT_MS } from '../server/write-context';
 import { createHttpApp, type HttpAuth } from './app';
 import type { HttpConfig } from './config';
@@ -45,6 +51,7 @@ export class ServeHttpError extends Error {
  * (`deploy/compose.yml`, 50 s).
  */
 export const HTTP_DRAIN_TIMEOUT_MS = AWAIT_ROUND_TIMEOUT_MS + 2_000;
+const ACTIVE_CONTROL_DIRS = new Set<string>();
 
 export interface StartServeHttpOptions
   extends Pick<OpenServeOptions, 'fetcher' | 'instance' | 'syncIntervalMs'> {
@@ -54,6 +61,10 @@ export interface StartServeHttpOptions
   version: string;
   /** Tests: espera más corta a las peticiones en curso (`HTTP_DRAIN_TIMEOUT_MS`). */
   drainTimeoutMs?: number;
+  /** Producción remota: difiere la apertura hasta conocer la cuenta autenticada. */
+  multiuser?: boolean;
+  /** Operación administrativa offline: adquiere control pero no abre listener. */
+  maintenance?: boolean;
   /** Comprobación pura: nunca lee ni escribe el almacén ni llama al broker. */
   authConfigured(): boolean;
   /**
@@ -66,8 +77,12 @@ export interface StartServeHttpOptions
 export interface ServeHttpHandle {
   /** Puerto real de escucha (con `config.port` 0, el que eligió el sistema). */
   port: number;
-  serve: ServeContext;
+  /** Contexto raíz del modo monousuario; multiusuario abre cada cuenta bajo demanda. */
+  serve: ServeContext | null;
   server: Server;
+  contexts: AccountContexts | null;
+  /** Retirada administrativa por id opaco, bajo el lock global de este proceso. */
+  removeAccount(id: string): Promise<void>;
   /**
    * Apagado ordenado: corta las esperas de ronda de las escrituras en curso
    * (`beginShutdown`), deja de aceptar conexiones, espera hasta `HTTP_DRAIN_TIMEOUT_MS` a
@@ -127,55 +142,139 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
     );
   }
-  const serve = await openServeContext({
-    dataDir: options.dataDir,
-    secrets: options.secrets,
-    fetcher: options.fetcher,
-    instance: options.instance,
-    syncIntervalMs: options.syncIntervalMs,
-    writerOnly: true
-  });
+  let serve: ServeContext | null = null;
   let server: Server;
   let inFlight: ReturnType<typeof trackInFlight>;
+  let contexts: AccountContexts | null = null;
+  let removal: AccountRemovalService | null = null;
+  let registry: AccountRegistry | null = null;
+  let remotePairing: RemotePairingRuntime | null = null;
+  let controlLock: WriterLock | null = null;
+  let controlServer: AccountControlServer | null = null;
+  let controlKey: string | null = null;
+  let controlRegistered = false;
   try {
+    // El modo monousuario conserva el orden de robustez histórico: toma el writer lock
+    // antes de recuperar OAuth. Solo producción multiusuario puede diferir la apertura,
+    // porque no existe un lock global que represente a todas las cuentas.
+    if (!options.multiuser) {
+      serve = await openServeContext({ dataDir: options.dataDir, secrets: options.secrets,
+        fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
+        writerOnly: true });
+    } else {
+      const controlDir = accountControlDir(options.dataDir);
+      await mkdir(controlDir, { recursive: true, mode: 0o700 });
+      controlKey = controlDir;
+      if (ACTIVE_CONTROL_DIRS.has(controlKey)) throw new WriterRequiredError();
+      ACTIVE_CONTROL_DIRS.add(controlKey);
+      controlRegistered = true;
+      controlLock = new WriterLock({ dataDir: controlDir });
+      if (!controlLock.tryAcquire()) {
+        ACTIVE_CONTROL_DIRS.delete(controlKey); controlRegistered = false; throw new WriterRequiredError();
+      }
+      controlLock.deferSignalRelease();
+    }
     // Emparejado revocado (SPEC.md §12.9): el `revoked` del relé o el `410 pairing_revoked` de
     // Lumbre que vea el OAuth; `hebra_status` dice lo mismo que la página de `/authorize`.
-    const pairing = new PairingRevocation(() => serve.instance.syncRunner?.revoked ?? false);
-    serve.ctx.status = new PairingStatusSource(serve.ctx.status, pairing);
+    const pairing = new PairingRevocation(() => serve?.instance.syncRunner?.revoked ?? false);
     const auth = await options.loadAuth(options.dataDir, options.config, options.secrets, pairing);
     if (!auth) throw new ServeHttpError(
       'auth_not_configured',
       'serve-http requiere emparejado y HEBRA_MCP_BACKCHANNEL_SECRET válido para el consentimiento de Lumbre.'
     );
-    const app = createHttpApp({ ctx: serve.ctx, version: options.version, config: options.config, auth });
+    registry = 'accounts' in auth && auth.accounts instanceof AccountRegistry ? auth.accounts : null;
+    if (registry) {
+      const activeRegistry = registry;
+      contexts = new AccountContexts(activeRegistry, async (account) => {
+        const dataDir = accountDataDir(options.dataDir, account);
+        const secrets = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
+        const opened = await openServeContext({ dataDir, secrets,
+          fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
+          writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); } });
+        opened.instance.deferSignalRelease();
+        if (account.storage === 'legacy-root') serve = opened;
+        const accountPairing = account.storage === 'legacy-root' ? pairing :
+          new PairingRevocation(() => opened.instance.syncRunner?.revoked ?? false);
+        opened.ctx.status = new PairingStatusSource(opened.ctx.status, accountPairing);
+        return opened;
+      });
+      const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
+      if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');
+      remotePairing = await openRemotePairing({ dataDir: options.dataDir, registry: activeRegistry, provider: oauth.provider,
+        lumbreOrigin: oauth.lumbreOrigin, fetcher: options.fetcher });
+      removal = new AccountRemovalService({ dataDir: options.dataDir, registry: activeRegistry, contexts,
+        oauth: oauth.provider, legacySecrets: options.secrets!,
+        cleanupLegacyShared: (account) => remotePairing!.cleanupForSub(account.sub),
+        revokeDevice: async (account) => {
+          const dataDir = accountDataDir(options.dataDir, account);
+          const store = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
+          if (!store) throw new Error('account_secrets_unavailable');
+          const paired = await readPairedSecrets(store);
+          if (!paired) throw new Error('account_pairing_unavailable');
+          await revokeRemoteCredential(paired.connection, options.fetcher);
+        } });
+      await removal.resumePending();
+      if (!options.maintenance) {
+        controlServer = await openAccountControlServer(options.dataDir, async (id) => {
+          const account = activeRegistry.findById(id);
+          if (!account) throw new Error('account_not_found');
+          await removal!.remove(account);
+        });
+      }
+    } else {
+      if (!serve) throw new ServeHttpError('auth_not_configured', 'El modo multiusuario requiere autenticación por cuenta.');
+      serve.ctx.status = new PairingStatusSource(serve.ctx.status, pairing);
+    }
+    const app = createHttpApp({ ctx: serve?.ctx, contexts: contexts ?? undefined,
+      remotePairing: remotePairing?.router,
+      version: options.version, config: options.config, auth });
     server = createServer(app);
     inFlight = trackInFlight(server);
-    await listen(server, options.config.port, options.config.listenHost);
+    if (!options.maintenance) await listen(server, options.config.port, options.config.listenHost);
   } catch (error) {
-    await serve.close();
+    await controlServer?.close();
+    if (contexts) await contexts.close();
+    else await serve?.close();
+    controlLock?.release();
+    if (controlKey && controlRegistered) ACTIVE_CONTROL_DIRS.delete(controlKey);
     throw error;
   }
-  const port = (server.address() as AddressInfo).port;
-  logEvent({ event: 'serve_http.listening', port });
+  const port = server.listening ? (server.address() as AddressInfo).port : 0;
+  if (server.listening) logEvent({ event: 'serve_http.listening', port });
 
   let closing: Promise<void> | null = null;
   return {
     port,
     serve,
     server,
+    contexts,
+    removeAccount(id) {
+      if (!removal) return Promise.reject(new Error('multiuser_not_configured'));
+      const account = registry?.findById(id);
+      if (!account) return Promise.reject(new Error('account_not_found'));
+      return removal.remove(account);
+    },
     close() {
       closing ??= (async () => {
         // Primero, que ninguna escritura en curso siga esperando su ronda: la respuesta
         // sale ya (con `sync: "pending"` donde lo haya).
-        serve.instance.beginShutdown();
+        if (contexts) contexts.beginShutdown();
+        else serve?.instance.beginShutdown();
         // `close` deja de aceptar conexiones y cierra las ociosas; las que tienen una
         // petición a medias siguen hasta responder (o hasta el plazo).
-        const closed = new Promise<void>((resolve) => server.close(() => resolve()));
+        const wasListening = server.listening;
+        const closed = wasListening
+          ? new Promise<void>((resolve) => server.close(() => resolve()))
+          : Promise.resolve();
         const drained = await inFlight.idle(options.drainTimeoutMs ?? HTTP_DRAIN_TIMEOUT_MS);
-        server.closeAllConnections();
+        if (wasListening) server.closeAllConnections();
         await closed;
         logEvent({ event: 'serve_http.closed', drained });
-        await serve.close();
+        await controlServer?.close();
+        if (contexts) await contexts.close();
+        else await serve?.close();
+        controlLock?.release();
+        if (controlKey && controlRegistered) ACTIVE_CONTROL_DIRS.delete(controlKey);
       })();
       return closing;
     }

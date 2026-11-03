@@ -129,6 +129,26 @@ describe('RemotePairingService', () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
+  it('si la identidad caduca tras preview, reautentica y publica sin repetir ownership', async () => {
+    let clock = NOW;
+    const verifyOwner = vi.fn(async ({ sub, binding }: { sub: string; binding: Binding }) => ownership(sub, binding));
+    const publish = vi.fn(async () => ({ id: 'account-david', generation: 1 }));
+    const service = createService({ link: fakeLink(recoveryCode, []), ownership: verifyOwner, publish,
+      now: () => clock });
+    const started = await service.start(startInput(new Date(NOW + 60_000).toISOString()));
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    await expect(service.poll(started.id, await currentAuth(service, started)))
+      .resolves.toMatchObject({ kind: 'preview' });
+    clock += 61_000;
+    await expect(service.confirm(started.id, await currentAuth(service, started)))
+      .resolves.toEqual({ kind: 'reauthenticate' });
+    await service.resumeIdentity(started.id, 'sumego|david', new Date(clock + 60_000).toISOString());
+    await expect(service.confirm(started.id, await currentAuth(service, started)))
+      .resolves.toMatchObject({ kind: 'confirmed', account: { id: 'account-david' } });
+    expect(verifyOwner).toHaveBeenCalledOnce();
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
   it('consume el token dentro del mismo lock en receive y poll concurrentes', async () => {
     const exchangeCode = vi.fn(async () => CONNECTION);
     const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode });

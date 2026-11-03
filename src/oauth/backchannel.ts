@@ -212,7 +212,8 @@ export class LumbreBackchannel {
    * responde exactamente `{requestId, expiresAt}`, sin `authorizationUrl`.
    */
   async requestSumego(input: Binding & { transactionId: string; clientId: string; clientName: string; sumegoNonceSha256: string }): Promise<{ requestId: string; expiresAt: string }> {
-    const raw = await this.post('requests', { ...input, resource: this.resource, scope: OAUTH_SCOPE, callbackUri: LUMBRE_CALLBACK, identityProvider: 'sumego' });
+    const raw = await this.post('requests', { ...input, resource: this.resource, scope: OAUTH_SCOPE,
+      callbackUri: LUMBRE_CALLBACK, identityProvider: 'sumego' });
     const value = object(raw, ['requestId', 'expiresAt']);
     if (!value || typeof value.requestId !== 'string' || !UUID.test(value.requestId) ||
       !isoInstantOrDate(value.expiresAt)) throw new BackchannelError('invalid');

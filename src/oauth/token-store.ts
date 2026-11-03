@@ -33,7 +33,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logEvent } from '../log/logger';
 import { readJsonOrNull, tokensFilePath, writeJsonAtomic } from './files';
-import type { ActiveGrant } from './backchannel';
+import { sameBinding, type ActiveGrant, type Binding } from './backchannel';
 
 export const ACCESS_TOKEN_TTL_MS = 60 * 60_000;
 const MAX_ACCESS_PER_FAMILY = 4;
@@ -42,6 +42,7 @@ const MAX_ACCESS_PER_FAMILY = 4;
 export const REFRESH_REUSE_GRACE_MS = 30_000;
 /** Familias vivas a la vez: una por dispositivo de claude.ai que conecta; de sobra. */
 const MAX_FAMILIES = 32;
+const MAX_FAMILIES_PER_ACCOUNT = 8;
 
 const ACCESS_PREFIX = 'hmcp_at_';
 const REFRESH_PREFIX = 'hmcp_rt_';
@@ -122,6 +123,14 @@ export interface VerifiedAccess {
   expiresAt: number;
   familyId: string;
   grant: ActiveGrant;
+  identity: FamilyIdentity | null;
+}
+
+export interface FamilyAccountSelector extends Binding {
+  sub: string;
+  accountId: string;
+  /** Solo la entrada heredada puede conservar familias v2, anteriores a `sub`. */
+  includeLegacyWithoutSub?: boolean;
 }
 
 export type RefreshOutcome =
@@ -229,6 +238,17 @@ export class TokenStore {
   /** Identificadores de familias persistidas para limpiar bearers huérfanos al reiniciar. */
   familyIds(): string[] { return this.families.map((family) => family.id); }
 
+  /** Candidato heredado demostrado por una familia previa; ambigüedad detiene migración. */
+  legacyCandidate(binding: Binding): { familyId: string; sub: string | null; grant: ActiveGrant } | null {
+    const matches = this.families.filter((family) => family.expiresAt > this.now() && sameBinding(family.grant, binding));
+    if (matches.length === 0) return null;
+    const accountIds = new Set(matches.map((family) => family.grant.accountId));
+    const subs = new Set(matches.flatMap((family) => family.sub === null ? [] : [family.sub]));
+    if (accountIds.size !== 1 || subs.size > 1) return null;
+    const preferred = matches.find((family) => family.sub !== null) ?? matches[0]!;
+    return { familyId: preferred.id, sub: preferred.sub, grant: structuredClone(preferred.grant) };
+  }
+
   /** Tras persistir, invalida en síncrono y devuelve una limpieza esperable fuera de la cola. */
   onFamiliesRemoved(handler: (ids: readonly string[]) => () => Promise<void>): void {
     this.familiesRemoved = handler;
@@ -299,7 +319,8 @@ export class TokenStore {
    */
   issueFamily(
     input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number;
-      identity?: FamilyIdentity | null; sumego?: SumegoRefreshState | null; loggedOut?: () => boolean },
+      identity?: FamilyIdentity | null; sumego?: SumegoRefreshState | null; loggedOut?: () => boolean;
+      authorize?: () => void | Promise<void> },
     revokedBefore: number,
     storeBearer: (familyId: string, liveIds: readonly string[]) => Promise<void>
   ): Promise<IssuedTokens> {
@@ -310,6 +331,9 @@ export class TokenStore {
       if (input.authorizedAt <= revokedBefore) throw new Error('authorization_revoked');
       if (input.loggedOut?.()) throw new Error('logged_out');
       if (this.families.length >= MAX_FAMILIES) throw new Error('too_many_families');
+      const accountFamilies = this.families.filter((family) => family.grant.accountId === input.grant.accountId &&
+        sameBinding(family.grant, input.grant) && family.sub === (input.identity?.sub ?? null));
+      if (accountFamilies.length >= MAX_FAMILIES_PER_ACCOUNT) throw new Error('too_many_account_families');
       const family: Family = {
         id: randomBytes(16).toString('base64url'),
         clientId: input.clientId,
@@ -331,6 +355,7 @@ export class TokenStore {
       if (family.expiresAt <= now) throw new Error('grant_expired');
       const accessToken = this.newAccess(family, now);
       const refreshToken = this.newRefresh(family);
+      await input.authorize?.();
       this.families.push(family);
       // Conservar bearers de familias podadas hasta que la eliminación sea durable;
       // el observador los revoca y retira después de persistir los tokens.
@@ -346,8 +371,8 @@ export class TokenStore {
    * de Sumego recién rotado, cifrado), también va en esa escritura.
    */
   rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number, renewedExpiresAt?: string,
-    sumego?: SumegoRefreshState): Promise<RefreshOutcome> {
-    return this.mutate((): RefreshOutcome => {
+    sumego?: SumegoRefreshState, authorize?: () => void | Promise<void>): Promise<RefreshOutcome> {
+    return this.mutate(async (): Promise<RefreshOutcome> => {
       const now = this.now();
       const match = REFRESH_PATTERN.exec(refreshToken);
       const family = match ? this.families.find((candidate) => candidate.id === match[1]) : undefined;
@@ -374,6 +399,7 @@ export class TokenStore {
         return { ok: false, reason: 'replay' };
       }
       this.prune(revokedBefore, now);
+      await authorize?.();
       family.previousRefreshHash = family.refreshHash;
       family.rotatedAt = now;
       if (renewedExpiresAt !== undefined) {
@@ -414,7 +440,8 @@ export class TokenStore {
             resource: family.resource,
             expiresAt: Math.floor(entry.expiresAt / 1000),
             familyId: family.id,
-            grant: family.grant
+            grant: family.grant,
+            identity: family.sub === null ? null : { sub: family.sub, sid: family.sid }
           };
         }
       }
@@ -423,12 +450,14 @@ export class TokenStore {
   }
 
   /** Vínculo de la familia del refresh vigente, sin revelar el bearer upstream. */
-  lookupRefresh(token: string, clientId: string, revokedBefore: number): { familyId: string; grant: ActiveGrant } | null {
+  lookupRefresh(token: string, clientId: string, revokedBefore: number):
+    { familyId: string; grant: ActiveGrant; identity: FamilyIdentity | null } | null {
     const match = REFRESH_PATTERN.exec(token);
     const family = match ? this.families.find((candidate) => candidate.id === match[1]) : undefined;
     if (!family || family.clientId !== clientId || !this.alive(family, revokedBefore, this.now()) ||
       !sameHash(sha256(token), family.refreshHash)) return null;
-    return { familyId: family.id, grant: family.grant };
+    return { familyId: family.id, grant: family.grant,
+      identity: family.sub === null ? null : { sub: family.sub, sid: family.sid } };
   }
 
   /** Corta una familia cuando Lumbre confirma revocación. */
@@ -446,6 +475,18 @@ export class TokenStore {
     return this.mutate((): string[] => {
       const matches = (family: Family): boolean =>
         logoutMatches(selector, family.sub === null ? null : { sub: family.sub, sid: family.sid });
+      const dropped = this.families.filter(matches).map((family) => family.id);
+      if (dropped.length) this.families = this.families.filter((family) => !matches(family));
+      return dropped;
+    });
+  }
+
+  /** Corta solo las familias ligadas a la persona, cuenta y dispositivo exactos. */
+  dropFamiliesForAccount(selector: FamilyAccountSelector): Promise<string[]> {
+    return this.mutate((): string[] => {
+      const matches = (family: Family): boolean => family.grant.accountId === selector.accountId &&
+        sameBinding(family.grant, selector) &&
+        (family.sub === selector.sub || (selector.includeLegacyWithoutSub === true && family.sub === null));
       const dropped = this.families.filter(matches).map((family) => family.id);
       if (dropped.length) this.families = this.families.filter((family) => !matches(family));
       return dropped;

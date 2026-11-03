@@ -333,7 +333,7 @@ export class RemotePairingService {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
       await this.ensureAlive(journal);
-      if (journal.phase !== 'owner-check' || !this.requireRuntime(id).granted) {
+      if ((journal.phase !== 'owner-check' && journal.phase !== 'confirmation') || !this.requireRuntime(id).granted) {
         throw new RemotePairingError('not_ready');
       }
       if (sub !== journal.sub) {
@@ -350,7 +350,10 @@ export class RemotePairingService {
   async confirm(
     id: string,
     authorization: RemotePairingFormAuthorization
-  ): Promise<Awaited<ReturnType<RemotePairingPublisher['publish']>>> {
+  ): Promise<
+    | { kind: 'reauthenticate' }
+    | { kind: 'confirmed'; account: Awaited<ReturnType<RemotePairingPublisher['publish']>> }
+  > {
     return this.exclusive(id, async () => {
       const journal = await this.requireJournal(id);
       await this.ensureAlive(journal);
@@ -360,6 +363,7 @@ export class RemotePairingService {
         journal.phase !== 'confirmation' || !runtime.preview || !runtime.ownership ||
         !journal.connection || !journal.preparedAgent || !journal.paired
       ) throw new RemotePairingError(journal.phase === 'committing' ? 'replayed' : 'not_ready');
+      if (!validFuture(journal.identityExpiresAt, this.now())) return { kind: 'reauthenticate' };
       journal.phase = 'committing';
       journal.updatedAt = new Date(this.now()).toISOString();
       await this.options.journals.write(journal);
@@ -393,7 +397,7 @@ export class RemotePairingService {
       await this.options.journals.write(journal);
       await this.options.journals.remove(id);
       this.runtime.delete(id);
-      return account;
+      return { kind: 'confirmed', account };
     });
   }
 
@@ -405,6 +409,14 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       await this.cleanup(journal);
     });
+  }
+
+  /** Retirada administrativa ya autenticada por el control local; no depende de CSRF web. */
+  async cleanupForSub(sub: string): Promise<void> {
+    for (const candidate of await this.options.journals.list()) {
+      if (candidate.sub !== sub) continue;
+      await this.exclusive(candidate.id, async () => this.cleanup(await this.requireJournal(candidate.id)));
+    }
   }
 
   /** Se ejecuta antes de aceptar tráfico. Nunca reanuda claves efímeras perdidas. */
@@ -495,8 +507,9 @@ export class RemotePairingService {
         binding,
         oauthRequestId: journal.oauthRequestId
       });
-    } catch {
+    } catch (error) {
       await this.cleanup(journal);
+      if (error instanceof RemotePairingError && error.code === 'unavailable') throw error;
       throw new RemotePairingError('wrong_account');
     }
     if (ownership.sub !== journal.sub || !sameBinding(binding, ownership.grant)) {

@@ -11,6 +11,7 @@ import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/serv
 import { InvalidGrantError, InvalidRequestError, InvalidScopeError, InvalidTargetError, InvalidTokenError, ServerError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthorizationParams, OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
+import { AccountRegistry, type AccountRecord, type AuthorizedAccount } from '../accounts';
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { decodeRecoveryCode } from '../hebra';
 import { logEvent } from '../log/logger';
@@ -59,6 +60,7 @@ const DENIED_EXCHANGE_STATUS = new Set([400, 403, 404, 409]);
 interface SumegoLogin {
   state: string;
   nonce: string;
+  nonceHash: string;
   verifier: string;
   cookieHash: string;
   phase: 'login' | 'exchanging' | 'consent';
@@ -74,6 +76,9 @@ interface SumegoLogin {
   /** Lumbre acepta el ID token hasta `iat` + 5 min (+60 s): el «Permitir» vale hasta `iat` + 5 min − 30 s. */
   consentDeadline: number | null;
   formTokenHash: string | null;
+  /** Reautenticación de una alta remota que perdió el ID token. */
+  remotePairingId?: string;
+  expectedSub?: string;
 }
 
 /** Lo que una autorización con Sumego lleva hasta su familia. */
@@ -99,7 +104,8 @@ const CONSENT_MARGIN_S = 30;
 const ID_TOKEN_ACCEPTED_S = 300;
 const MAX_CLOSED_LOGOUTS = 1024;
 
-interface PendingAuthorization extends Binding {
+interface PendingAuthorization {
+  binding: Binding | null;
   requestId: string | null;
   transactionId: string;
   clientId: string;
@@ -113,6 +119,8 @@ interface PendingAuthorization extends Binding {
   claimed: boolean;
   /** Solo en modo `sumego`. */
   sumego?: SumegoLogin;
+  pairingGrant?: Grant;
+  pairingStageHash?: string;
 }
 
 interface AuthorizationCode {
@@ -185,7 +193,18 @@ export interface HebraOAuthProviderOptions {
   pairing?: PairingRevocation;
   /** Cifra los refresh de Sumego de las familias; obligatorio con `sumego`. */
   sealer?: RefreshSealer | null;
+  /** Registro multiusuario. Sin él no se puede convertir una familia en biblioteca. */
+  accounts: AccountRegistry;
+  /** Activa selección obligatoria por cuenta; `false` conserva el servidor legado. */
+  multiuser?: boolean;
 }
+
+export interface RemotePairingOAuthHooks {
+  start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string }, res: Response): Promise<string>;
+  resumeIdentity(input: { pairingSessionId: string; sub: string; identityExpiresAt: string }): Promise<void>;
+}
+
+export interface AccountAuthInfo extends AuthInfo { account: AuthorizedAccount }
 
 export class HebraOAuthProvider implements OAuthServerProvider {
   readonly skipLocalPkceValidation = true;
@@ -216,6 +235,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private readonly loginProvider: LoginProvider;
   private readonly sumego: SumegoOidc | null;
   private readonly sealer: RefreshSealer | null;
+  private readonly accounts: AccountRegistry;
+  private readonly multiuser: boolean;
+  private remotePairing: RemotePairingOAuthHooks | null = null;
   readonly pairing: PairingRevocation;
   /** Logout recientes: alcanzan a solicitudes y códigos en vuelo y a la familia que aún no existe. */
   private closedLogouts: ClosedLogout[] = [];
@@ -238,6 +260,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     this.loginProvider = options.loginProvider ?? 'lumbre';
     this.sumego = options.sumego ?? null;
     this.sealer = options.sealer ?? null;
+    this.accounts = options.accounts;
+    this.multiuser = options.multiuser ?? false;
     if (this.loginProvider === 'sumego' && (!this.sumego || !this.sealer)) throw new Error('sumego_not_configured');
     this.pairing = options.pairing ?? new PairingRevocation();
     this.tokens.onFamiliesRemoved((ids) => {
@@ -258,6 +282,11 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   }
 
   get clientsStore(): OAuthRegisteredClientsStore { return this.clients; }
+
+  attachRemotePairing(hooks: RemotePairingOAuthHooks): void {
+    if (this.remotePairing) throw new Error('remote_pairing_already_attached');
+    this.remotePairing = hooks;
+  }
 
   private sameResource(resource: URL | string | undefined): boolean {
     if (resource === undefined) return true;
@@ -283,15 +312,66 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     } catch { return null; }
   }
 
+  /** Compatibilidad monousuario: el vínculo local sigue siendo la autoridad del contexto fijo. */
+  private async legacySingleUser(grant: Binding): Promise<AuthorizedAccount | null> {
+    if (this.multiuser) return null;
+    const current = await this.currentBinding();
+    return current && sameBinding(current, grant)
+      ? { id: 'legacy-single-user', generation: 1, binding: current, storage: 'legacy-root' }
+      : null;
+  }
+
+  private async assertAccountActive(account: AuthorizedAccount): Promise<void> {
+    if (account.id !== 'legacy-single-user') { this.accounts.assertActive(account); return; }
+    if (!await this.legacySingleUser(account.binding)) throw new Error('account_inactive');
+  }
+
   /** Caducados en memoria: la concesión remota se revoca y el secreto staged se retira. */
   private prune(): void {
     const now = this.now();
-    for (const [id, pending] of this.pending) if (pending.expiresAt <= now) this.pending.delete(id);
+    for (const [id, pending] of this.pending) if (pending.expiresAt <= now) this.discardPending(id, pending);
     for (const [hash, code] of this.codes) {
       if (code.expiresAt > now) continue;
       this.discardCode(hash, code);
     }
     this.closedLogouts = this.closedLogouts.filter((entry) => entry.until > now);
+  }
+
+  private discardPending(id: string, pending: PendingAuthorization): void {
+    this.pending.delete(id);
+    if (!pending.pairingGrant || !pending.pairingStageHash) return;
+    void this.backchannel.revoke(pending.pairingGrant.accessToken)
+      .then(() => this.grants.unstage(pending.pairingStageHash!))
+      .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+  }
+
+  async cancelRemoteAuthorization(oauthRequestId: string): Promise<void> {
+    const pending = this.pending.get(oauthRequestId);
+    if (!pending) return;
+    this.pending.delete(oauthRequestId);
+    if (!pending.pairingGrant || !pending.pairingStageHash) return;
+    await this.backchannel.revoke(pending.pairingGrant.accessToken);
+    await this.grants.unstage(pending.pairingStageHash);
+  }
+
+  async reauthenticateRemote(input: { oauthRequestId: string; expectedSub: string; pairingSessionId: string },
+    res: Response): Promise<string> {
+    const pending = this.pending.get(input.oauthRequestId);
+    if (!pending?.sumego?.identity || pending.sumego.identity.sub !== input.expectedSub || !this.sumego ||
+      pending.expiresAt <= this.now()) throw new Error('remote_pairing_reauth_invalid');
+    const random = () => randomBytes(32).toString('base64url');
+    const nonce = random();
+    const login: SumegoLogin = { state: random(), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '',
+      phase: 'login', idToken: null, email: null, identity: null, idTokenIat: null, refreshToken: null,
+      refreshedAt: null, consentDeadline: null, formTokenHash: null,
+      remotePairingId: input.pairingSessionId, expectedSub: input.expectedSub };
+    const cookie = random();
+    login.cookieHash = sha256(cookie);
+    pending.sumego = login;
+    const location = await this.sumego.authorizationUrl({ state: login.state, nonce,
+      codeChallenge: s256(login.verifier) });
+    res.append('set-cookie', loginCookie(cookie, LOGIN_COOKIE_MAX_AGE_S));
+    return location;
   }
 
   /** Quita un código no canjeado y revoca su concesión upstream, sin esperar. */
@@ -332,10 +412,18 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.status(429).json({ error: 'rate_limited' }); return;
     }
     const transactionId = randomBytes(32).toString('base64url');
-    const binding = await this.currentBinding();
-    if (!binding) { res.status(503).json({ error: 'temporarily_unavailable' }); return; }
-    // Emparejado revocado (SPEC.md §12.9): una página que dice cómo reemparejar, no un 503 JSON.
-    if (this.pairing.isRevoked(binding.pairedCredentialId)) { sendPairingRevokedPage(res); return; }
+    // El legado sin dueño es el único vínculo que puede conocerse antes del login.
+    // Pedir su transacción aquí no lo adjudica: el claim solo ocurre después de que
+    // Sumego valide `sub` y el broker canjee exactamente esta misma vinculación.
+    const binding = this.loginProvider === 'sumego'
+      ? (!this.accounts.legacyAccount() ? await this.currentBinding() : null)
+      : await this.currentBinding();
+    if (this.loginProvider !== 'sumego' && !binding) {
+      res.status(503).json({ error: 'temporarily_unavailable' }); return;
+    }
+    if (binding && this.pairing.isRevoked(binding.pairedCredentialId)) {
+      sendPairingRevokedPage(res); return;
+    }
     const current = [...this.pending.values()];
     if (current.length >= MAX_PENDING || current.filter((entry) => entry.ip === ip).length >= MAX_PENDING_PER_IP ||
       current.filter((entry) => entry.clientId === client.client_id).length >= MAX_PENDING_PER_CLIENT) {
@@ -343,16 +431,16 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     const clientName = (client.client_name || 'Claude').slice(0, 120);
     const pending: PendingAuthorization = {
-      ...binding, requestId: null, transactionId, clientId: client.client_id, clientName,
+      binding, requestId: null, transactionId, clientId: client.client_id, clientName,
       redirectUri: params.redirectUri, challenge: params.codeChallenge, state: params.state,
       ip, createdAt: this.now(), expiresAt: this.now() + PENDING_TTL_MS, claimed: false
     };
     // El insert ocurre antes de la primera llamada remota.
     this.pending.set(transactionId, pending);
-    if (this.loginProvider === 'sumego') { await this.authorizeWithSumego(pending, binding, res); return; }
+    if (this.loginProvider === 'sumego') { await this.authorizeWithSumego(pending, res); return; }
     try {
-      const requested = await this.backchannel.request({ ...binding, transactionId, clientId: client.client_id, clientName });
-      if (this.pending.get(transactionId) !== pending || !sameBinding(binding, (await this.currentBinding()) ?? { pairedCredentialId: '', syncVaultId: '', opaqueDeviceId: '' })) {
+      const requested = await this.backchannel.request({ ...binding!, transactionId, clientId: client.client_id, clientName });
+      if (this.pending.get(transactionId) !== pending || !sameBinding(binding!, (await this.currentBinding()) ?? { pairedCredentialId: '', syncVaultId: '', opaqueDeviceId: '' })) {
         this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return;
       }
       pending.requestId = requested.requestId;
@@ -362,7 +450,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.redirect(302, requested.authorizationUrl);
     } catch (error) {
       this.pending.delete(transactionId);
-      if (this.pairingRevokedBy(error, binding)) { sendPairingRevokedPage(res); return; }
+      if (this.pairingRevokedBy(error, binding!)) { sendPairingRevokedPage(res); return; }
       logEvent({ event: 'oauth.authorize', result: 'unavailable' });
       res.status(503).json({ error: 'temporarily_unavailable' });
     }
@@ -379,17 +467,16 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   }
 
   /**
-   * `/authorize` en modo `sumego` (SPEC.md §12.9, paso 1): `state`, `nonce` y `code_verifier`
-   * propios, solo en la solicitud; la solicitud se registra en Lumbre con el sha256 del `nonce`;
-   * cookie `__Host-hebra_mcp_login` con su sha256 en la solicitud, y 302 al
-   * `authorization_endpoint` de la discovery. La discovery va antes que Lumbre: si Sumego está
-   * caído, no queda una solicitud huérfana allí.
+   * `/authorize` en modo `sumego`: primero autentica a la persona, sin elegir biblioteca.
+   * Tras el callback, el `sub` decide si se registra en Lumbre el vínculo de su cuenta o si
+   * empieza un alta remota. `state`, `nonce`, PKCE y la cookie siguen atando el navegador.
    */
-  private async authorizeWithSumego(pending: PendingAuthorization, binding: Binding, res: Response): Promise<void> {
+  private async authorizeWithSumego(pending: PendingAuthorization, res: Response): Promise<void> {
     const sumego = this.sumego!;
     const { transactionId } = pending;
     const random = () => randomBytes(32).toString('base64url');
-    const login: SumegoLogin = { state: random(), nonce: random(), verifier: random(), cookieHash: '', phase: 'login',
+    const nonce = random();
+    const login: SumegoLogin = { state: random(), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '', phase: 'login',
       idToken: null, email: null, identity: null, idTokenIat: null, refreshToken: null, refreshedAt: null,
       consentDeadline: null, formTokenHash: null };
     const cookie = random();
@@ -397,23 +484,32 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     pending.sumego = login;
     try {
       const authorizationUrl = await sumego.authorizationUrl({ state: login.state, nonce: login.nonce, codeChallenge: s256(login.verifier) });
-      const requested = await this.backchannel.requestSumego({ ...binding, transactionId, clientId: pending.clientId,
-        clientName: pending.clientName, sumegoNonceSha256: s256(login.nonce) });
-      if (this.pending.get(transactionId) !== pending || !sameBinding(binding, (await this.currentBinding()) ?? { pairedCredentialId: '', syncVaultId: '', opaqueDeviceId: '' })) {
-        this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return;
-      }
-      pending.requestId = requested.requestId;
-      pending.expiresAt = Math.min(pending.expiresAt, Date.parse(requested.expiresAt));
-      if (pending.expiresAt <= this.now()) { this.pending.delete(transactionId); res.status(400).json({ error: 'invalid_request' }); return; }
+      // Valida primero discovery/JWKS del proveedor: un login inválido no debe dejar
+      // solicitudes huérfanas en Lumbre.
+      if (pending.binding) await this.requestSumegoFor(pending, pending.binding);
       res.setHeader('set-cookie', loginCookie(cookie, LOGIN_COOKIE_MAX_AGE_S));
       logEvent({ event: 'oauth.authorize', result: 'sumego' });
       res.redirect(302, authorizationUrl);
     } catch (error) {
       this.pending.delete(transactionId);
-      if (this.pairingRevokedBy(error, binding)) { sendPairingRevokedPage(res); return; }
+      if (pending.binding && this.pairingRevokedBy(error, pending.binding)) {
+        sendPairingRevokedPage(res); return;
+      }
       logEvent({ event: 'oauth.authorize', result: 'unavailable' });
       res.status(503).json({ error: 'temporarily_unavailable' });
     }
+  }
+
+  private async requestSumegoFor(pending: PendingAuthorization, binding: Binding): Promise<void> {
+    const login = pending.sumego;
+    if (!login) throw new Error('sumego_login_missing');
+    const requested = await this.backchannel.requestSumego({ ...binding, transactionId: pending.transactionId,
+      clientId: pending.clientId, clientName: pending.clientName, sumegoNonceSha256: login.nonceHash });
+    if (this.pending.get(pending.transactionId) !== pending) throw new Error('authorization_expired');
+    pending.binding = binding;
+    pending.requestId = requested.requestId;
+    pending.expiresAt = Math.min(pending.expiresAt, Date.parse(requested.expiresAt));
+    if (pending.expiresAt <= this.now()) throw new Error('authorization_expired');
   }
 
   /** La solicitud del login con Sumego cuyo `state` es este, comparado en tiempo constante. */
@@ -507,6 +603,48 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (login.consentDeadline <= this.now()) {
       burn(); logEvent({ event: 'oauth.sumego.callback', result: 'expired' }); sendConsentExpiredPage(res); return;
     }
+
+    const identityExpiresAt = new Date(login.consentDeadline).toISOString();
+    if (login.remotePairingId) {
+      if (!login.expectedSub || claims.sub !== login.expectedSub || !this.remotePairing) {
+        reject('wrong_account'); return;
+      }
+      try {
+        await this.remotePairing.resumeIdentity({ pairingSessionId: login.remotePairingId,
+          sub: claims.sub, identityExpiresAt });
+        res.append('set-cookie', loginCookie('', 0));
+        res.redirect(303, '/lumbre/pairing/resume');
+      } catch {
+        reject('unavailable');
+      }
+      return;
+    }
+
+    const account = this.accounts.findBySub(claims.sub);
+    if (account?.state === 'removing') { reject('account_removing'); return; }
+    let binding: Binding | null = account?.state === 'active' ? account.binding : null;
+    // Migración explícita del único legado: solo se prueba su vínculo si aún no tiene dueño.
+    if (!binding && !this.accounts.legacyAccount()) binding = await this.currentBinding();
+    if (binding && pending.requestId) {
+      if (!pending.binding || !sameBinding(binding, pending.binding)) { reject('binding_changed'); return; }
+    } else if (binding) {
+      try { await this.requestSumegoFor(pending, binding); }
+      catch (failure) {
+        if (this.pairingRevokedBy(failure, binding)) { burn(); sendPairingRevokedPage(res); return; }
+        reject('unavailable'); return;
+      }
+    } else {
+      if (!this.remotePairing) { reject('unavailable'); return; }
+      try {
+        const location = await this.remotePairing.start({ oauthRequestId: pending.transactionId,
+          sub: claims.sub, identityExpiresAt }, res);
+        res.append('set-cookie', loginCookie('', 0));
+        res.redirect(303, location);
+      } catch {
+        reject('unavailable');
+      }
+      return;
+    }
     login.formTokenHash = sha256(formToken);
     logEvent({ event: 'oauth.sumego.callback', result: 'consent' });
     sendConsentPage(res, { clientName: pending.clientName, email: claims.email, scope: OAUTH_SCOPE, formToken, redirectUri: pending.redirectUri });
@@ -556,7 +694,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId });
     } catch (error) {
       this.pending.delete(key);
-      if (this.pairingRevokedBy(error, pending)) { sendPairingRevokedPage(res); return; }
+      if (pending.binding && this.pairingRevokedBy(error, pending.binding)) { sendPairingRevokedPage(res); return; }
       const status = error instanceof BackchannelError ? error.status : undefined;
       // Un 401 es que el secreto de backchannel no coincide con el de Lumbre.
       if (status === 401) logEvent({ event: 'oauth.sumego.exchange', result: 'unauthorized' });
@@ -589,15 +727,28 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * callback del cliente; lanza si algo no casa (quien llama revoca la concesión).
    */
   private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null): Promise<string> {
-    const current = await this.currentBinding();
-    if (pending.createdAt <= await this.revokedBefore() || !current ||
-      !sameBinding(grant, pending) || !sameBinding(grant, current) ||
+    if (pending.createdAt <= await this.revokedBefore() || !pending.binding ||
+      !sameBinding(grant, pending.binding) ||
       grant.clientId !== pending.clientId || grant.resource !== this.resource || Date.parse(grant.expiresAt) <= this.now()) {
       throw new Error('binding');
     }
+    const { accessToken: _bearer, ...activeFields } = grant;
+    const active: ActiveGrant = { ...activeFields, active: true };
+    let account = this.accounts.authorize(active, sumego?.identity.sub ?? null);
+    if (!account && sumego && !this.accounts.legacyAccount()) {
+      const current = await this.currentBinding();
+      if (current && sameBinding(current, grant)) {
+        account = await this.accounts.claimLegacy({ sub: sumego.identity.sub, grant: active });
+      }
+    }
+    account ??= await this.legacySingleUser(grant);
+    if (!account) throw new Error('account_inactive');
+    await this.assertAccountActive(account);
     const code = randomBytes(32).toString('base64url');
     const hash = sha256(code);
     await this.grants.stage(hash, grant.accessToken);
+    try { await this.assertAccountActive(account); }
+    catch (error) { await this.grants.unstage(hash).catch(() => undefined); throw error; }
     this.pending.delete(key);
     this.codes.set(hash, { clientId: pending.clientId, redirectUri: pending.redirectUri, challenge: pending.challenge,
       resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS,
@@ -634,6 +785,80 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const dropped = await this.tokens.dropFamiliesByLogout(selector);
     for (const id of dropped) this.forgetIntrospection(id);
     return dropped.length;
+  }
+
+  /**
+   * Primera fase OAuth de la retirada de una persona. Invalida memoria y familias locales
+   * antes de drenar su contexto; el observador de `TokenStore` revoca después los bearers.
+   */
+  async invalidateAccount(account: AccountRecord): Promise<number> {
+    for (const [key, pending] of this.pending) {
+      if (pending.binding && sameBinding(pending.binding, account.binding)) this.discardPending(key, pending);
+    }
+    for (const [hash, code] of this.codes) {
+      const sameIdentity = code.identity?.sub === account.sub ||
+        (account.storage === 'legacy-root' && code.identity === null);
+      if (sameIdentity && code.grant.accountId === account.accountId && sameBinding(code.grant, account.binding)) {
+        this.discardCode(hash, code);
+      }
+    }
+    this.closedLogouts = this.closedLogouts.filter((entry) =>
+      entry.selector.sub !== account.sub);
+    const dropped = await this.tokens.dropFamiliesForAccount({ ...account.binding, sub: account.sub,
+      accountId: account.accountId, includeLegacyWithoutSub: account.storage === 'legacy-root' });
+    for (const id of dropped) this.forgetIntrospection(id);
+    return dropped.length;
+  }
+
+  /** El broker demuestra que el `sub` vigente es dueño del vínculo recién emparejado. */
+  async verifyRemoteOwnership(input: { sub: string; binding: Binding; oauthRequestId: string }): Promise<{
+    sub: string; grant: ActiveGrant;
+  }> {
+    const pending = this.pending.get(input.oauthRequestId);
+    const login = pending?.sumego;
+    if (!pending || !login?.identity || login.identity.sub !== input.sub || !login.idToken ||
+      login.consentDeadline === null || login.consentDeadline <= this.now() || pending.pairingGrant) {
+      throw new Error('remote_pairing_identity_invalid');
+    }
+    await this.requestSumegoFor(pending, input.binding);
+    const grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId!,
+      transactionId: pending.transactionId, idToken: login.idToken, clientId: pending.clientId });
+    if (!sameBinding(grant, input.binding)) {
+      await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
+      throw new Error('remote_pairing_binding_mismatch');
+    }
+    const stage = sha256(`remote-pairing:${pending.transactionId}`);
+    try { await this.grants.stage(stage, grant.accessToken); }
+    catch {
+      await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
+      throw new BackchannelError('unavailable');
+    }
+    pending.pairingGrant = grant;
+    pending.pairingStageHash = stage;
+    const { accessToken: _bearer, ...metadata } = grant;
+    return { sub: input.sub, grant: { ...metadata, active: true } };
+  }
+
+  /** Publicada la cuenta, convierte el grant de propiedad en el código OAuth original. */
+  async resumeRemoteAuthorization(input: { oauthRequestId: string; account: { id: string; generation: number } }): Promise<string> {
+    const pending = this.pending.get(input.oauthRequestId);
+    const login = pending?.sumego;
+    const record = this.accounts.findById(input.account.id);
+    if (!pending || !login?.identity || !login.refreshToken || login.idTokenIat === null ||
+      login.refreshedAt === null || !pending.pairingGrant || !pending.pairingStageHash ||
+      !record || record.state !== 'active' || record.generation !== input.account.generation ||
+      record.sub !== login.identity.sub || !pending.binding || !sameBinding(record.binding, pending.binding)) {
+      throw new Error('remote_pairing_resume_invalid');
+    }
+    const authorization: SumegoAuthorization = { identity: login.identity, idTokenIat: login.idTokenIat,
+      refreshToken: login.refreshToken, refreshedAt: login.refreshedAt };
+    if (this.loggedOut(authorization.identity, authorization.idTokenIat)) throw new Error('logged_out');
+    const stage = pending.pairingStageHash;
+    const target = await this.issueCode(pending.transactionId, pending, pending.pairingGrant, authorization);
+    await this.grants.unstage(stage).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+    login.idToken = null;
+    login.refreshToken = null;
+    return target;
   }
 
   /**
@@ -704,7 +929,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.redirect(302, target);
     } catch (error) {
       this.pending.delete(key);
-      this.pairingRevokedBy(error, pending);
+      if (pending.binding) this.pairingRevokedBy(error, pending.binding);
       if (grant) await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       res.status(400).json({ error: 'invalid_grant' });
@@ -781,12 +1006,26 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * introspección positiva de hace menos de `INTROSPECTION_CACHE_MS` evita la ida a Lumbre.
    * Un `null`, un desajuste o un error del backchannel nunca se guardan.
    */
-  private async active(familyId: string, grant: ActiveGrant, useCache: boolean): Promise<boolean> {
-    const current = await this.currentBinding();
-    if (!current || !sameBinding(current, grant)) { await this.dropFamily(familyId); return false; }
+  private async active(familyId: string, grant: ActiveGrant, identity: FamilyIdentity | null,
+    useCache: boolean): Promise<AuthorizedAccount | null> {
+    let account = this.accounts.authorize(grant, identity?.sub ?? null);
+    let legacyCandidate = false;
+    if (!account) {
+      const current = await this.currentBinding();
+      if (!this.multiuser && current !== null && sameBinding(current, grant)) {
+        account = await this.legacySingleUser(grant);
+      }
+      // Una familia v2 del legado no conoce `sub`: se conserva hasta que la migración
+      // explícita publique al dueño. Nunca se usa para reclamar la raíz ni otra cuenta.
+      if (!account && identity === null && current !== null && sameBinding(current, grant)) {
+        throw new BackchannelError('unavailable');
+      }
+      legacyCandidate = !account && identity !== null && current !== null && sameBinding(current, grant);
+      if (!account && !legacyCandidate) { await this.dropFamily(familyId); return null; }
+    }
     const bearer = this.grants.get(familyId);
-    if (!bearer) { this.forgetIntrospection(familyId); return false; }
-    if (useCache && this.cachedIntrospection(familyId, grantFingerprint(grant))) return true;
+    if (!bearer) { this.forgetIntrospection(familyId); return null; }
+    if (account && useCache && this.cachedIntrospection(familyId, grantFingerprint(grant))) return account;
     const epoch = this.introspectionEpoch;
     const checkedAt = this.now();
     const monotonicCheckedAt = performance.now();
@@ -800,18 +1039,25 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       attempts.delete(attempt);
       if (attempts.size === 0) this.inFlightIntrospections.delete(familyId);
     }
-    if (!inspected) { await this.dropFamily(familyId); return false; }
+    if (!inspected) { await this.dropFamily(familyId); return null; }
     // Otra petición pudo invalidar la familia mientras Lumbre respondía.
-    if (attempt.invalidated || epoch !== this.introspectionEpoch) return false;
+    if (attempt.invalidated || epoch !== this.introspectionEpoch) return null;
     const sameGrant = inspected.credentialId === grant.credentialId && inspected.clientId === grant.clientId &&
       inspected.accountId === grant.accountId && sameBinding(inspected, grant);
     if (!sameGrant || inspected.expiresAt !== grant.expiresAt) {
       // Solo la fecha, con una renovación a medio guardar: transitorio, no se corta la familia.
       if (sameGrant && this.renewing.has(familyId)) throw new BackchannelError('unavailable');
-      await this.dropFamily(familyId); return false;
+      await this.dropFamily(familyId); return null;
     }
+    if (legacyCandidate) {
+      try { account = await this.accounts.claimLegacy({ sub: identity!.sub, grant: inspected }); }
+      catch { await this.dropFamily(familyId); return null; }
+    } else if (!account) {
+      await this.dropFamily(familyId); return null;
+    }
+    try { await this.assertAccountActive(account); } catch { await this.dropFamily(familyId); return null; }
     this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
-    return true;
+    return account;
   }
 
   /** El código se quema antes de comprobar cliente, PKCE, recurso e introspección. */
@@ -834,12 +1080,21 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     const revokedBefore = await this.revokedBefore();
     if (entry.issuedAt <= revokedBefore) { await cleanup(); return fail(); }
-    const current = await this.currentBinding();
-    if (!current || !sameBinding(current, grant)) { await cleanup(); return fail(); }
     let inspected: ActiveGrant | null;
     try { inspected = await this.backchannel.introspect(grant.accessToken); }
     catch { throw new ServerError('Consentimiento temporalmente no disponible.'); }
     if (!inspected || inspected.credentialId !== grant.credentialId || !sameBinding(inspected, grant)) { await cleanup(); return fail(); }
+    let account = this.accounts.authorize(inspected, entry.identity?.sub ?? null);
+    if (!account && entry.identity !== null) {
+      const current = await this.currentBinding();
+      if (current && sameBinding(current, inspected)) {
+        try { account = await this.accounts.claimLegacy({ sub: entry.identity.sub, grant: inspected }); }
+        catch { /* La raíz pertenece a otra identidad o mantiene una lápida. */ }
+      }
+    }
+    account ??= await this.legacySingleUser(inspected);
+    if (!account) { await cleanup(); return fail(); }
+    try { await this.assertAccountActive(account); } catch { await cleanup(); return fail(); }
     // Back-channel logout de esa sesión o persona mientras el código esperaba su canje.
     const sumego = entry.sumego;
     const loggedOut = () => sumego !== null && this.loggedOut(sumego.identity, sumego.idTokenIat);
@@ -850,8 +1105,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       const issued = await this.tokens.issueFamily({ clientId: entry.clientId, scope: OAUTH_SCOPE, resource: entry.resource,
         grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt, identity: entry.identity,
         sumego: sumego ? { sealedRefresh: this.sealer!.seal(sumego.refreshToken), renewedAt: sumego.refreshedAt } : null,
-        loggedOut }, await this.revokedBefore(),
+        loggedOut, authorize: () => this.assertAccountActive(account!) }, await this.revokedBefore(),
       async (familyId, ids) => { await this.grants.markPromoting(hash, familyId); await this.grants.set(familyId, grant.accessToken, ids); });
+      await this.assertAccountActive(account);
       await this.grants.unstage(hash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
       logEvent({ event: 'oauth.token', grant: 'authorization_code', result: 'issued' });
       return this.tokensResponse(issued);
@@ -900,7 +1156,12 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       if (!candidate) return this.rejectRefresh(refreshToken, client.client_id, revokedBefore);
       const { familyId } = candidate;
       // Emitir tokens nuevos exige una introspección fresca: la caché solo ahorra la de `/mcp`.
-      try { if (!await this.active(familyId, candidate.grant, false)) throw new InvalidGrantError('Refresh token no válido.'); }
+      let account: AuthorizedAccount;
+      try {
+        const active = await this.active(familyId, candidate.grant, candidate.identity, false);
+        if (!active) throw new InvalidGrantError('Refresh token no válido.');
+        account = active;
+      }
       catch (error) { if (error instanceof InvalidGrantError) throw error; throw new ServerError('Consentimiento temporalmente no disponible.'); }
       const bearer = this.grants.get(familyId);
       if (!bearer) { this.forgetIntrospection(familyId); throw new InvalidGrantError('Refresh token no válido.'); }
@@ -927,29 +1188,36 @@ export class HebraOAuthProvider implements OAuthServerProvider {
           logEvent({ event: 'oauth.renew', result: 'invalid' });
           throw new ServerError('temporarily_unavailable');
         }
-        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed, sumegoUpdate);
+        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed,
+          sumegoUpdate, () => this.assertAccountActive(account));
         // Guardada (o la familia ya no existe): la rotación en memoria ya no hace falta.
         if (sumegoUpdate) this.sumegoRotations.delete(familyId);
         // La caché y las introspecciones en vuelo eran de la fecha anterior.
         this.forgetIntrospection(familyId);
         // Un replay o una familia caducada la quitan del almacén; una rotación reciente solo fuerza otra consulta.
         if (!outcome.ok) throw new InvalidGrantError('Refresh token no válido.');
+        await this.assertAccountActive(account);
         logEvent({ event: 'oauth.renew', result: 'renewed' });
         return this.tokensResponse(outcome.tokens);
       } finally { this.renewing.delete(familyId); }
     });
   }
 
-  async verifyAccessToken(token: string): Promise<AuthInfo> {
+  async verifyAccessToken(token: string): Promise<AccountAuthInfo> {
     const verified = this.tokens.verifyAccess(token, await this.revokedBefore());
     if (!verified) throw new InvalidTokenError('Token no válido.');
-    try { if (!await this.active(verified.familyId, verified.grant, true)) throw new InvalidTokenError('Token no válido.'); }
+    let account: AuthorizedAccount;
+    try {
+      const active = await this.active(verified.familyId, verified.grant, verified.identity, true);
+      if (!active) throw new InvalidTokenError('Token no válido.');
+      account = active;
+    }
     catch (error) {
       if (error instanceof InvalidTokenError || error instanceof BackchannelError) throw error;
       throw new BackchannelError('unavailable');
     }
     return { token, clientId: verified.clientId, scopes: verified.scope.split(' '), expiresAt: verified.expiresAt,
-      resource: new URL(verified.resource) };
+      resource: new URL(verified.resource), account };
   }
 
   async revokeToken(client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {

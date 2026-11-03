@@ -52,6 +52,8 @@ export interface OpenServeOptions {
    * `serve` por stdio en la misma máquina le reenvíe las suyas (§8).
    */
   writerOnly?: boolean;
+  /** Guardia fresca de la cuenta dueña. Se comprueba también al publicar cada resultado. */
+  authorize?: () => Promise<void>;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -121,7 +123,6 @@ export function localWriteContext(instance: LibraryInstance, authorize?: () => P
     if (typeof value !== 'function' || property === 'onConflictCopy') return value;
     return async (...args: unknown[]) => {
       try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
-      if (property === 'jdNewId' || property === 'jdMove') throw new StoreError('space_access_denied');
       const result = await Reflect.apply(value, target, args);
       try { await authorize(); } catch { throw new StoreError('space_access_denied'); }
       return result;
@@ -195,7 +196,8 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       privacyConfig,
       privacyConfigSource: privacySource,
       status: new LibraryInstanceStatusSource(instance, linked !== null),
-      write: localWriteContext(instance)
+      authorize: options.authorize,
+      write: localWriteContext(instance, options.authorize)
     };
     return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
   }
@@ -209,6 +211,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const write = buildRoutedWriteContext(instance, localWriteContext(instance), options.forward);
   const ctx: ServerContext = {
     spaces,
+    authorize: options.authorize,
     port: instance.port,
     privacyConfig,
     privacyConfigSource: privacySource,

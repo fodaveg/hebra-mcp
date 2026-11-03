@@ -8,6 +8,7 @@
  * verdad (C3) tiene sus propios tests en `test/http/oauth.test.ts`.
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,8 +16,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { MAX_MCP_BODY_BYTES } from '../../src/http/app';
+import { AccountRegistry, accountDataDir, requestAccountRemoval } from '../../src/accounts';
+import { encodeRecoveryCode } from '../../src/hebra';
+import type { OAuthHttpAuth } from '../../src/oauth/http-auth';
 import { GrantSecrets } from '../../src/oauth/grants';
-import { MemorySecretStore } from '../../src/secrets';
+import { MemorySecretStore, openFileSecretStore, writePairedSecrets } from '../../src/secrets';
 import { httpConfigFor } from '../../src/http/config';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../../src/http/serve-http';
 import { WriterRequiredError } from '../../src/server/serve';
@@ -320,7 +324,7 @@ describe('arranque de serve-http', () => {
       instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
     });
     handles.push(handle);
-    expect(handle.serve.instance.role).toBe('this');
+    expect(handle.serve?.instance.role).toBe('this');
 
     const client = await connectHttpClient(`http://127.0.0.1:${handle.port}`, TOKEN);
     clients.push(client);
@@ -447,7 +451,7 @@ describe('arranque de serve-http', () => {
       });
       handles.push(handle);
       try {
-        const { instance } = handle.serve;
+        const { instance } = handle.serve!;
         const { id } = await instance.createNote({ body: '# Lenta', privacy: NO_PRIVATE });
         const client = await connectHttpClient(`http://127.0.0.1:${handle.port}`, TOKEN);
         clients.push(client);
@@ -510,5 +514,37 @@ describe('arranque de serve-http', () => {
     })).rejects.toBeInstanceOf(WriterRequiredError);
     expect(recoveries).toBe(0);
     expect(await secrets.get('hebra-mcp-oauth-pending')).toContain('bb'.repeat(32));
+  });
+
+  it('el lock global excluye otro daemon y la retirada maintenance borra solo su cuenta', async () => {
+    const dataDir = tempDataDir();
+    const registry = await AccountRegistry.open(dataDir);
+    const grant = { active: true as const, credentialId: '20000000-0000-4000-8000-000000000001',
+      clientId: 'hebra-mcp-claude', resource: 'http://127.0.0.1/mcp', scope: 'hebra:mcp',
+      accountId: 'a'.repeat(64), pairedCredentialId: '10000000-0000-4000-8000-000000000001',
+      syncVaultId: 'b'.repeat(32), opaqueDeviceId: 'c'.repeat(32), expiresAt: '2026-12-01T00:00:00.000Z' };
+    const account = await registry.commitAccount({ sub: 'mikel', grant });
+    const accountDir = accountDataDir(dataDir, account);
+    await writePairedSecrets(openFileSecretStore(accountDir), {
+      connection: { credentialId: grant.pairedCredentialId, readToken: 'read', writeToken: 'write',
+        apiOrigin: 'https://app.lumbre.pro', connectedAt: new Date().toISOString() },
+      recoveryCode: await encodeRecoveryCode({ relayOrigin: 'https://app.lumbre.pro', syncVaultId: grant.syncVaultId,
+        keyEpoch: 1, vaultKey: randomBytes(32) }),
+      device: { opaqueDeviceId: grant.opaqueDeviceId, lumbreDeviceId: '30000000-0000-4000-8000-000000000001' }
+    });
+    const provider = { attachRemotePairing() {}, invalidateAccount: async () => 0 };
+    const auth = { ...staticBearerAuth(TOKEN), accounts: registry, provider,
+      lumbreOrigin: 'https://app.lumbre.pro' } as unknown as OAuthHttpAuth;
+    const options = { dataDir, secrets: new MemorySecretStore(), multiuser: true,
+      config: httpConfigFor('http://127.0.0.1', 0), version: '0.0.0-test', authConfigured: () => true,
+      loadAuth: async () => auth,
+      fetcher: async () => new Response(JSON.stringify({ ok: true }),
+        { status: 200, headers: { 'content-type': 'application/json' } }) };
+    const first = await startServeHttp(options);
+    handles.push(first);
+    await expect(startServeHttp(options)).rejects.toBeInstanceOf(WriterRequiredError);
+    await expect(requestAccountRemoval(dataDir, account.id)).resolves.toBe(true);
+    expect(registry.findById(account.id)).toMatchObject({ state: 'removed', removalPhase: 'data-erased' });
+    expect(existsSync(accountDir)).toBe(false);
   });
 });

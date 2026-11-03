@@ -148,8 +148,18 @@ export function createRemotePairingRouter(
     try {
       const authorized = await authorizedSession(req, service);
       session = authorized.session;
-      const account = await service.confirm(session.id, authorized.authorization);
-      const location = await hooks.resumeOauth({ oauthRequestId: session.oauthRequestId, account });
+      const result = await service.confirm(session.id, authorized.authorization);
+      if (result.kind === 'reauthenticate') {
+        const location = await hooks.reauthenticate({ oauthRequestId: session.oauthRequestId,
+          expectedSub: session.sub, pairingSessionId: session.id }, res);
+        if (location) sendContinuePage(res, 'Vuelve a identificarte',
+          'Continúa con la misma cuenta para terminar la conexión.', location,
+          'Continuar con Sumego');
+        else sendRemotePairingMessage(res, 401, 'Vuelve a identificarte',
+          'Inicia sesión de nuevo con la misma cuenta para continuar.');
+        return;
+      }
+      const location = await hooks.resumeOauth({ oauthRequestId: session.oauthRequestId, account: result.account });
       clearCookie(res);
       sendContinuePage(res, 'Biblioteca conectada',
         'La biblioteca está conectada. Continúa para volver a tu aplicación.', location,

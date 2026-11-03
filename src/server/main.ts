@@ -30,6 +30,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 // `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
 import { version } from '../../package.json';
 import { logEvent } from '../log/logger';
+import { requestAccountRemoval } from '../accounts';
 import { PairError } from '../pair/errors';
 import { DEFAULT_LUMBRE_ORIGIN } from '../pair/lumbre';
 import { DEFAULT_PAIR_LABEL, runPair } from '../pair/pair';
@@ -58,6 +59,7 @@ const USAGE = [
   `  hebra-mcp pair [--lumbre ${DEFAULT_LUMBRE_ORIGIN}] [--label "${DEFAULT_PAIR_LABEL}"]`,
   '  hebra-mcp unpair',
   '  hebra-mcp serve-http',
+  '  hebra-mcp account-remove <account-id>',
   '  hebra-mcp oauth-revoke-all',
   ...WORKDIR_USAGE
 ].join('\n');
@@ -123,10 +125,11 @@ async function serveHttp(): Promise<void> {
     handle = await startServeHttp({
       dataDir,
       secrets,
+      multiuser: true,
       config: readHttpConfig(),
       version,
       authConfigured: () => oauthHttpAuthConfigured(secrets),
-      loadAuth: (authDataDir, config, secrets, pairing) => loadOAuthHttpAuth(authDataDir, config, secrets, { pairing })
+      loadAuth: (authDataDir, config, secrets, pairing) => loadOAuthHttpAuth(authDataDir, config, secrets, { pairing, multiuser: true })
     });
   } catch (error) {
     if (
@@ -151,7 +154,41 @@ async function serveHttp(): Promise<void> {
   };
   process.once('SIGINT', () => void shutdown());
   process.once('SIGTERM', () => void shutdown());
-  handle.serve.instance.deferSignalRelease();
+  handle.serve?.instance.deferSignalRelease();
+}
+
+/** Retirada offline: comparte el lock global con `serve-http` y no acepta tráfico externo. */
+async function removeAccountCommand(id: string | undefined, rest: string[]): Promise<void> {
+  if (!id || rest.length > 0) {
+    process.stderr.write(`${USAGE}\n`);
+    process.exit(1);
+  }
+  const dataDir = resolveDataDir();
+  if (await requestAccountRemoval(dataDir, id)) {
+    process.stdout.write(`${JSON.stringify({ removed: id })}\n`);
+    process.exit(0);
+  }
+  const secrets = await openServeSecretStore(dataDir);
+  readLoginConfig();
+  const configured = readHttpConfig();
+  const handle = await startServeHttp({
+    dataDir,
+    secrets,
+    multiuser: true,
+    maintenance: true,
+    config: { ...configured, listenHost: '127.0.0.1', port: 0 },
+    version,
+    authConfigured: () => oauthHttpAuthConfigured(secrets),
+    loadAuth: (authDataDir, config, store, pairing) =>
+      loadOAuthHttpAuth(authDataDir, config, store, { pairing, multiuser: true })
+  });
+  try {
+    await handle.removeAccount(id);
+    process.stdout.write(`${JSON.stringify({ removed: id })}\n`);
+  } finally {
+    await handle.close();
+  }
+  process.exit(0);
 }
 
 function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | HttpConfigError): string {
@@ -225,6 +262,9 @@ async function main(): Promise<void> {
       return;
     case 'serve-http':
       await serveHttp();
+      return;
+    case 'account-remove':
+      await removeAccountCommand(rest[0], rest.slice(1));
       return;
     case 'oauth-set-secret':
       await oauthCommand(() => runOAuthSetSecret());

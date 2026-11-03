@@ -1,8 +1,9 @@
 /**
  * La aplicación HTTP de `hebra-mcp serve-http` (SPEC.md §12.1): Streamable HTTP SIN
  * estado, como lumbre-mcp (`src/http.ts`): un `McpServer` y un transporte NUEVOS por
- * petición, sobre el MISMO `ServerContext` de todo el proceso (almacén, configuración de
- * privados, estado y escrituras). No hay sesiones MCP que atar a un token ni que expirar.
+ * petición. En `serve-http` multiusuario el access validado selecciona antes su contexto
+ * de cuenta; el modo monousuario de tests conserva un contexto fijo. No hay sesiones MCP
+ * que atar a un token ni que expirar.
  *
  * Rutas:
  * - `POST /mcp`: el protocolo MCP, solo con credencial (`HttpAuth.requireAuth`, que va
@@ -36,10 +37,12 @@ import express, {
   type RequestHandler,
   type Response
 } from 'express';
+import type { Router } from 'express';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { logEvent } from '../log/logger';
 import { buildMcpServer } from '../server/build-server';
 import type { ServerContext } from '../server/context';
+import type { AccountContexts, AuthorizedAccount } from '../accounts';
 import { MAX_WRITE_MESSAGE_BYTES } from '../store/writes';
 import { isLoopbackHostname, MCP_PATH, type HttpConfig } from './config';
 
@@ -68,14 +71,19 @@ export interface HttpAuth {
   requireAuth: RequestHandler;
   /** Rutas especiales de Origin nulo; OAuth actual no declara ninguna. */
   nullOriginPostPaths?: readonly string[];
+  /** Cuenta que `requireAuth` ya validó. Ausente conserva el modo monousuario de tests. */
+  account?(req: Request): AuthorizedAccount | null;
 }
 
 export interface CreateHttpAppOptions {
-  ctx: ServerContext;
+  /** Contexto monousuario heredado. En multiusuario cada petición lo adquiere por cuenta. */
+  ctx?: ServerContext;
+  contexts?: AccountContexts;
   /** Versión que ve el cliente MCP en `initialize`. */
   version: string;
   config: HttpConfig;
   auth: HttpAuth;
+  remotePairing?: Router;
 }
 
 /** Etiquetas de ruta para el log: un conjunto cerrado, nunca la ruta recibida. */
@@ -91,6 +99,11 @@ const ROUTE_LABELS = new Set([
   '/oauth/sumego/callback',
   '/oauth/sumego/consent',
   '/oauth/sumego/backchannel-logout',
+  '/lumbre/connect',
+  '/lumbre/pairing/resume',
+  '/lumbre/pairing/poll',
+  '/lumbre/pairing/confirm',
+  '/lumbre/pairing/cancel',
   '/.well-known/oauth-protected-resource',
   '/.well-known/oauth-protected-resource/mcp',
   '/.well-known/oauth-authorization-server'
@@ -169,6 +182,7 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
   });
 
   auth.install(app);
+  if (options.remotePairing) app.use(options.remotePairing);
 
   const parseBody = express.json({ limit: MAX_MCP_BODY_BYTES, type: 'application/json' });
 
@@ -179,7 +193,25 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
       sendJsonRpcError(res, 415, -32000, 'Content-Type debe ser application/json.');
       return;
     }
-    void handleMcp(ctx, version, req, res);
+    const account = auth.account?.(req) ?? null;
+    if (!account) {
+      if (auth.account) { sendJsonRpcError(res, 401, -32000, 'Token no válido.'); return; }
+      if (!ctx) { sendJsonRpcError(res, 503, -32603, 'No disponible.'); return; }
+      void handleMcp(ctx, version, req, res);
+      return;
+    }
+    if (!options.contexts) { sendJsonRpcError(res, 503, -32603, 'No disponible.'); return; }
+    void options.contexts.acquire(account).then(async (lease) => {
+      try { await handleMcp(lease.ctx, version, req, res); }
+      finally { lease.release(); }
+    }).catch((error: unknown) => {
+      if (res.headersSent) return;
+      if (error instanceof Error && error.message === 'account_inactive') {
+        sendJsonRpcError(res, 401, -32000, 'Token no válido.');
+      } else {
+        sendJsonRpcError(res, 503, -32603, 'No disponible.');
+      }
+    });
   });
 
   app.all(MCP_PATH, (_req: Request, res: Response) => {
