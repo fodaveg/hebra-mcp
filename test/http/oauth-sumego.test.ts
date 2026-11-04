@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exportJWK, generateKeyPair, SignJWT, UnsecuredJWT, type CryptoKey, type JWK } from 'jose';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { RemotePairingError, RemotePairingService, RemotePairingJournalStore } from '../../src/pair/remote';
+import { hebraAccountIdOf } from '../../src/pair/remote/account-id';
 import type { AccountRegistry } from '../../src/accounts';
 import { HttpConfigError } from '../../src/http/config';
 import { createHttpApp } from '../../src/http/app';
@@ -39,9 +40,9 @@ const PAIR_ID = '11111111-1111-4111-8111-111111111111';
 const GRANT_ID = '22222222-2222-4222-8222-222222222222';
 const VAULT = 'ab'.repeat(16);
 const DEVICE = 'cd'.repeat(16);
-const ACCOUNT = '34'.repeat(32);
 const UPSTREAM = '56'.repeat(32);
 const SUB = 'usuario-sumego-1';
+const ACCOUNT = hebraAccountIdOf(SUB);
 const EMAIL = 'david@example.test';
 const KID = 'clave-1';
 
@@ -435,19 +436,106 @@ describe('recorrido con Sumego', () => {
     expect(accounts.legacyAccount()).toMatchObject({ sub: '__legacy_unclaimed__', state: 'active' });
   });
 
-  it('v2 → reinicio → otro sub no reclama el legado si Lumbre rechaza su propiedad', async () => {
+  it('M13: con el legado sin reclamar, un sub nuevo empieza su alta sin probar el vínculo heredado', async () => {
     await restartFromV2();
-    const startPairing = vi.fn(async () => '/lumbre/pairing/resume');
+    const startPairing = vi.fn(async () => '/lumbre/pairing/start');
     provider.attachRemotePairing({ start: startPairing, resumeIdentity: async () => undefined, abandon: async () => undefined });
     currentSub = 'sumego|mikel';
-    exchangeResponse = async () => json({ error: 'wrong_account' }, 403);
-    const { login, formToken } = await toConsent();
-    const denied = await consent(formToken, login.cookie);
-    expect(denied.status).toBe(403);
-    expect(exchangeBodies).toHaveLength(2); // Login de la familia v2 y prueba explícita de propiedad.
+    const requestsBefore = requestBodies.length;
+    const exchangesBefore = exchangeBodies.length;
+    const login = await startLogin();
+    const returned = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+    expect(returned.status).toBe(303);
+    expect(returned.headers.get('location')).toBe('/lumbre/pairing/start');
+    expect(startPairing).toHaveBeenCalledOnce();
+    expect(startPairing.mock.calls[0]!).toEqual(expect.arrayContaining([expect.objectContaining({ sub: 'sumego|mikel', renew: false })]));
+    // Ninguna petición a Lumbre con el vínculo de David y nada reasignado.
+    expect(requestBodies).toHaveLength(requestsBefore);
+    expect(exchangeBodies).toHaveLength(exchangesBefore);
     expect(accounts.legacyAccount()).toMatchObject({ sub: '__legacy_unclaimed__', state: 'active' });
-    expect(accounts.findBySub(currentSub)).toBeNull();
-    expect(startPairing).not.toHaveBeenCalled();
+    expect(accounts.findBySub('sumego|mikel')).toBeNull();
+  });
+
+  it('M13: sin un accountId que confirme al dueño, el rechazo de Lumbre también lleva al alta y no al «denegado»', async () => {
+    const file = join(context.dataDir, 'accounts-v1.json');
+    await rm(file, { force: true });
+    await rm(join(context.dataDir, OAUTH_TOKENS_FILE), { force: true });
+    const auth = await loadOAuthHttpAuth(context.dataDir, app.config, store, {
+      backchannelFetch: broker, sumegoFetch, env: sumegoEnv(), pairing, multiuser: true,
+      now: () => Date.now() + clockOffset
+    });
+    if (!auth) throw new Error('auth absent');
+    provider = auth.provider; accounts = auth.accounts;
+    app.server.removeAllListeners('request');
+    app.server.on('request', createHttpApp({ ctx: context.serverContext, version: 'test', config: app.config, auth }));
+    expect(accounts.legacyAccount()).toBeNull();
+    const startPairing = vi.fn(async () => '/lumbre/pairing/start');
+    provider.attachRemotePairing({ start: startPairing, resumeIdentity: async () => undefined, abandon: async () => undefined });
+    currentSub = 'sumego|mikel';
+    exchangeResponse = async () => json({ error: 'invalid_token', code: 'invalid_token' }, 400);
+    const { login, formToken } = await toConsent();
+    const moved = await consent(formToken, login.cookie);
+    expect(moved.status).toBe(303);
+    expect(moved.headers.get('location')).toBe('/lumbre/pairing/start');
+    expect(startPairing).toHaveBeenCalledOnce();
+    expect(accounts.legacyAccount()).toBeNull();
+    expect(accounts.findBySub('sumego|mikel')).toBeNull();
+  });
+
+  describe('reconectar tras una revocación', () => {
+    const revokedAnswer = async () => json({ error: 'pairing_revoked' }, 410);
+
+    async function multiuserWith(renewal: { ready(): boolean; credentialRejected(): Promise<boolean> } | undefined) {
+      await restartFromV2();
+      await accounts.claimLegacy({ sub: SUB, grant: brokerGrant });
+      const startPairing = vi.fn(async () => '/lumbre/pairing/start');
+      provider.attachRemotePairing({ start: startPairing, resumeIdentity: async () => undefined,
+        abandon: async () => undefined, renewal });
+      return startPairing;
+    }
+
+    it('Lumbre dice que la credencial está revocada: tras el login, renovar con el ID token vivo', async () => {
+      const startPairing = await multiuserWith({ ready: () => true, credentialRejected: async () => false });
+      requestsResponse = revokedAnswer;
+      const login = await startLogin();
+      const returned = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+      expect(returned.status).toBe(303);
+      expect(returned.headers.get('location')).toBe('/lumbre/pairing/start');
+      expect(startPairing.mock.calls[0]!).toEqual(expect.arrayContaining([
+        expect.objectContaining({ sub: SUB, email: EMAIL, renew: true })]));
+    });
+
+    it('el relé rechaza los tokens aunque Lumbre dé por bueno el vínculo: también renueva', async () => {
+      const startPairing = await multiuserWith({ ready: () => true, credentialRejected: async () => true });
+      const before = requestBodies.length;
+      const login = await startLogin();
+      const returned = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+      expect(returned.status).toBe(303);
+      expect(requestBodies).toHaveLength(before);
+      expect(startPairing.mock.calls[0]!).toEqual(expect.arrayContaining([expect.objectContaining({ renew: true })]));
+    });
+
+    it('revocada entre el callback y el «Permitir»: renueva con la misma solicitud', async () => {
+      const startPairing = await multiuserWith({ ready: () => true, credentialRejected: async () => false });
+      const { login, formToken } = await toConsent();
+      exchangeResponse = async () => json({ error: 'pairing_revoked', code: 'pairing_revoked' }, 410);
+      const moved = await consent(formToken, login.cookie);
+      expect(moved.status).toBe(303);
+      expect(moved.headers.get('location')).toBe('/lumbre/pairing/start');
+      expect(startPairing.mock.calls[0]!).toEqual(expect.arrayContaining([expect.objectContaining({ sub: SUB, renew: true })]));
+    });
+
+    it('sin la pieza de renovar, la página no manda a nadie a una orden de terminal', async () => {
+      const startPairing = await multiuserWith(undefined);
+      requestsResponse = revokedAnswer;
+      const login = await startLogin();
+      const page = await callback({ code: login.code, state: login.state, iss: issuer }, login.cookie);
+      const html = await page.text();
+      expect(page.status).toBe(503);
+      expect(html).toContain('Vuelve a conectar Hebra desde tu aplicación');
+      expect(html).not.toContain('hebra-mcp pair');
+      expect(startPairing).not.toHaveBeenCalled();
+    });
   });
 
   it.each([false, true])('reauth con sub distinto limpia el alta por el provider real (revocación falla=%s)', async (revokeFails) => {

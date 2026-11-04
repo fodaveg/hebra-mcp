@@ -15,6 +15,7 @@ import { AccountRegistry, type AccountRecord, type AuthorizedAccount } from '../
 import type { OAuthClientInformationFull, OAuthTokenRevocationRequest, OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { decodeRecoveryCode } from '../hebra';
 import { logEvent } from '../log/logger';
+import { hebraAccountIdOf } from '../pair/remote/account-id';
 import { readPairedSecrets, type SecretStore } from '../secrets';
 import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type Grant, sameBinding } from './backchannel';
@@ -121,6 +122,8 @@ interface PendingAuthorization {
   sumego?: SumegoLogin;
   pairingGrant?: Grant;
   pairingStageHash?: string;
+  /** Se prueba el legado sin un `accountId` que confirme al dueño: su rechazo lleva al alta. */
+  legacyProbe?: boolean;
 }
 
 interface AuthorizationCode {
@@ -213,9 +216,15 @@ export interface HebraOAuthProviderOptions {
 }
 
 export interface RemotePairingOAuthHooks {
-  start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string }, res: Response): Promise<string>;
+  start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string; email?: string | null; renew?: boolean },
+    res: Response): Promise<string>;
   resumeIdentity(input: { pairingSessionId: string; sub: string; identityExpiresAt: string }): Promise<void>;
   abandon(pairingSessionId: string, oauthRequestId: string): Promise<void>;
+  /** Volver desde el conector tras una revocación (§12.10). Sin esto, solo se avisa. */
+  renewal?: {
+    ready(): boolean;
+    credentialRejected(account: AccountRecord): Promise<boolean>;
+  };
 }
 
 export interface AccountAuthInfo extends AuthInfo { account: AuthorizedAccount }
@@ -332,6 +341,40 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (legacy && (legacy.state !== 'active' || legacy.sub !== '__legacy_unclaimed__')) return null;
     const current = await this.currentBinding();
     return current && (!legacy || sameBinding(legacy.binding, current)) ? current : null;
+  }
+
+  /**
+   * ¿Puede este `sub` probar el legado sin reclamar? En remoto, solo el dueño: un `sub` nuevo
+   * empieza su propia alta en vez de probarlo (D22, M13). `proven` dice si el `accountId` lo
+   * confirma; sin uno conocido, la prueba en Lumbre decide y su rechazo también lleva al alta.
+   */
+  private async legacyBindingFor(sub: string): Promise<{ binding: Binding; proven: boolean } | null> {
+    const binding = await this.unclaimedLegacyBinding();
+    if (!binding) return null;
+    if (!this.multiuser) return { binding, proven: true };
+    const owner = this.accounts.legacyAccount()?.accountId ?? await this.storedAgentAccountId();
+    if (owner === null) return { binding, proven: false };
+    return owner === hebraAccountIdOf(sub) ? { binding, proven: true } : null;
+  }
+
+  /** El `accountId` que registró la clave de agente de la raíz heredada, si llegó a registrarla. */
+  private async storedAgentAccountId(): Promise<string | null> {
+    try {
+      const stored = await this.secrets.get('agent-device-key');
+      const accountId = stored ? (JSON.parse(stored) as { accountId?: unknown }).accountId : null;
+      return typeof accountId === 'string' ? accountId : null;
+    } catch { return null; }
+  }
+
+  private renewalReady(): boolean {
+    return this.multiuser && this.remotePairing?.renewal?.ready() === true;
+  }
+
+  /** La misma solicitud OAuth sigue por el alta; el ID token y su plazo no cambian. */
+  private async startRemoteAlta(pending: PendingAuthorization, login: SumegoLogin, res: Response, renew: boolean): Promise<string> {
+    if (!this.remotePairing || !login.identity || login.consentDeadline === null) throw new Error('remote_pairing_not_attached');
+    return this.remotePairing.start({ oauthRequestId: pending.transactionId, sub: login.identity.sub,
+      identityExpiresAt: new Date(login.consentDeadline).toISOString(), email: login.email, renew }, res);
   }
 
   /** Compatibilidad monousuario: el vínculo local sigue siendo la autoridad del contexto fijo. */
@@ -653,26 +696,38 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const account = this.accounts.findBySub(claims.sub);
     if (account?.state === 'removing') { reject('account_removing'); return; }
     let binding: Binding | null = account?.state === 'active' ? account.binding : null;
-    // Migración explícita del único legado: solo se prueba su vínculo si aún no tiene dueño.
-    if (!binding) binding = await this.unclaimedLegacyBinding();
-    if (binding && pending.requestId) {
-      if (!pending.binding || !sameBinding(binding, pending.binding)) { reject('binding_changed'); return; }
-    } else if (binding) {
-      try { await this.requestSumegoFor(pending, binding); }
-      catch (failure) {
-        if (this.pairingRevokedBy(failure, binding)) { burn(); sendPairingRevokedPage(res); return; }
-        reject('unavailable', failureReason(failure)); return;
-      }
-    } else {
-      if (!this.remotePairing) { reject('unavailable', 'remote_pairing_not_attached'); return; }
+    // Migración explícita del único legado: solo su dueño prueba su vínculo mientras no tenga.
+    if (!binding) {
+      const legacy = await this.legacyBindingFor(claims.sub);
+      binding = legacy?.binding ?? null;
+      pending.legacyProbe = legacy !== null && !legacy.proven;
+    }
+    const startAlta = async (renew: boolean): Promise<void> => {
       try {
-        const location = await this.remotePairing.start({ oauthRequestId: pending.transactionId,
-          sub: claims.sub, identityExpiresAt }, res);
+        const location = await this.startRemoteAlta(pending, login, res, renew);
         res.append('set-cookie', loginCookie('', 0));
         res.redirect(303, location);
       } catch (failure) {
         reject('unavailable', failureReason(failure));
       }
+    };
+    if (binding && pending.requestId) {
+      if (!pending.binding || !sameBinding(binding, pending.binding)) { reject('binding_changed'); return; }
+    } else if (binding) {
+      // El vínculo de Lumbre puede seguir vivo con unos tokens que el relé ya no acepta.
+      if (account?.state === 'active' && this.renewalReady() &&
+        await this.remotePairing!.renewal!.credentialRejected(account)) { await startAlta(true); return; }
+      try { await this.requestSumegoFor(pending, binding); }
+      catch (failure) {
+        if (this.pairingRevokedBy(failure, binding)) {
+          // La persona vuelve desde aquí, sin operador (D22). Sin la pieza de renovar, solo se avisa.
+          if (this.renewalReady()) { await startAlta(true); return; }
+          burn(); sendPairingRevokedPage(res, this.multiuser); return;
+        }
+        reject('unavailable', failureReason(failure)); return;
+      }
+    } else {
+      await startAlta(false);
       return;
     }
     login.formTokenHash = sha256(formToken);
@@ -723,9 +778,30 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     try {
       grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId });
     } catch (error) {
-      this.pending.delete(key);
-      if (pending.binding && this.pairingRevokedBy(error, pending.binding)) { sendPairingRevokedPage(res); return; }
+      const revoked = pending.binding !== null && this.pairingRevokedBy(error, pending.binding);
       const status = error instanceof BackchannelError ? error.status : undefined;
+      // Lumbre rechazó el ID token antes de consumirlo: sigue valiendo para un alta. O se revocó
+      // entre el callback y el «Permitir», o este `sub` no era el dueño del legado que se probó.
+      const notOwner = pending.legacyProbe === true && (status === 400 || status === 403);
+      if (this.multiuser && this.remotePairing && ((revoked && this.renewalReady()) || notOwner)) {
+        login.idToken = idToken;
+        login.refreshToken = authorization.refreshToken;
+        pending.claimed = false;
+        pending.requestId = null;
+        pending.binding = null;
+        pending.legacyProbe = false;
+        try {
+          res.redirect(303, await this.startRemoteAlta(pending, login, res, revoked));
+          return;
+        } catch (failure) {
+          logEvent({ event: 'oauth.sumego.exchange', result: 'unavailable', reason: failureReason(failure) });
+          this.pending.delete(key);
+          sendUnavailablePage(res);
+          return;
+        }
+      }
+      this.pending.delete(key);
+      if (revoked) { sendPairingRevokedPage(res, this.multiuser); return; }
       // Un 401 es que el secreto de backchannel no coincide con el de Lumbre.
       if (status === 401) logEvent({ event: 'oauth.sumego.exchange', result: 'unauthorized' });
       if (status !== undefined && DENIED_EXCHANGE_STATUS.has(status)) {
@@ -836,6 +912,23 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       entry.selector.sub !== account.sub);
     const dropped = await this.tokens.dropFamiliesForAccount({ ...account.binding, sub: account.sub,
       accountId: account.accountId, includeLegacyWithoutSub: account.storage === 'legacy-root' });
+    for (const id of dropped) this.forgetIntrospection(id);
+    return dropped.length;
+  }
+
+  /**
+   * Renovación de una cuenta (§12.10): ninguna familia ni código de la generación anterior
+   * sobrevive a la nueva, aunque el vínculo sea el mismo (una credencial caducada conserva su id).
+   * Va antes de publicar y no toca las solicitudes pendientes: una es la que está renovando.
+   */
+  async invalidateFamiliesForRenewal(account: AccountRecord, sub: string): Promise<number> {
+    for (const [hash, code] of this.codes) {
+      if (code.identity?.sub === sub && code.grant.accountId === account.accountId && sameBinding(code.grant, account.binding)) {
+        this.discardCode(hash, code);
+      }
+    }
+    const dropped = await this.tokens.dropFamiliesForAccount({ ...account.binding, sub, accountId: account.accountId,
+      includeLegacyWithoutSub: account.storage === 'legacy-root' });
     for (const id of dropped) this.forgetIntrospection(id);
     return dropped.length;
   }

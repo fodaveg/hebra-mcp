@@ -57,13 +57,16 @@ async function validateRegistration(
   return r;
 }
 /** Pair registra el dispositivo ANTES de consultar biblioteca o pedir preview. Su privada
- * queda solo en memoria hasta la confirmación; cancelar no modifica el llavero anterior. */
+ * queda solo en memoria hasta la confirmación; cancelar no modifica el llavero anterior.
+ * `existingKey`: al renovar, una credencial que sobrevive (caducada o desactivada) conserva su
+ * pública y Lumbre rechaza otra con `version_conflict`. */
 export async function prepareAgentDevice(
   connection: LumbreConnection,
   deviceId: string,
-  fetcher: Fetcher
+  fetcher: Fetcher,
+  existingKey?: JsonWebKey
 ): Promise<PreparedAgentDevice> {
-  const privateKey = await generatePrivateKey();
+  const privateKey = existingKey ?? await generatePrivateKey();
   const { kty, crv, x, y } = privateKey;
   const publicKey = publicKeySchema.parse({ kty, crv, x, y });
   try {
