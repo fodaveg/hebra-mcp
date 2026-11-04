@@ -8,6 +8,7 @@ import {
   prepareAgentDevice,
   savePreparedAgentDevice
 } from '../../spaces/device';
+import { logEvent } from '../../log/logger';
 import { PairError } from '../errors';
 import { DEFAULT_PAIR_LABEL } from '../pair';
 import {
@@ -16,6 +17,7 @@ import {
   pairingUrl,
   type Fetcher
 } from '../lumbre';
+import { hebraAccountIdOf } from './account-id';
 import { RemotePairingJournalStore } from './journal';
 import { startRemoteLink, type RemoteLinkRequest } from './link';
 import { revokeRemoteCredential, RevokeError } from './revoke';
@@ -26,6 +28,7 @@ import {
   type RemotePairingJournal,
   type RemotePairingFormAuthorization,
   type RemotePairingPublisher,
+  type RemotePairingRenewals,
   type RemotePairingSession,
   type RemotePairingStatus,
   type VerifiedOwnership
@@ -39,16 +42,28 @@ type GrantedPoll = Extract<Awaited<ReturnType<RemoteLinkRequest['poll']>>, { kin
 interface RuntimePairing {
   cookie: string;
   csrf: string;
+  /** Solo en memoria: el aviso previo nombra la cuenta; no entra en el diario, URLs ni logs. */
+  email: string | null;
+  authorizationUrl: string;
   link?: RemoteLinkRequest;
   granted?: GrantedPoll;
   preview?: PairingPreview;
   ownership?: VerifiedOwnership;
 }
 
+/** Lo que enseña el aviso previo, antes de salir hacia Lumbre. */
+export interface RemotePairingNotice {
+  email: string | null;
+  renewal: boolean;
+  authorizationUrl: string;
+  formToken: string;
+}
+
 export interface RemotePairingServiceOptions {
   journals: RemotePairingJournalStore;
   ownership: OwnershipVerifier;
   publisher: RemotePairingPublisher;
+  renewals?: RemotePairingRenewals;
   publicOrigin?: string;
   lumbreOrigin?: string;
   fetcher?: Fetcher;
@@ -65,6 +80,10 @@ export interface StartRemotePairingInput {
   sub: string;
   identityExpiresAt: string;
   label?: string;
+  /** Presentación en el aviso previo; nunca decide nada. */
+  email?: string | null;
+  /** La credencial de esta persona está revocada o rechazada: renovar en vez de dar de alta. */
+  renew?: boolean;
 }
 
 export interface StartedRemotePairing {
@@ -94,10 +113,24 @@ function errorDetail(error: unknown): string {
   return error instanceof Error ? error.name : 'unknown';
 }
 
+/**
+ * ¿Prueba esta respuesta de `/exchange` que no queda ninguna credencial viva de este intento?
+ * El canje con PKCE deja un recibo y repetirlo devuelve la misma credencial mientras siga activa
+ * (`exchangeHebraPairingCodeWithRecovery` de Lumbre), así que su 401 significa código basura,
+ * caducado o credencial ya revocada, y su 400 un cuerpo que nunca llegó a la transacción. Cualquier
+ * otro estado (404, 410, 5xx, red) sigue siendo ambiguo y conserva la intención para resolverla.
+ */
+function exchangeLeftNoEffect(error: unknown): boolean {
+  return error instanceof PairError && error.code === 'exchange_rejected' &&
+    (error.detail === 400 || error.detail === 401);
+}
+
 /** Orquesta el emparejado sin confiar nunca en identidad ni sesión recibidas del formulario. */
 export class RemotePairingService {
   private readonly runtime = new Map<string, RuntimePairing>();
   private readonly locks = new Map<string, Promise<void>>();
+  /** Diarios que están publicando: retirar la cuenta anterior no puede limpiarse a sí mismo. */
+  private readonly publishing = new Set<string>();
   private readonly fetcher: Fetcher;
   private readonly now: () => number;
   private readonly publicOrigin: string;
@@ -139,13 +172,20 @@ export class RemotePairingService {
         // caducado o no: el usuario legítimo ya probó su identidad con un ID token nuevo y el
         // intento previo queda inutilizado (runtime borrado). `cleanup` solo retira el intento
         // tras resolver sus efectos remotos (revoca la credencial, nunca una cuenta publicada).
-        await this.cleanup(existing);
+        // Lo que no se pueda resolver ahora no detiene a esta persona (D22, "Alta sin atascos"):
+        // su diario sigue en disco, sin sesión, y lo reintentan `recover` y el barrido.
+        try { await this.cleanup(existing); }
+        catch (error) {
+          logEvent({ event: 'remote_pairing.superseded', result: 'cleanup_pending',
+            reason: error instanceof RemotePairingError ? error.reason ?? error.code : errorDetail(error) });
+        }
       });
     }
+    const target = input.renew ? await this.options.renewals?.target(input.sub) ?? null : null;
     const id = randomUUID();
     const cookie = randomBytes(32).toString('base64url');
     const csrf = randomBytes(32).toString('base64url');
-    const deviceId = randomUUID();
+    const deviceId = target?.lumbreDeviceId ?? randomUUID();
     const label = sanitizeDeviceLabel(input.label ?? DEFAULT_PAIR_LABEL, 'agent');
     const createdAt = new Date(this.now()).toISOString();
     const expiresAt = new Date(this.now() + REMOTE_PAIRING_TTL_MS).toISOString();
@@ -169,11 +209,36 @@ export class RemotePairingService {
       identityExpiresAt: input.identityExpiresAt,
       deviceId,
       verifier,
-      cleanupRequired: false
+      cleanupRequired: false,
+      ...(target ? { renewal: { id: target.id, generation: target.generation, accountId: target.accountId,
+        syncVaultId: target.syncVaultId, opaqueDeviceId: target.opaqueDeviceId } } : {})
     };
     await this.options.journals.write(journal);
-    this.runtime.set(id, { cookie, csrf });
+    this.runtime.set(id, { cookie, csrf, email: input.email ?? null, authorizationUrl: url });
     return { id, cookie, formToken: csrf, authorizationUrl: url };
+  }
+
+  /** El aviso previo de una transacción que aún espera volver de Lumbre; si no, `null`. */
+  async noticeForCookie(cookie: string): Promise<RemotePairingNotice | null> {
+    for (const [id, runtime] of this.runtime) {
+      if (runtime.cookie !== cookie) continue;
+      return this.exclusive(id, async () => {
+        const current = this.runtime.get(id);
+        if (!current || current.cookie !== cookie) return null;
+        const journal = await this.requireJournal(id);
+        if (!equalDigest(journal.cookieHash, cookie)) return null;
+        await this.ensureAlive(journal);
+        if (journal.phase !== 'credential') return null;
+        return { email: current.email, renewal: journal.renewal !== undefined,
+          authorizationUrl: current.authorizationUrl, formToken: current.csrf };
+      });
+    }
+    return null;
+  }
+
+  /** ¿Espera esta transacción el código de Lumbre? Solo entonces la página puente puede enviarlo. */
+  async awaitsCredential(id: string): Promise<boolean> {
+    return (await this.options.journals.read(id).catch(() => null))?.phase === 'credential';
   }
 
   async sessionForCookie(cookie: string): Promise<RemotePairingSession | null> {
@@ -268,6 +333,16 @@ export class RemotePairingService {
           now: this.now
         });
       } catch (error) {
+        if (exchangeLeftNoEffect(error)) {
+          // Un código que Lumbre no reconoce (un enlace `#code=` ajeno, uno caducado) no deja nada
+          // que limpiar: la transacción vuelve a esperar el código bueno, con el mismo verifier.
+          journal.phase = 'credential';
+          journal.cleanupRequired = false;
+          journal.pairingCode = undefined;
+          journal.updatedAt = new Date(this.now()).toISOString();
+          await this.options.journals.write(journal);
+          throw new RemotePairingError('code_rejected', `exchange_failed:${errorDetail(error)}`);
+        }
         this.runtime.delete(id);
         throw new RemotePairingError('unavailable', `exchange_failed:${errorDetail(error)}`);
       }
@@ -288,22 +363,60 @@ export class RemotePairingService {
         } catch { /* El intent durable bloquea una reactivación hasta recovery. */ }
         throw new RemotePairingError('unavailable');
       }
+      let wrongAccount = false;
       try {
-        journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher);
-        const link = await this.startLink({
-          connection,
-          label: DEFAULT_PAIR_LABEL,
-          fetcher: this.fetcher
-        });
-        runtime.link = link;
-        journal.phase = 'approval';
-        journal.updatedAt = new Date(this.now()).toISOString();
-        await this.options.journals.write(journal);
+        const existingKey = journal.renewal ? await this.options.renewals?.agentKey(journal.renewal) : undefined;
+        journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher, existingKey);
+        // Antes de pedir la aprobación: el registro dice de qué cuenta es la credencial. La prueba
+        // de propiedad sigue siendo la concesión de Lumbre, esto ahorra aprobar para nada.
+        const expected = journal.renewal?.accountId ?? hebraAccountIdOf(journal.sub);
+        wrongAccount = journal.preparedAgent.registration.accountId !== expected;
+        if (!wrongAccount) {
+          const link = await this.startLink({
+            connection,
+            label: DEFAULT_PAIR_LABEL,
+            fetcher: this.fetcher
+          });
+          runtime.link = link;
+          journal.phase = 'approval';
+          journal.updatedAt = new Date(this.now()).toISOString();
+          await this.options.journals.write(journal);
+        }
       } catch {
         await this.cleanup(journal);
         throw new RemotePairingError('unavailable');
       }
+      if (wrongAccount) {
+        await this.restartAfterWrongAccount(journal, runtime);
+        throw new RemotePairingError('wrong_lumbre_account');
+      }
     });
+  }
+
+  /**
+   * La credencial se emitió para otra cuenta: se revoca y la misma transacción vuelve a esperar
+   * un código, con un verifier nuevo. Si no se puede revocar, el diario queda pendiente sin
+   * sesión y esta transacción termina, pero el login siguiente no se atasca.
+   */
+  private async restartAfterWrongAccount(journal: RemotePairingJournal, runtime: RuntimePairing): Promise<void> {
+    try {
+      await this.revoke(journal.connection!, this.fetcher);
+      const { url, verifier } = await pairingUrl({
+        lumbreOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
+        deviceId: journal.deviceId,
+        label: sanitizeDeviceLabel(DEFAULT_PAIR_LABEL, 'agent'),
+        webOrigin: this.publicOrigin
+      });
+      journal.verifier = verifier;
+      journal.connection = undefined;
+      journal.preparedAgent = undefined;
+      journal.cleanupRequired = false;
+      journal.updatedAt = new Date(this.now()).toISOString();
+      await this.options.journals.write(journal);
+      runtime.authorizationUrl = url;
+    } catch {
+      await this.cleanup(journal).catch(() => undefined);
+    }
   }
 
   async poll(
@@ -382,21 +495,10 @@ export class RemotePairingService {
       journal.phase = 'committing';
       journal.updatedAt = new Date(this.now()).toISOString();
       await this.options.journals.write(journal);
-      const preparedDir = this.options.journals.preparedDir(id);
-      await mkdir(preparedDir, { recursive: true, mode: 0o700 });
-      await chmod(preparedDir, 0o700);
-      const secrets = openFileSecretStore(preparedDir);
-      await savePreparedAgentDevice(secrets, journal.paired, journal.preparedAgent);
-      await writePairedSecrets(secrets, journal.paired);
-      try { await runtime.link?.complete(); } catch { /* El sobre caduca solo. */ }
       let account: Awaited<ReturnType<RemotePairingPublisher['publish']>>;
+      this.publishing.add(id);
       try {
-        account = await this.options.publisher.publish({
-          ownership: runtime.ownership,
-          paired: journal.paired,
-          preparedDir,
-          journalId: id
-        });
+        account = await this.publishLocked(journal, runtime, id);
       } catch {
         this.runtime.delete(id);
         const committed = await this.options.publisher.findCommitted(journal);
@@ -405,6 +507,8 @@ export class RemotePairingService {
           await this.abortPublish(journal);
           throw new RemotePairingError('unavailable');
         }
+      } finally {
+        this.publishing.delete(id);
       }
       // La cuenta publicada ya no pertenece al alta cancelable, incluso si falla el disco.
       this.runtime.delete(id);
@@ -418,6 +522,39 @@ export class RemotePairingService {
       } catch { /* Recovery reconoce la publicación durable antes de limpiar el diario. */ }
       return { kind: 'confirmed', account };
     });
+  }
+
+  /**
+   * Confirmar deja la cuenta lista, sin abrir su contexto: lo abre su primera llamada (D22). Con
+   * la misma bóveda se renueva sobre su raíz; con otra, se retira antes la cuenta anterior y se da
+   * de alta la nueva en su propio directorio, sin mezclar datos.
+   */
+  private async publishLocked(
+    journal: RemotePairingJournal,
+    runtime: RuntimePairing,
+    id: string
+  ): Promise<Awaited<ReturnType<RemotePairingPublisher['publish']>>> {
+    const { paired, preparedAgent } = journal;
+    const ownership = runtime.ownership;
+    if (!paired || !preparedAgent || !ownership) throw new RemotePairingError('not_ready');
+    const renewal = journal.renewal;
+    if (renewal && !journal.replacesAccount) {
+      if (!this.options.renewals) throw new RemotePairingError('unavailable', 'renewals_not_attached');
+      try { await runtime.link?.complete(); } catch { /* El sobre caduca solo. */ }
+      return this.options.renewals.publish({ renewal, journalId: id, ownership, paired, preparedAgent });
+    }
+    if (renewal) {
+      if (!this.options.renewals) throw new RemotePairingError('unavailable', 'renewals_not_attached');
+      await this.options.renewals.retire(renewal);
+    }
+    const preparedDir = this.options.journals.preparedDir(id);
+    await mkdir(preparedDir, { recursive: true, mode: 0o700 });
+    await chmod(preparedDir, 0o700);
+    const secrets = openFileSecretStore(preparedDir);
+    await savePreparedAgentDevice(secrets, paired, preparedAgent);
+    await writePairedSecrets(secrets, paired);
+    try { await runtime.link?.complete(); } catch { /* El sobre caduca solo. */ }
+    return this.options.publisher.publish({ ownership, paired, preparedDir, journalId: id });
   }
 
   async cancel(id: string, authorization: RemotePairingFormAuthorization): Promise<void> {
@@ -442,22 +579,28 @@ export class RemotePairingService {
   /** Retirada administrativa ya autenticada por el control local; no depende de CSRF web. */
   async cleanupForSub(sub: string): Promise<void> {
     for (const candidate of await this.options.journals.list()) {
-      if (candidate.sub !== sub) continue;
+      if (candidate.sub !== sub || this.publishing.has(candidate.id)) continue;
       await this.exclusive(candidate.id, async () => this.cleanup(await this.requireJournal(candidate.id)));
     }
   }
 
-  /** Se ejecuta antes de aceptar tráfico. Nunca reanuda claves efímeras perdidas. */
+  /**
+   * Antes de aceptar tráfico y desde el barrido global (D22): limpia los diarios sin sesión viva y
+   * los caducados, y no toca una transacción que una persona tiene abierta. Sin diarios, no hace
+   * ninguna petición. Nunca reanuda claves efímeras perdidas.
+   */
   async recover(): Promise<{ cleaned: number; pending: number }> {
     let cleaned = 0;
     let pending = 0;
     for (const candidate of await this.options.journals.list()) {
       try {
-        await this.exclusive(candidate.id, async () => {
+        const handled = await this.exclusive(candidate.id, async () => {
           const journal = await this.options.journals.read(candidate.id);
+          if (journal && this.runtime.has(journal.id) && Date.parse(journal.expiresAt) > this.now()) return false;
           if (journal) await this.cleanup(journal);
+          return true;
         });
-        cleaned += 1;
+        if (handled) cleaned += 1;
       } catch {
         pending += 1;
       }
@@ -472,10 +615,14 @@ export class RemotePairingService {
   ): Promise<RemotePairingStatus> {
     if (!journal.connection) throw new RemotePairingError('invalid_session');
     const recovered = await decodeRecoveryCode(granted.recoveryCode);
+    // Con la misma bóveda se conserva el dispositivo (`credential_renewed`, §7): Lumbre reactiva el
+    // `opaqueDeviceId` al registrarlo con la credencial nueva. Otra bóveda estrena el suyo.
+    const sameVault = journal.renewal?.syncVaultId === recovered.syncVaultId;
     const paired: PairedSecrets = {
       connection: journal.connection,
       recoveryCode: granted.recoveryCode,
-      device: { opaqueDeviceId: randomBytes(16).toString('hex'), lumbreDeviceId: journal.deviceId }
+      device: { opaqueDeviceId: (sameVault && journal.renewal?.opaqueDeviceId) || randomBytes(16).toString('hex'),
+        lumbreDeviceId: journal.deviceId }
     };
     const binding: Binding = {
       pairedCredentialId: journal.connection.credentialId,
@@ -498,21 +645,26 @@ export class RemotePairingService {
       if (error instanceof RemotePairingError && error.code === 'unavailable') throw error;
       throw new RemotePairingError('wrong_account');
     }
-    if (ownership.sub !== journal.sub || !sameBinding(binding, ownership.grant)) {
+    // Una persona no renueva sobre la cuenta de otra, aunque Lumbre le dé la propiedad de la suya.
+    if (ownership.sub !== journal.sub || !sameBinding(binding, ownership.grant) ||
+      (journal.renewal && ownership.grant.accountId !== journal.renewal.accountId)) {
       await this.cleanup(journal);
       throw new RemotePairingError('wrong_account');
     }
     const verified = await runtime.link!.verify(granted);
+    const replacesAccount = journal.renewal !== undefined && !sameVault;
     const preview: PairingPreview = {
       titles: verified.titles.slice(0, 3),
       vaultCreatedAt: verified.vaultCreatedAt,
       recordsRead: verified.recordsRead,
-      more: verified.more
+      more: verified.more,
+      ...(replacesAccount ? { replacesLibrary: true } : {})
     };
     runtime.ownership = ownership;
     runtime.preview = preview;
     journal.ownership = ownership;
     journal.paired = paired;
+    journal.replacesAccount = replacesAccount;
     journal.phase = 'confirmation';
     journal.updatedAt = new Date(this.now()).toISOString();
     await this.options.journals.write(journal);
@@ -529,6 +681,8 @@ export class RemotePairingService {
       await this.options.journals.remove(journal.id);
       return;
     }
+    // Sin publicar, esta alta ya no va a publicar: la cuenta deja de estar bloqueada por ella.
+    if (journal.renewal) await this.options.renewals?.abort(journal);
     if (journal.cleanupRequired && !journal.connection) {
       // Un error HTTP genérico no prueba que el canje no ocurrió. Conservar el intent
       // hasta recuperar exactamente su resultado y poder revocarlo.
@@ -546,7 +700,12 @@ export class RemotePairingService {
         });
         journal.pairingCode = undefined;
       } catch (error) {
-        throw new RemotePairingError('unavailable', `cleanup_exchange_recover_failed:${errorDetail(error)}`);
+        if (!exchangeLeftNoEffect(error)) {
+          throw new RemotePairingError('unavailable', `cleanup_exchange_recover_failed:${errorDetail(error)}`);
+        }
+        // Resuelto: no hay credencial viva que recuperar ni que revocar.
+        journal.pairingCode = undefined;
+        journal.cleanupRequired = false;
       }
     }
     journal.phase = 'cleanup-pending';
@@ -600,7 +759,8 @@ export class RemotePairingService {
     return runtime;
   }
 
-  private async ensureAlive(journal: RemotePairingJournal): Promise<void> {
+  /** Caducar revoca y limpia. Lo usa también quien sondee un diario desde fuera. */
+  async ensureAlive(journal: RemotePairingJournal): Promise<void> {
     if (Date.parse(journal.expiresAt) > this.now()) return;
     await this.cleanup(journal);
     throw new RemotePairingError('expired');

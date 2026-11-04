@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeRecoveryCode, type DeviceLinkPoll, type LumbreConnection } from '../../src/hebra';
 import type { ActiveGrant, Binding } from '../../src/oauth/backchannel';
-import { PairError } from '../../src/pair/errors';import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
+import { PairError } from '../../src/pair/errors';
+import { hebraAccountIdOf } from '../../src/pair/remote/account-id';
+import { RemotePairingJournalStore } from '../../src/pair/remote/journal';
 import type { RemoteLinkRequest } from '../../src/pair/remote/link';
 import { RevokeError } from '../../src/pair/remote/revoke';
 import {
@@ -13,7 +15,7 @@ import {
   RemotePairingService,
   type RemotePairingServiceOptions
 } from '../../src/pair/remote/service';
-import type { VerifiedOwnership } from '../../src/pair/remote/types';
+import type { RemotePairingRenewals, VerifiedOwnership } from '../../src/pair/remote/types';
 
 const NOW = Date.parse('2026-11-03T08:00:00.000Z');
 const CONNECTION: LumbreConnection = {
@@ -242,7 +244,7 @@ describe('RemotePairingService', () => {
     expect(revoke).toHaveBeenCalledOnce();
   });
 
-  it.each([401, 404])(
+  it.each([404, 410])(
     'conserva exchange-pending ante un rechazo HTTP %s ambiguo en recovery',
     async (status) => {
       const rejected = () => { throw new PairError('exchange_rejected', status); };
@@ -324,32 +326,41 @@ describe('RemotePairingService', () => {
     expect(cleanupOrphan).not.toHaveBeenCalled();
   });
 
-  it('si el intento anterior no se puede resolver, el error lleva un motivo cerrado sin secretos', async () => {
+  it('un canje ambiguo sin resolver no bloquea el login siguiente; el log da un motivo cerrado', async () => {
     let clock = NOW;
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 410); });
     const service = createService({ link: fakeLink(recoveryCode, []), now: () => clock, exchangeCode });
     const started = await service.start(startInput());
     await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'secret-code'))
       .rejects.toMatchObject({ code: 'unavailable', reason: 'exchange_failed:exchange_rejected:410' });
-    const outcomes = [] as unknown[];
-    for (const tick of [1_000, REMOTE_PAIRING_TTL_MS + 1]) {
-      clock = NOW + tick;
-      outcomes.push(await service.start(startInput(new Date(clock + 60_000).toISOString())).catch((error) => error));
-    }
-    // Sin idempotencia, un canje ambiguo bloquea la alta (SPEC §12.9): el motivo lo dice.
-    for (const error of outcomes) {
-      expect(error).toMatchObject({ code: 'unavailable', reason: 'cleanup_exchange_recover_failed:exchange_rejected:410' });
-      expect(JSON.stringify(error)).not.toContain('secret-code');
-    }
+    clock = NOW + 1_000;
+    const next = await service.start(startInput(new Date(clock + 60_000).toISOString()));
+    expect(await service.sessionForCookie(next.cookie)).not.toBeNull();
+    // El efecto sin resolver no se olvida: sigue en disco, sin sesión, con su intención.
+    expect(await journals.read(started.id)).toMatchObject({ phase: 'exchange-pending', pairingCode: 'secret-code' });
+    const logged = stderr.mock.calls.map(([chunk]) => String(chunk)).filter((line) => line.includes('remote_pairing.superseded'));
+    expect(logged.map((line) => JSON.parse(line))).toEqual([{ event: 'remote_pairing.superseded', result: 'cleanup_pending',
+      reason: 'cleanup_exchange_recover_failed:exchange_rejected:410' }]);
+    expect(logged.join('')).not.toContain('secret-code');
+    expect(logged.join('')).not.toContain('sumego|david');
   });
 
-  it('si la revocación del intento anterior falla, el motivo incluye el estado HTTP', async () => {
-    const revoke = vi.fn(async () => { throw new RevokeError(403); });
+  it('si la revocación del intento anterior falla, el login siguiente sigue y el log da el estado HTTP', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const revoke = vi.fn().mockRejectedValueOnce(new RevokeError(403)).mockResolvedValue(undefined);
     const service = createService({ link: fakeLink(recoveryCode, []), revoke });
     const started = await service.start(startInput());
     await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
-    await expect(service.start(startInput()))
-      .rejects.toMatchObject({ code: 'unavailable', reason: 'cleanup_revoke_failed:403' });
+    const next = await service.start(startInput());
+    expect(next.id).not.toBe(started.id);
+    expect(stderr.mock.calls.map(([chunk]) => String(chunk)).join('')).toContain('cleanup_revoke_failed:403');
+    expect((await journals.read(started.id))?.phase).toBe('cleanup-pending');
+    // El barrido la termina y no toca la transacción que está viva.
+    await expect(service.recover()).resolves.toEqual({ cleaned: 1, pending: 0 });
+    expect(revoke).toHaveBeenCalledTimes(2);
+    expect(await journals.read(started.id)).toBeNull();
+    expect(await service.sessionForCookie(next.cookie)).not.toBeNull();
   });
 
   it('TTL no olvida un canje ambiguo si sigue sin poder recuperar su resultado', async () => {
@@ -360,10 +371,250 @@ describe('RemotePairingService', () => {
     await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'code'))
       .rejects.toMatchObject({ code: 'unavailable' });
     clock += REMOTE_PAIRING_TTL_MS + 1;
-    await expect(service.start(startInput(new Date(clock + 60_000).toISOString())))
-      .rejects.toMatchObject({ code: 'unavailable' });
+    await service.start(startInput(new Date(clock + 60_000).toISOString()));
     expect(exchangeCode).toHaveBeenCalledTimes(2);
     expect((await journals.read(started.id))?.phase).toBe('exchange-pending');
+    await expect(service.recover()).resolves.toEqual({ cleaned: 0, pending: 1 });
+    expect((await journals.read(started.id))?.phase).toBe('exchange-pending');
+  });
+
+  it.each([400, 401])('un código que Lumbre rechaza con %s no bloquea: la misma transacción acepta el bueno', async (status) => {
+    const revoke = vi.fn(async () => undefined);
+    const exchangeCode = vi.fn(async ({ code }: { code: string }) => {
+      if (code === 'basura') throw new PairError('exchange_rejected', status);
+      return CONNECTION;
+    });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, revoke });
+    const started = await service.start(startInput());
+    await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'code_rejected' });
+    const journal = await journals.read(started.id);
+    expect(journal).toMatchObject({ phase: 'credential', cleanupRequired: false });
+    expect(journal?.pairingCode).toBeUndefined();
+    await service.receiveCredential(started.id, await currentAuth(service, started), 'bueno');
+    expect((await journals.read(started.id))?.phase).toBe('approval');
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it('código rechazado, login nuevo y alta correcta: nada queda bloqueado ni se revoca', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const exchangeCode = vi.fn(async ({ code }: { code: string }) => {
+      if (code === 'basura') throw new PairError('exchange_rejected', 401);
+      return CONNECTION;
+    });
+    const publish = vi.fn(async () => ({ id: 'account-david', generation: 1 }));
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, revoke, publish });
+    const first = await service.start(startInput());
+    await expect(service.receiveCredential(first.id, auth(first, first.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'code_rejected' });
+    const second = await service.start(startInput());
+    expect(await journals.read(first.id)).toBeNull();
+    await service.receiveCredential(second.id, auth(second, second.formToken), 'bueno');
+    await service.poll(second.id, await currentAuth(service, second));
+    await expect(service.confirm(second.id, await currentAuth(service, second)))
+      .resolves.toMatchObject({ kind: 'confirmed', account: { id: 'account-david' } });
+    expect(revoke).not.toHaveBeenCalled();
+    expect(publish).toHaveBeenCalledOnce();
+  });
+
+  it('un canje perdido cuyo código resulta inválido en recovery se resuelve sin revocar nada', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const first = createService({ link: fakeLink(recoveryCode, []), exchangeCode: async () => { throw new Error('offline'); } });
+    const started = await first.start(startInput());
+    await expect(first.receiveCredential(started.id, auth(started, started.formToken), 'code'))
+      .rejects.toMatchObject({ code: 'unavailable' });
+    const recovered = createService({ link: fakeLink(recoveryCode, []), revoke,
+      exchangeCode: async () => { throw new PairError('exchange_rejected', 401); } });
+    await expect(recovered.recover()).resolves.toEqual({ cleaned: 1, pending: 0 });
+    expect(revoke).not.toHaveBeenCalled();
+    expect(await journals.read(started.id)).toBeNull();
+  });
+
+  it('recover no toca una transacción viva y limpia la que caducó', async () => {
+    let clock = NOW;
+    const revoke = vi.fn(async () => undefined);
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke, now: () => clock });
+    const started = await service.start(startInput());
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    await expect(service.recover()).resolves.toEqual({ cleaned: 0, pending: 0 });
+    expect(revoke).not.toHaveBeenCalled();
+    expect(await service.sessionForCookie(started.cookie)).not.toBeNull();
+    clock += REMOTE_PAIRING_TTL_MS + 1;
+    await expect(service.recover()).resolves.toEqual({ cleaned: 1, pending: 0 });
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(await journals.read(started.id)).toBeNull();
+  });
+
+  it('la sesión de Lumbre de otra cuenta se detecta antes de pedir la aprobación y se puede reintentar', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const startLink = vi.fn(async () => fakeLink(recoveryCode, []));
+    let account = hebraAccountIdOf('sumego|otra');
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke, startLink,
+      agentAccountId: () => account });
+    const started = await service.start({ ...startInput(), email: 'david@example.test' });
+    await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'code'))
+      .rejects.toMatchObject({ code: 'wrong_lumbre_account' });
+    expect(startLink).not.toHaveBeenCalled();
+    expect(revoke).toHaveBeenCalledOnce();
+    const journal = (await journals.read(started.id))!;
+    expect(journal).toMatchObject({ phase: 'credential', cleanupRequired: false });
+    expect(journal.connection).toBeUndefined();
+    const notice = await service.noticeForCookie(started.cookie);
+    expect(notice).toMatchObject({ email: 'david@example.test', renewal: false });
+    // Verifier nuevo: el enlace del reintento no reutiliza el challenge ya gastado.
+    expect(notice!.authorizationUrl).not.toBe(started.authorizationUrl);
+    expect(JSON.stringify(journal)).not.toContain('david@example.test');
+    account = hebraAccountIdOf('sumego|david');
+    await service.receiveCredential(started.id, await currentAuth(service, started), 'code-2');
+    expect(startLink).toHaveBeenCalledOnce();
+    expect((await journals.read(started.id))?.phase).toBe('approval');
+  });
+
+  it('si no se puede revocar la credencial de la otra cuenta, queda pendiente sin atascar el login', async () => {
+    const revoke = vi.fn().mockRejectedValue(new RevokeError(503));
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke,
+      agentAccountId: () => hebraAccountIdOf('sumego|otra') });
+    const started = await service.start(startInput());
+    await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'code'))
+      .rejects.toMatchObject({ code: 'wrong_lumbre_account' });
+    expect((await journals.read(started.id))?.phase).toBe('cleanup-pending');
+    expect(await service.sessionForCookie(started.cookie)).toBeNull();
+    const next = await service.start(startInput());
+    expect(await service.sessionForCookie(next.cookie)).not.toBeNull();
+  });
+
+  describe('renovación', () => {
+    const RENEWAL_ACCOUNT = '44'.repeat(32);
+    const STORED_DEVICE = 'dd'.repeat(16);
+    const STORED_LUMBRE_DEVICE = '55555555-5555-4555-8555-555555555555';
+
+    function renewals(overrides: Partial<RemotePairingRenewals> = {}): RemotePairingRenewals {
+      return {
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: SYNC_VAULT,
+          opaqueDeviceId: STORED_DEVICE, lumbreDeviceId: STORED_LUMBRE_DEVICE }),
+        agentKey: async () => ({ kty: 'EC', crv: 'P-256', d: 'guardada', x: 'x', y: 'y' }),
+        publish: vi.fn(async () => ({ id: 'cuenta-david', generation: 5 })),
+        retire: vi.fn(async () => undefined),
+        abort: vi.fn(async () => undefined),
+        ...overrides
+      };
+    }
+
+    it('con la misma bóveda conserva dispositivo e identidad y publica sobre la cuenta', async () => {
+      const set = renewals();
+      const prepareAgent = vi.fn();
+      const seen: Binding[] = [];
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, agentAccountId: () => RENEWAL_ACCOUNT,
+        prepareAgentSpy: prepareAgent, ownership: async ({ sub, binding }) => { seen.push(binding); return ownership(sub, binding); } });
+      const started = await service.start({ ...startInput(), renew: true });
+      expect(new URL(started.authorizationUrl).searchParams.get('deviceId')).toBe(STORED_LUMBRE_DEVICE);
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      // Una credencial que sobrevive conserva su pública: se reutiliza la clave guardada.
+      expect(prepareAgent.mock.calls[0]![3]).toMatchObject({ d: 'guardada' });
+      const status = await service.poll(started.id, await currentAuth(service, started));
+      expect(status).toMatchObject({ kind: 'preview' });
+      if (status.kind === 'preview') expect(status.preview.replacesLibrary).toBeUndefined();
+      expect(seen[0]!.opaqueDeviceId).toBe(STORED_DEVICE);
+      await expect(service.confirm(started.id, await currentAuth(service, started)))
+        .resolves.toMatchObject({ kind: 'confirmed', account: { id: 'cuenta-david', generation: 5 } });
+      expect(set.publish).toHaveBeenCalledOnce();
+      expect(vi.mocked(set.publish).mock.calls[0]![0].paired.device).toEqual({ opaqueDeviceId: STORED_DEVICE,
+        lumbreDeviceId: STORED_LUMBRE_DEVICE });
+      expect(set.retire).not.toHaveBeenCalled();
+    });
+
+    it('con otra bóveda la página lo dice y confirmar retira antes de dar de alta', async () => {
+      const order: string[] = [];
+      const set = renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16),
+          opaqueDeviceId: STORED_DEVICE, lumbreDeviceId: STORED_LUMBRE_DEVICE }),
+        retire: vi.fn(async () => { order.push('retire'); }),
+        publish: vi.fn(async () => { throw new Error('no debe publicar sobre la cuenta anterior'); })
+      });
+      const publish = vi.fn(async () => { order.push('publish'); return { id: 'cuenta-nueva', generation: 1 }; });
+      const seen: Binding[] = [];
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, agentAccountId: () => RENEWAL_ACCOUNT,
+        ownership: async ({ sub, binding }) => { seen.push(binding); return ownership(sub, binding); } });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      const status = await service.poll(started.id, await currentAuth(service, started));
+      expect(status).toMatchObject({ kind: 'preview', preview: { replacesLibrary: true } });
+      // Nada se toca hasta confirmar, y el dispositivo es nuevo: no se mezcla con la otra bóveda.
+      expect(set.retire).not.toHaveBeenCalled();
+      expect(seen[0]!.opaqueDeviceId).not.toBe(STORED_DEVICE);
+      await expect(service.confirm(started.id, await currentAuth(service, started)))
+        .resolves.toMatchObject({ kind: 'confirmed', account: { id: 'cuenta-nueva' } });
+      expect(order).toEqual(['retire', 'publish']);
+    });
+
+    it('si retirar la cuenta anterior falla, revoca la nueva y no da de alta nada', async () => {
+      const revoke = vi.fn(async () => undefined);
+      const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
+      const set = renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        retire: vi.fn(async () => { throw new Error('account_writer_busy'); })
+      });
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, revoke,
+        agentAccountId: () => RENEWAL_ACCOUNT });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      await service.poll(started.id, await currentAuth(service, started));
+      await expect(service.confirm(started.id, await currentAuth(service, started)))
+        .rejects.toMatchObject({ code: 'unavailable' });
+      expect(publish).not.toHaveBeenCalled();
+      expect(revoke).toHaveBeenCalledOnce();
+      expect(await journals.read(started.id)).toBeNull();
+    });
+
+    it('otra cuenta de Lumbre no llega a pedir la aprobación ni a publicar sobre esta', async () => {
+      const startLink = vi.fn(async () => fakeLink(recoveryCode, []));
+      const set = renewals();
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, startLink,
+        agentAccountId: () => 'ab'.repeat(32) });
+      const started = await service.start({ ...startInput(), renew: true });
+      await expect(service.receiveCredential(started.id, auth(started, started.formToken), 'code'))
+        .rejects.toMatchObject({ code: 'wrong_lumbre_account' });
+      expect(startLink).not.toHaveBeenCalled();
+      expect(set.publish).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['otro sub', { sub: 'sumego|mikel' }],
+      ['otra cuenta de Lumbre', { accountId: 'cc'.repeat(32) }]
+    ] as const)('una concesión de %s no renueva esta cuenta', async (_name, change) => {
+      const revoke = vi.fn(async () => undefined);
+      const set = renewals();
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, revoke, agentAccountId: () => RENEWAL_ACCOUNT,
+        ownership: async ({ sub, binding }) => {
+          const proof = ownership('sub' in change ? change.sub : sub, binding);
+          return 'accountId' in change ? { ...proof, grant: { ...proof.grant, accountId: change.accountId } } : proof;
+        } });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      await expect(service.poll(started.id, await currentAuth(service, started)))
+        .rejects.toMatchObject({ code: 'wrong_account' });
+      expect(set.publish).not.toHaveBeenCalled();
+      expect(revoke).toHaveBeenCalledOnce();
+    });
+
+    it('la doble confirmación de una renovación publica una sola vez', async () => {
+      const set = renewals();
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, agentAccountId: () => RENEWAL_ACCOUNT });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      await service.poll(started.id, await currentAuth(service, started));
+      const form = await currentAuth(service, started);
+      const results = await Promise.allSettled([service.confirm(started.id, form), service.confirm(started.id, form)]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(set.publish).toHaveBeenCalledOnce();
+    });
+
+    it('sin cuenta que renovar, empieza un alta normal', async () => {
+      const set = renewals({ target: async () => null });
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set });
+      const started = await service.start({ ...startInput(), renew: true });
+      expect((await journals.read(started.id))?.renewal).toBeUndefined();
+    });
   });
 
   it.each([
@@ -448,7 +699,7 @@ describe('RemotePairingService', () => {
     expect(await journals.read(started.id)).toBeNull();
   });
 
-  it('TTL conserva el bloqueo si falla revocar y solo admite otra alta al resolverlo', async () => {
+  it('TTL deja pendiente una revocación fallida sin frenar la otra alta y la resuelve al repetir', async () => {
     let clock = NOW;
     const revoke = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(undefined);
     const service = createService({ link: fakeLink(recoveryCode, []), now: () => clock, revoke });
@@ -456,9 +707,10 @@ describe('RemotePairingService', () => {
     await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
     clock += REMOTE_PAIRING_TTL_MS + 1;
     const replacementInput = startInput(new Date(clock + 60_000).toISOString());
-    await expect(service.start(replacementInput)).rejects.toMatchObject({ code: 'unavailable' });
+    const replacement = await service.start(replacementInput);
     expect((await journals.read(started.id))?.phase).toBe('cleanup-pending');
     expect(await service.sessionForCookie(started.cookie)).toBeNull();
+    expect(await service.sessionForCookie(replacement.cookie)).not.toBeNull();
     const outcomes = await Promise.allSettled([service.start(replacementInput), service.start(replacementInput)]);
     // Dos logins simultáneos del mismo sub: gana el último y solo queda un diario vivo.
     const live = [];
@@ -482,23 +734,31 @@ describe('RemotePairingService', () => {
     registerDevice?: RemotePairingServiceOptions['registerDevice'];
     exchangeCode?: RemotePairingServiceOptions['exchangeCode'];
     now?: () => number;
+    renewals?: RemotePairingRenewals;
+    agentAccountId?: () => string;
+    startLink?: RemotePairingServiceOptions['startLink'];
+    prepareAgentSpy?: (...args: unknown[]) => void;
   }): RemotePairingService {
     return new RemotePairingService({
       journals,
       now: input.now ?? (() => NOW),
       exchangeCode: input.exchangeCode ?? (async () => CONNECTION),
-      prepareAgent: async (_connection, deviceId) => ({
-        privateKey: { kty: 'EC', crv: 'P-256', d: 'private', x: 'x', y: 'y' },
-        registration: {
-          credentialId: CONNECTION.credentialId,
-          deviceId,
-          accountId: 'account-david',
-          actorKind: 'agent',
-          keyId: 'key',
-          publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' }
-        }
-      }),
-      startLink: async () => input.link,
+      prepareAgent: async (connection, deviceId, fetcher, existingKey) => {
+        input.prepareAgentSpy?.(connection, deviceId, fetcher, existingKey);
+        return {
+          privateKey: { kty: 'EC', crv: 'P-256', d: 'private', x: 'x', y: 'y' },
+          registration: {
+            credentialId: CONNECTION.credentialId,
+            deviceId,
+            accountId: input.agentAccountId?.() ?? hebraAccountIdOf('sumego|david'),
+            actorKind: 'agent',
+            keyId: 'key',
+            publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' }
+          }
+        };
+      },
+      startLink: input.startLink ?? (async () => input.link),
+      renewals: input.renewals,
       revoke: input.revoke ?? (async () => undefined),
       registerDevice: input.registerDevice ?? (async () => 'ok'),
       ownership: { verify: input.ownership ?? (async ({ sub, binding }) => ownership(sub, binding)) },

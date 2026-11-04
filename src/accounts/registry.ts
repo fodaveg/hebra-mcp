@@ -30,7 +30,9 @@ function validRecord(value: unknown): value is AccountRecord {
     (row.storage === 'legacy-root' || row.storage === 'account-dir') &&
     (row.state === 'active' || row.state === 'removing' || row.state === 'removed') &&
     (row.removalPhase === undefined || row.removalPhase === 'blocked' ||
-      row.removalPhase === 'remote-revoked' || row.removalPhase === 'data-erased');
+      row.removalPhase === 'remote-revoked' || row.removalPhase === 'data-erased') &&
+    (row.renewing === undefined || typeof row.renewing === 'string') &&
+    (row.renewedBy === undefined || typeof row.renewedBy === 'string');
 }
 function validRecords(accounts: AccountRecord[]): boolean {
   const ids = new Set<string>();
@@ -199,15 +201,83 @@ export class AccountRegistry {
     });
   }
 
+  /** El legado aún sin dueño cuyo `accountId` es este; nunca lo asigna, solo lo encuentra. */
+  unclaimedLegacyOf(accountId: string): AccountRecord | null {
+    const legacy = this.accounts.find((entry) => entry.storage === 'legacy-root' && entry.state === 'active' &&
+      entry.sub === UNCLAIMED_LEGACY_SUB && entry.accountId === accountId);
+    return legacy ? structuredClone(legacy) : null;
+  }
+
+  /**
+   * Primera mitad de una renovación (§12.10): sube la generación y bloquea la cuenta, de modo
+   * que los contextos y familias de la generación anterior dejan de valer antes de tocar sus
+   * secretos. Repetirla con el mismo diario no cambia nada.
+   */
+  beginRenewal(ref: AccountRef, journalId: string): Promise<AccountRecord> {
+    return this.mutate(() => {
+      const record = this.accounts.find((entry) => entry.id === ref.id);
+      if (!record || record.state !== 'active') throw new Error('account_inactive');
+      if (record.renewing === journalId) return structuredClone(record);
+      if (record.renewing !== undefined || record.generation !== ref.generation) throw new Error('account_inactive');
+      record.generation += 1;
+      record.renewing = journalId;
+      return structuredClone(record);
+    });
+  }
+
+  /**
+   * Publica en una sola escritura atómica el vínculo y la generación nuevos. Solo la persona de
+   * esa cuenta puede hacerlo: el `sub` (o el legado aún sin reclamar, con su mismo `accountId`) y
+   * la bóveda tienen que coincidir, y el vínculo no puede ser de otro registro.
+   */
+  commitRenewal(ref: AccountRef, journalId: string, ownership: VerifiedOwnership): Promise<AccountRecord> {
+    return this.mutate(() => {
+      const record = this.accounts.find((entry) => entry.id === ref.id);
+      if (!record || record.state !== 'active' || record.generation !== ref.generation ||
+        record.renewing !== journalId) throw new Error('account_inactive');
+      const sameOwner = record.sub === ownership.sub ||
+        (record.sub === UNCLAIMED_LEGACY_SUB && record.storage === 'legacy-root');
+      if (!sameOwner || record.accountId !== ownership.grant.accountId ||
+        record.binding.syncVaultId !== ownership.grant.syncVaultId) throw new Error('renewal_owner_conflict');
+      if (this.accounts.some((entry) => entry.id !== record.id && ((entry.sub === ownership.sub && entry.state !== 'removed') ||
+        (entry.accountId === ownership.grant.accountId && sameBinding(entry.binding, ownership.grant))))) {
+        throw new Error('account_exists');
+      }
+      record.sub = ownership.sub;
+      record.binding = bindingOf(ownership.grant);
+      record.generation += 1;
+      record.renewedBy = journalId;
+      delete record.renewing;
+      return structuredClone(record);
+    });
+  }
+
+  /**
+   * Suelta una renovación que no llegó a publicarse. La generación sube otra vez: nadie vuelve a
+   * entrar con una referencia tomada durante la publicación a medias. Sin bloqueo de este diario,
+   * no escribe nada.
+   */
+  async abortRenewal(id: string, journalId: string): Promise<void> {
+    if (this.accounts.find((entry) => entry.id === id)?.renewing !== journalId) return;
+    await this.mutate(() => {
+      const record = this.accounts.find((entry) => entry.id === id);
+      if (record?.renewing !== journalId) return;
+      delete record.renewing;
+      record.generation += 1;
+    });
+  }
+
   authorize(grant: ActiveGrant, sub: string | null): AuthorizedAccount | null {
-    const record = this.accounts.find((entry) => entry.state === 'active' && entry.accountId === grant.accountId &&
-      sameBinding(entry.binding, grant) && (sub === null ? entry.storage === 'legacy-root' : entry.sub === sub));
+    const record = this.accounts.find((entry) => entry.state === 'active' && entry.renewing === undefined &&
+      entry.accountId === grant.accountId && sameBinding(entry.binding, grant) &&
+      (sub === null ? entry.storage === 'legacy-root' : entry.sub === sub));
     return record ? authorized(record) : null;
   }
 
   assertActive(ref: AccountRef): void {
     const record = this.accounts.find((entry) => entry.id === ref.id);
-    if (!record || record.state !== 'active' || record.generation !== ref.generation) throw new Error('account_inactive');
+    if (!record || record.state !== 'active' || record.renewing !== undefined ||
+      record.generation !== ref.generation) throw new Error('account_inactive');
   }
 
   beginRemoval(ref: AccountRef): Promise<AccountRecord> {
@@ -274,7 +344,7 @@ export function accountAccessGuard(dataDir: string): () => void {
       if (expected || accountId) throw new Error('account_inactive');
       return;
     }
-    if (record.state !== 'active' || (expected &&
+    if (record.state !== 'active' || record.renewing !== undefined || (expected &&
       (expected.id !== record.id || expected.generation !== record.generation))) throw new Error('account_inactive');
     expected ??= { id: record.id, generation: record.generation };
   };

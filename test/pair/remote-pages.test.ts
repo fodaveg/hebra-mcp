@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { sendBridgePage, sendContinuePage, sendPreviewPage } from '../../src/pair/remote/pages';
+import { sendBridgePage, sendContinuePage, sendNoticePage, sendPreviewPage, sendWrongLumbreAccountPage } from '../../src/pair/remote/pages';
 
 describe('páginas del emparejado remoto', () => {
   it('puentea solo el fragmento con CSP nonce y sin recursos externos', () => {
@@ -10,6 +10,45 @@ describe('páginas del emparejado remoto', () => {
     expect(response.body).toContain("location.hash.slice(1)");
     expect(response.body).toContain("history.replaceState(null,'','/lumbre/connect')");
     expect(response.body).not.toMatch(/https?:\/\//);
+  });
+
+  it('la página puente solo envía un código con la forma de Lumbre', () => {
+    const response = fakeResponse();
+    sendBridgePage(response.res, 'csrf-secret');
+    const pattern = /\.test\(v\[0\]\)/.test(response.body) ? /\/\^\[a-f0-9\]\{64\}\$\//.exec(response.body) : null;
+    expect(pattern).not.toBeNull();
+    expect(/^[a-f0-9]{64}$/.test('basura')).toBe(false);
+    expect(/^[a-f0-9]{64}$/.test('ab'.repeat(32))).toBe(true);
+  });
+
+  it('el aviso previo escapa el email, nombra lo que hace falta y solo enlaza a https', () => {
+    const response = fakeResponse();
+    sendNoticePage(response.res, { email: '<b>@x', renewal: true, formToken: 'csrf',
+      authorizationUrl: 'https://app.lumbre.pro/integrations/hebra?deviceId=1' });
+    expect(response.body).toContain('&lt;b&gt;@x');
+    expect(response.body).toContain('Renueva la conexión');
+    expect(response.body).toContain('Hebra instalada');
+    expect(() => sendNoticePage(fakeResponse().res, { email: null, renewal: false, formToken: 'c',
+      authorizationUrl: 'javascript:alert(1)' })).toThrow('invalid_lumbre_url');
+  });
+
+  it('con otra bóveda, la confirmación dice lo que va a pasar con la anterior', () => {
+    const response = fakeResponse();
+    sendPreviewPage(response.res, 'csrf', { titles: [], vaultCreatedAt: '2026-01-01T00:00:00.000Z', recordsRead: 0,
+      more: false, replacesLibrary: true });
+    expect(response.body).toContain('distinta de la que tenías conectada');
+    expect(response.body).toContain('se borra su copia de este servidor');
+  });
+
+  it('otra cuenta en Lumbre: nombra la que se va a conectar y no pide aprobar nada', () => {
+    const response = fakeResponse();
+    sendWrongLumbreAccountPage(response.res, { email: 'david@example.test', renewal: false, formToken: 'csrf',
+      authorizationUrl: 'https://app.lumbre.pro/integrations/hebra' });
+    expect(response.body).toContain('david@example.test');
+    expect(response.body).toContain('ni hace falta aprobar nada');
+    const gone = fakeResponse();
+    sendWrongLumbreAccountPage(gone.res, null);
+    expect(gone.body).toContain('vuelve a conectar desde tu aplicación');
   });
 
   it('escapa títulos, limita la UI al preview recibido y ofrece cancelar', () => {

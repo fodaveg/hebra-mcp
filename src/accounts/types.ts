@@ -15,6 +15,10 @@ export interface AccountRecord extends AccountRef {
   storage: AccountStorage;
   state: AccountState;
   removalPhase?: 'blocked' | 'remote-revoked' | 'data-erased';
+  /** Diario que está publicando una renovación: mientras tanto la cuenta no autoriza a nadie. */
+  renewing?: string;
+  /** Diario que publicó la generación vigente; la recuperación lo usa para no revocarla. */
+  renewedBy?: string;
 }
 
 export interface AuthorizedAccount extends AccountRef {

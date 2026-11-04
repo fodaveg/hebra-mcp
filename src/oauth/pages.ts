@@ -11,7 +11,7 @@
  * `'self'` solo el 302 final al cliente quedaría bloqueado.
  */
 import type { Response } from 'express';
-import { PAIRING_REVOKED_REASON } from '../status/pairing-revocation';
+import { PAIRING_REVOKED_REASON, PAIRING_REVOKED_REMOTE_REASON } from '../status/pairing-revocation';
 import { SUMEGO_CONSENT_PATH } from './sumego';
 
 const BASE_CSP = "default-src 'none'; form-action 'self'; style-src 'unsafe-inline'";
@@ -92,7 +92,8 @@ export function sendUnavailablePage(res: Response): void {
   send(res, 503, htmlDocument('No disponible', '<p>El servicio de autorización no está disponible ahora. Inténtalo de nuevo en unos minutos.</p>'));
 }
 
-/** Emparejado revocado (SPEC.md §12.9): qué pasó y cómo reemparejar. */
-export function sendPairingRevokedPage(res: Response): void {
-  send(res, 503, htmlDocument('Conexión con la biblioteca cortada', `<p>${escapeHtml(PAIRING_REVOKED_REASON)}</p>`));
+/** Emparejado revocado (SPEC.md §12.9): qué pasó y cómo volver. `remote`: desde el conector, sin CLI. */
+export function sendPairingRevokedPage(res: Response, remote = false): void {
+  const reason = remote ? PAIRING_REVOKED_REMOTE_REASON : PAIRING_REVOKED_REASON;
+  send(res, 503, htmlDocument('Conexión con la biblioteca cortada', `<p>${escapeHtml(reason)}</p>`));
 }

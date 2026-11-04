@@ -4,12 +4,16 @@ import express, {
   type Response,
   type Router
 } from 'express';
+import { PAIRING_CODE_PATTERN } from '../loopback';
 import {
   sendBridgePage,
+  sendCodeRejectedPage,
   sendContinuePage,
+  sendNoticePage,
   sendPreviewPage,
   sendRemotePairingMessage,
-  sendWaitingPage
+  sendWaitingPage,
+  sendWrongLumbreAccountPage
 } from './pages';
 import { REMOTE_PAIRING_ORIGIN, RemotePairingService } from './service';
 import {
@@ -63,6 +67,12 @@ async function authorizedSession(req: Request, service: RemotePairingService): P
   return { session, authorization: { cookie, formToken: bodyString(req, 'form_token') } };
 }
 
+/** El aviso de la transacción de este navegador, si sigue viva tras un error recuperable. */
+async function currentNotice(req: Request, service: RemotePairingService) {
+  const cookie = cookieValue(req);
+  return cookie ? service.noticeForCookie(cookie).catch(() => null) : null;
+}
+
 function clearCookie(res: Response): void {
   res.clearCookie(REMOTE_PAIRING_COOKIE, { secure: true, httpOnly: true, sameSite: 'lax', path: '/' });
 }
@@ -93,13 +103,29 @@ export function createRemotePairingRouter(
   const router = express.Router();
   const form = express.urlencoded({ extended: false, limit: '4kb' });
 
+  // Aviso previo: destino del callback de Sumego, antes de salir hacia Lumbre.
+  router.get('/lumbre/pairing/start', async (req, res) => {
+    try {
+      const cookie = cookieValue(req);
+      if (!cookie) throw new RemotePairingError('invalid_session');
+      const notice = await service.noticeForCookie(cookie);
+      if (notice) { sendNoticePage(res, notice); return; }
+      const page = await service.pageForCookie(cookie);
+      if (!page) throw new RemotePairingError('invalid_session');
+      sendWaitingPage(res, page.formToken);
+    } catch (error) { handleError(res, error); }
+  });
+
+  // Sin una transacción viva de este navegador que espere un código, la página no lleva el script
+  // que envía el fragmento: un enlace `/lumbre/connect#code=…` no tiene ningún efecto.
   router.get('/lumbre/connect', async (req, res) => {
     try {
       const cookie = cookieValue(req);
       if (!cookie) throw new RemotePairingError('invalid_session');
       const page = await service.pageForCookie(cookie);
       if (!page) throw new RemotePairingError('invalid_session');
-      sendBridgePage(res, page.formToken);
+      if (await service.awaitsCredential(page.session.id)) sendBridgePage(res, page.formToken);
+      else sendWaitingPage(res, page.formToken);
     } catch (error) { handleError(res, error); }
   });
 
@@ -116,9 +142,18 @@ export function createRemotePairingRouter(
   router.post('/lumbre/connect', form, async (req, res) => {
     try {
       const { session, authorization } = await authorizedSession(req, service);
-      await service.receiveCredential(session.id, authorization, bodyString(req, 'code'));
+      const code = bodyString(req, 'code');
+      // Con otra forma no es un código de Lumbre: ni se persiste ni llega a canjearse.
+      if (!PAIRING_CODE_PATTERN.test(code)) throw new RemotePairingError('invalid_form');
+      await service.receiveCredential(session.id, authorization, code);
       sendWaitingPage(res, await service.formToken(session.id));
-    } catch (error) { handleError(res, error); }
+    } catch (error) {
+      if (error instanceof RemotePairingError && error.code === 'wrong_lumbre_account') {
+        sendWrongLumbreAccountPage(res, await currentNotice(req, service));
+      } else if (error instanceof RemotePairingError && error.code === 'code_rejected') {
+        sendCodeRejectedPage(res, await currentNotice(req, service));
+      } else handleError(res, error);
+    }
   });
 
   router.post('/lumbre/pairing/poll', form, async (req, res) => {

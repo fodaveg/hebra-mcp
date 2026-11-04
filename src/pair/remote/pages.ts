@@ -33,14 +33,72 @@ function hiddenToken(formToken: string): string {
 
 export function sendBridgePage(res: Response, formToken: string): void {
   const nonce = randomBytes(18).toString('base64url');
-  const script = `(function(){var f=document.getElementById('bridge'),p=new URLSearchParams(location.hash.slice(1)),v=p.getAll('code');history.replaceState(null,'','/lumbre/connect');if(v.length!==1||!v[0]){document.getElementById('problem').hidden=false;return}f.elements.code.value=v[0];f.submit()}())`;
+  // Solo se envía un código con la forma que emite Lumbre: lo demás no llega a tocar la transacción.
+  const script = `(function(){var f=document.getElementById('bridge'),p=new URLSearchParams(location.hash.slice(1)),v=p.getAll('code');history.replaceState(null,'','/lumbre/connect');if(v.length!==1||!/^[a-f0-9]{64}$/.test(v[0])){document.getElementById('problem').hidden=false;return}f.elements.code.value=v[0];f.submit()}())`;
   const body = '<p>Terminando la conexión con Lumbre…</p>' +
-    '<p id="problem" hidden>No se ha recibido una autorización válida. Vuelve a iniciar la conexión.</p>' +
+    '<p id="problem" hidden>No se ha recibido una autorización válida. <a href="/lumbre/pairing/start">Vuelve a autorizar en Lumbre</a>.</p>' +
     '<form id="bridge" method="post" action="/lumbre/connect">' + hiddenToken(formToken) +
     '<input type="hidden" name="code" value=""></form>' +
     `<script nonce="${nonce}">${script}</script>`;
   securityHeaders(res, `${BASE_CSP}; script-src 'nonce-${nonce}'`);
   res.status(200).type('html').send(document('Conectar biblioteca', body));
+}
+
+export interface RemotePairingNoticePage {
+  email: string | null;
+  renewal: boolean;
+  authorizationUrl: string;
+  formToken: string;
+}
+
+function accountLabel(email: string | null): string {
+  return email ? `<strong>${escapeRemoteHtml(email)}</strong>` : 'la cuenta con la que acabas de entrar';
+}
+
+function lumbreLink(url: string): string {
+  const target = new URL(url);
+  if (target.protocol !== 'https:' || target.username || target.password) throw new Error('invalid_lumbre_url');
+  return `<p><a class="continue" href="${escapeRemoteHtml(target.toString())}">Continuar en Lumbre</a></p>`;
+}
+
+/**
+ * Aviso previo (D22, "Alta sin atascos"): antes de salir hacia Lumbre, qué cuenta se va a conectar
+ * y qué hace falta, para no descubrirlo cuando el dueño ya tiene la aprobación delante.
+ */
+export function sendNoticePage(res: Response, page: RemotePairingNoticePage): void {
+  const intro = page.renewal
+    ? `<p>La conexión de ${accountLabel(page.email)} con su biblioteca se cortó. Al renovarla conservas tus notas y no hay que volver a descargar nada.</p>`
+    : `<p>Vas a conectar la biblioteca de ${accountLabel(page.email)}.</p>`;
+  const body = intro +
+    '<p>Antes de empezar, comprueba que tienes:</p><ul>' +
+    '<li>Hebra instalada con esta misma cuenta.</li>' +
+    '<li>El código de recuperación exportado en el dispositivo con el que vas a aprobar (Hebra &gt; Ajustes &gt; Sincronización).</li>' +
+    '<li>Abierta en Lumbre la sesión de esta misma cuenta, no la de otra.</li></ul>' +
+    KEY_CUSTODY_NOTICE + lumbreLink(page.authorizationUrl) +
+    `<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(page.formToken)}<button class="secondary" type="submit">Cancelar</button></form>`;
+  securityHeaders(res);
+  res.status(200).type('html').send(document(page.renewal ? 'Renueva la conexión' : 'Conecta tu biblioteca', body));
+}
+
+/** La sesión de Lumbre de este navegador es de otra cuenta, y aún nadie ha aprobado nada. */
+export function sendWrongLumbreAccountPage(res: Response, page: RemotePairingNoticePage | null): void {
+  const retry = page
+    ? `<p>Cierra esa sesión en Lumbre, entra con ${accountLabel(page.email)} y continúa.</p>${lumbreLink(page.authorizationUrl)}` +
+      `<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(page.formToken)}<button class="secondary" type="submit">Cancelar</button></form>`
+    : '<p>Cierra esa sesión en Lumbre, entra con tu cuenta y vuelve a conectar desde tu aplicación.</p>';
+  securityHeaders(res);
+  res.status(409).type('html').send(document('Lumbre tiene abierta otra cuenta',
+    `<p>La sesión de Lumbre de este navegador es de otra cuenta. No se ha conectado nada ni hace falta aprobar nada en Hebra.</p>${retry}`));
+}
+
+/** Lumbre no reconoce el código recibido: no ha pasado nada y se puede volver a autorizar. */
+export function sendCodeRejectedPage(res: Response, page: RemotePairingNoticePage | null): void {
+  const retry = page
+    ? `${lumbreLink(page.authorizationUrl)}<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(page.formToken)}<button class="secondary" type="submit">Cancelar</button></form>`
+    : '<p>Vuelve a conectar desde tu aplicación.</p>';
+  securityHeaders(res);
+  res.status(400).type('html').send(document('Autorización no válida',
+    `<p>Lumbre no reconoce la autorización recibida: puede haber caducado o venir de otro enlace. No se ha conectado nada.</p>${retry}`));
 }
 
 export function sendWaitingPage(res: Response, formToken: string, remainingMs?: number): void {
@@ -59,7 +117,10 @@ export function sendPreviewPage(res: Response, formToken: string, preview: Pairi
     ? '<p class="empty">La biblioteca no contiene títulos que mostrar.</p>'
     : `<ul>${preview.titles.slice(0, 3).map((title) => `<li>${escapeRemoteHtml(title || 'Sin título')}</li>`).join('')}</ul>`;
   const records = preview.more ? `más de ${preview.recordsRead}` : String(preview.recordsRead);
-  const body = '<p>Comprueba que estas notas pertenecen a la biblioteca que quieres conectar:</p>' + titles +
+  const replaces = preview.replacesLibrary
+    ? '<p><strong>Esta biblioteca es distinta de la que tenías conectada.</strong> Al confirmar se retira la conexión anterior y se borra su copia de este servidor. Las notas que tengas en Hebra no se tocan.</p>'
+    : '';
+  const body = replaces + '<p>Comprueba que estas notas pertenecen a la biblioteca que quieres conectar:</p>' + titles +
     `<p class="meta">Biblioteca creada el ${escapeRemoteHtml(preview.vaultCreatedAt)}; ${records} registros leídos.</p>` + KEY_CUSTODY_NOTICE +
     `<form method="post" action="/lumbre/pairing/confirm">${hiddenToken(formToken)}<button type="submit">Sí, conectar esta biblioteca</button></form>` +
     `<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(formToken)}<button class="secondary" type="submit">No, cancelar</button></form>`;
