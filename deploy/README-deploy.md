@@ -442,8 +442,12 @@ tras esa marca. Después se arranca la imagen anterior siguiendo la advertencia 
 «Publicar una versión nueva»: solo una versión que entienda el registro
 multiusuario puede volver a servir tráfico.
 
-El bloqueo de control no protege entre contenedores, porque cada uno tiene su
-propio espacio de PID: por eso el paso de parar y comprobar es obligatorio.
+La orden toma `control/server.lock`, el mismo bloqueo que el servicio, y se niega
+con `control_secrets_busy` si otro proceso lo tiene. Es un bloqueo del kernel
+sobre el fichero (no de PID), así que lo ve también un servicio que corra en otro
+contenedor sobre el mismo volumen, y lo suelta la muerte del proceso sea como
+sea. Aun así, el paso de parar y comprobar sigue siendo el procedimiento: el
+bloqueo es la red, no el plan.
 
 Mientras la imagen anterior atienda, `secrets.json` es la fuente vigente y
 `control/secrets.json` queda atrasado, con los bearers revocados desde entonces

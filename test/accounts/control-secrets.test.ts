@@ -14,7 +14,7 @@ import { ControlSecretsError, migrateControlSecrets, openControlSecrets, openCon
 import { accountControlDir } from '../../src/accounts/control-ipc';
 import { AccountRegistry } from '../../src/accounts/registry';
 import { AccountRemovalService } from '../../src/accounts/removal';
-import { WriterLock } from '../../src/lock';
+import { acquireServerLock } from '../../src/lock';
 import type { ActiveGrant } from '../../src/oauth/backchannel';
 import { GrantSecrets } from '../../src/oauth/grants';
 import { RefreshSealer } from '../../src/oauth/sumego-refresh';
@@ -488,9 +488,10 @@ describe('vuelta atrás', () => {
     const { expected } = await seedLegacyRoot(dataDir);
     const { legacy, control } = stores(dataDir);
     await migrateControlSecrets(legacy, control);
-    // Otro PID vivo: el padre del worker de vitest.
-    const server = new WriterLock({ dataDir: accountControlDir(dataDir), pid: process.ppid, releaseOnExit: false });
-    expect(server.tryAcquire()).toBe(true);
+    // Un serve-http vivo (aquí, de este proceso): toma control/server.lock y registra su arranque.
+    // El de otro proceso real está en test/lock/server-lock.node.test.ts.
+    const server = acquireServerLock(dataDir, accountControlDir(dataDir))!;
+    expect(server).not.toBeNull();
 
     await expect(rollbackControlSecrets(dataDir)).rejects.toMatchObject({ code: 'control_secrets_busy' });
     expect(await rawGlobals(openFileSecretStore(dataDir))).toEqual({});
@@ -499,7 +500,8 @@ describe('vuelta atrás', () => {
     const report = await rollbackControlSecrets(dataDir);
     expect(report.restored.sort()).toEqual([...CONTROL_SECRET_KEYS].sort());
     expect(await rawGlobals(openFileSecretStore(dataDir))).toEqual(expected);
-    expect(await readdir(accountControlDir(dataDir))).toEqual(['secrets.json']);
+    // `server.lock` se queda en disco, vacío, por diseño; la orden no deja ningún `writer.lock`.
+    expect((await readdir(accountControlDir(dataDir))).sort()).toEqual(['secrets.json', 'server.lock']);
   });
 });
 
