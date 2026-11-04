@@ -218,7 +218,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     }
     // Emparejado revocado (SPEC.md §12.9): el `revoked` del relé o el `410 pairing_revoked` de
     // Lumbre que vea el OAuth; `hebra_status` dice lo mismo que la página de `/authorize`.
-    const pairing = new PairingRevocation(() => serve?.instance.syncRunner?.revoked ?? false);
+    // El estado es por cuenta (D22): se guarda por credencial en `pairing`, no en la instancia.
+    const pairing = new PairingRevocation(options.multiuser ? undefined : () => serve?.instance.syncRunner?.revoked ?? false);
     const auth = await options.loadAuth(options.dataDir, options.config, options.secrets, pairing);
     if (!auth) throw new ServeHttpError(
       'auth_not_configured',
@@ -237,15 +238,19 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           assertActive: () => { activeRegistry.assertActive(account); },
           uploadLedger: pendingUploads.ledger(account) });
         opened.instance.deferSignalRelease();
-        const accountPairing = account.storage === 'legacy-root' ? pairing :
-          new PairingRevocation(() => opened.instance.syncRunner?.revoked ?? false);
-        opened.ctx.status = new PairingStatusSource(opened.ctx.status, accountPairing);
-        if (account.storage !== 'legacy-root') return opened;
-        const legacy = rememberRevocationOnClose(opened, pairing, account.binding.pairedCredentialId, () => {
-          if (serve === legacy) serve = null;
-        });
-        serve = legacy;
-        return legacy;
+        const credentialId = account.binding.pairedCredentialId;
+        const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false);
+        opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
+        const tracked: ServeContext = { ...opened, close: async () => {
+          detachRelay();
+          try {
+            await opened.close();
+          } finally {
+            if (serve === tracked) serve = null;
+          }
+        } };
+        if (account.storage === 'legacy-root') serve = tracked;
+        return tracked;
       }, readCapacityConfig());
       const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
       if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');
@@ -292,7 +297,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       }
     } else {
       if (!serve) throw new ServeHttpError('auth_not_configured', 'El modo multiusuario requiere autenticación por cuenta.');
-      serve.ctx.status = new PairingStatusSource(serve.ctx.status, pairing);
+      serve.ctx.status = new PairingStatusSource(serve.ctx.status, pairing,
+        async () => options.secrets ? (await readPairedSecrets(options.secrets))?.connection.credentialId ?? null : null);
     }
     const app = createHttpApp({ ctx: serve?.ctx, contexts: contexts ?? undefined,
       remotePairing: remotePairing?.router,

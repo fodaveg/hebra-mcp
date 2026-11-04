@@ -11,7 +11,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE, revokeAllTokens } from '../../src/oauth';
 import { INTROSPECTION_CACHE_MS, type HebraOAuthProvider } from '../../src/oauth/provider';
-import { CODEX_CIMD_CLIENT_ID, LECHAT_CALLBACK, LECHAT_CLIENT_NAME, LECHAT_DCR_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID } from '../../src/oauth/clients';
+import { CLAUDE_CODE_CIMD_CLIENT_ID, CODEX_CIMD_CLIENT_ID, LECHAT_CALLBACK, LECHAT_CLIENT_NAME, LECHAT_DCR_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID } from '../../src/oauth/clients';
 import { BackchannelError, LumbreBackchannel } from '../../src/oauth/backchannel';
 import { HttpConfigError } from '../../src/http/config';
 import { ACCESS_TOKEN_TTL_MS, REFRESH_REUSE_GRACE_MS } from '../../src/oauth/token-store';
@@ -118,11 +118,11 @@ beforeEach(async () => {
   stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   cimdFetch = vi.fn(async (input: string | URL) => new Response(JSON.stringify({
     client_id: String(input), client_name: String(input) === CODEX_CIMD_CLIENT_ID ? 'Codex' : 'Claude',
-    redirect_uris: String(input) === CODEX_CIMD_CLIENT_ID
+    redirect_uris: [CODEX_CIMD_CLIENT_ID, CLAUDE_CODE_CIMD_CLIENT_ID].includes(String(input))
       ? ['http://127.0.0.1/callback', 'http://localhost/callback'] : [CLAUDE_CALLBACK],
     token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'],
     response_types: ['code']
-  }), { status: [CIMD_CLIENT_ID, CODEX_CIMD_CLIENT_ID].includes(String(input)) ? 200 : 404, headers: { 'content-type': 'application/json' } }));
+  }), { status: [CIMD_CLIENT_ID, CODEX_CIMD_CLIENT_ID, CLAUDE_CODE_CIMD_CLIENT_ID].includes(String(input)) ? 200 : 404, headers: { 'content-type': 'application/json' } }));
   context = await buildTestContext();
   store = new MemorySecretStore();
   await writePairedSecrets(store, {
@@ -283,6 +283,37 @@ describe('consentimiento y vínculo exacto', () => {
     expect(requestCount).toBe(1);
     expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length);
     await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: CODEX_CIMD_CLIENT_ID });
+  });
+
+  it.each(['http://127.0.0.1:54321/callback', 'http://localhost:54322/callback'])('Claude Code CIMD oficial completa consentimiento, PKCE y herramientas con %s', async (redirect) => {
+    const auth = new MemoryOAuthClient(CLAUDE_CODE_CIMD_CLIENT_ID, redirect, 'Claude Code');
+    const client = await sdkFlow(auth);
+    expect(auth.info?.client_id).toBe(CLAUDE_CODE_CIMD_CLIENT_ID);
+    expect(cimdFetch).toHaveBeenCalledWith(CLAUDE_CODE_CIMD_CLIENT_ID, expect.objectContaining({ redirect: 'manual' }));
+    expect(requestCount).toBe(1);
+    expect(requestClientName).toBe('Claude Code');
+    expect((await client.listTools()).tools).toHaveLength(TOOL_NAMES.length);
+    await expect(provider.verifyAccessToken(auth.saved!.access_token)).resolves.toMatchObject({ clientId: CLAUDE_CODE_CIMD_CLIENT_ID });
+  });
+
+  it('Claude Code rechaza callbacks ajenos y el canje con otra URI o puerto', async () => {
+    for (const redirect of ['http://evil.example:54321/callback', 'http://127.0.0.1:54321/callback?x=1',
+      'http://user@127.0.0.1:54321/callback', 'http://127.0.0.1:54321/callback#f', CLAUDE_CALLBACK]) {
+      const rejected = await authorize(pkce().challenge, undefined, CLAUDE_CODE_CIMD_CLIENT_ID, redirect);
+      expect(rejected.status).toBe(400);
+      expect(rejected.headers.get('location')).toBeNull();
+    }
+    expect(requestCount).toBe(0);
+    const { verifier, challenge } = pkce();
+    const redirect = 'http://127.0.0.1:54321/callback';
+    expect((await authorize(challenge, undefined, CLAUDE_CODE_CIMD_CLIENT_ID, redirect)).status).toBe(302);
+    approved = true;
+    const returned = await callback('approved');
+    const code = new URL(returned.headers.get('location')!).searchParams.get('code')!;
+    const body = { client_id: CLAUDE_CODE_CIMD_CLIENT_ID, grant_type: 'authorization_code', code, code_verifier: verifier };
+    for (const changed of ['http://127.0.0.1:54322/callback', 'http://localhost:54321/callback']) {
+      expect((await token({ ...body, redirect_uri: changed })).status).toBe(400);
+    }
   });
 
   it('Codex DCR conserva su host registrado y recibe una concesión válida', async () => {

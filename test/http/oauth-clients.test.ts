@@ -1,7 +1,7 @@
 /** Allowlist de clientes públicos: la metadata remota no amplía los callbacks. */
 import { describe, expect, it, vi } from 'vitest';
 import {
-  ClaudeClientsStore, CLAUDE_CALLBACK, CODEX_CIMD_CLIENT_ID, isAcceptableCimdClientId, isAcceptableOAuthClientId,
+  ClaudeClientsStore, CLAUDE_CALLBACK, CLAUDE_CODE_CIMD_CLIENT_ID, CODEX_CIMD_CLIENT_ID, isAcceptableCimdClientId, isAcceptableOAuthClientId,
   isAllowedRedirectUri, isCodexCallback, isVibeCallback, LECHAT_CALLBACK, LECHAT_CLIENT_NAME, LECHAT_DCR_CLIENT_ID, VIBE_CLIENT_NAME, VIBE_DCR_CLIENT_ID
 } from '../../src/oauth/clients';
 
@@ -154,5 +154,65 @@ describe('cliente OAuth Le Chat', () => {
     expect(isAllowedRedirectUri(client, LECHAT_CALLBACK)).toBe(true);
     for (const uri of [`${LECHAT_CALLBACK}/`, `${LECHAT_CALLBACK}?a=b`, CLAUDE_CALLBACK, 'http://127.0.0.1:54321/callback',
       'https://callback.mistral.ai:443/v1/integrations_auth/oauth2_callback']) expect(isAllowedRedirectUri(client, uri)).toBe(false);
+  });
+});
+
+describe('cliente OAuth Claude Code (D22)', () => {
+  const doc = (redirects: unknown = callbacks, extra: object = {}) => ({ client_id: CLAUDE_CODE_CIMD_CLIENT_ID,
+    client_name: 'Claude Code', redirect_uris: redirects, token_endpoint_auth_method: 'none', ...extra });
+
+  it('acepta el CIMD oficial con ambos callbacks loopback y lo nombra Claude Code', async () => {
+    const fetch = vi.fn(async () => json(doc()));
+    const client = await new ClaudeClientsStore({ fetch }).getClient(CLAUDE_CODE_CIMD_CLIENT_ID);
+    expect(client).toMatchObject({ client_id: CLAUDE_CODE_CIMD_CLIENT_ID, client_name: 'Claude Code',
+      redirect_uris: callbacks, application_type: 'native', token_endpoint_auth_method: 'none' });
+    expect(fetch).toHaveBeenCalledWith(CLAUDE_CODE_CIMD_CLIENT_ID, expect.objectContaining({ redirect: 'manual' }));
+    expect(isAcceptableOAuthClientId(CLAUDE_CODE_CIMD_CLIENT_ID)).toBe(true);
+  });
+
+  it('el nombre del consentimiento no sale de la metadata remota', async () => {
+    const client = await new ClaudeClientsStore({ fetch: async () => json(doc(callbacks, { client_name: 'Otro' })) })
+      .getClient(CLAUDE_CODE_CIMD_CLIENT_ID);
+    expect(client?.client_name).toBe('Claude Code');
+  });
+
+  it('puerto dinámico válido; sin equiparar hosts ni aceptar el callback web', async () => {
+    const client = (await new ClaudeClientsStore({ fetch: async () => json(doc()) }).getClient(CLAUDE_CODE_CIMD_CLIENT_ID))!;
+    for (const uri of ['http://127.0.0.1:54321/callback', 'http://localhost:1/callback', 'http://localhost:65535/callback', ...callbacks]) {
+      expect(isAllowedRedirectUri(client, uri)).toBe(true);
+    }
+    for (const uri of ['http://localhost:0/callback', 'http://localhost:65536/callback', 'http://evil.example:54321/callback',
+      'http://127.0.0.1:54321/callback?x=1', 'http://127.0.0.1:54321/callback#f', 'http://user@127.0.0.1:54321/callback',
+      'http://[::1]:54321/callback', 'https://localhost:54321/callback', CLAUDE_CALLBACK]) {
+      expect(isAllowedRedirectUri(client, uri)).toBe(false);
+    }
+    const only127 = (await new ClaudeClientsStore({ fetch: async () => json(doc([callbacks[0]])) }).getClient(CLAUDE_CODE_CIMD_CLIENT_ID))!;
+    expect(isAllowedRedirectUri(only127, 'http://127.0.0.1:54321/callback')).toBe(true);
+    expect(isAllowedRedirectUri(only127, 'http://localhost:54321/callback')).toBe(false);
+  });
+
+  it.each([
+    [[]], [['https://evil.example/callback']], [[...callbacks, 'https://evil.example/callback']],
+    [[CLAUDE_CALLBACK]], [[...callbacks, CLAUDE_CALLBACK]], [['http://localhost/callback?']], [['http://user@localhost/callback']],
+    [['http://127.0.0.1/callback#']], [['http://localhost:65536/callback']]
+  ])('rechaza metadata con callbacks ajenos %j', async (redirects) => {
+    expect(await new ClaudeClientsStore({ fetch: async () => json(doc(redirects)) }).getClient(CLAUDE_CODE_CIMD_CLIENT_ID)).toBeUndefined();
+  });
+
+  it('rechaza otro client_id en el documento y auth privada', async () => {
+    for (const body of [doc(callbacks, { client_id: 'otro' }), doc(callbacks, { token_endpoint_auth_method: 'client_secret_basic' })]) {
+      expect(await new ClaudeClientsStore({ fetch: async () => json(body) }).getClient(CLAUDE_CODE_CIMD_CLIENT_ID)).toBeUndefined();
+    }
+  });
+
+  it('otro CIMD de claude.ai con callbacks loopback se rechaza; el web sigue igual', async () => {
+    const other = 'https://claude.ai/oauth/other-client-metadata';
+    const fetch = vi.fn(async () => json({ ...doc(callbacks), client_id: other }));
+    expect(await new ClaudeClientsStore({ fetch }).getClient(other)).toBeUndefined();
+    const web = await new ClaudeClientsStore({ fetch: async () => json({ ...doc([CLAUDE_CALLBACK]), client_id: other }) }).getClient(other);
+    expect(web?.redirect_uris).toEqual([CLAUDE_CALLBACK]);
+    expect(isAllowedRedirectUri(web!, 'http://localhost:54321/callback')).toBe(false);
+    for (const id of [`${CLAUDE_CODE_CIMD_CLIENT_ID}?x=1`, `${CLAUDE_CODE_CIMD_CLIENT_ID}#`, 'https://claude.ai:8443/oauth/claude-code-client-metadata',
+      'http://claude.ai/oauth/claude-code-client-metadata']) expect(isAcceptableCimdClientId(id)).toBe(false);
   });
 });
