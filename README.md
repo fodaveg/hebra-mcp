@@ -14,7 +14,7 @@ vincula como un dispositivo más de la biblioteca. En el conector remoto, el ser
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 3 de noviembre de 2026: el servidor MCP tiene 40 herramientas
+Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -97,11 +97,13 @@ Estado a 3 de noviembre de 2026: el servidor MCP tiene 40 herramientas
   `operationId`) y `undo` (7 días). Una carpeta solo se rechaza por la configuración de
   privados, con el `folder_unavailable` de `hebra_rename_folder`; lo privado que tenga dentro
   se mueve con ella y sigue oculto, como al renombrarla.
-- Espacios compartidos (H-L7): `hebra_list_spaces` devuelve (con `spaceId` y `name`) solo los espacios para los que
-  esa cuenta tiene membresía, concesión y permiso propio del agente. Las herramientas de
-  contenido aceptan `space`; sin él trabajan en la biblioteca personal de la cuenta
-  autenticada. Pertenecer a un espacio u organización nunca abre la biblioteca personal de
-  otro miembro.
+- Espacios compartidos (H-L7) y organizaciones (D22): `hebra_list_spaces` devuelve los espacios
+  que vería la persona de esa cuenta, con `spaceId`, `name`, su organización y `granted`;
+  `hebra_list_organizations` lista en solo lectura sus organizaciones, miembros y espacios.
+  Las herramientas de contenido aceptan `space`, solo con un espacio de `granted: true`; sin él
+  trabajan en la biblioteca personal de la cuenta autenticada. Ser miembro de una organización
+  no concede contenido, y pertenecer a un espacio u organización nunca abre la biblioteca
+  personal de otro miembro.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).

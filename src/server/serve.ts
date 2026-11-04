@@ -178,6 +178,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // sus bibliotecas sin que el gestor sepa de ella.
   const spaceInstance = uploadLedger ? { ...options.instance, uploadLedger } : options.instance;
   const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive) : undefined;
+  const directory = spaces ? () => spaces.directory() : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
@@ -239,6 +240,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     // rechazan con `busy_other_instance` en vez de saltar a `writer.sock`.
     const ctx: ServerContext = {
       spaces,
+      directory,
       port: instance.port,
       privacyConfig,
       privacyConfigSource: privacySource,
@@ -259,6 +261,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const write = buildRoutedWriteContext(instance, localWriteContext(instance, authorize), options.forward);
   const ctx: ServerContext = {
     spaces,
+    directory,
     authorize,
     port: instance.port,
     privacyConfig,

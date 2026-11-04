@@ -59,6 +59,7 @@ describe('capacidades', () => {
     expect(capabilities.tools).toContain('hebra_search');
     expect(capabilities.limits.search).toEqual({ default: 20, max: 50 });
     expect(capabilities.limits.listNotes).toEqual({ default: 50, max: 100 });
+    expect(capabilities.limits.listOrganizations).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);
     // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover

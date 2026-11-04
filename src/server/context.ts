@@ -5,6 +5,7 @@ import type { PrivacyFilter } from '../privacy/filter';
 import type { PrivacyConfig } from '../privacy/config';
 import { privacyWithMemory } from '../privacy/folder-memory';
 import type { StatusSource } from '../status/status-source';
+import type { AgentDirectory } from '../spaces/protocol';
 import { GateUsage } from './privacy-gate';
 import type { WriteContext } from './write-context';
 
@@ -52,10 +53,18 @@ export interface SpaceLifecycleControl {
   beginShutdown(): void;
 }
 
+/** Lo que devuelve el relé, y qué miembro es la persona (el `accountId` de su registro). */
+export interface DirectoryView {
+  selfAccountId: string;
+  directory: AgentDirectory;
+}
+
 export interface ServerContext {
   spaces?: SpaceRouter;
   /** `serve-http`: la petición dura hasta que acabe esta llamada, aunque el cliente se vaya. */
   trackInvocation?<T>(run: () => Promise<T>): Promise<T>;
+  /** El directorio de la persona (D22), fresco. Falla con `organizations_unavailable`. */
+  directory?: () => Promise<DirectoryView>;
   spaceId?: string;
   /** Nombre del espacio compartido (cacheado; `null` si no se pudo leer). Contenido del usuario: nunca a logs. */
   spaceName?: () => string | null;

@@ -1,5 +1,5 @@
 /**
- * Registro de las 39 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 41 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
@@ -28,6 +28,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
+import { runListOrganizations, runListSpaces } from '../spaces/directory';
 import { resolveToolContext, usageOf, type ServerContext, type ToolContext } from './context';
 import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
@@ -61,6 +62,7 @@ import {
   listFilesInputShape,
   listFoldersInputShape,
   listNotesInputShape,
+  listOrganizationsInputShape,
   listTagsInputShape,
   listTrashInputShape,
   listVersionsInputShape,
@@ -154,7 +156,8 @@ function countOf(result: unknown): number | undefined {
     'versions',
     'attachments',
     'sections',
-    'matches'
+    'matches',
+    'organizations'
   ] as const) {
     const value = record[key];
     if (Array.isArray(value)) return value.length;
@@ -311,6 +314,7 @@ const GATE_POLICIES: Record<
   hebra_links: read(),
   hebra_status: read(),
   hebra_list_spaces: read(),
+  hebra_list_organizations: read(emptyList('organizations')),
   hebra_create_note: WRITE,
   hebra_append_to_note: WRITE_WITH_COPY,
   hebra_edit_note: WRITE_WITH_COPY,
@@ -495,7 +499,7 @@ export function gatedTools(server: McpServer): ReadonlySet<string> {
 }
 
 export function registerTools(server: McpServer, ctx: ServerContext, version = 'unknown'): void {
-  const space = z.string().max(200).optional().describe('UUID de un espacio de hebra_list_spaces; personal u omitido = biblioteca personal.');
+  const space = z.string().max(200).optional().describe('UUID de un espacio de hebra_list_spaces con `granted: true`; personal u omitido = biblioteca personal.');
   const scoped = <T extends Record<string, unknown>>(shape: T) => ({ ...shape, space });
   const gatedNames = new Set<string>();
   gatedByServer.set(server, gatedNames);
@@ -537,10 +541,23 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
   }
 
   server.registerTool('hebra_list_spaces', {
-    title: 'Espacios autorizados al agente',
-    description: 'Lista solo los espacios con permiso y concesión vigentes para este agente, con su `spaceId` y su `name` (null si no se puede leer). No incluye los apagados. Usa spaceId como selector space; omitir space siempre elige personal. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
+    title: 'Espacios que vería la persona',
+    description: 'Lista los espacios que vería la persona de este agente, con `spaceId`, `name` (null si no se puede leer), `organization` ({orgId, name} o null) y `granted`. Solo con `granted: true` se puede usar spaceId como selector space; con false responde space_access_denied, aunque seas miembro de la organización. Omitir space siempre elige personal. Si `organizationsAvailable` es false, el directorio no está disponible y salen solo los espacios con concesión. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
     inputSchema: {}, annotations: READ_ONLY
-  }, gated('hebra_list_spaces', async () => ({ spaces: await ctx.spaces?.list() ?? [] })));
+  }, gated('hebra_list_spaces', () => runListSpaces(ctx)));
+
+  server.registerTool(
+    'hebra_list_organizations',
+    {
+      title: 'Organizaciones de la persona',
+      description: 'Lista en solo lectura las organizaciones de la persona de este agente: `orgId`, `name`, `members` ({accountId, role, name, isSelf}; `name` es null si no se conoce, `isSelf` marca a la persona) y `spaces` ({spaceId, name, granted}). Una organización no es un selector y ser miembro no concede contenido: se entra con `space`, espacio por espacio, y solo con `granted: true`. Paginada (`limit`, `cursor`, `nextCursor`). Si el directorio no está disponible: organizations_unavailable con `reason`.',
+      inputSchema: listOrganizationsInputShape,
+      annotations: READ_ONLY
+    },
+    gated('hebra_list_organizations', (_toolCtx, input: { limit?: number; cursor?: string }) =>
+      runListOrganizations(ctx, input)
+    )
+  );
 
   server.registerTool(
     'hebra_search',
