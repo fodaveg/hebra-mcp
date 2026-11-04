@@ -968,15 +968,28 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   /** Cierra la conexión SQLite ya (sin esperar a la cola). */
+  /**
+   * `closed` solo pasa a true cuando las tres conexiones están cerradas de verdad: si una
+   * `close()` lanza a medias, el reintento (`closeWhenIdle` de `LibraryInstance.close`) no
+   * puede darlo por cerrado y soltar el bloqueo del escritor con la conexión abierta. Se
+   * intentan las tres siempre y se relanza el primer error; `isOpen` hace que repetir sea
+   * seguro (cerrar dos veces una `DatabaseSync` lanza).
+   */
   close(): void {
     if (this.closed) return;
-    this.closed = true;
     this.statements.clear();
     this.operationStore = null;
     this.replacePlanStore = null;
     this.jdPlanStore = null;
-    this.jdPlansDb?.close();
-    this.replacePlansDb?.close();
-    this.db.close();
+    let failure: unknown = null;
+    for (const conn of [this.jdPlansDb, this.replacePlansDb, this.db]) {
+      try {
+        if (conn?.isOpen) conn.close();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== null) throw failure;
+    this.closed = true;
   }
 }
