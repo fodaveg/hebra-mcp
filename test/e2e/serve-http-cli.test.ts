@@ -1,7 +1,7 @@
 /** CLI real: el método owner antiguo no abre el servidor ni modifica el emparejado. */
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -41,5 +41,41 @@ describe('serve-http y mantenimiento OAuth', () => {
     const revoked = await run(['oauth-revoke-all']);
     expect(revoked.code).toBe(0);
     expect(JSON.parse(readFileSync(join(dataDir, 'oauth-revocations-v2.json'), 'utf8'))).toMatchObject({ version: 2 });
+  });
+
+  it('control-secrets-rollback copia de vuelta sin borrar control/secrets.json y no imprime valores', async () => {
+    const value = JSON.stringify({ ['A'.repeat(22)]: 'a1'.repeat(32) });
+    await mkdir(join(dataDir, 'control'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(dataDir, 'secrets.json'), JSON.stringify({ 'recovery-code': 'personal-sintetico' }), { mode: 0o600 });
+    writeFileSync(join(dataDir, 'control', 'secrets.json'), JSON.stringify({ 'hebra-mcp-oauth-grants': value }), { mode: 0o600 });
+
+    const result = await run(['control-secrets-rollback']);
+
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({ restored: ['hebra-mcp-oauth-grants'] });
+    expect(result.stdout + result.stderr).not.toContain('a1'.repeat(32));
+    expect(JSON.parse(readFileSync(join(dataDir, 'secrets.json'), 'utf8'))).toEqual({
+      'recovery-code': 'personal-sintetico', 'hebra-mcp-oauth-grants': value
+    });
+    expect(JSON.parse(readFileSync(join(dataDir, 'control', 'secrets.json'), 'utf8'))).toMatchObject({
+      'hebra-mcp-oauth-grants': value
+    });
+  });
+
+  it('control-secrets-rollback rechaza el llavero, un conflicto y argumentos de más sin tocar nada', async () => {
+    await mkdir(join(dataDir, 'control'), { recursive: true, mode: 0o700 });
+    const control = JSON.stringify({ 'hebra-mcp-oauth-grants': '{}' });
+    const legacy = JSON.stringify({ 'hebra-mcp-oauth-grants': '{"distinto":"x"}' });
+    writeFileSync(join(dataDir, 'control', 'secrets.json'), control, { mode: 0o600 });
+    writeFileSync(join(dataDir, 'secrets.json'), legacy, { mode: 0o600 });
+
+    expect((await run(['control-secrets-rollback'], { HEBRA_MCP_SECRET_STORE: 'keychain' })).code).toBe(1);
+    expect((await run(['control-secrets-rollback', 'de-mas'])).code).toBe(1);
+    const conflict = await run(['control-secrets-rollback']);
+
+    expect(conflict.code).toBe(1);
+    expect(JSON.parse(conflict.stderr)).toMatchObject({ code: 'control_secrets_conflict' });
+    expect(readFileSync(join(dataDir, 'control', 'secrets.json'), 'utf8')).toBe(control);
+    expect(readFileSync(join(dataDir, 'secrets.json'), 'utf8')).toBe(legacy);
   });
 });

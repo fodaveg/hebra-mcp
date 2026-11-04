@@ -20,11 +20,23 @@ export const SECRET_SERVICE = 'hebra-mcp';
 
 /** Las tres entradas del llavero (SPEC.md §6.1), por nombre de cuenta. */
 export const SECRET_KEYS = ['lumbre-connection', 'recovery-code', 'device-identity', 'agent-device-key'] as const;
-/** Bearers de concesiones OAuth; separado del emparejado para que `unpair` mantenga
- * su semántica y las familias se invaliden por comparación del vínculo. */
-export type SecretKey = (typeof SECRET_KEYS)[number] | 'hebra-mcp-oauth-grants' | 'hebra-mcp-oauth-pending'
-  // Clave AES-256-GCM de los refresh de Sumego guardados cifrados en `oauth-tokens.json` (D20).
-  | 'hebra-mcp-sumego-refresh-key';
+/**
+ * Secretos globales del conector, no de una persona (D22, SPEC.md §12.10): bearers de
+ * concesiones OAuth de todas las cuentas, sus pendientes y la clave AES-256-GCM de los
+ * refresh de Sumego guardados cifrados en `oauth-tokens.json` (D20). Separados del
+ * emparejado para que `unpair` mantenga su semántica y las familias se invaliden por
+ * comparación del vínculo; en modo fichero viven en `control/secrets.json`
+ * (`../accounts/control-secrets.ts`).
+ */
+export const CONTROL_SECRET_KEYS = [
+  'hebra-mcp-oauth-grants', 'hebra-mcp-oauth-pending', 'hebra-mcp-sumego-refresh-key'
+] as const;
+
+/** Marca de `control/secrets.json`: una vuelta atrás dejó en `secrets.json` la fuente vigente. */
+export const CONTROL_ROLLBACK_MARK = 'hebra-mcp-control-rollback';
+
+export type SecretKey = (typeof SECRET_KEYS)[number] | (typeof CONTROL_SECRET_KEYS)[number]
+  | typeof CONTROL_ROLLBACK_MARK;
 
 export interface SecretStore {
   get(key: SecretKey): Promise<string | null>;
@@ -34,6 +46,9 @@ export interface SecretStore {
   /** Los stores de fichero pueden cerrar una retirada personal borrando las claves y
    *  cualquier temporal exacto bajo la misma exclusión que sus escrituras. */
   deleteKeysAndTemporaryFiles?(keys: readonly SecretKey[]): Promise<void>;
+  /** Los stores de fichero enumeran lo guardado para que el inventario de retirada pueda
+   *  detenerse ante una clave sin clasificar. Puede devolver nombres que no son `SecretKey`. */
+  keys?(): Promise<string[]>;
 }
 
 /** Para tests: nada sale del proceso. */

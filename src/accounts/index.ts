@@ -3,6 +3,9 @@ export { accountControlDir, openAccountControlServer, requestAccountRemoval,
   type AccountControlServer } from './control-ipc';
 export { AccountUploadLedger, expireRemotePairings, PendingSweep, PendingUploadList,
   type PendingSweepOptions, type SweepReport, type WithAccountContext } from './pending-sweep';
+export { ControlSecretsError, migrateControlSecrets, openControlSecrets, openControlSecretStore, restoreControlSecrets,
+  rollbackControlSecrets, type ControlSecretsErrorCode, type ControlSecretsMigration,
+  type ControlSecretsRollback } from './control-secrets';
 export { AccountRegistry, accountDataDir } from './registry';
 export { AccountRemovalService, type AccountOAuthInvalidator, type AccountRemovalOptions } from './removal';
 export { eraseLegacyAccountData, LEGACY_INVENTORY_VERSION, type LegacyInventoryOptions } from './legacy-inventory';

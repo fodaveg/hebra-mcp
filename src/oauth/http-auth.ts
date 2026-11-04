@@ -30,7 +30,7 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import { InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { mcpAuthRouter } from '@modelcontextprotocol/sdk/server/auth/router.js';
 import type { HttpAuth } from '../http/app';
-import { AccountRegistry } from '../accounts';
+import { AccountRegistry, openControlSecrets } from '../accounts';
 import { decodeRecoveryCode } from '../hebra';
 import type { HttpConfig } from '../http/config';
 import { logEvent } from '../log/logger';
@@ -101,8 +101,11 @@ export async function loadOAuthHttpAuth(
   const tokens = await TokenStore.open(dataDir, now);
   const accounts = await AccountRegistry.open(dataDir);
   const revocations = new RevocationFile(dataDir);
-  const grants = await GrantSecrets.open(secrets!, tokens.familyIds());
-  await GrantSecrets.recoverPending(secrets!, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
+  // D22: lo global sale de los secretos de una persona antes de usarlo; `secrets` queda para
+  // su emparejado. Un fallo impide arrancar: nunca se atiende con dos fuentes que discrepen.
+  const control = await openControlSecrets(dataDir, secrets!);
+  const grants = await GrantSecrets.open(control, tokens.familyIds());
+  await GrantSecrets.recoverPending(control, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
   await grants.recoverOrphans(tokens.familyIds(), (token) => backchannel.revoke(token));
   if (options.multiuser && !accounts.legacyAccount()) {
     const paired = await readPairedSecrets(secrets!);
@@ -137,7 +140,7 @@ export async function loadOAuthHttpAuth(
     loginProvider: login.provider,
     sumego,
     pairing: options.pairing,
-    sealer: sumego ? await RefreshSealer.open(secrets!) : null,
+    sealer: sumego ? await RefreshSealer.open(control) : null,
     accounts,
     multiuser: options.multiuser
   });

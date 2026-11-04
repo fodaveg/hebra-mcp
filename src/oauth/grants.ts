@@ -1,4 +1,7 @@
-/** Bearers upstream en el mismo almacén seguro que el emparejado, nunca en metadata OAuth. */
+/**
+ * Bearers upstream de todas las cuentas, nunca en metadata OAuth. En `serve-http` con almacén
+ * de fichero, `store` es `control/secrets.json` (D22, `../accounts/control-secrets.ts`).
+ */
 import type { SecretStore } from '../secrets';
 import { logEvent } from '../log/logger';
 

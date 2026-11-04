@@ -33,23 +33,28 @@ import type { SecretKey, SecretStore } from './secret-store';
 const FILE_NAME = 'secrets.json';
 const TEMPORARY_FILE = /^\.secrets\.json\..+\.tmp$/;
 
-type StoredSecrets = Partial<Record<SecretKey, string>>;
+export type StoredSecrets = Partial<Record<SecretKey, string>>;
+/** Lo que hay en el fichero, sin confundir «no existe» con «no se entiende». */
+export type SecretFileState =
+  | { status: 'absent' }
+  | { status: 'corrupt' }
+  | { status: 'present'; values: StoredSecrets };
 const mutationQueues = new Map<string, Promise<void>>();
 
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
 }
 
-/** JSON inválido, o no es un objeto plano, o un campo no es cadena: la clave (o todas)
- *  cuenta como ausente, sin lanzar. */
-function parseStoredSecrets(raw: string): StoredSecrets {
+/** `null` si es JSON inválido o no es un objeto plano. Un campo que no sea cadena se
+ *  descarta: esa clave cuenta como ausente y las demás sobreviven. */
+function parseSecretsObject(raw: string): StoredSecrets | null {
   let value: unknown;
   try {
     value = JSON.parse(raw);
   } catch {
-    return {};
+    return null;
   }
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return null;
   const result: StoredSecrets = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     if (typeof entry === 'string') result[key as SecretKey] = entry;
@@ -57,10 +62,27 @@ function parseStoredSecrets(raw: string): StoredSecrets {
   return result;
 }
 
+/** JSON inválido, o no es un objeto plano, o un campo no es cadena: la clave (o todas)
+ *  cuenta como ausente, sin lanzar. */
+function parseStoredSecrets(raw: string): StoredSecrets {
+  return parseSecretsObject(raw) ?? {};
+}
+
+/** `fsync` de un directorio: el `rename` vive en él y sin esto un corte de luz puede
+ *  devolver el fichero anterior. */
+export async function syncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r');
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
 export class FileSecretStore implements SecretStore {
   private readonly queueKey: string;
   /** `path`: ruta del JSON, normalmente `fileSecretStorePath(dataDir)`. */
-  constructor(private readonly path: string) { this.queueKey = resolve(path); }
+  constructor(readonly path: string) { this.queueKey = resolve(path); }
 
   /** Serializa el read-modify-write entre todas las instancias del mismo fichero. */
   private mutate<T>(operation: () => Promise<T>): Promise<T> {
@@ -170,6 +192,87 @@ export class FileSecretStore implements SecretStore {
         if (TEMPORARY_FILE.test(name)) await rm(join(dir, name));
       }
     });
+  }
+
+  /**
+   * Lectura para quien no puede tratar un fichero roto como vacío (la migración de
+   * `../accounts/control-secrets.ts`): `get` lo considera ausente y regeneraría claves.
+   * Corrige los permisos igual que `get`.
+   */
+  async inspect(): Promise<SecretFileState> {
+    let raw: string;
+    try {
+      raw = await readFile(this.path, 'utf8');
+    } catch (error) {
+      if (isEnoent(error)) return { status: 'absent' };
+      throw error;
+    }
+    await chmod(dirname(this.path), 0o700);
+    await chmod(this.path, 0o600);
+    const values = parseSecretsObject(raw);
+    return values ? { status: 'present', values } : { status: 'corrupt' };
+  }
+
+  /** Varias claves en una sola escritura atómica. */
+  async update(changes: { set?: StoredSecrets; remove?: readonly SecretKey[] }): Promise<void> {
+    await this.mutate(async () => {
+      const values = await this.readAll();
+      for (const key of changes.remove ?? []) delete values[key];
+      Object.assign(values, changes.set);
+      await this.writeAll(values);
+    });
+  }
+
+  /** Lleva a disco el fichero y su directorio; sin fichero no hay nada que asegurar. */
+  async flush(): Promise<void> {
+    let handle;
+    try {
+      handle = await open(this.path, 'r');
+    } catch (error) {
+      if (isEnoent(error)) return;
+      throw error;
+    }
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await syncDirectory(dirname(this.path));
+  }
+
+  /**
+   * Borra los temporales de una escritura interrumpida que citan alguna de estas claves.
+   * Un temporal es una foto del fichero: si aún contiene una clave ya retirada, seguiría
+   * teniendo el valor. Los demás no se tocan (pueden ser de un `pair` en curso); uno
+   * truncado antes de la clave tampoco contiene su valor.
+   */
+  async deleteTemporaryFilesHolding(keys: readonly SecretKey[]): Promise<void> {
+    await this.mutate(async () => {
+      const dir = dirname(this.path);
+      let entries: string[];
+      try {
+        entries = await readdir(dir);
+      } catch (error) {
+        if (isEnoent(error)) return;
+        throw error;
+      }
+      for (const name of entries) {
+        if (!TEMPORARY_FILE.test(name)) continue;
+        let raw: string;
+        try {
+          raw = await readFile(join(dir, name), 'utf8');
+        } catch (error) {
+          // Otro proceso publicó su temporal entre `readdir` y esta lectura.
+          if (isEnoent(error)) continue;
+          throw error;
+        }
+        if (keys.some((key) => raw.includes(JSON.stringify(key)))) await rm(join(dir, name));
+      }
+    });
+  }
+
+  async keys(): Promise<string[]> {
+    return Object.keys(await this.readAll());
   }
 }
 

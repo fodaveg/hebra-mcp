@@ -2,8 +2,8 @@
  * Refresh de Sumego de cada familia, cifrado (SPEC.md §12.9). Va dentro de `oauth-tokens.json`
  * para que su rotación entre en la misma escritura atómica que rota el refresh de Hebra, pero
  * nunca en claro: AES-256-GCM con una clave aleatoria de 32 bytes que vive en el almacén de
- * secretos existente (`hebra-mcp-sumego-refresh-key`, el mismo llavero o fichero 0600 que el
- * emparejado). Sin esa clave, el fichero de tokens no da acceso a Sumego.
+ * secretos globales (`hebra-mcp-sumego-refresh-key`: el llavero o `control/secrets.json`, D22).
+ * Sin esa clave, el fichero de tokens no da acceso a Sumego.
  *
  * Formato: `v1.<iv>.<cifrado>.<etiqueta>`, todo base64url, con datos asociados fijos. Un valor
  * que no descifra (clave perdida o fichero manipulado) es `null`: la familia no se puede

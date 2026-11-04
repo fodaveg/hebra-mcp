@@ -1,4 +1,6 @@
 export {
+  CONTROL_ROLLBACK_MARK,
+  CONTROL_SECRET_KEYS,
   SECRET_KEYS,
   SECRET_SERVICE,
   KeyringSecretStore,
@@ -7,7 +9,14 @@ export {
   type SecretKey,
   type SecretStore
 } from './secret-store';
-export { FileSecretStore, fileSecretStorePath, openFileSecretStore } from './file-secret-store';
+export {
+  FileSecretStore,
+  fileSecretStorePath,
+  openFileSecretStore,
+  syncDirectory,
+  type SecretFileState,
+  type StoredSecrets
+} from './file-secret-store';
 export {
   SECRET_STORE_MODES,
   SecretStoreModeError,
