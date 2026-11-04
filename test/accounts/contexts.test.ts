@@ -8,10 +8,11 @@ import type { AccountRegistry } from '../../src/accounts/registry';
 import type { AuthorizedAccount } from '../../src/accounts/types';
 import { createHttpApp } from '../../src/http/app';
 import { httpConfigFor } from '../../src/http/config';
-import { rememberRevocationOnClose } from '../../src/http/serve-http';
+import { bindPairingRevocation } from '../../src/http/serve-http';
 import type { SpaceLifecycleControl } from '../../src/server/context';
 import type { ServeContext } from '../../src/server/serve';
-import { PairingRevocation } from '../../src/status/pairing-revocation';
+import { PAIRING_REVOKED_REMOTE_REASON, PairingRevocation } from '../../src/status/pairing-revocation';
+import { runStatus } from '../../src/server/tools/status';
 import { deferred } from '../fixtures/deferred';
 
 const account = (id: string, generation = 1): AuthorizedAccount => ({ id, generation,
@@ -328,7 +329,7 @@ describe('ciclo de vida sin recuento (D22)', () => {
     await contexts.close();
   });
 
-  it('un cierre que falla no deja abrir otra instancia sobre el mismo directorio', async () => {
+  it('un cierre que falla no deja abrir otra instancia mientras siga fallando', async () => {
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     try {
       const { clock, libraries, contexts } = harness();
@@ -336,8 +337,64 @@ describe('ciclo de vida sin recuento (D22)', () => {
       libraries.beforeClose = async () => { throw new Error('disk'); };
       await clock.advance(IDLE_MS);
       await expect(contexts.acquire(account('a'))).rejects.toThrow('disk');
+      await clock.advance(1_000);
+      await expect(contexts.acquire(account('a'))).rejects.toThrow('disk');
       expect(libraries.opened).toEqual(['a']);
-      expect(stderr.mock.calls.flat().join('')).toContain('contexts.close_failed');
+      const logged = stderr.mock.calls.flat().join('');
+      expect(logged).toContain('contexts.close_failed');
+      expect(logged).not.toContain('disk');
+    } finally { stderr.mockRestore(); }
+  });
+
+  it('un cierre fallido se reintenta con espera creciente y la cuenta vuelve sin reiniciar', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { clock, libraries, contexts } = harness();
+      (await contexts.acquire(account('a'))).release();
+      (await contexts.acquire(account('b'))).release();
+      let failures = 3;
+      libraries.beforeClose = async (id) => { if (id === 'a' && failures-- > 0) throw new Error('disk'); };
+      await clock.advance(IDLE_MS);
+      // Fallo 1; el reintento llega a 1 s, el siguiente a 2 s y el otro a 4 s.
+      await expect(contexts.acquire(account('a'))).rejects.toThrow('disk');
+      // Otra cuenta no se entera: se abre y se sirve con normalidad.
+      (await contexts.acquire(account('b'))).release();
+      await clock.advance(999);
+      expect(failures).toBe(2);
+      await clock.advance(1);
+      expect(failures).toBe(1);
+      await clock.advance(1_999);
+      expect(failures).toBe(1);
+      await clock.advance(1);
+      expect(failures).toBe(0);
+      await clock.advance(4_000);
+      expect(libraries.closed).toContain('a');
+      const lease = await contexts.acquire(account('a'));
+      expect(libraries.opened.filter((id) => id === 'a')).toHaveLength(2);
+      expect(libraries.overlap).toBe(false);
+      lease.release();
+      const logged = stderr.mock.calls.flat().join('');
+      expect(logged).toContain('contexts.close_recovered');
+      await contexts.close();
+    } finally { stderr.mockRestore(); }
+  });
+
+  it('un cierre que no se recupera dice contexts.close_stuck cada 10 intentos y sigue reintentando', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { clock, libraries, contexts } = harness();
+      (await contexts.acquire(account('a'))).release();
+      libraries.beforeClose = async () => { throw new Error('disk'); };
+      await clock.advance(IDLE_MS);
+      // 1+2+4+8+16 s y después 30 s: el décimo intento cae antes de los 4 minutos.
+      await clock.advance(240_000);
+      expect(stderr.mock.calls.flat().join('')).toContain('contexts.close_stuck');
+      libraries.beforeClose = null;
+      await clock.advance(30_000);
+      const lease = await contexts.acquire(account('a'));
+      expect(libraries.opened.filter((id) => id === 'a')).toHaveLength(2);
+      lease.release();
+      await contexts.close();
     } finally { stderr.mockRestore(); }
   });
 
@@ -782,31 +839,96 @@ describe('/mcp sobre AccountContexts', () => {
   });
 });
 
-describe('contexto heredado cerrado', () => {
-  const opened = (revoked: boolean): ServeContext => ({
-    ctx: {} as never, linked: true, close: async () => undefined,
-    instance: { syncRunner: { revoked } } as never
+describe('marca de revocación compartida (bindPairingRevocation)', () => {
+  const statusOf = (revoked: boolean) => ({ getStatus: () => ({ linked: true, lastSyncAt: null, lastSyncOutcome: null,
+    pendingUpload: 0, errorsByCode: {}, writer: 'this' as const, revoked }) });
+
+  /** Lo que hace `startServeHttp` por cuenta: abrir con un runner propio y atar la marca. */
+  function revocableHarness(pairing: PairingRevocation) {
+    const runners = new Map<string, { revoked: boolean }>();
+    const libraries = new FakeLibraries();
+    libraries.decorate = (context, id) => {
+      const runner = { revoked: false };
+      runners.set(id, runner);
+      return bindPairingRevocation({
+        ...context, ctx: { status: statusOf(false) } as never,
+        instance: { beginShutdown() {}, syncRunner: runner } as never
+      }, pairing, `${id}-credential`);
+    };
+    const clock = new FakeClock();
+    const contexts = new AccountContexts(activeRegistry, libraries.open, {
+      idleMs: IDLE_MS, openWaitMs: WAIT_MS, clock, readMemory: () => ({ usedBytes: 0, limitBytes: 1000 * MIB }) });
+    const statusNow = async (id: string, generation = 1) => {
+      const lease = await contexts.acquire(account(id, generation));
+      try { return await lease.ctx.status.getStatus(); } finally { lease.release(); }
+    };
+    return { runners, libraries, clock, contexts, statusNow };
+  }
+
+  it('account-dir: el relé revoca, la cuenta se cierra por inactividad, se reabre y sigue revocada', async () => {
+    const pairing = new PairingRevocation();
+    const { runners, libraries, clock, contexts, statusNow } = revocableHarness(pairing);
+    expect((await statusNow('mikel')).revoked).toBe(false);
+    runners.get('mikel')!.revoked = true;
+    expect((await statusNow('mikel')).revoked).toBe(true);
+    await clock.advance(IDLE_MS);
+    expect(libraries.closed).toEqual(['mikel']);
+    // El runner nuevo no sabe nada: la marca viene de la credencial.
+    const reopened = await statusNow('mikel');
+    expect(libraries.opened).toEqual(['mikel', 'mikel']);
+    expect(reopened.revoked).toBe(true);
+    expect(reopened.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
+    await contexts.close();
   });
 
-  it('un revocado sigue revocado después de cerrar, hasta que haya otra credencial', async () => {
-    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
-    try {
-      let serve: ServeContext | null = opened(true);
-      const pairing = new PairingRevocation(() => (serve?.instance.syncRunner?.revoked ?? false));
-      const legacy = rememberRevocationOnClose(serve, pairing, 'cred-1', () => { serve = null; });
-      await legacy.close();
-      expect(serve).toBeNull();
-      expect(pairing.isRevoked()).toBe(true);
-      expect(pairing.isRevoked('cred-2')).toBe(false);
-    } finally { stderr.mockRestore(); }
+  it('una credencial renovada deja de estar revocada; con el mismo id, tras clear', async () => {
+    const pairing = new PairingRevocation();
+    const { runners, clock, contexts, statusNow } = revocableHarness(pairing);
+    await statusNow('mikel');
+    runners.get('mikel')!.revoked = true;
+    await statusNow('mikel');
+    await clock.advance(IDLE_MS);
+    expect(pairing.isRevoked('mikel-credential')).toBe(true);
+    // La renovación con la misma bóveda puede conservar el id: `commitRenewal` limpia la marca.
+    pairing.clear('mikel-credential');
+    expect((await statusNow('mikel', 2)).revoked).toBe(false);
+    await contexts.close();
+  });
+
+  it('la revocación de una cuenta no marca a otra', async () => {
+    const pairing = new PairingRevocation();
+    const { runners, clock, contexts, statusNow } = revocableHarness(pairing);
+    await statusNow('mikel');
+    await statusNow('ane');
+    runners.get('mikel')!.revoked = true;
+    await clock.advance(IDLE_MS);
+    expect((await statusNow('ane')).revoked).toBe(false);
+    expect((await statusNow('mikel')).revoked).toBe(true);
+    // También para legacy-root, que usa la misma marca.
+    expect((await statusNow('legacy')).revoked).toBe(false);
+    await contexts.close();
   });
 
   it('uno vigente no se marca revocado al cerrar', async () => {
-    let serve: ServeContext | null = opened(false);
-    const pairing = new PairingRevocation(() => (serve?.instance.syncRunner?.revoked ?? false));
-    const legacy = rememberRevocationOnClose(serve, pairing, 'cred-1', () => { serve = null; });
-    await legacy.close();
-    expect(serve).toBeNull();
-    expect(pairing.isRevoked()).toBe(false);
+    const pairing = new PairingRevocation();
+    const { clock, contexts, statusNow } = revocableHarness(pairing);
+    await statusNow('mikel');
+    await clock.advance(IDLE_MS);
+    expect(pairing.isRevoked('mikel-credential')).toBe(false);
+    await contexts.close();
+  });
+
+  it('hebra_status dice el motivo del conector remoto, y en stdio el de siempre', async () => {
+    const pairing = new PairingRevocation();
+    const { runners, contexts } = revocableHarness(pairing);
+    const lease = await contexts.acquire(account('mikel'));
+    runners.get('mikel')!.revoked = true;
+    const remote = await runStatus({ status: lease.ctx.status, privacyConfig: { privateFolders: [], privateTags: [] } } as never);
+    expect(remote.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
+    expect(remote.revokedReason).not.toContain('hebra-mcp pair');
+    lease.release();
+    const stdio = await runStatus({ status: statusOf(true), privacyConfig: { privateFolders: [], privateTags: [] } } as never);
+    expect(stdio.revokedReason).toContain('hebra-mcp pair');
+    await contexts.close();
   });
 });

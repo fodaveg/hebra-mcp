@@ -31,7 +31,10 @@ import type { SecretKey, SecretStore } from './secret-store';
 
 /** Nombre del fichero dentro del directorio de datos. */
 const FILE_NAME = 'secrets.json';
+/** Nombre del fichero y forma de sus temporales, para quien clasifica el contenido de un directorio. */
+export const SECRETS_FILE_NAME = FILE_NAME;
 const TEMPORARY_FILE = /^\.secrets\.json\..+\.tmp$/;
+export const SECRETS_TEMPORARY_FILE = TEMPORARY_FILE;
 
 export type StoredSecrets = Partial<Record<SecretKey, string>>;
 /** Lo que hay en el fichero, sin confundir «no existe» con «no se entiende». */

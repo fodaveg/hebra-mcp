@@ -1,7 +1,11 @@
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { CONTROL_SECRET_KEYS, SECRET_KEYS, type SecretStore } from '../secrets';
-import { accountControlDir } from './control-ipc';
+import { SERVER_LOCK_FILE } from '../lock/server-lock';
+import { WRITER_LOCK_FILE } from '../lock/writer-lock';
+import { SECRETS_FILE_NAME, SECRETS_TEMPORARY_FILE } from '../secrets/file-secret-store';
+import { accountControlDir, CONTROL_SOCKET } from './control-ipc';
+import { PENDING_UPLOADS_FILE, PENDING_UPLOADS_TEMPORARY } from './pending-sweep';
 
 /** Cambiar la clasificación exige una migración/revisión explícita antes de borrar. */
 export const LEGACY_INVENTORY_VERSION = 2;
@@ -22,9 +26,18 @@ const GLOBAL_ENTRIES = new Set([
   'oauth-logout-jtis.json', 'secrets.json', 'remote-pairing-v1'
 ]);
 
-/** Contenido de `control/`, global entero y nunca borrado: tampoco aquí se presume nada por
- *  la ubicación, y un fichero nuevo tiene que clasificarse antes de poder retirar a nadie. */
-const CONTROL_ENTRIES = new Set(['writer.lock', 'accounts.sock', 'secrets.json']);
+/**
+ * Contenido de `control/`, global entero y nunca borrado: tampoco aquí se presume nada por la
+ * ubicación, y un fichero nuevo tiene que clasificarse antes de poder retirar a nadie. Los
+ * nombres salen de quien los escribe, no de una copia: `server.lock` (con los ficheros que SQLite
+ * deja al lado según su modo de diario; `-journal` si un SIGKILL lo deja), `writer.lock` (el de
+ * `control-secrets-rollback`), el socket de retirada, `secrets.json` y la lista durable de
+ * subidas pendientes.
+ */
+const CONTROL_ENTRIES = new Set([
+  WRITER_LOCK_FILE, CONTROL_SOCKET, SECRETS_FILE_NAME, PENDING_UPLOADS_FILE,
+  SERVER_LOCK_FILE, `${SERVER_LOCK_FILE}-journal`, `${SERVER_LOCK_FILE}-wal`, `${SERVER_LOCK_FILE}-shm`
+]);
 
 function globalTemporary(name: string): boolean {
   return /^\.(?:accounts-v1|oauth-tokens|oauth-revocations-v2|oauth-logout-jtis)\.json\..+\.tmp$/.test(name);
@@ -34,7 +47,8 @@ function personalEntry(name: string): boolean {
   return PERSONAL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name) || /^writer\.lock\.stale-/.test(name);
 }
 function controlEntry(name: string): boolean {
-  return CONTROL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name) || /^writer\.lock\.stale-.+$/.test(name);
+  return CONTROL_ENTRIES.has(name) || SECRETS_TEMPORARY_FILE.test(name) || PENDING_UPLOADS_TEMPORARY.test(name) ||
+    /^writer\.lock\.stale-.+$/.test(name);
 }
 
 async function controlEntries(dataDir: string): Promise<string[]> {

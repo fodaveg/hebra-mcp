@@ -12,6 +12,7 @@ import {
   type MemoryReader
 } from './capacity';
 import { realClock, ResourceLifecycle, type Clock } from './lifecycle';
+import { RemoteStatusSource } from '../status/pairing-revocation';
 import type { AccountRef, AuthorizedAccount } from './types';
 import type { AccountRegistry } from './registry';
 
@@ -135,7 +136,7 @@ function guardedContext(
     await accountActive();
     return view;
   } : undefined;
-  return { ...ctx, spaces, directory, authorize, ...(use ? { trackInvocation: <T>(run: () => Promise<T>) => use.track(run) } : {}) };
+  return { ...ctx, status: new RemoteStatusSource(ctx.status), spaces, directory, authorize, ...(use ? { trackInvocation: <T>(run: () => Promise<T>) => use.track(run) } : {}) };
 }
 
 /** Lo que aún tiene que subir, salvo que la credencial esté revocada y no pueda subir nunca. */
@@ -261,10 +262,7 @@ export class AccountContexts {
           if (this.entries.get(account.id) === entry) this.entries.delete(account.id);
           this.gate.recheck();
         },
-        onCloseFailed: (error) => {
-          logEvent({ event: 'contexts.close_failed', resource: 'account',
-            error: error instanceof Error ? error.name : 'unknown' });
-        }
+        resource: 'account'
       })
     };
     this.entries.set(account.id, entry);

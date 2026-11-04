@@ -1,3 +1,5 @@
+import { logEvent } from '../log/logger';
+
 /**
  * El ciclo de vida de lo que se abre por uso en `serve-http` (SPEC.md §12.10, "Capacidad sin
  * recuento"): una biblioteca de cuenta o un espacio. Un solo estado a la vez, `cerrado`,
@@ -10,8 +12,20 @@
  * - `retire` impide adquirirlo otra vez y lo cierra al terminar lo que tenga en curso.
  *
  * Un cierre que falla no vuelve a `cerrado`: sin saber si la instancia soltó el directorio,
- * abrir otra podría dejar dos. Se queda en `cerrando`, y las peticiones reciben el error de
- * ese cierre hasta que un reinicio del proceso lo resuelva.
+ * abrir otra podría dejar dos. Se queda en `cerrando` y se reintenta solo, con espera creciente
+ * (1 s, 2 s, 4 s... hasta 30 s) y sin límite de intentos. Mientras tanto, quien pide ese recurso
+ * recibe el error del último intento (503 `open_failed` con `Retry-After`) y vuelve a probar; en
+ * cuanto un intento cierra, la siguiente petición abre de nuevo, sin reiniciar nada ni afectar a
+ * otras cuentas. Un cierre que no se recupera no se da por bueno ni se abandona. Eventos de log,
+ * todos con `resource` (`account` | `space`): `contexts.close_failed` en cada intento fallido
+ * (con `attempt`), `contexts.close_recovered` cuando un reintento cierra, y
+ * `contexts.close_stuck` al llegar al intento 10 (unos 3 minutos) y cada 10 después.
+ *
+ * Solo `contexts.close_stuck` repetido sin `close_recovered` pide mirar al operador, y el
+ * arreglo es quitar la causa (disco lleno o solo lectura, directorio desmontado), que el
+ * siguiente reintento recoge. Reiniciar el proceso solo hace falta si el cierre falla porque
+ * el recurso quedó a medias de un modo que no se repara desde dentro; el reinicio libera el
+ * directorio igual (el `writer.lock` obsoleto de un arranque anterior se limpia al abrir).
  */
 export type LifecycleState = 'cerrado' | 'abriendo' | 'abierto' | 'cerrando';
 
@@ -50,8 +64,17 @@ export interface ResourceLifecycleOptions<V> {
   closeAfterUse?(value: V): boolean;
   /** Pasó a `cerrado` y nadie va a reabrir este objeto: quien lo guarda ya puede soltarlo. */
   onDisposable?(): void;
-  onCloseFailed?(error: unknown): void;
+  /** Para el log de los cierres fallidos y recuperados. */
+  resource: 'account' | 'space';
+  /** Primera espera entre reintentos de un cierre fallido (se duplica hasta `closeRetryMaxMs`). */
+  closeRetryBaseMs?: number;
+  closeRetryMaxMs?: number;
 }
+
+const DEFAULT_CLOSE_RETRY_BASE_MS = 1_000;
+const DEFAULT_CLOSE_RETRY_MAX_MS = 30_000;
+/** Cada cuántos intentos fallidos seguidos se dice `contexts.close_stuck`. */
+const CLOSE_STUCK_EVERY = 10;
 
 export class ResourceLifecycle<V> {
   private phase: LifecycleState = 'cerrado';
@@ -65,6 +88,7 @@ export class ResourceLifecycle<V> {
   private openAbort: AbortController | null = null;
   private cancelIdle: (() => void) | null = null;
   private closeFailure: { error: unknown } | null = null;
+  private closeAttempts = 0;
   private readonly closedWaiters: Array<() => void> = [];
 
   constructor(private readonly options: ResourceLifecycleOptions<V>) {}
@@ -159,21 +183,49 @@ export class ResourceLifecycle<V> {
 
   private beginClosing(): Promise<void> {
     this.stopIdle();
-    const value = this.value as V;
     this.phase = 'cerrando';
+    this.closeAttempts = 0;
+    return this.attemptClose();
+  }
+
+  /** Un intento de cierre. Si falla, programa el siguiente y deja el error para quien espere. */
+  private attemptClose(): Promise<void> {
+    const value = this.value as V;
+    this.closeFailure = null;
     this.closing = (async () => {
       try {
         await this.options.close(value);
         this.value = null;
         this.phase = 'cerrado';
+        if (this.closeAttempts > 0) {
+          logEvent({ event: 'contexts.close_recovered', resource: this.options.resource,
+            attempts: this.closeAttempts });
+        }
+        this.closeAttempts = 0;
       } catch (error) {
         this.closeFailure = { error };
-        this.options.onCloseFailed?.(error);
+        this.closeAttempts += 1;
+        logEvent({ event: 'contexts.close_failed', resource: this.options.resource,
+          attempt: this.closeAttempts, error: error instanceof Error ? error.name : 'unknown' });
+        if (this.closeAttempts % CLOSE_STUCK_EVERY === 0) {
+          logEvent({ event: 'contexts.close_stuck', resource: this.options.resource,
+            attempts: this.closeAttempts });
+        }
+        this.scheduleCloseRetry();
       }
       this.wakeClosed();
       this.settle();
     })();
     return this.closing;
+  }
+
+  private scheduleCloseRetry(): void {
+    const base = this.options.closeRetryBaseMs ?? DEFAULT_CLOSE_RETRY_BASE_MS;
+    const max = this.options.closeRetryMaxMs ?? DEFAULT_CLOSE_RETRY_MAX_MS;
+    const wait = Math.min(max, base * 2 ** Math.min(this.closeAttempts - 1, 20));
+    this.options.clock.setTimer(() => {
+      void this.attemptClose();
+    }, wait);
   }
 
   /** Lo que toca después de cada cambio de uso o de estado. */

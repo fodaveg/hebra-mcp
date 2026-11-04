@@ -222,6 +222,8 @@ export class LibraryInstance implements NoteWriteTarget {
   /** Fallos seguidos del relleno, y cuándo se puede reintentar (`retrySubstringFill`). */
   private substringFillFailures = 0;
   private substringFillRetryAt = 0;
+  /** `close` en curso o hecho; se borra si falla para poder reintentarlo. */
+  private closePromise: Promise<void> | null = null;
   /** `settleUploads` en curso o hecho: el cierre lo pide una sola vez. */
   private settling: Promise<void> | null = null;
   /** La lista durable ya nombra esta biblioteca por una escritura (`afterWrite`). */
@@ -782,17 +784,31 @@ export class LibraryInstance implements NoteWriteTarget {
     return this.shuttingDown;
   }
 
-  /** Para el sync, cierra la SQLite y suelta el bloqueo. */
-  async close(): Promise<void> {
-    if (this.closed) return;
+  /**
+   * Para el sync, cierra la SQLite y suelta el bloqueo. Se puede repetir si falla: cada paso es
+   * idempotente, se sigue por donde se quedó, y el bloqueo solo se suelta tras cerrar todo lo
+   * anterior (soltarlo con la SQLite aún abierta dejaría entrar a otro escritor). Es lo que
+   * permite al ciclo de vida de `serve-http` reintentar un cierre fallido (`ResourceLifecycle`)
+   * en vez de dejar la cuenta sin biblioteca. Dos llamadas a la vez comparten el mismo cierre.
+   */
+  close(): Promise<void> {
     this.closed = true;
     this.beginShutdown();
     if (this.timer) clearInterval(this.timer);
+    this.closePromise ??= this.runClose().catch((error: unknown) => {
+      this.closePromise = null;
+      throw error;
+    });
+    return this.closePromise;
+  }
+
+  private async runClose(): Promise<void> {
     await this.switching;
     await this.closeWriterSocket();
     await this.settleUploads();
-    await this.runner?.stop();
-    this.runner = null;
+    const runner = this.runner;
+    await runner?.stop();
+    if (this.runner === runner) this.runner = null;
     await this.current.closeWhenIdle();
     this.lock.release();
     this.options.uploadLedger?.closed(this.ledgerSpace);

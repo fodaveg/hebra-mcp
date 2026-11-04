@@ -291,10 +291,7 @@ export class AgentSpaceManager implements SpaceRouter {
           if (this.entries.get(key) === entry) this.entries.delete(key);
           this.onClosed?.();
         },
-        onCloseFailed: (error) => {
-          logEvent({ event: 'contexts.close_failed', resource: 'space',
-            error: error instanceof Error ? error.name : 'unknown' });
-        }
+        resource: 'space'
       })
     };
     this.entries.set(key, entry);

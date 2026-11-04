@@ -224,11 +224,16 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // una ronda de un espacio ya no podría salir después.
   let closing: Promise<void> | null = null;
   const close = (): Promise<void> => {
+    // Si falla se borra, para que el reintento del ciclo de vida repita lo que quedó sin hacer
+    // (cada paso es idempotente) en vez de recibir el mismo rechazo para siempre.
     closing ??= (async () => {
       await uploadLedger?.settleAll();
       await spaces?.close();
       await instance.close();
-    })();
+    })().catch((error: unknown) => {
+      closing = null;
+      throw error;
+    });
     return closing;
   };
   if (options.writerOnly) {

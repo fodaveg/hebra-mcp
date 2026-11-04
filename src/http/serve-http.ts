@@ -131,29 +131,19 @@ function trackInFlight(server: Server): { idle(timeoutMs: number): Promise<boole
 }
 
 /**
- * El contexto heredado se cierra por inactividad: su `revoked` no puede depender de una
- * instancia cerrada, ni volver a `false` porque ya no haya runner. Al cerrar se queda en la
- * marca de `PairingRevocation`, atada a la credencial, que olvida un emparejado nuevo.
- * `onClosed` suelta la referencia a la instancia.
+ * Une un contexto de cuenta a la marca de revocación compartida (`PairingRevocation`), válida
+ * para cualquier cuenta, también `legacy-root`. Mientras está abierto, `revoked` lo dice su
+ * runner; al cerrar, `attachRelay` fija el valor en la marca atada a la credencial, así que
+ * una cuenta revocada que se cierra por inactividad sigue revocada al reabrir, hasta que haya
+ * otra credencial o se renueve (`PairingRevocation.clear`). La marca de una cuenta no cambia
+ * la de otra. El desacople va ANTES de cerrar la instancia, con el runner aún vivo.
  */
-export function rememberRevocationOnClose(
-  opened: ServeContext,
-  pairing: PairingRevocation,
-  credentialId: string,
-  onClosed: () => void
-): ServeContext {
-  const runner = opened.instance.syncRunner;
-  const remember = (): void => {
-    if (runner?.revoked) pairing.markRevoked(credentialId);
-  };
+export function bindPairingRevocation(opened: ServeContext, pairing: PairingRevocation, credentialId: string): ServeContext {
+  const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false);
+  opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
   return { ...opened, close: async () => {
-    remember();
-    try {
-      await opened.close();
-    } finally {
-      remember();
-      onClosed();
-    }
+    detachRelay();
+    await opened.close();
   } };
 }
 
@@ -238,13 +228,10 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           assertActive: () => { activeRegistry.assertActive(account); },
           uploadLedger: pendingUploads.ledger(account) });
         opened.instance.deferSignalRelease();
-        const credentialId = account.binding.pairedCredentialId;
-        const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false);
-        opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
-        const tracked: ServeContext = { ...opened, close: async () => {
-          detachRelay();
+        const bound = bindPairingRevocation(opened, pairing, account.binding.pairedCredentialId);
+        const tracked: ServeContext = { ...bound, close: async () => {
           try {
-            await opened.close();
+            await bound.close();
           } finally {
             if (serve === tracked) serve = null;
           }

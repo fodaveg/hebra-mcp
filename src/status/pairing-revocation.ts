@@ -46,7 +46,9 @@ export class PairingRevocation {
    * Devuelve la función que desacopla.
    */
   attachRelay(credentialId: string, revoked: () => boolean): () => void {
-    this.relayLatched.delete(credentialId);
+    // No se toca `relayLatched`: una cuenta revocada que se cerró por inactividad y se reabre
+    // tiene un runner nuevo que aún no ha hablado con el relé, y no por eso deja de estar
+    // revocada. Solo la renovación (`clear`) o una credencial con otro id la levantan.
     this.relayLive.set(credentialId, revoked);
     return () => {
       if (this.relayLive.get(credentialId) !== revoked) return;
@@ -69,12 +71,35 @@ export class PairingRevocation {
     return this.relayLive.get(currentCredentialId)?.() ?? false;
   }
 
+  /**
+   * Olvida lo que se sabía de esta credencial: la marca de Lumbre y la del relé ya cerrado. Lo
+   * llama la renovación (`commitRenewal`): una credencial renovada con la misma bóveda puede
+   * conservar su id, y sin esto seguiría revocada hasta reiniciar. El runner abierto, si lo
+   * hay, sigue diciendo lo suyo.
+   */
+  clear(credentialId: string): void {
+    this.revokedCredentials.delete(credentialId);
+    this.relayLatched.delete(credentialId);
+  }
+
   /** Lumbre dijo `pairing_revoked` para esta credencial. El evento sale una sola vez. */
   markRevoked(credentialId: string): void {
     const already = this.isRevoked(credentialId);
     this.revokedCredentials.add(credentialId);
     if (!already) logEvent({ event: 'pairing.revoked', source: 'lumbre' });
   }
+}
+
+/** Añade el motivo del conector remoto a un estado revocado (`serve-http`, donde `hebra-mcp pair` no existe). */
+export function withRemoteRevokedReason(status: HebraStatus): HebraStatus {
+  return status.revoked === true && status.revokedReason === undefined
+    ? { ...status, revokedReason: PAIRING_REVOKED_REMOTE_REASON } : status;
+}
+
+/** Un `StatusSource` de `serve-http`: si dice revocado, con el motivo remoto. */
+export class RemoteStatusSource implements StatusSource {
+  constructor(private readonly inner: StatusSource) {}
+  async getStatus(): Promise<HebraStatus> { return withRemoteRevokedReason(await this.inner.getStatus()); }
 }
 
 /** `hebra_status` con la marca de Lumbre sumada al `revoked` del relé, para la credencial de su cuenta. */
@@ -87,6 +112,7 @@ export class PairingStatusSource implements StatusSource {
 
   async getStatus(): Promise<HebraStatus> {
     const status = await this.inner.getStatus();
-    return this.pairing.isRevoked(await this.credentialId()) ? { ...status, revoked: true } : status;
+    return withRemoteRevokedReason(
+      this.pairing.isRevoked(await this.credentialId()) ? { ...status, revoked: true } : status);
   }
 }

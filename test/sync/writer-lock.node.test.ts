@@ -438,4 +438,24 @@ describe('LibraryInstance: relevo con la base ocupada', () => {
       busy.close();
     }
   });
+
+  it('un cierre que falla se puede repetir y suelta el bloqueo solo cuando termina', async () => {
+    const dataDir = await createdLibrary();
+    const instance = await open(dataDir);
+    const lockPath = join(dataDir, WRITER_LOCK_FILE);
+    expect(existsSync(lockPath)).toBe(true);
+    const port = (instance as unknown as { current: { closeWhenIdle(): Promise<void> } }).current;
+    const real = port.closeWhenIdle.bind(port);
+    let fail = true;
+    port.closeWhenIdle = async () => {
+      if (fail) throw new Error('disk');
+      await real();
+    };
+    await expect(instance.close()).rejects.toThrow('disk');
+    // Con la SQLite sin cerrar, el bloqueo sigue siendo suyo.
+    expect(existsSync(lockPath)).toBe(true);
+    fail = false;
+    await instance.close();
+    expect(existsSync(lockPath)).toBe(false);
+  });
 });

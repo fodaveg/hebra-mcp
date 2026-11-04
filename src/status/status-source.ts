@@ -13,6 +13,8 @@ export interface HebraStatus {
   errorsByCode: Record<string, number> | null;
   writer: 'this' | 'other_instance' | null;
   revoked: boolean | null;
+  /** Quien sirve en remoto (`serve-http`) dice aquí cómo recuperarse; `hebra_status` lo usa en vez del texto de stdio. */
+  revokedReason?: string;
 }
 
 export interface StatusSource {

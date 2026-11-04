@@ -12,7 +12,7 @@ import { CLAUDE_CALLBACK, DCR_CLIENT_ID, loadOAuthHttpAuth, OAUTH_TOKENS_FILE } 
 import { TokenStore } from '../../src/oauth/token-store';
 import { runStatus } from '../../src/server/tools/status';
 import { MemorySecretStore, writePairedSecrets } from '../../src/secrets';
-import { PAIRING_REVOKED_REASON, PairingRevocation, PairingStatusSource } from '../../src/status/pairing-revocation';
+import { PAIRING_REVOKED_REMOTE_REASON, PairingRevocation, PairingStatusSource } from '../../src/status/pairing-revocation';
 import { buildTestContext, type TestContext } from '../fixtures/test-context';
 import { startTestHttpApp, type TestHttpApp } from '../fixtures/http-app';
 
@@ -143,7 +143,9 @@ describe('hebra_status', () => {
     pairing.markRevoked(PAIR_ID);
     const after = await runStatus(ctx);
     expect(after.revoked).toBe(true);
-    expect(after.revokedReason).toBe(PAIRING_REVOKED_REASON);
+    // `PairingStatusSource` solo existe en `serve-http`: ahí nadie puede lanzar `hebra-mcp pair`.
+    expect(after.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
+    expect(after.revokedReason).not.toContain('hebra-mcp pair');
   });
 });
 
