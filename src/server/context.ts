@@ -40,6 +40,8 @@ export interface SpaceLifecycleControl {
   /** Antes del primer uso: activa el cierre por inactividad y la admisión por memoria. */
   configure(options: {
     idleMs: number;
+    /** Plazo de espera de una apertura (`HEBRA_MCP_OPEN_WAIT_MS`); sin él, el valor por defecto. */
+    openWaitMs?: number;
     clock: Clock;
     admit(signal: AbortSignal): Promise<AdmissionTicket>;
     onClosed(): void;

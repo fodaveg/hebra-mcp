@@ -2311,8 +2311,9 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
 - Ninguna espera de una apertura o un cierre en curso es ilimitada: a los `HEBRA_MCP_OPEN_WAIT_MS`
   más 5 s de margen (tope de seguridad; las esperas con plazo propio, memoria y `writer.lock`, acaban
   antes y dan su motivo), la petición recibe 503 `open_failed` con `Retry-After`. La apertura o el
-  cierre siguen en segundo plano y la persona vuelve a entrar en cuanto terminan, sin reiniciar. En
-  un espacio el plazo parte del valor por defecto (20 s), no de la variable.
+  cierre siguen en segundo plano y la persona vuelve a entrar en cuanto terminan, sin reiniciar. El
+  mismo plazo rige para los espacios: `AccountContexts` lo pasa con `configure` y, en `stdio`, que no
+  lo llama, rige el valor por defecto (20 s).
 - Un cierre que falla no devuelve el recurso a `cerrado`: sin saber si soltó el directorio, abrir
   otra instancia podría dejar dos. Queda en `cerrando` y se reintenta solo, con espera de 1 s que se
   duplica hasta 30 s y sin límite de intentos. Mientras tanto, quien pide ese recurso recibe 503
@@ -2462,6 +2463,13 @@ un agente desactivado, a propósito, y hebra-mcp no los distingue.
   recuperación exportado en el dispositivo que aprueba (R9, que sigue vigente para cada persona nueva).
 - La cookie de Lumbre de otra cuenta en el mismo navegador se detecta antes de pedir la aprobación, no
   después, y la página nombra la cuenta que va a conectar.
+- Como mucho 5 códigos rechazados por transacción y 10 por hora por `sub`: al llegar a cualquiera de
+  los dos la transacción termina (`too_many_codes`), y con el tope por `sub` ya alcanzado no se vuelve
+  a gastar un canje. Un 429 de `/exchange` no cuenta como rechazo y conserva la transacción, que sigue
+  esperando el código con la espera que indica Lumbre.
+- Si la biblioteca nueva es otra bóveda distinta de la conectada y la copia anterior tiene escrituras
+  sin subir (o no se ha podido comprobar), confirmar exige marcar la casilla `accept_loss`; sin ella
+  responde `loss_unconfirmed` y no se retira nada.
 - Con el legado sin reclamar, un `sub` nuevo empieza su propia alta en vez de probar el vínculo heredado.
 - Confirmar deja la cuenta lista, y la primera llamada abre su contexto (sustituye a "abre el
   contexto" de "Alta y emparejado web").
@@ -2525,7 +2533,7 @@ tiene biblioteca, crea una transacción de alta de un uso y empieza el protocolo
 agente de Lumbre que usa `DeviceLinkRequester`; la persona aprueba el dispositivo en Hebra.
 
 El callback de Sumego termina en `GET /lumbre/pairing/start`, con la cookie de transacción. Esa ruta
-enseña el aviso previo (la cuenta que va a conectar y si es una renovación) con el enlace que sale
+enseña el aviso previo (el nombre del cliente que pidió la conexión y el host al que volverá el acceso, la cuenta que va a conectar y si es una renovación) con el enlace que sale
 hacia Lumbre mientras espera el código, o la página de espera si ya pasó de esa fase; sin una transacción viva de ese navegador
 responde `invalid_session`.
 

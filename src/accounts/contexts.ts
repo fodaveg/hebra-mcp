@@ -351,6 +351,7 @@ export class AccountContexts {
     const lifecycle: SpaceLifecycleControl | undefined = opened.ctx.spaces?.lifecycle;
     lifecycle?.configure({
       idleMs: this.idleMs,
+      openWaitMs: this.openWaitMs,
       clock: this.clock,
       admit: (signal) => this.gate.admit(signal),
       onClosed: () => this.gate.recheck()
