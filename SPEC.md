@@ -2512,7 +2512,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   `sha256("hebra-org:" + UUID)`, `accountId` es el mismo valor que `grant.accountId` del catálogo
   (`sha256hex("hebra-account:" + lowerCase(sub))`, contrato con Lumbre), y el
   `name` de un miembro o de un espacio puede ser `null` (el de un miembro se tolera ausente hasta que
-  la ruta esté publicada). El `spaces` de primer nivel son los sueltos y aquellos donde su persona es
+  la ruta esté publicada). Un `role` de texto desconocido se enseña como `member`, como en Lumbre: el
+  rol no concede nada y un rol nuevo de Sumego no debe dejar sin directorio a la organización. El `spaces` de primer nivel son los sueltos y aquellos donde su persona es
   invitada. Un campo de más, o una organización, un miembro o un espacio repetidos, invalidan la
   respuesta entera. No hay tope por recuento. Errores: 401 `credential_revoked`, 429 `rate_limited` con
   `Retry-After`, 503 `relay_unavailable`; una credencial de app o el emparejado legado reciben 404.

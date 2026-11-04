@@ -362,7 +362,8 @@ describe('DTO cerrado', () => {
   });
 
   it.each<[string, (d: ReturnType<typeof base>) => void]>([
-    ['un rol desconocido', (d) => { d.organizations[0]!.members[0]!.role = 'owner'; }],
+    ['un rol que no es texto', (d) => { Object.assign(d.organizations[0]!.members[0]!, { role: 1 }); }],
+    ['un rol de más de 100 caracteres', (d) => { d.organizations[0]!.members[0]!.role = 'x'.repeat(101); }],
     ['un orgId que no es un sha256', (d) => { d.organizations[0]!.orgId = 'org-1'; }],
     ['un spaceId que no es un UUID', (d) => { d.spaces[0]!.spaceId = 'x'; }],
     ['granted ausente', (d) => { delete (d.spaces[0] as { granted?: boolean }).granted; }],
@@ -462,6 +463,21 @@ describe('hebra_list_organizations', () => {
     const { body } = await call(agent, 'hebra_list_organizations');
     expect(body.organizations[0].members).toEqual([
       { accountId, role: 'admin', name: null, isSelf: true },
+      { accountId: OTHER_ACCOUNT, role: 'member', name: null, isSelf: false }
+    ]);
+  });
+
+  it('un rol que Sumego añada después sale como member y no invalida el directorio', async () => {
+    const agent = await connectAgent('alice');
+    const accountId = await grant(agent);
+    const directory = directoryFor(accountId);
+    directory.organizations[0]!.members[1]!.role = 'rol-futuro';
+    agent.reply = { status: 200, body: directory };
+    const spaces = await call(agent, 'hebra_list_spaces');
+    expect(spaces.body.organizationsAvailable).toBe(true);
+    const { body } = await call(agent, 'hebra_list_organizations');
+    expect(body.organizations[0].members).toEqual([
+      { accountId, role: 'admin', name: MEMBER_NAME, isSelf: true },
       { accountId: OTHER_ACCOUNT, role: 'member', name: null, isSelf: false }
     ]);
   });

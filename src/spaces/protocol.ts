@@ -53,6 +53,13 @@ export type AgentPublicKey = z.infer<typeof publicKeySchema>;
 
 /** Nombre de una organización, un miembro o un espacio en el directorio. */
 const directoryName = z.string().max(1000);
+const DIRECTORY_ROLES = ['admin', 'manager', 'member'] as const;
+/** Un rol que Sumego añada después cuenta como `member`, como en Lumbre (`docs/81`): el rol solo
+ *  se enseña, no concede nada, y no debe dejar sin directorio a toda la organización. */
+const directoryRole = z
+  .string()
+  .max(100)
+  .transform((role) => DIRECTORY_ROLES.find((known) => known === role) ?? 'member');
 const directorySpaceSchema = z
   .object({ spaceId: uuid, name: directoryName.nullable(), granted: z.boolean() })
   .strict();
@@ -61,7 +68,7 @@ const directorySpaceSchema = z
 const directoryMemberSchema = z
   .object({
     accountId: hex(32),
-    role: z.enum(['admin', 'manager', 'member']),
+    role: directoryRole,
     name: directoryName.nullable().optional()
   })
   .strict();
