@@ -14,10 +14,11 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccountContexts } from '../../src/accounts/contexts';
 import {
-  expireRemotePairings,
   PENDING_UPLOADS_FILE,
   PendingSweep,
   PendingUploadList,
+  RETRY_BACKOFF_BASE_MS,
+  RETRY_BACKOFF_MAX_MS,
   SWEEP_ELEMENT_TIMEOUT_MS,
   type PendingSweepOptions,
   type WithAccountContext
@@ -130,6 +131,14 @@ function viaOpenClose(accounts: TestAccount[], list: PendingUploadList, opened: 
     } finally {
       await served.close();
     }
+  };
+}
+
+/** El gancho de diarios del barrido de producción: `recover` con la espera creciente del barrido. */
+function recoverOf(service: RemotePairingService): PendingSweepOptions['expireJournals'] {
+  return async (retry) => {
+    const { cleaned, pending } = await service.recover({ retry });
+    return { expired: cleaned, failed: pending };
   };
 }
 
@@ -324,7 +333,7 @@ describe('barrido global', () => {
     let tick: () => void = () => undefined;
     const sweep = sweepOf(list, viaOpenClose([account], list, opened), {
       resumeRemovals: () => removal.resumePending(),
-      expireJournals: () => expireRemotePairings(journals, service, Date.now()),
+      expireJournals: recoverOf(service),
       schedule: (run, ms) => { expect(ms).toBe(60_000); tick = run; return () => undefined; }
     });
     sweep.start();
@@ -362,7 +371,7 @@ describe('barrido global', () => {
     expect(opened).toHaveLength(1);
   });
 
-  it('un fallo persistente no bloquea a otra cuenta, y se reintenta en cada barrido', async () => {
+  it('un fallo persistente no bloquea a otra cuenta, y espera cada vez más antes de reintentarse', async () => {
     const failing = testAccount('falla');
     const healthy = testAccount('sana');
     const list = await PendingUploadList.open(control);
@@ -372,16 +381,45 @@ describe('barrido global', () => {
     failing.mode = 'down';
 
     const opened: string[] = [];
-    const sweep = sweepOf(list, viaOpenClose([failing, healthy], list, opened));
+    let now = 0;
+    const sweep = sweepOf(list, viaOpenClose([failing, healthy], list, opened), { now: () => now });
     expect(await sweep.runOnce()).toMatchObject({ uploaded: 1, kept: 1 });
     expect(await noteOnRelay(healthy, id)).toBe('# Titulo privado\n\ncuerpo');
     expect(list.entries().map((entry) => entry.account)).toEqual([failing.ref.id]);
+    // Sin que pase la espera, el barrido no vuelve a abrir esa biblioteca ni a llamar al relé.
+    const calls = failing.calls;
+    expect(await sweep.runOnce()).toMatchObject({ uploaded: 0, kept: 0, skipped: 1 });
+    expect(failing.calls).toBe(calls);
+    expect(opened).toEqual([failing.ref.id, healthy.ref.id]);
+
+    now = RETRY_BACKOFF_BASE_MS;
     expect(await sweep.runOnce()).toMatchObject({ uploaded: 0, kept: 1 });
     expect(opened).toEqual([failing.ref.id, healthy.ref.id, failing.ref.id]);
-
+    // La siguiente espera es el doble.
+    now += RETRY_BACKOFF_BASE_MS * 2 - 1;
+    expect(await sweep.runOnce()).toMatchObject({ kept: 0, skipped: 1 });
     failing.mode = 'up';
+    now += 1;
     expect(await sweep.runOnce()).toMatchObject({ uploaded: 1, kept: 0 });
     expect(list.entries()).toEqual([]);
+  });
+
+  it('la espera tiene tope', async () => {
+    const failing = testAccount('falla');
+    const list = await PendingUploadList.open(control);
+    await closeWithPendingUpload(failing, list);
+    failing.mode = 'down';
+    let now = 0;
+    const sweep = sweepOf(list, viaOpenClose([failing], list), { now: () => now });
+    for (let round = 0; round < 12; round += 1) {
+      expect(await sweep.runOnce()).toMatchObject({ kept: 1 });
+      now += RETRY_BACKOFF_MAX_MS;
+    }
+    // Con 12 fallos seguidos la espera sigue siendo el tope, no 2^11 veces la base.
+    now -= 1;
+    expect(await sweep.runOnce()).toMatchObject({ kept: 0, skipped: 1 });
+    now += 1;
+    expect(await sweep.runOnce()).toMatchObject({ kept: 1 });
   });
 
   it('una apertura que lanza tampoco bloquea: es un fallo más de ese elemento', async () => {
@@ -409,6 +447,7 @@ describe('barrido global', () => {
     const limits: Array<{ ms: number; timer: ReturnType<typeof deferred> }> = [];
     const opens: string[] = [];
     const normal = viaOpenClose([healthy], list, opens);
+    let now = 0;
     const sweep = sweepOf(list, async (ref, fn) => {
       if (ref.id === stuck.ref.id) {
         opens.push(ref.id);
@@ -416,7 +455,7 @@ describe('barrido global', () => {
         throw new Error('colgada');
       }
       return normal(ref, fn);
-    }, { sleep: (ms) => {
+    }, { now: () => now, sleep: (ms) => {
       const timer = deferred();
       limits.push({ ms, timer });
       return timer.promise;
@@ -432,7 +471,9 @@ describe('barrido global', () => {
     expect(await sweep.runOnce()).toMatchObject({ uploaded: 0, kept: 0, skipped: 1 });
     expect(opens).toEqual([stuck.ref.id, healthy.ref.id]);
     release.resolve();
+    // Lo que lo retuvo falla al fin y espera su turno como cualquier fallo: pasada la espera, se repite.
     await vi.waitFor(async () => {
+      now += RETRY_BACKOFF_BASE_MS;
       await sweep.runOnce();
       expect(opens.filter((id) => id === stuck.ref.id).length).toBeGreaterThan(1);
     }, { timeout: 20_000 });
@@ -574,7 +615,7 @@ describe('barrido global', () => {
   });
 });
 
-describe('diarios de alta caducados', () => {
+describe('diarios de alta pendientes (recover, con espera creciente)', () => {
   const NOW = Date.parse('2026-11-04T12:00:00.000Z');
 
   function journal(id: string, expiresAt: string, patch: Partial<RemotePairingJournal> = {}): RemotePairingJournal {
@@ -583,38 +624,76 @@ describe('diarios de alta caducados', () => {
       expiresAt, identityExpiresAt: expiresAt, deviceId: 'd', verifier: 'v', cleanupRequired: false, ...patch };
   }
 
-  it('limpia solo los caducados: un alta en curso sigue viva, y sin credencial no hay peticiones', async () => {
-    const journals = new RemotePairingJournalStore(join(root, 'remote-pairing-v1'));
-    const expired = randomUUID();
-    const live = randomUUID();
-    await journals.write(journal(expired, '2026-11-04T11:59:59.000Z'));
-    await journals.write(journal(live, '2026-11-04T12:05:00.000Z'));
-    const fetcher = vi.fn(async () => new Response('{}'));
-    const service = new RemotePairingService({ journals, fetcher, now: () => NOW,
+  function serviceOf(journals: RemotePairingJournalStore, fetcher = vi.fn(async () => new Response('{}'))): RemotePairingService {
+    return new RemotePairingService({ journals, fetcher, now: () => NOW,
       ownership: { verify: async () => { throw new Error('unexpected'); } },
       publisher: { publish: async () => { throw new Error('unexpected'); }, findCommitted: async () => null, cleanupOrphan: async () => undefined } });
+  }
 
-    expect(await expireRemotePairings(journals, service, NOW)).toEqual({ expired: 1, failed: 0 });
+  it('limpia los diarios sin sesión viva por el barrido, y sin credencial no hay peticiones', async () => {
+    const journals = new RemotePairingJournalStore(join(root, 'remote-pairing-v1'));
+    const expired = randomUUID();
+    await journals.write(journal(expired, '2026-11-04T11:59:59.000Z'));
+    const fetcher = vi.fn(async () => new Response('{}'));
+    const list = await PendingUploadList.open(control);
+    const sweep = sweepOf(list, viaOpenClose([], list), { expireJournals: recoverOf(serviceOf(journals, fetcher)) });
+    expect(await sweep.runOnce()).toMatchObject({ journalsExpired: 1, journalsFailed: 0 });
     expect(await journals.read(expired)).toBeNull();
-    expect(await journals.read(live)).not.toBeNull();
     expect(fetcher).not.toHaveBeenCalled();
-    // Lo que no se puede hacer aquí: `recover` limpia también el que está en curso.
-    expect((await service.recover()).cleaned).toBe(1);
-    expect(await journals.read(live)).toBeNull();
   });
 
-  it('uno que falla o está corrupto no para a los demás; sin directorio, nada', async () => {
+  it('un diario que sigue sin limpiarse espera cada vez más y los demás no esperan por él', async () => {
     const journals = new RemotePairingJournalStore(join(root, 'remote-pairing-v1'));
-    expect(await expireRemotePairings(journals, { abandon: vi.fn() }, NOW)).toEqual({ expired: 0, failed: 0 });
-    const ids = [randomUUID(), randomUUID()];
-    for (const id of ids) await journals.write(journal(id, '2026-11-04T11:00:00.000Z'));
-    const corrupt = randomUUID();
-    await mkdir(journals.sessionDir(corrupt), { recursive: true });
-    await writeFile(join(journals.sessionDir(corrupt), 'pairing.json'), '{}');
-    await writeFile(join(journals.root, 'no-soy-un-diario'), '');
-    const abandon = vi.fn(async (id: string) => { if (id === ids[0]) throw new Error('cleanup_revoke_failed'); });
-    expect(await expireRemotePairings(journals, { abandon }, NOW)).toEqual({ expired: 1, failed: 2 });
-    expect(abandon).toHaveBeenCalledTimes(2);
+    const stuck = randomUUID();
+    // Un canje del que no se conserva nada que reintentar: la limpieza falla en cada intento.
+    await journals.write(journal(stuck, '2026-11-04T11:00:00.000Z', { cleanupRequired: true }));
+    const service = serviceOf(journals);
+    const recover = vi.spyOn(service, 'recover');
+    let now = 0;
+    const list = await PendingUploadList.open(control);
+    const sweep = sweepOf(list, viaOpenClose([], list), { now: () => now, expireJournals: recoverOf(service) });
+    const tried = (): number => recover.mock.results.length;
+    const failedReads = async (): Promise<number> => (await sweep.runOnce()).journalsFailed;
+
+    expect(await failedReads()).toBe(1);
+    expect(await failedReads()).toBe(0);
+    now = RETRY_BACKOFF_BASE_MS - 1;
+    expect(await failedReads()).toBe(0);
+    now = RETRY_BACKOFF_BASE_MS;
+    expect(await failedReads()).toBe(1);
+    // La segunda espera es el doble.
+    now += RETRY_BACKOFF_BASE_MS * 2 - 1;
+    expect(await failedReads()).toBe(0);
+    now += 1;
+    expect(await failedReads()).toBe(1);
+    expect(tried()).toBe(6);
+
+    // Otro diario nuevo no espera a que le toque al atascado.
+    const other = randomUUID();
+    await journals.write(journal(other, '2026-11-04T11:00:00.000Z'));
+    expect((await sweep.runOnce()).journalsExpired).toBe(1);
+    expect(await journals.read(other)).toBeNull();
+    expect(await journals.read(stuck)).not.toBeNull();
+  });
+
+  it('con un 404 persistente del canje, cada diario gasta una petición por espera y no una por barrido', async () => {
+    const journals = new RemotePairingJournalStore(join(root, 'remote-pairing-v1'));
+    const id = randomUUID();
+    await journals.write(journal(id, '2026-11-04T11:00:00.000Z',
+      { phase: 'exchange-pending', cleanupRequired: true, pairingCode: 'codigo' }));
+    const fetcher = vi.fn(async () => new Response('{}', { status: 404 }));
+    const service = serviceOf(journals, fetcher);
+    let now = 0;
+    const list = await PendingUploadList.open(control);
+    const sweep = sweepOf(list, viaOpenClose([], list), { now: () => now, expireJournals: recoverOf(service) });
+    await sweep.runOnce();
+    const first = fetcher.mock.calls.length;
+    expect(first).toBeGreaterThan(0);
+    for (let round = 0; round < 10; round += 1) {
+      now += 1_000;
+      await sweep.runOnce();
+    }
+    expect(fetcher.mock.calls.length).toBe(first);
   });
 });
 

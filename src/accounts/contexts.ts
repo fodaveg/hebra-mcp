@@ -1,4 +1,5 @@
 import { logEvent } from '../log/logger';
+import type { WriterLockOwner } from '../lock';
 import type { ServerContext, SpaceLease, SpaceLifecycleControl } from '../server/context';
 import type { ServeContext } from '../server/serve';
 import {
@@ -41,9 +42,6 @@ export interface AccountContextsOptions {
   /** Quién tiene el `writer.lock` de la cuenta, antes de abrir (`classifyWriterLock`). */
   classifyLock?(account: AuthorizedAccount): WriterLockOwner;
 }
-
-/** Lo que devuelve `classifyWriterLock` de `src/lock`. */
-export type WriterLockOwner = 'none' | 'stale' | 'this-boot' | 'other-process';
 
 /** Cada cuánto se reintenta una apertura cuyo `writer.lock` tiene otro proceso vivo. */
 const LOCK_RETRY_MS = 2_000;
@@ -216,6 +214,35 @@ export class AccountContexts {
         release: () => use.release()
       };
     }
+  }
+
+  /**
+   * Da `fn` con el contexto de la cuenta por la misma adquisición que una petición (el barrido de
+   * lo pendiente, D22): comparte el contexto con quien ya lo tenga abierto, cuenta como uso mientras
+   * dura y, al soltarlo, lo cierra si nadie más lo usa. No retira nada: la persona que llama
+   * mientras tanto recibe respuesta normal.
+   */
+  async use<T>(ref: AccountRef, fn: (ctx: ServerContext) => Promise<T>): Promise<T> {
+    const account = this.registry.findById(ref.id);
+    if (!account || account.generation !== ref.generation) throw new Error('account_inactive');
+    const lease = await this.acquire(account);
+    try {
+      return await fn(lease.ctx);
+    } finally {
+      lease.release();
+      await this.closeIfIdle(ref).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Cierra ya el contexto de la cuenta si nadie lo está usando, sin esperar a la inactividad y
+   * sin retirarlo: quien llegue después lo abre de nuevo. Es lo que usa el barrido al terminar,
+   * para no tener abierta una biblioteca que nadie pidió.
+   */
+  async closeIfIdle(ref: AccountRef): Promise<void> {
+    const entry = this.entries.get(ref.id);
+    if (!entry || entry.account.generation !== ref.generation) return;
+    await entry.life.closeIfIdle();
   }
 
   async drainAndClose(ref: AccountRef): Promise<void> {

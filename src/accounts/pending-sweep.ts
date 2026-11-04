@@ -9,16 +9,18 @@
  *   (`LibraryInstance.settleUploads`).
  * - `PendingSweep`: el único barrido global, cada 60 s, sin solaparse consigo mismo. Reintenta la
  *   lista, las retiradas pendientes y los diarios de alta caducados. Sin nada pendiente, ninguna
- *   petición. Un elemento que falla o se cuelga no para a los demás.
+ *   petición. Un elemento que falla o se cuelga no para a los demás, y cada uno que falla espera
+ *   más que la vez anterior (`RetryBackoff`), para que un relé caído no abra cada biblioteca cada
+ *   minuto ni gaste el límite de canjes de Lumbre.
  *
  * Reintentar una subida abre el contexto por la vía normal (`WithAccountContext`), y quien lo abre
  * es quien sabe cuándo cerrarlo.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readdir, readFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logEvent } from '../log/logger';
-import type { RemotePairingJournal } from '../pair/remote/types';
+import type { RecoverRetry } from '../pair/remote/service';
 import type { ServerContext } from '../server/context';
 import { ToolError } from '../server/errors';
 import type { UploadLedger, UploadLedgerState } from '../sync/library-instance';
@@ -42,8 +44,10 @@ export function pendingUploadsTemporaryName(): string {
 }
 
 const FILE_VERSION = 1;
-/** Como `RemotePairingJournalStore.list`: lo demás de ese directorio no es un diario. */
-const JOURNAL_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Primera espera tras un fallo: dos barridos. Se dobla con cada fallo seguido. */
+export const RETRY_BACKOFF_BASE_MS = 2 * PENDING_SWEEP_INTERVAL_MS;
+/** Tope de la espera: media hora. Un relé que vuelve se nota como mucho en ese plazo, y la persona que llama lo abre antes. */
+export const RETRY_BACKOFF_MAX_MS = 30 * 60_000;
 
 /** Una biblioteca con subidas pendientes. `space: null` es la personal de esa cuenta. */
 export interface PendingUploadEntry {
@@ -217,6 +221,35 @@ export class AccountUploadLedger implements UploadLedger {
 }
 
 /**
+ * Espera creciente por elemento, en memoria: tras `n` fallos seguidos, `base * 2^(n-1)` hasta `max`.
+ * Un éxito o un `succeeded` la olvida. No se persiste: un reinicio es motivo para intentarlo ya.
+ */
+export class RetryBackoff {
+  private readonly state = new Map<string, { failures: number; nextAt: number }>();
+
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly baseMs: number = RETRY_BACKOFF_BASE_MS,
+    private readonly maxMs: number = RETRY_BACKOFF_MAX_MS
+  ) {}
+
+  ready(key: string): boolean {
+    const entry = this.state.get(key);
+    return !entry || this.now() >= entry.nextAt;
+  }
+
+  failed(key: string): void {
+    const failures = (this.state.get(key)?.failures ?? 0) + 1;
+    const wait = Math.min(this.baseMs * 2 ** Math.min(failures - 1, 30), this.maxMs);
+    this.state.set(key, { failures, nextAt: this.now() + wait });
+  }
+
+  succeeded(key: string): void {
+    this.state.delete(key);
+  }
+}
+
+/**
  * Da `fn` con el contexto de una cuenta abierto por la vía normal y lo cierra (o lo deja cerrarse)
  * después. El lote de ciclo de vida (D22) enchufa aquí su apertura; ver `startServeHttp`.
  */
@@ -227,11 +260,20 @@ export interface PendingSweepOptions {
   withAccountContext: WithAccountContext;
   /** Si no sigue activa con esa generación, su entrada se descarta sin abrir nada. */
   accountActive(ref: AccountRef): boolean;
+  /**
+   * La cuenta activa con su generación de ahora, o `null` si ya no está. Una renovación sube la
+   * generación: la entrada pasa a la nueva, desbloqueada y sin espera, para que el siguiente barrido
+   * lo intente con la credencial nueva en vez de descartar unas subidas que siguen pendientes.
+   */
+  currentRef?(accountId: string): AccountRef | null;
   /** `AccountRemovalService.resumePending`. */
   resumeRemovals(): Promise<void>;
-  /** `expireRemotePairings`. */
-  expireJournals(): Promise<{ expired: number; failed: number }>;
+  /** `RemotePairingService.recover`, con la espera por diario que lleva el barrido. */
+  expireJournals(retry: RecoverRetry): Promise<{ expired: number; failed: number }>;
   /** Tests: relojes y temporizador. */
+  now?: () => number;
+  backoffBaseMs?: number;
+  backoffMaxMs?: number;
   intervalMs?: number;
   elementTimeoutMs?: number;
   stopWaitMs?: number;
@@ -280,12 +322,20 @@ export class PendingSweep {
   private stopped = false;
   /** Lo que sigue en marcha, también después de agotar su plazo: nunca dos veces a la vez. */
   private readonly inFlight = new Set<string>();
-  /** Bloqueadas ya reintentadas: una vez por arranque, por si un binario nuevo lo resuelve. */
-  private readonly triedBlocked = new Set<string>();
+  /** Bloqueadas ya reintentadas: una vez por arranque y generación, por si un binario nuevo lo resuelve. */
+  private readonly triedBlocked = new Map<string, number>();
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly backoff: RetryBackoff;
+  private readonly journalRetry: RecoverRetry;
 
   constructor(private readonly options: PendingSweepOptions) {
     this.sleep = options.sleep ?? realSleep;
+    this.backoff = new RetryBackoff(options.now, options.backoffBaseMs, options.backoffMaxMs);
+    this.journalRetry = {
+      ready: (id) => this.backoff.ready(`journal:${id}`),
+      failed: (id) => this.backoff.failed(`journal:${id}`),
+      succeeded: (id) => this.backoff.succeeded(`journal:${id}`)
+    };
   }
 
   /** Un único temporizador; idempotente. */
@@ -343,7 +393,7 @@ export class PendingSweep {
 
   private async sweepJournals(report: SweepReport): Promise<void> {
     try {
-      const done = await this.bounded('journals', () => this.options.expireJournals());
+      const done = await this.bounded('journals', () => this.options.expireJournals(this.journalRetry));
       if (done === TIMED_OUT) report.journalsFailed += 1;
       else if (done) {
         report.journalsExpired += done.expired;
@@ -357,27 +407,61 @@ export class PendingSweep {
   /** Una a una: abrir una biblioteca cuesta memoria, y el barrido no compite con nadie por ella. */
   private async sweepUploads(report: SweepReport): Promise<void> {
     const { list } = this.options;
-    for (const entry of list.entries()) {
+    for (const listed of list.entries()) {
       if (this.stopped) return;
-      const key = keyOf(entry);
-      if (list.isOpen(entry) || (entry.blocked && this.triedBlocked.has(key))) {
-        report.skipped += 1;
-        continue;
-      }
-      if (entry.blocked) this.triedBlocked.add(key);
+      let entry = listed;
       try {
-        const outcome = await this.bounded(`upload:${key}`, () => this.retryUpload(entry));
-        // Si este mismo intento la ha bloqueado, ya cuenta como el de este arranque.
-        if (list.isBlocked(entry)) this.triedBlocked.add(key);
-        if (outcome === 'dropped') report.dropped += 1;
-        else if (outcome === null) report.skipped += 1;
-        else if (outcome === TIMED_OUT || list.has(entry)) report.kept += 1;
-        else report.uploaded += 1;
+        entry = await this.followRenewal(listed);
       } catch (error) {
         report.kept += 1;
         logEvent({ event: 'pending_sweep.element', result: 'failed', code: errorCode(error) });
+        continue;
+      }
+      const key = keyOf(entry);
+      const retryKey = `upload:${key}#${entry.generation}`;
+      if (list.isOpen(entry) || (entry.blocked && this.triedBlocked.get(key) === entry.generation) ||
+        !this.backoff.ready(retryKey)) {
+        report.skipped += 1;
+        continue;
+      }
+      if (entry.blocked) this.triedBlocked.set(key, entry.generation);
+      try {
+        const outcome = await this.bounded(`upload:${key}`, () => this.retryUpload(entry));
+        // Si este mismo intento la ha bloqueado, ya cuenta como el de este arranque.
+        if (list.isBlocked(entry)) this.triedBlocked.set(key, entry.generation);
+        if (outcome === 'dropped') {
+          report.dropped += 1;
+          this.backoff.succeeded(retryKey);
+        } else if (outcome === null) report.skipped += 1;
+        else if (outcome === TIMED_OUT || list.has(entry)) {
+          report.kept += 1;
+          // Una bloqueada espera un cambio (renovación, binario nuevo), no un plazo.
+          if (!list.isBlocked(entry)) this.backoff.failed(retryKey);
+        } else {
+          report.uploaded += 1;
+          this.backoff.succeeded(retryKey);
+        }
+      } catch (error) {
+        report.kept += 1;
+        this.backoff.failed(retryKey);
+        logEvent({ event: 'pending_sweep.element', result: 'failed', code: errorCode(error) });
       }
     }
+  }
+
+  /**
+   * Una renovación de credencial sube la generación de la cuenta. La entrada, bloqueada por la
+   * credencial vieja o con su espera acumulada, pasa a la generación nueva ya desbloqueada y sin
+   * espera: el siguiente intento es en esta misma pasada.
+   */
+  private async followRenewal(entry: PendingUploadEntry): Promise<PendingUploadEntry> {
+    const current = this.options.currentRef?.(entry.account);
+    if (!current || current.generation === entry.generation) return entry;
+    const key = keyOf(entry);
+    this.backoff.succeeded(`upload:${key}#${entry.generation}`);
+    this.triedBlocked.delete(key);
+    await this.options.list.put(current, entry.space, false);
+    return { ...entry, generation: current.generation, blocked: false };
   }
 
   /**
@@ -444,38 +528,4 @@ async function targetOf(ctx: ServerContext, entry: PendingUploadEntry): Promise<
     if (visible.some((space) => space.spaceId === entry.space)) throw error;
     return null;
   }
-}
-
-/**
- * Los diarios de alta caducados. No sirve `RemotePairingService.recover`: limpia TODOS los diarios,
- * porque es para el arranque, y aquí se llevaría por delante las altas en curso de esas personas.
- * `abandon` hace la misma limpieza sobre uno solo, en su turno; una cuenta ya publicada solo pierde
- * el diario, nunca la credencial. Lee los diarios uno a uno para que uno ilegible no pare al resto.
- */
-export async function expireRemotePairings(
-  journals: { root: string; read(id: string): Promise<RemotePairingJournal | null> },
-  service: { abandon(id: string, oauthRequestId: string): Promise<void> },
-  now: number
-): Promise<{ expired: number; failed: number }> {
-  let names: string[];
-  try {
-    names = await readdir(journals.root);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { expired: 0, failed: 0 };
-    throw error;
-  }
-  let expired = 0;
-  let failed = 0;
-  for (const name of names) {
-    if (!JOURNAL_NAME.test(name)) continue;
-    try {
-      const journal = await journals.read(name);
-      if (!journal || Date.parse(journal.expiresAt) > now) continue;
-      await service.abandon(journal.id, journal.oauthRequestId);
-      expired += 1;
-    } catch {
-      failed += 1;
-    }
-  }
-  return { expired, failed };
 }

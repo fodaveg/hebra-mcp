@@ -53,6 +53,13 @@ interface RuntimePairing {
 }
 
 /** Lo que enseña el aviso previo, antes de salir hacia Lumbre. */
+/** La espera creciente por diario que lleva quien llama a `recover` de forma repetida. */
+export interface RecoverRetry {
+  ready(journalId: string): boolean;
+  failed(journalId: string): void;
+  succeeded(journalId: string): void;
+}
+
 export interface RemotePairingNotice {
   email: string | null;
   renewal: boolean;
@@ -596,11 +603,17 @@ export class RemotePairingService {
    * Antes de aceptar tráfico y desde el barrido global (D22): limpia los diarios sin sesión viva y
    * los caducados, y no toca una transacción que una persona tiene abierta. Sin diarios, no hace
    * ninguna petición. Nunca reanuda claves efímeras perdidas.
+   *
+   * `retry` es la espera creciente del barrido: un diario cuya limpieza falla (un 404 o 410 que
+   * persiste al recuperar su canje) no se vuelve a intentar hasta que le toque, porque cada intento
+   * gasta el límite de canjes de Lumbre por IP.
    */
-  async recover(): Promise<{ cleaned: number; pending: number }> {
+  async recover(options: { retry?: RecoverRetry } = {}): Promise<{ cleaned: number; pending: number }> {
+    const { retry } = options;
     let cleaned = 0;
     let pending = 0;
     for (const candidate of await this.options.journals.list()) {
+      if (retry && !retry.ready(candidate.id)) continue;
       try {
         const handled = await this.exclusive(candidate.id, async () => {
           const journal = await this.options.journals.read(candidate.id);
@@ -609,7 +622,9 @@ export class RemotePairingService {
           return true;
         });
         if (handled) cleaned += 1;
+        retry?.succeeded(candidate.id);
       } catch {
+        retry?.failed(candidate.id);
         pending += 1;
       }
     }
