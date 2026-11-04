@@ -134,14 +134,30 @@ function trackInFlight(server: Server): { idle(timeoutMs: number): Promise<boole
  * runner; al cerrar, `attachRelay` fija el valor en la marca atada a la credencial, así que
  * una cuenta revocada que se cierra por inactividad sigue revocada al reabrir, hasta que haya
  * otra credencial o se renueve (`PairingRevocation.clear`). La marca de una cuenta no cambia
- * la de otra. El desacople va ANTES de cerrar la instancia, con el runner aún vivo.
+ * la de otra. El desacople va DESPUÉS de cerrar la instancia (la ronda final puede recibir el 401),
+ * leyendo el runner que se guardó antes de que se soltara.
  */
 export function bindPairingRevocation(opened: ServeContext, pairing: PairingRevocation, credentialId: string): ServeContext {
-  const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false);
+  // Al cerrar, la instancia suelta su runner (`syncRunner` pasa a null) y la ronda final corre
+  // DENTRO de `close`: si recibe el 401, el runner queda revocado pero ya nadie lo alcanza por
+  // la instancia. Se guarda el último runner visto para poder leer `revoked` después de cerrar.
+  let lastRunner: NonNullable<ServeContext['instance']['syncRunner']> | null = null;
+  const revoked = (): boolean => {
+    const runner = opened.instance.syncRunner;
+    if (runner) lastRunner = runner;
+    return (runner ?? lastRunner)?.revoked ?? false;
+  };
+  const detachRelay = pairing.attachRelay(credentialId, revoked);
   opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
   return { ...opened, close: async () => {
-    detachRelay();
-    await opened.close();
+    revoked();
+    try {
+      await opened.close();
+    } finally {
+      // Después de cerrar, también si el cierre falla: la ronda final ya dijo lo que tenía que
+      // decir y `detachRelay` fija ese valor en la marca de la credencial.
+      detachRelay();
+    }
   } };
 }
 
