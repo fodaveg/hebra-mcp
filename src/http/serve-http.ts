@@ -19,7 +19,7 @@ import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir
   type AccountControlServer, type RemotePairingRuntime,
   type WithAccountContext } from '../accounts';
 import { readCapacityConfig } from '../accounts/capacity';
-import { revokeRemoteCredential } from '../pair/remote/revoke';
+import { revokeAccountDevice } from '../accounts/revoke-device';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
 import { withLumbreIdentity, type LumbreIdentity } from '../oauth/lumbre-identity';
@@ -272,9 +272,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           const dataDir = accountDataDir(options.dataDir, account);
           const store = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
           if (!store) throw new Error('account_secrets_unavailable');
-          const paired = await readPairedSecrets(store);
-          if (!paired) throw new Error('account_pairing_unavailable');
-          await revokeRemoteCredential(paired.connection, withLumbreIdentity(options.fetcher, options.lumbreIdentity, account.sub));
+          await revokeAccountDevice(store, withLumbreIdentity(options.fetcher, options.lumbreIdentity, account.sub));
         } });
       // Sin esto, a una persona revocada no se le ofrece renovar desde el conector (D22).
       remotePairing.attachAccountServices({ contexts, removal, legacySecrets: options.secrets! });

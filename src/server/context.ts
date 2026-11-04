@@ -45,9 +45,11 @@ export interface SpaceLifecycleControl {
     onClosed(): void;
   }): void;
   acquire(spaceId: string): Promise<SpaceLease>;
-  /** Como `acquire`, sin red si ya está abierto. `null`: que lo diga la herramienta. Solo
-   *  rechaza una apertura sin capacidad. */
-  prepare(spaceId: string): Promise<SpaceLease | null>;
+  /** Como `acquire` para varios espacios, con un solo catálogo para el lote y sin red los que ya
+   *  están abiertos. Un espacio que no se abre (ajeno, apagado, con error) falta del resultado:
+   *  que lo diga la herramienta. Solo rechaza una apertura sin capacidad. `shouldStop` corta el
+   *  lote, p. ej. si el cliente ya se fue. */
+  prepare(spaceIds: readonly string[], shouldStop?: () => boolean): Promise<SpaceLease[]>;
   /** Cierra ya los espacios sin peticiones en curso ni subidas pendientes. */
   reclaimIdle(): Promise<void>;
   beginShutdown(): void;

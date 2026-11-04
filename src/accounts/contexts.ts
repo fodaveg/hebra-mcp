@@ -25,7 +25,7 @@ export interface AccountContextLease {
    * vez dentro de la herramienta, ya solo cabe un error de herramienta. No concede nada:
    * la herramienta sigue validando el catálogo en cada invocación.
    */
-  prepareSpaces(spaceIds: readonly string[]): Promise<void>;
+  prepareSpaces(spaceIds: readonly string[], shouldStop?: () => boolean): Promise<void>;
   /** La respuesta terminó. El lease dura hasta que acabe la última herramienta en curso. */
   release(): void;
 }
@@ -204,12 +204,9 @@ export class AccountContexts {
       const lifecycle = lease.value.ctx.spaces?.lifecycle;
       return {
         ctx: guardedContext(lease.value.ctx, this.registry, account, use),
-        prepareSpaces: async (spaceIds) => {
-          if (!lifecycle) return;
-          for (const spaceId of spaceIds) {
-            const prepared = await lifecycle.prepare(spaceId);
-            if (prepared) use.hold(prepared);
-          }
+        prepareSpaces: async (spaceIds, shouldStop) => {
+          if (!lifecycle || spaceIds.length === 0) return;
+          for (const prepared of await lifecycle.prepare(spaceIds, shouldStop)) use.hold(prepared);
         },
         release: () => use.release()
       };

@@ -237,7 +237,8 @@ export interface HebraOAuthProviderOptions {
 }
 
 export interface RemotePairingOAuthHooks {
-  start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string; email?: string | null; renew?: boolean },
+  start(input: { oauthRequestId: string; sub: string; identityExpiresAt: string; email?: string | null; renew?: boolean;
+    client?: { name: string; redirectUri: string } },
     res: Response): Promise<string>;
   resumeIdentity(input: { pairingSessionId: string; sub: string; identityExpiresAt: string }): Promise<void>;
   abandon(pairingSessionId: string, oauthRequestId: string): Promise<void>;
@@ -397,7 +398,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private async startRemoteAlta(pending: PendingAuthorization, login: SumegoLogin, res: Response, renew: boolean): Promise<string> {
     if (!this.remotePairing || !login.identity || login.consentDeadline === null) throw new Error('remote_pairing_not_attached');
     return this.remotePairing.start({ oauthRequestId: pending.transactionId, sub: login.identity.sub,
-      identityExpiresAt: new Date(login.consentDeadline).toISOString(), email: login.email, renew }, res);
+      identityExpiresAt: new Date(login.consentDeadline).toISOString(), email: login.email, renew,
+      client: { name: pending.clientName, redirectUri: pending.redirectUri } }, res);
   }
 
   /** Compatibilidad monousuario: el vínculo local sigue siendo la autoridad del contexto fijo. */

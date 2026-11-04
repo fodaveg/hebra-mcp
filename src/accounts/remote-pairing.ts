@@ -1,4 +1,5 @@
-import { mkdir, open, rename, rm } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, open, readdir, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Response, Router } from 'express';
 import type { HebraOAuthProvider } from '../oauth/provider';
@@ -18,6 +19,8 @@ import { hebraAccountIdOf } from '../pair/remote/account-id';
 import type { Fetcher } from '../pair/lumbre';
 import { openFileSecretStore, readPairedSecrets, readStoredIdentity, writePairedSecrets, type SecretStore } from '../secrets';
 import { savePreparedAgentDevice } from '../spaces/device';
+import { openNodeLibraryPort } from '../store/node-port';
+import { LIBRARY_SQLITE_FILE } from '../sync/library-instance';
 import { accountDataDir, AccountRegistry } from './registry';
 import type { AccountRecord, AccountRef } from './types';
 
@@ -56,6 +59,20 @@ export interface RemotePairingRuntime {
   router: Router;
   cleanupForSub(sub: string): Promise<void>;
   attachAccountServices(services: RemotePairingAccountServices): void;
+}
+
+/**
+ * Escrituras sin subir en una SQLite: la cuenta exacta del motor (`dirty` y adjuntos pendientes),
+ * abierta de solo lectura. Una base que no existe no tiene ninguna.
+ */
+async function pendingWritesIn(directory: string): Promise<number> {
+  const sqlitePath = join(directory, LIBRARY_SQLITE_FILE);
+  if (!existsSync(sqlitePath)) return 0;
+  const port = await openNodeLibraryPort({ sqlitePath, dataDir: directory, mode: 'readOnly' });
+  try {
+    const counts = await port.syncStorePort().syncStatus();
+    return counts.dirty + counts.blobsPending;
+  } finally { port.close(); }
 }
 
 export interface RemotePairingAdapterOptions {
@@ -153,6 +170,19 @@ export function remotePairingAdapters(options: RemotePairingAdapterOptions): {
       options.provider.pairing.clear(held.binding.pairedCredentialId);
       options.provider.pairing.clear(record.binding.pairedCredentialId);
       return { id: record.id, generation: record.generation };
+    },
+    async pendingWrites(renewal) {
+      const record = options.registry.findById(renewal.id);
+      if (!record) return null;
+      const root = accountDataDir(options.dataDir, record);
+      try {
+        let total = await pendingWritesIn(root);
+        let spaces: string[] = [];
+        try { spaces = await readdir(join(root, 'spaces')); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        for (const space of spaces) total += await pendingWritesIn(join(root, 'spaces', space));
+        return total;
+      } catch { return null; }
     },
     async retire(renewal) {
       const attached = options.services();

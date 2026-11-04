@@ -529,7 +529,7 @@ function spaceControl(overrides: Partial<SpaceLifecycleControl> = {}): SpaceLife
   return {
     configure() {},
     acquire: async () => { throw new Error('unused'); },
-    prepare: async () => null,
+    prepare: async () => [],
     reclaimIdle: async () => undefined,
     beginShutdown() {},
     ...overrides
@@ -544,7 +544,7 @@ describe('espacios desde la petición', () => {
     const control = spaceControl({
       configure: () => { configured = true; },
       acquire: async (spaceId) => ({ value: { spaceId } as never, release: () => released.push(spaceId) }),
-      prepare: async (spaceId) => ({ value: { spaceId } as never, release: () => released.push(`prep-${spaceId}`) })
+      prepare: async (spaceIds) => spaceIds.map((spaceId) => ({ value: { spaceId } as never, release: () => released.push(`prep-${spaceId}`) }))
     });
     libraries.decorate = (context) => ({
       ...context,

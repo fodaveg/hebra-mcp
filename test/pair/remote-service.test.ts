@@ -417,6 +417,74 @@ describe('RemotePairingService', () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
+  it('el conector que inició el alta llega al aviso previo y a la vista previa, con su host', async () => {
+    const service = createService({ link: fakeLink(recoveryCode, []) });
+    const started = await service.start({ ...startInput(),
+      client: { name: 'Claude', redirectUri: 'https://claude.ai/api/mcp/auth_callback?x=1' } });
+    expect(await service.noticeForCookie(started.cookie))
+      .toMatchObject({ client: { name: 'Claude', callbackHost: 'claude.ai' } });
+    await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+    expect(await service.poll(started.id, await currentAuth(service, started)))
+      .toMatchObject({ kind: 'preview', preview: { client: { name: 'Claude', callbackHost: 'claude.ai' } } });
+  });
+
+  it('cinco códigos rechazados en una transacción la terminan, sin tocar a Lumbre más', async () => {
+    const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 401); });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode });
+    const started = await service.start(startInput());
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+        .rejects.toMatchObject({ code: 'code_rejected' });
+    }
+    await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(5);
+    expect(await journals.read(started.id)).toBeNull();
+  });
+
+  it('los rechazos de una persona suman entre transacciones; con el tope no se canjea nada más', async () => {
+    let clock = NOW;
+    const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 401); });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, now: () => clock });
+    for (let round = 0; round < 2; round += 1) {
+      const started = await service.start(startInput());
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+          .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'code_rejected' });
+      }
+    }
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+    const third = await service.start(startInput());
+    await expect(service.receiveCredential(third.id, auth(third, third.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+    // La ventana es de una hora: pasada, la persona vuelve a poder intentarlo.
+    clock += 60 * 60_000 + 1;
+    const later = await service.start(startInput(new Date(clock + 60_000).toISOString()));
+    await expect(service.receiveCredential(later.id, auth(later, later.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'code_rejected' });
+  });
+
+  it('un 429 de /exchange no cuenta, conserva la transacción y trae el Retry-After', async () => {
+    const revoke = vi.fn(async () => undefined);
+    let limited = true;
+    const exchangeCode = vi.fn(async () => {
+      if (limited) throw new PairError('exchange_failed', 429, 17);
+      return CONNECTION;
+    });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, revoke });
+    const started = await service.start(startInput());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'bueno'))
+        .rejects.toMatchObject({ code: 'rate_limited', retryAfterSeconds: 17 });
+    }
+    expect(await journals.read(started.id)).toMatchObject({ phase: 'credential', cleanupRequired: false });
+    limited = false;
+    await service.receiveCredential(started.id, await currentAuth(service, started), 'bueno');
+    expect((await journals.read(started.id))?.phase).toBe('approval');
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
   it('un canje perdido cuyo código resulta inválido en recovery se resuelve sin revocar nada', async () => {
     const revoke = vi.fn(async () => undefined);
     const first = createService({ link: fakeLink(recoveryCode, []), exchangeCode: async () => { throw new Error('offline'); } });
@@ -529,6 +597,7 @@ describe('RemotePairingService', () => {
       const set = renewals({
         target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16),
           opaqueDeviceId: STORED_DEVICE, lumbreDeviceId: STORED_LUMBRE_DEVICE }),
+        pendingWrites: async () => 0,
         retire: vi.fn(async () => { order.push('retire'); }),
         publish: vi.fn(async () => { throw new Error('no debe publicar sobre la cuenta anterior'); })
       });
@@ -548,11 +617,56 @@ describe('RemotePairingService', () => {
       expect(order).toEqual(['retire', 'publish']);
     });
 
+    describe.each([[3], [null]])('otra bóveda con escrituras sin subir (%s)', (pending) => {
+      const other = () => renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        pendingWrites: vi.fn(async () => pending),
+        retire: vi.fn(async () => undefined)
+      });
+
+      it('la vista previa lo dice y confirmar sin la casilla aparte no retira nada', async () => {
+        const set = other();
+        const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
+        const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, agentAccountId: () => RENEWAL_ACCOUNT });
+        const started = await service.start({ ...startInput(), renew: true });
+        await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+        expect(await service.poll(started.id, await currentAuth(service, started)))
+          .toMatchObject({ kind: 'preview', preview: { replacesLibrary: true, pendingWrites: pending } });
+        await expect(service.confirm(started.id, await currentAuth(service, started)))
+          .rejects.toMatchObject({ code: 'loss_unconfirmed' });
+        expect(set.retire).not.toHaveBeenCalled();
+        expect(publish).not.toHaveBeenCalled();
+        // La transacción sigue viva: con la confirmación aparte, termina.
+        await expect(service.confirm(started.id, await currentAuth(service, started), { acknowledgeLoss: true }))
+          .resolves.toMatchObject({ kind: 'confirmed', account: { id: 'cuenta-nueva' } });
+        expect(set.retire).toHaveBeenCalledOnce();
+      });
+    });
+
+    it('si entre la vista previa y confirmar hay más escrituras, la casilla marcada antes no vale', async () => {
+      let pending = 2;
+      const set = renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        pendingWrites: vi.fn(async () => pending)
+      });
+      const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, agentAccountId: () => RENEWAL_ACCOUNT });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      await service.poll(started.id, await currentAuth(service, started));
+      pending = 5;
+      await expect(service.confirm(started.id, await currentAuth(service, started), { acknowledgeLoss: true }))
+        .rejects.toMatchObject({ code: 'loss_unconfirmed' });
+      expect(await service.previewOf(started.id)).toMatchObject({ pendingWrites: 5 });
+      expect(set.retire).not.toHaveBeenCalled();
+    });
+
     it('si retirar la cuenta anterior falla, revoca la nueva y no da de alta nada', async () => {
       const revoke = vi.fn(async () => undefined);
       const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
       const set = renewals({
         target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        pendingWrites: async () => 0,
         retire: vi.fn(async () => { throw new Error('account_writer_busy'); })
       });
       const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, revoke,

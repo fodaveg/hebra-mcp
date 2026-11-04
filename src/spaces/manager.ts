@@ -32,6 +32,9 @@ import { catalogueSchema, type AgentSpaceAccess } from './protocol';
 /** Cuánto vale un nombre leído, y cuánto un fallo o un meta ausente. */
 const NAME_TTL_MS = 10 * 60_000;
 const NAME_FAILURE_TTL_MS = 60_000;
+/** Cuánto vale la última lectura del catálogo para las comprobaciones del sync de un espacio
+ * (D22). La invocación de una herramienta y `writer.sock` no la usan: consultan siempre. */
+const SYNC_CATALOGUE_WINDOW_MS = 2000;
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 /** JSONB puede reordenar las propiedades; eso no cambia la concesión ni su caché. */
@@ -85,6 +88,9 @@ export class AgentSpaceManager implements SpaceRouter {
     string,
     { value: string | null; until: number; last: string | null }
   >();
+  private catalogueFlight: Promise<AgentSpaceAccess[]> | null = null;
+  private queuedCatalogue: Promise<AgentSpaceAccess[]> | null = null;
+  private lastCatalogue: { startedAt: number; spaces: AgentSpaceAccess[] } | null = null;
   /** Deja de abrir y adquirir; hasta `closed`, la ronda final de un cierre sigue autorizada. */
   private accepting = true;
   private closed = false;
@@ -96,16 +102,32 @@ export class AgentSpaceManager implements SpaceRouter {
       this.onClosed = onClosed;
     },
     acquire: async (spaceId) => (await this.leaseFor(spaceId)).lease,
-    prepare: async (spaceId) => {
-      const open = [...this.entries.values()].find(
-        (entry) => entry.access.spaceId === spaceId && !entry.denied && entry.life.state === 'abierto'
-      );
+    prepare: async (spaceIds, shouldStop) => {
+      const leases: SpaceLease[] = [];
+      let catalogue: AgentSpaceAccess[] | undefined;
       try {
-        return open ? await open.life.acquire() : (await this.leaseFor(spaceId)).lease;
+        for (const spaceId of spaceIds) {
+          if (shouldStop?.()) break;
+          const open = [...this.entries.values()].find(
+            (entry) => entry.access.spaceId === spaceId && !entry.denied && entry.life.state === 'abierto'
+          );
+          try {
+            if (open) {
+              leases.push(await open.life.acquire());
+              continue;
+            }
+            // Un solo catálogo para todo el lote.
+            catalogue ??= await this.catalogue();
+            leases.push((await this.leaseFor(spaceId, catalogue)).lease);
+          } catch (error) {
+            if (error instanceof ContextUnavailableError) throw error;
+          }
+        }
       } catch (error) {
-        if (error instanceof ContextUnavailableError) throw error;
-        return null;
+        for (const lease of leases) lease.release();
+        throw error;
       }
+      return leases;
     },
     // Mismo criterio que `AccountContexts.reclaim`: primero los ociosos sin subidas pendientes; solo
     // si no queda ninguno ni hay cierres en curso, también los ociosos CON pendientes. Su cierre
@@ -144,9 +166,59 @@ export class AgentSpaceManager implements SpaceRouter {
     private readonly now: () => number = () => Date.now()
   ) {}
 
-  private async catalogue(): Promise<AgentSpaceAccess[]> {
+  /**
+   * El catálogo del relé (D22). Una consulta nunca se reutiliza si es anterior a quien la pide:
+   * quien llega con una en curso espera a UNA siguiente, que otros que lleguen también
+   * comparten, así que el relé recibe como mucho una lectura en vuelo y una en cola por cuenta
+   * sin que nadie vea un catálogo anterior a su petición. Con `maxAgeMs` (solo las
+   * comprobaciones del sync, que repiten antes y después de cada fetch) vale además la última
+   * lectura correcta de hace menos de ese tiempo.
+   */
+  private async catalogue(maxAgeMs = 0): Promise<AgentSpaceAccess[]> {
     this.assertAccountActive?.();
     if (this.closed) throw new ToolError('space_access_denied');
+    const last = this.lastCatalogue;
+    const spaces =
+      maxAgeMs > 0 && last && this.now() - last.startedAt < maxAgeMs
+        ? last.spaces
+        : await this.sharedCatalogue();
+    this.assertAccountActive?.();
+    if (this.closed) throw new ToolError('space_access_denied');
+    return spaces;
+  }
+
+  private sharedCatalogue(): Promise<AgentSpaceAccess[]> {
+    if (this.queuedCatalogue) return this.queuedCatalogue;
+    if (!this.catalogueFlight) return this.startCatalogueRead();
+    const queued = this.catalogueFlight.then(
+      () => undefined,
+      () => undefined
+    ).then(() => {
+      this.queuedCatalogue = null;
+      return this.startCatalogueRead();
+    });
+    this.queuedCatalogue = queued;
+    return queued;
+  }
+
+  private startCatalogueRead(): Promise<AgentSpaceAccess[]> {
+    const startedAt = this.now();
+    const flight = this.readCatalogue();
+    this.catalogueFlight = flight;
+    const done = () => {
+      if (this.catalogueFlight === flight) this.catalogueFlight = null;
+    };
+    flight.then(
+      (spaces) => {
+        this.lastCatalogue = { startedAt, spaces };
+        done();
+      },
+      done
+    );
+    return flight;
+  }
+
+  private async readCatalogue(): Promise<AgentSpaceAccess[]> {
     const registration = await this.device.ensureRegistered();
     try {
       const result = catalogueSchema.parse(await this.device.request('/spaces/agent-access'));
@@ -226,7 +298,7 @@ export class AgentSpaceManager implements SpaceRouter {
       const vaultKey = key ?? (own = await this.device.openGrant(item));
       const { apiOrigin, readToken, writeToken } = this.device.paired.connection;
       const check = async () => {
-        const fresh = await this.catalogue();
+        const fresh = await this.catalogue(SYNC_CATALOGUE_WINDOW_MS);
         if (!fresh.some((s) => grantHash(s) === grantHash(item))) throw new Error();
       };
       const guardedFetch: typeof fetch = async (input, init) => {
@@ -280,8 +352,11 @@ export class AgentSpaceManager implements SpaceRouter {
     return lease.value;
   }
 
-  private async leaseFor(spaceId: string): Promise<{ entry: Entry; lease: SpaceLease }> {
-    const item = (await this.catalogue()).find((space) => space.spaceId === spaceId);
+  private async leaseFor(
+    spaceId: string,
+    known?: AgentSpaceAccess[]
+  ): Promise<{ entry: Entry; lease: SpaceLease }> {
+    const item = (known ?? (await this.catalogue())).find((space) => space.spaceId === spaceId);
     if (!item || !this.accepting) throw new ToolError('space_access_denied');
     const key = this.nameKey(item);
     const existing = this.entries.get(key);
@@ -355,9 +430,9 @@ export class AgentSpaceManager implements SpaceRouter {
   }
 
   /** Validación fresca: catálogo del relé, sin caché. Nunca dentro del turno FIFO. */
-  private async authorize(entry: Entry): Promise<void> {
+  private async authorize(entry: Entry, maxAgeMs = 0): Promise<void> {
     this.assertActive(entry);
-    const spaces = await this.catalogue();
+    const spaces = await this.catalogue(maxAgeMs);
     if (!spaces.some((item) => grantHash(item) === grantHash(entry.access))) {
       await this.deny(entry);
       throw new ToolError('space_access_denied');
@@ -375,16 +450,17 @@ export class AgentSpaceManager implements SpaceRouter {
     const authorize = () => this.authorize(entry);
     const assertActive = async () => this.assertActive(entry);
     const identity = { relayOrigin: apiOrigin, syncVaultId: entry.access.syncVaultId };
+    const syncAuthorize = () => this.authorize(entry, SYNC_CATALOGUE_WINDOW_MS);
     const connection = async () => {
-      await authorize();
+      await syncAuthorize();
       return { apiOrigin, readToken, writeToken };
     };
     // El cuerpo no llega al motor hasta comprobar de nuevo el grant después de fetch.
     // El relé además controla cada fragmento de un stream y las escrituras al aplicar.
     const guardedFetch: typeof fetch = async (input, init) => {
-      await authorize();
+      await syncAuthorize();
       const response = await this.fetcher(input, { ...init, redirect: 'error' });
-      await authorize();
+      await syncAuthorize();
       return response;
     };
     const registered = await registerLinkedDevice(

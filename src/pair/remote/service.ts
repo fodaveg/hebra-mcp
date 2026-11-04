@@ -26,6 +26,7 @@ import { revokeRemoteCredential, RevokeError } from './revoke';
 import {
   RemotePairingError,
   type OwnershipVerifier,
+  type ClientLabel,
   type PairingPreview,
   type RemotePairingJournal,
   type RemotePairingFormAuthorization,
@@ -47,10 +48,13 @@ interface RuntimePairing {
   /** Solo en memoria: el aviso previo nombra la cuenta; no entra en el diario, URLs ni logs. */
   email: string | null;
   authorizationUrl: string;
+  client?: ClientLabel;
   link?: RemoteLinkRequest;
   granted?: GrantedPoll;
   preview?: PairingPreview;
   ownership?: VerifiedOwnership;
+  /** Códigos que Lumbre rechazó en esta transacción. */
+  rejectedCodes?: number;
 }
 
 /** Lo que enseña el aviso previo, antes de salir hacia Lumbre. */
@@ -62,6 +66,7 @@ export interface RecoverRetry {
 }
 
 export interface RemotePairingNotice {
+  client?: ClientLabel;
   email: string | null;
   renewal: boolean;
   authorizationUrl: string;
@@ -95,6 +100,8 @@ export interface StartRemotePairingInput {
   email?: string | null;
   /** La credencial de esta persona está revocada o rechazada: renovar en vez de dar de alta. */
   renew?: boolean;
+  /** El conector que inició el alta (nombre registrado y callback); solo se muestra. */
+  client?: { name: string; redirectUri: string };
 }
 
 export interface StartedRemotePairing {
@@ -102,6 +109,13 @@ export interface StartedRemotePairing {
   cookie: string;
   formToken: string;
   authorizationUrl: string;
+}
+
+/** Nombre y host del callback como los muestra el consentimiento normal (el nombre ya viene acotado). */
+function clientLabel(client: { name: string; redirectUri: string }): ClientLabel {
+  let callbackHost = '';
+  try { callbackHost = new URL(client.redirectUri).host; } catch { /* sin host que mostrar */ }
+  return { name: client.name.slice(0, 120), callbackHost };
 }
 
 function digest(value: string): string {
@@ -131,6 +145,18 @@ function errorDetail(error: unknown): string {
  * caducado o credencial ya revocada, y su 400 un cuerpo que nunca llegó a la transacción. Cualquier
  * otro estado (404, 410, 5xx, red) sigue siendo ambiguo y conserva la intención para resolverla.
  */
+/** 429 de `/exchange`: el limitador de Lumbre corta antes de mirar el código, sin efecto alguno. */
+function exchangeRateLimited(error: unknown): error is PairError {
+  return error instanceof PairError && error.code === 'exchange_failed' && error.detail === 429;
+}
+
+/** Códigos que Lumbre puede rechazar antes de cortar la transacción y la ventana por persona. */
+export const MAX_REJECTED_CODES_PER_TRANSACTION = 5;
+export const MAX_REJECTED_CODES_PER_SUB = 10;
+export const REJECTED_CODES_WINDOW_MS = 60 * 60_000;
+/** Espera que se pide si Lumbre no da `Retry-After`. */
+const DEFAULT_EXCHANGE_RETRY_SECONDS = 60;
+
 function exchangeLeftNoEffect(error: unknown): boolean {
   return error instanceof PairError && error.code === 'exchange_rejected' &&
     (error.detail === 400 || error.detail === 401);
@@ -139,6 +165,8 @@ function exchangeLeftNoEffect(error: unknown): boolean {
 /** Orquesta el emparejado sin confiar nunca en identidad ni sesión recibidas del formulario. */
 export class RemotePairingService {
   private readonly runtime = new Map<string, RuntimePairing>();
+  /** Instantes de los códigos rechazados por persona. Gasta el límite de canjes por IP de Lumbre. */
+  private readonly rejectedBySub = new Map<string, number[]>();
   private readonly locks = new Map<string, Promise<void>>();
   /** Diarios que están publicando: retirar la cuenta anterior no puede limpiarse a sí mismo. */
   private readonly publishing = new Set<string>();
@@ -227,7 +255,8 @@ export class RemotePairingService {
         syncVaultId: target.syncVaultId, opaqueDeviceId: target.opaqueDeviceId } } : {})
     };
     await this.options.journals.write(journal);
-    this.runtime.set(id, { cookie, csrf, email: input.email ?? null, authorizationUrl: url });
+    this.runtime.set(id, { cookie, csrf, email: input.email ?? null, authorizationUrl: url,
+      ...(input.client ? { client: clientLabel(input.client) } : {}) });
     return { id, cookie, formToken: csrf, authorizationUrl: url };
   }
 
@@ -243,6 +272,7 @@ export class RemotePairingService {
         await this.ensureAlive(journal);
         if (journal.phase !== 'credential') return null;
         return { email: current.email, renewal: journal.renewal !== undefined,
+          ...(current.client ? { client: current.client } : {}),
           authorizationUrl: current.authorizationUrl, formToken: current.csrf };
       });
     }
@@ -316,6 +346,13 @@ export class RemotePairingService {
     await this.options.journals.write(journal);
   }
 
+  private rejectedRecently(sub: string): number {
+    const since = this.now() - REJECTED_CODES_WINDOW_MS;
+    const recent = (this.rejectedBySub.get(sub) ?? []).filter((at) => at > since);
+    if (recent.length > 0) this.rejectedBySub.set(sub, recent); else this.rejectedBySub.delete(sub);
+    return recent.length;
+  }
+
   async receiveCredential(
     id: string,
     authorization: RemotePairingFormAuthorization,
@@ -328,6 +365,12 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase !== 'credential') throw new RemotePairingError('replayed');
       if (!code || code.length > 4_096) throw new RemotePairingError('invalid_form');
+      // Cada canje gasta el límite de Lumbre por IP, que comparten todas las personas: quien ya
+      // acumuló rechazos no vuelve a gastarlo y su transacción termina.
+      if (this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
+        await this.cleanup(journal);
+        throw new RemotePairingError('too_many_codes', 'sub_limit');
+      }
       // El intent queda durable ANTES del efecto remoto. Sin idempotencia/revocación por
       // deviceId, una respuesta perdida no se puede clasificar como «sin efecto».
       journal.phase = 'exchange-pending';
@@ -346,14 +389,26 @@ export class RemotePairingService {
           now: this.now
         });
       } catch (error) {
-        if (exchangeLeftNoEffect(error)) {
-          // Un código que Lumbre no reconoce (un enlace `#code=` ajeno, uno caducado) no deja nada
-          // que limpiar: la transacción vuelve a esperar el código bueno, con el mismo verifier.
+        if (exchangeLeftNoEffect(error) || exchangeRateLimited(error)) {
+          // Un código que Lumbre no reconoce (un enlace `#code=` ajeno, uno caducado) o un 429 no
+          // dejan nada que limpiar: la transacción vuelve a esperar el código bueno, con el mismo
+          // verifier.
           journal.phase = 'credential';
           journal.cleanupRequired = false;
           journal.pairingCode = undefined;
           journal.updatedAt = new Date(this.now()).toISOString();
           await this.options.journals.write(journal);
+          if (exchangeRateLimited(error)) {
+            throw new RemotePairingError('rate_limited', 'exchange_failed:429',
+              error.retryAfterSeconds ?? DEFAULT_EXCHANGE_RETRY_SECONDS);
+          }
+          runtime.rejectedCodes = (runtime.rejectedCodes ?? 0) + 1;
+          this.rejectedBySub.set(journal.sub, [...(this.rejectedBySub.get(journal.sub) ?? []), this.now()]);
+          if (runtime.rejectedCodes >= MAX_REJECTED_CODES_PER_TRANSACTION ||
+            this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
+            await this.cleanup(journal);
+            throw new RemotePairingError('too_many_codes', 'rejected_codes');
+          }
           throw new RemotePairingError('code_rejected', `exchange_failed:${errorDetail(error)}`);
         }
         this.runtime.delete(id);
@@ -512,9 +567,19 @@ export class RemotePairingService {
     });
   }
 
+  /** La vista previa vigente de una transacción en confirmación, para volver a enseñarla. */
+  async previewOf(id: string): Promise<PairingPreview | null> {
+    return this.exclusive(id, async () => {
+      const journal = await this.requireJournal(id);
+      await this.ensureAlive(journal);
+      return journal.phase === 'confirmation' ? this.requireRuntime(id).preview ?? null : null;
+    });
+  }
+
   async confirm(
     id: string,
-    authorization: RemotePairingFormAuthorization
+    authorization: RemotePairingFormAuthorization,
+    options: { acknowledgeLoss?: boolean } = {}
   ): Promise<
     | { kind: 'reauthenticate' }
     | { kind: 'confirmed'; account: Awaited<ReturnType<RemotePairingPublisher['publish']>> }
@@ -529,6 +594,16 @@ export class RemotePairingService {
         !journal.connection || !journal.paired
       ) throw new RemotePairingError(journal.phase === 'committing' ? 'replayed' : 'not_ready');
       if (!validFuture(journal.identityExpiresAt, this.now())) return { kind: 'reauthenticate' };
+      if (journal.replacesAccount && runtime.preview.pendingWrites !== 0) {
+        // Escrituras sin subir, o sin poder contarlas: se borran con la cuenta anterior. Hace falta
+        // una confirmación aparte, y si desde la vista previa hay más (o ya no se pueden contar),
+        // la anterior no vale.
+        const seen = runtime.preview.pendingWrites ?? null;
+        const now = await this.options.renewals?.pendingWrites?.(journal.renewal!).catch(() => null) ?? null;
+        const worse = now === null ? seen !== null : seen !== null && now > seen;
+        if (worse) runtime.preview = { ...runtime.preview, pendingWrites: now };
+        if (!options.acknowledgeLoss || worse) throw new RemotePairingError('loss_unconfirmed');
+      }
       journal.phase = 'committing';
       journal.updatedAt = new Date(this.now()).toISOString();
       await this.options.journals.write(journal);
@@ -698,12 +773,18 @@ export class RemotePairingService {
     }
     const verified = await runtime.link!.verify(granted);
     const replacesAccount = journal.renewal !== undefined && !sameVault;
+    // Antes de enseñar la vista previa: retirar la cuenta anterior borra su copia, con lo que no
+    // haya subido. Se cuenta ahora para decirlo; si no se puede leer, también se dice.
+    const pendingWrites = replacesAccount
+      ? await this.options.renewals?.pendingWrites?.(journal.renewal!).catch(() => null) ?? null
+      : undefined;
     const preview: PairingPreview = {
       titles: verified.titles.slice(0, 3),
       vaultCreatedAt: verified.vaultCreatedAt,
       recordsRead: verified.recordsRead,
       more: verified.more,
-      ...(replacesAccount ? { replacesLibrary: true } : {})
+      ...(replacesAccount ? { replacesLibrary: true, pendingWrites } : {}),
+      ...(runtime.client ? { client: runtime.client } : {})
     };
     runtime.ownership = ownership;
     runtime.preview = preview;

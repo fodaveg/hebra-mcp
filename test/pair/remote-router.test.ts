@@ -73,6 +73,76 @@ describe('router del emparejado remoto', () => {
     expect(reply.headers.get('set-cookie')).toMatch(/__Host-hebra_mcp_pair=;/);
   });
 
+  it('un 429 de /exchange: página con Retry-After, sin cerrar la solicitud OAuth ni la cookie', async () => {
+    const { RemotePairingError } = await import('../../src/pair/remote/types');
+    const service = {
+      sessionForCookie: vi.fn(async () => ({ id: 's', oauthRequestId: 'oauth-1', sub: 'sumego|david' })),
+      noticeForCookie: vi.fn(async () => null),
+      receiveCredential: vi.fn(async () => { throw new RemotePairingError('rate_limited', 'exchange_failed:429', 23); })
+    } as unknown as RemotePairingService;
+    const cancelOauth = vi.fn(async () => undefined);
+    const app = express();
+    app.use(createRemotePairingRouter(service, { resumeOauth: async () => '/x', cancelOauth, reauthenticate: async () => undefined }));
+    const address = await listen(app);
+    const reply = await fetch(`${address}/lumbre/connect`, { method: 'POST',
+      headers: { origin: REMOTE_PAIRING_ORIGIN, cookie: '__Host-hebra_mcp_pair=c', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ form_token: 't', code: 'ab'.repeat(32) }) });
+    expect(reply.status).toBe(429);
+    expect(reply.headers.get('retry-after')).toBe('23');
+    expect(await reply.text()).toContain('Espera unos 23 segundos');
+    expect(cancelOauth).not.toHaveBeenCalled();
+    expect(reply.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('confirmar sin la casilla de pérdida: vuelve a enseñar la vista previa, sin cancelar la solicitud OAuth', async () => {
+    const { RemotePairingError } = await import('../../src/pair/remote/types');
+    const preview = { titles: [], vaultCreatedAt: '2026-01-01T00:00:00.000Z', recordsRead: 0, more: false,
+      replacesLibrary: true, pendingWrites: 4 };
+    const confirm = vi.fn(async () => { throw new RemotePairingError('loss_unconfirmed'); });
+    const service = {
+      sessionForCookie: vi.fn(async () => ({ id: 's', oauthRequestId: 'oauth-1', sub: 'sumego|david' })),
+      confirm,
+      previewOf: vi.fn(async () => preview),
+      formToken: vi.fn(async () => 'nuevo')
+    } as unknown as RemotePairingService;
+    const cancelOauth = vi.fn(async () => undefined);
+    const app = express();
+    app.use(createRemotePairingRouter(service, { resumeOauth: async () => '/x', cancelOauth, reauthenticate: async () => undefined }));
+    const address = await listen(app);
+    const post = (body: Record<string, string>) => fetch(`${address}/lumbre/pairing/confirm`, { method: 'POST',
+      headers: { origin: REMOTE_PAIRING_ORIGIN, cookie: '__Host-hebra_mcp_pair=c', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(body) });
+    const reply = await post({ form_token: 't' });
+    expect(reply.status).toBe(409);
+    const html = await reply.text();
+    expect(html).toContain('4 escrituras');
+    expect(html).toContain('Marca la casilla');
+    expect(html).toContain('value="nuevo"');
+    expect(cancelOauth).not.toHaveBeenCalled();
+    expect(confirm).toHaveBeenLastCalledWith('s', expect.anything(), { acknowledgeLoss: false });
+    await post({ form_token: 't', accept_loss: '1' });
+    expect(confirm).toHaveBeenLastCalledWith('s', expect.anything(), { acknowledgeLoss: true });
+  });
+
+  it('demasiados códigos rechazados: la transacción y la solicitud OAuth terminan con una página clara', async () => {
+    const { RemotePairingError } = await import('../../src/pair/remote/types');
+    const service = {
+      sessionForCookie: vi.fn(async () => ({ id: 's', oauthRequestId: 'oauth-1', sub: 'sumego|david' })),
+      receiveCredential: vi.fn(async () => { throw new RemotePairingError('too_many_codes', 'rejected_codes'); })
+    } as unknown as RemotePairingService;
+    const cancelOauth = vi.fn(async () => undefined);
+    const app = express();
+    app.use(createRemotePairingRouter(service, { resumeOauth: async () => '/x', cancelOauth, reauthenticate: async () => undefined }));
+    const address = await listen(app);
+    const reply = await fetch(`${address}/lumbre/connect`, { method: 'POST',
+      headers: { origin: REMOTE_PAIRING_ORIGIN, cookie: '__Host-hebra_mcp_pair=c', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ form_token: 't', code: 'ab'.repeat(32) }) });
+    expect(reply.status).toBe(429);
+    expect(await reply.text()).toContain('Demasiados intentos');
+    expect(cancelOauth).toHaveBeenCalledWith({ oauthRequestId: 'oauth-1' });
+    expect(reply.headers.get('set-cookie')).toMatch(/__Host-hebra_mcp_pair=;/);
+  });
+
   describe('con el servicio real', () => {
     const NOW = Date.parse('2026-11-04T08:00:00.000Z');
     const CODE = 'ab'.repeat(32);

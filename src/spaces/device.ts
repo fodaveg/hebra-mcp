@@ -21,7 +21,7 @@ import {
 type Fetcher = typeof globalThis.fetch;
 
 /** El JSON de la respuesta, leído por trozos para cortar en cuanto pase del tope. Lanza si pasa. */
-async function readLimitedJson(response: Response): Promise<unknown> {
+export async function readLimitedJson(response: Response): Promise<unknown> {
   if (Number(response.headers.get('content-length')) > DEVICE_RESPONSE_MAX_BYTES) throw new Error();
   const reader = response.body?.getReader();
   const chunks: Uint8Array[] = [];

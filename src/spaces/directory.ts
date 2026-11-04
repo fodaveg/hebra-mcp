@@ -10,7 +10,7 @@
 import { ToolError } from '../server/errors';
 import type { DirectoryView, ServerContext } from '../server/context';
 import { effectiveLimit, LIMITS, sliceAfterKey, unwrapCursor, wrapCursor } from '../server/pagination';
-import type { AgentDevice } from './device';
+import { readLimitedJson, type AgentDevice } from './device';
 import { agentDirectorySchema, type AgentDirectory } from './protocol';
 
 type UnavailableReason = 'not_available' | 'rate_limited' | 'relay_unavailable' | 'invalid_response';
@@ -60,7 +60,7 @@ export async function fetchAgentDirectory(
   if (!response.ok) throw unavailable('relay_unavailable');
   let directory: AgentDirectory;
   try {
-    directory = agentDirectorySchema.parse(await response.json());
+    directory = agentDirectorySchema.parse(await readLimitedJson(response));
   } catch {
     throw unavailable('invalid_response');
   }
