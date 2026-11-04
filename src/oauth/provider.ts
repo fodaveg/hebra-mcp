@@ -25,7 +25,7 @@ import { sendTooManyRequests } from './failure-limit';
 import { GrantSecrets } from './grants';
 import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
-import { sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
+import { sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendFamilyRateLimitedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
 import { SumegoError, type SumegoOidc } from './sumego';
 import type { RefreshSealer } from './sumego-refresh';
 import { familyRateKey, FamilyRateLimitedError, logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
@@ -707,6 +707,11 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (login.consentDeadline <= this.now()) {
       burn(); logEvent({ event: 'oauth.sumego.callback', result: 'expired' }); sendConsentExpiredPage(res); return;
     }
+    // Una conexión en mitad de un alta ya empezada sigue: el 429 de `/token` la espera.
+    const waitSeconds = login.remotePairingId ? null : this.familyWait(identity);
+    if (waitSeconds !== null) {
+      burn(); logEvent({ event: 'oauth.rate_limited', scope: 'family' }); sendFamilyRateLimitedPage(res, waitSeconds); return;
+    }
 
     const identityExpiresAt = new Date(login.consentDeadline).toISOString();
     if (login.remotePairingId) {
@@ -809,6 +814,12 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     if (this.loggedOut(authorization.identity, authorization.idTokenIat)) {
       this.pending.delete(key); logEvent({ event: 'oauth.consent', result: 'logged_out' }); sendDeniedPage(res); return;
+    }
+    // Antes de gastar una concesión en Lumbre: si el ritmo se llenó desde el callback, se dice aquí.
+    const waitSeconds = this.familyWait(authorization.identity);
+    if (waitSeconds !== null) {
+      this.pending.delete(key); logEvent({ event: 'oauth.rate_limited', scope: 'family' });
+      sendFamilyRateLimitedPage(res, waitSeconds); return;
     }
     if (pending.claimed) { this.pending.delete(key); sendUnavailablePage(res); return; }
     pending.claimed = true;
@@ -1309,6 +1320,28 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       if (left > 0) this.familyExchanges.set(key, left); else this.familyExchanges.delete(key);
     });
     next();
+  }
+
+  /** Segundos hasta que esta persona pueda crear otra familia, o `null` si ya puede (ritmo por `sub`). */
+  private familyWait(identity: FamilyIdentity): number | null {
+    return this.tokens.familyRetryAfter(familyRateKey(identity, ''), this.familyExchanges.get(familyRateKey(identity, '')) ?? 0);
+  }
+
+  /**
+   * `/token` con un refresh vigente o un código vigente (D22, SPEC.md §12.10). Sin escribir ni
+   * llamar a nadie: solo memoria, para que el freno por dirección deje pasar lo correcto.
+   */
+  async presentsLiveCredential(req: Request): Promise<boolean> {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    if (req.method !== 'POST') return false;
+    if (body.grant_type === 'refresh_token' && typeof body.refresh_token === 'string' && typeof body.client_id === 'string') {
+      return this.tokens.lookupRefresh(body.refresh_token, body.client_id, await this.revokedBefore()) !== null;
+    }
+    if (body.grant_type === 'authorization_code' && typeof body.code === 'string') {
+      const entry = this.codes.get(sha256(body.code));
+      return entry !== undefined && entry.expiresAt > this.now();
+    }
+    return false;
   }
 
   /** Un refresh que no es el vigente de una familia viva: replay, rotación reciente o caducada. Nunca renueva. */

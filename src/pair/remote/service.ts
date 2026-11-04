@@ -5,6 +5,7 @@ import { sameBinding, type Binding } from '../../oauth/backchannel';
 import { openFileSecretStore, writePairedSecrets, type PairedSecrets } from '../../secrets';
 import { linkedSyncFrom, registerLinkedDevice } from '../../sync/linked';
 import {
+  AgentKeyNotFoundError,
   prepareAgentDevice,
   savePreparedAgentDevice
 } from '../../spaces/device';
@@ -315,6 +316,12 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase !== 'credential') throw new RemotePairingError('replayed');
       if (!code || code.length > 4_096) throw new RemotePairingError('invalid_form');
+      // Renovar: antes de canjear nada (el canje rota los tokens de la credencial), comprobar que
+      // el agente está activo. Si no, la conexión guardada queda intacta para cuando se reactive.
+      if (journal.renewal && await this.options.renewals?.agentEnabled?.(journal.renewal, this.fetcher) === false) {
+        await this.cleanup(journal).catch(() => undefined);
+        throw new RemotePairingError('agent_disabled');
+      }
       // El intent queda durable ANTES del efecto remoto. Sin idempotencia/revocación por
       // deviceId, una respuesta perdida no se puede clasificar como «sin efecto».
       journal.phase = 'exchange-pending';
@@ -382,9 +389,10 @@ export class RemotePairingService {
           journal.updatedAt = new Date(this.now()).toISOString();
           await this.options.journals.write(journal);
         }
-      } catch {
+      } catch (error) {
         await this.cleanup(journal);
-        throw new RemotePairingError('unavailable');
+        // Solo si se desactivó entre la comprobación y el canje.
+        throw new RemotePairingError(error instanceof AgentKeyNotFoundError ? 'agent_disabled' : 'unavailable');
       }
       if (wrongAccount) {
         await this.restartAfterWrongAccount(journal, runtime);

@@ -16,7 +16,7 @@ import {
 import { hebraAccountIdOf } from '../pair/remote/account-id';
 import type { Fetcher } from '../pair/lumbre';
 import { openFileSecretStore, readPairedSecrets, readStoredIdentity, writePairedSecrets, type SecretStore } from '../secrets';
-import { savePreparedAgentDevice } from '../spaces/device';
+import { AgentKeyNotFoundError, prepareAgentDevice, savePreparedAgentDevice } from '../spaces/device';
 import { accountDataDir, AccountRegistry } from './registry';
 import type { AccountRecord, AccountRef } from './types';
 
@@ -118,6 +118,20 @@ export function remotePairingAdapters(options: RemotePairingAdapterOptions): {
       if (!stored) return undefined;
       try { return (JSON.parse(stored) as { privateKey?: JsonWebKey }).privateKey; }
       catch { return undefined; }
+    },
+    async agentEnabled(renewal, fetcher) {
+      const record = options.registry.findById(renewal.id);
+      const attached = options.services();
+      if (!attached || !record) return true;
+      try {
+        const store = storeOf(record, attached);
+        const paired = await readPairedSecrets(store);
+        const stored = await store.get('agent-device-key');
+        const key = stored ? (JSON.parse(stored) as { privateKey?: JsonWebKey }).privateKey : undefined;
+        if (!paired || !key) return true;
+        await prepareAgentDevice(paired.connection, paired.device.lumbreDeviceId, fetcher, key);
+        return true;
+      } catch (error) { return !(error instanceof AgentKeyNotFoundError); }
     },
     async publish(input) {
       const attached = options.services();

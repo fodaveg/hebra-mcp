@@ -232,8 +232,10 @@ describe('familias: sin máximo, con ritmo por persona', () => {
   it('la 21.ª de una persona en una hora da 429 con Retry-After y no afecta a otra', async () => {
     const ana = await person('sumego|ana');
     const beto = await person('sumego|beto');
+    // El código se pide antes: con el ritmo lleno, el login ya no llega a dar uno (ver abajo).
+    const ready = await codeFor(ana);
     for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
-    const limited = await exchange(await codeFor(ana));
+    const limited = await exchange(ready);
     expect(limited.status).toBe(429);
     const retryAfter = Number(limited.headers.get('retry-after'));
     expect(retryAfter).toBeGreaterThan(0);
@@ -247,13 +249,15 @@ describe('familias: sin máximo, con ritmo por persona', () => {
 
   it('el 429 no quema el código: abierto el hueco, el mismo código sirve', async () => {
     const ana = await person('sumego|ana');
-    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
-    clockOffset = FAMILY_RATE_WINDOW_MS - 30_000;
+    for (let index = 0; index < FAMILY_RATE_LIMIT - 1; index += 1) await connect(ana);
     const ready = await codeFor(ana);
+    // La 20.ª familia, empezada hace casi una hora: sale de la ventana dentro de 30 s.
+    const starts = (provider as unknown as { tokens: { familyStarts: Map<string, number[]> } }).tokens.familyStarts;
+    starts.get('sub:sumego|ana')!.unshift(nowMs() - FAMILY_RATE_WINDOW_MS + 30_000);
     const limited = await exchange(ready);
     expect(limited.status).toBe(429);
     expect(Number(limited.headers.get('retry-after'))).toBeLessThanOrEqual(31);
-    clockOffset = FAMILY_RATE_WINDOW_MS + 1_000;
+    clockOffset = 31_000;
     expect((await exchange(ready)).status).toBe(200);
   });
 
@@ -286,10 +290,67 @@ describe('familias: sin máximo, con ritmo por persona', () => {
 
   it('frenar por ritmo no gasta el cupo de fallos de la dirección', async () => {
     const ana = await person('sumego|ana');
-    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
     const ready = await codeFor(ana);
+    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
     for (let index = 0; index < FAILURE_POLICIES['/token'].limit + 5; index += 1) expect((await exchange(ready)).status).toBe(429);
     expect((await refresh('hmcp_rt_invalido')).status).toBe(400);
+  });
+});
+
+describe('ritmo de familias en las páginas del login', () => {
+  it('el callback, con el ritmo lleno, enseña una página con el motivo y cuándo reintentar, no un error en crudo', async () => {
+    const ana = await person('sumego|ana');
+    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
+    const login = await startLogin();
+    const page = await sumegoCallback(login, ana);
+    expect(page.status).toBe(429);
+    expect(page.headers.get('content-type')).toMatch(/text\/html/);
+    const seconds = Number(page.headers.get('retry-after'));
+    expect(seconds).toBeGreaterThan(0);
+    expect(seconds).toBeLessThanOrEqual(FAMILY_RATE_WINDOW_MS / 1000);
+    const html = await page.text();
+    expect(html).toContain('Demasiadas conexiones nuevas');
+    expect(html).toMatch(/dentro de (un minuto|unos \d+ minutos)/);
+    expect(html).not.toContain('too_many_requests');
+    expect(html).not.toMatch(/form_token/);
+    expect(await liveFamilies()).toBe(FAMILY_RATE_LIMIT);
+    // Pasada la espera que dice la página, la misma persona entra.
+    clockOffset = seconds * 1000 + 1_000;
+    await connect(ana);
+  });
+
+  it('otra persona no ve esa página', async () => {
+    const ana = await person('sumego|ana');
+    const beto = await person('sumego|beto');
+    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
+    expect((await sumegoCallback(await startLogin(), beto)).status).toBe(200);
+  });
+
+  it('el "Permitir", si el ritmo se llenó después del callback, dice lo mismo y no gasta una concesión en Lumbre', async () => {
+    const ana = await person('sumego|ana');
+    for (let index = 0; index < FAMILY_RATE_LIMIT - 1; index += 1) await connect(ana);
+    const login = await startLogin();
+    const page = await sumegoCallback(login, ana);
+    expect(page.status).toBe(200);
+    const formToken = formTokenOf(await page.text());
+    await connect(ana);
+    const before = lumbreGrants.size;
+    const denied = await consent(formToken, login.cookie);
+    expect(denied.status).toBe(429);
+    expect(Number(denied.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(await denied.text()).toContain('Demasiadas conexiones nuevas');
+    expect(lumbreGrants.size).toBe(before);
+  });
+
+  it('en /token sigue siendo un JSON de error OAuth con Retry-After', async () => {
+    const ana = await person('sumego|ana');
+    const ready = await codeFor(ana);
+    for (let index = 0; index < FAMILY_RATE_LIMIT; index += 1) await connect(ana);
+    const limited = await exchange(ready);
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get('content-type')).toMatch(/application\/json/);
+    expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(0);
+    expect(await limited.json()).toMatchObject({ error: 'too_many_requests' });
   });
 });
 
@@ -447,6 +508,36 @@ describe('cupos por dirección: solo cuentan los fallos', () => {
     }
     const statuses = (await Promise.all(tokens.map((token) => refresh(token)))).map((res) => res.status);
     expect(new Set(statuses)).toEqual(new Set([200]));
+  });
+
+  it('con 200 fallos ajenos desde la IP, un refresh correcto y un canje de código correcto pasan', async () => {
+    const ana = await person('sumego|ana');
+    const { refresh_token: token } = await connect(ana);
+    const ready = await codeFor(ana);
+    const { limit } = FAILURE_POLICIES['/token'];
+    for (let index = 0; index < 200; index += 1) await refresh('hmcp_rt_invalido');
+    expect(limit).toBeLessThan(200);
+    const renewed = await refresh(token);
+    expect(renewed.status).toBe(200);
+    expect((await exchange(ready)).status).toBe(200);
+    // El que sigue fallando, desde esa misma IP, recibe 429 con Retry-After.
+    const failing = await refresh('hmcp_rt_invalido');
+    expect(failing.status).toBe(429);
+    expect(Number(failing.headers.get('retry-after'))).toBeGreaterThan(0);
+    // Un código inventado y un refresh ya rotado tampoco pasan el freno.
+    expect((await exchange({ code: randomBytes(32).toString('base64url'), verifier: randomBytes(32).toString('base64url') })).status).toBe(429);
+    expect((await refresh(token)).status).toBe(429);
+  });
+
+  it('el freno de la IP no deja pasar a quien presenta el cliente o el recurso equivocados', async () => {
+    const ana = await person('sumego|ana');
+    const { refresh_token: token } = await connect(ana);
+    const { limit } = FAILURE_POLICIES['/token'];
+    for (let index = 0; index < limit; index += 1) await refresh('hmcp_rt_invalido');
+    const wrongClient = await fetch(`${app.origin}/token`, { method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded', ...fromIp(IP_A) },
+      body: new URLSearchParams({ client_id: 'otro-cliente', grant_type: 'refresh_token', refresh_token: token }) });
+    expect(wrongClient.status).toBe(429);
   });
 
   it('un 5xx no es un fallo del cliente: una caída de Lumbre no deja a la IP fuera al volver', async () => {

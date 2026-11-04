@@ -101,6 +101,17 @@ export function sendCodeRejectedPage(res: Response, page: RemotePairingNoticePag
     `<p>Lumbre no reconoce la autorización recibida: puede haber caducado o venir de otro enlace. No se ha conectado nada.</p>${retry}`));
 }
 
+/**
+ * El agente de la persona está desactivado en Hebra (Lumbre responde 404 al registrar su clave).
+ * No se ha cambiado nada: la conexión guardada sigue ahí para cuando se active.
+ */
+export function sendAgentDisabledPage(res: Response): void {
+  securityHeaders(res, BASE_CSP.replace("form-action 'self'; ", ''));
+  res.status(409).type('html').send(document('El agente está desactivado en Hebra',
+    '<p>Para renovar la conexión hace falta que el agente esté activado en tu cuenta de Hebra. No se ha cambiado nada y tu conexión anterior sigue guardada.</p>' +
+    '<p>Actívalo en Hebra y vuelve a abrir el conector desde tu aplicación. Si no vuelve a funcionar solo en la siguiente apertura, repite la conexión.</p>'));
+}
+
 export function sendWaitingPage(res: Response, formToken: string, remainingMs?: number): void {
   const remaining = remainingMs === undefined ? '' :
     `<p class="meta">La solicitud caduca en unos ${Math.max(1, Math.ceil(remainingMs / 60_000))} min.</p>`;

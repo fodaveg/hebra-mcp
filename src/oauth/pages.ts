@@ -92,6 +92,19 @@ export function sendUnavailablePage(res: Response): void {
   send(res, 503, htmlDocument('No disponible', '<p>El servicio de autorización no está disponible ahora. Inténtalo de nuevo en unos minutos.</p>'));
 }
 
+/**
+ * Demasiadas conexiones nuevas de esta persona en la última hora (D22, ritmo por `sub`, SPEC.md
+ * §12.10). Dice qué pasa y cuándo reintentar; el tiempo también va en `Retry-After`.
+ */
+export function sendFamilyRateLimitedPage(res: Response, retryAfterSeconds: number): void {
+  const minutes = Math.max(1, Math.ceil(retryAfterSeconds / 60));
+  res.setHeader('retry-after', String(Math.max(1, Math.ceil(retryAfterSeconds))));
+  send(res, 429, htmlDocument('Demasiadas conexiones nuevas',
+    '<p>Esta cuenta ha conectado muchas veces en la última hora y por ahora no admite otra conexión nueva. ' +
+    'Las conexiones que ya tienes siguen funcionando.</p>' +
+    `<p>Vuelve a conectar desde la aplicación dentro de ${minutes === 1 ? 'un minuto' : `unos ${minutes} minutos`}.</p>`));
+}
+
 /** Emparejado revocado (SPEC.md §12.9): qué pasó y cómo volver. `remote`: desde el conector, sin CLI. */
 export function sendPairingRevokedPage(res: Response, remote = false): void {
   const reason = remote ? PAIRING_REVOKED_REMOTE_REASON : PAIRING_REVOKED_REASON;

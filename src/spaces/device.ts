@@ -44,6 +44,14 @@ interface StoredAgentKey {
   privateKey: JsonWebKey;
   accountId?: string;
 }
+/**
+ * Lumbre responde 404 a `PUT /agent-device-key` cuando el agente de la persona está desactivado
+ * en Hebra. Sigue siendo `space_access_denied` hacia fuera; el alta lo distingue por la clase.
+ * Un relé sin esta API da el mismo 404: el contrato no tiene un código propio todavía.
+ */
+export class AgentKeyNotFoundError extends ToolError {
+  constructor() { super('space_access_denied'); }
+}
 export interface PreparedAgentDevice {
   privateKey: JsonWebKey;
   registration: AgentRegistration;
@@ -105,6 +113,7 @@ export async function prepareAgentDevice(
         body: JSON.stringify({ publicKey })
       }
     );
+    if (response.status === 404) throw new AgentKeyNotFoundError();
     if (!response.ok) throw new Error();
     return {
       privateKey,
@@ -115,7 +124,8 @@ export async function prepareAgentDevice(
         publicKey
       )
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof AgentKeyNotFoundError) throw error;
     throw new ToolError('space_access_denied');
   }
 }
