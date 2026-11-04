@@ -127,7 +127,15 @@ function guardedContext(
       return guardedContext(selected, registry, account);
     }
   } : undefined;
-  return { ...ctx, spaces, authorize, ...(use ? { trackInvocation: <T>(run: () => Promise<T>) => use.track(run) } : {}) };
+  // El directorio es un dato de permisos de la persona: una cuenta retirada o desactivada no
+  // lo lee, ni antes de pedirlo ni con la respuesta ya en la mano.
+  const directory = ctx.directory ? async () => {
+    await accountActive();
+    const view = await ctx.directory!();
+    await accountActive();
+    return view;
+  } : undefined;
+  return { ...ctx, spaces, directory, authorize, ...(use ? { trackInvocation: <T>(run: () => Promise<T>) => use.track(run) } : {}) };
 }
 
 /** Lo que aún tiene que subir, salvo que la credencial esté revocada y no pueda subir nunca. */
