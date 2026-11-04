@@ -13,7 +13,7 @@
  *   públicos (`none`) y un `issuer` SIN barra final, igual que lumbre-mcp (el SDK usaría
  *   `URL.href`, con barra). Se monta ANTES del router del SDK, que también las sirve.
  * - `/authorize`, `/token`, `/register`, `/revoke`: el router del SDK (`mcpAuthRouter`)
- *   con el proveedor de `./provider.ts`, con sus limitadores por IP.
+ *   con el proveedor de `./provider.ts`, y delante los cupos de fallos por IP (`./failure-limit.ts`).
  * - `GET /oauth/lumbre/callback`: recibe la vuelta del consentimiento y
  *   confirma la aprobación por backchannel antes de emitir código.
  * - Con `HEBRA_MCP_LOGIN_PROVIDER=sumego` (D20, SPEC.md §12.9): `GET /oauth/sumego/callback`
@@ -39,6 +39,7 @@ import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from './backchannel';
 import { BackchannelLogout } from './backchannel-logout';
 import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback, LECHAT_CALLBACK } from './clients';
+import { installFailureLimits } from './failure-limit';
 import { GrantSecrets } from './grants';
 import { readLoginConfig } from './login-config';
 import { LogoutJtiStore } from './logout-jtis';
@@ -225,6 +226,12 @@ export async function loadOAuthHttpAuth(
           });
         });
       }
+      // D22: los cupos por IP cuentan solo los fallos, y `/token` frena por `sub` con 429 y
+      // `Retry-After`, que un proveedor no puede dar desde dentro del handler del SDK.
+      installFailureLimits(app, now);
+      app.use('/token', express.urlencoded({ extended: false }), (req: Request, res: Response, next: NextFunction) => {
+        provider.guardFamilyRate(req, res, next);
+      });
       app.use(
         mcpAuthRouter({
           provider,
@@ -232,7 +239,10 @@ export async function loadOAuthHttpAuth(
           resourceServerUrl: new URL(config.resourceUrl),
           scopesSupported: [OAUTH_SCOPE],
           resourceName: 'Hebra',
-          clientRegistrationOptions: { clientIdGeneration: false }
+          authorizationOptions: { rateLimit: false },
+          tokenOptions: { rateLimit: false },
+          revocationOptions: { rateLimit: false },
+          clientRegistrationOptions: { clientIdGeneration: false, rateLimit: false }
         })
       );
     },
