@@ -317,6 +317,8 @@ sin saltos de línea. Se transmite solo por TLS en `Authorization: Bearer`.
 el valor en este runbook, en Compose ni en los logs. El proceso debe conservar
 su emparejado existente: el login no sustituye la clave de biblioteca.
 
+Las peticiones de cada cuenta a `LUMBRE_APP_ORIGIN` (`/exchange`, relé, espacios) llevan además `X-Hebra-Mcp-Backchannel` (este secreto) y `X-Hebra-Mcp-Subject` (su `sub` en minúsculas) para que Lumbre limite por persona; solo a ese origen exacto, con `redirect: 'error'`, nunca en `stdio` ni sin `sub` conocido (`src/oauth/lumbre-identity.ts`).
+
 Para una emergencia global que corte todas las familias locales, ejecutar
 sobre el volumen activo:
 
