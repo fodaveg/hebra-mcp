@@ -538,6 +538,30 @@ describe('RemotePairingService', () => {
     expect((await journals.read(started.id))?.phase).toBe('approval');
   });
 
+  it('un código válido de otra cuenta cuenta como rechazo: a los 5 cierra la transacción y suma por persona', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const exchangeCode = vi.fn(async () => CONNECTION);
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke, exchangeCode,
+      agentAccountId: () => hebraAccountIdOf('sumego|otra') });
+    const started = await service.start(startInput());
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'code'))
+        .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'wrong_lumbre_account' });
+    }
+    expect(exchangeCode).toHaveBeenCalledTimes(5);
+    expect(await journals.read(started.id)).toBeNull();
+    // Y suman al contador de la persona: otra transacción de 5 llega a 10 y la siguiente se bloquea.
+    const second = await service.start(startInput());
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(second.id, await currentAuth(service, second), 'code'))
+        .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'wrong_lumbre_account' });
+    }
+    const third = await service.start(startInput());
+    await expect(service.receiveCredential(third.id, auth(third, third.formToken), 'code'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+  });
+
   it('si no se puede revocar la credencial de la otra cuenta, queda pendiente sin atascar el login', async () => {
     const revoke = vi.fn().mockRejectedValue(new RevokeError(503));
     const service = createService({ link: fakeLink(recoveryCode, []), revoke,

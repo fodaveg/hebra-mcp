@@ -402,13 +402,7 @@ export class RemotePairingService {
             throw new RemotePairingError('rate_limited', 'exchange_failed:429',
               error.retryAfterSeconds ?? DEFAULT_EXCHANGE_RETRY_SECONDS);
           }
-          runtime.rejectedCodes = (runtime.rejectedCodes ?? 0) + 1;
-          this.rejectedBySub.set(journal.sub, [...(this.rejectedBySub.get(journal.sub) ?? []), this.now()]);
-          if (runtime.rejectedCodes >= MAX_REJECTED_CODES_PER_TRANSACTION ||
-            this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
-            await this.cleanup(journal);
-            throw new RemotePairingError('too_many_codes', 'rejected_codes');
-          }
+          await this.countRejectedCode(journal, runtime);
           throw new RemotePairingError('code_rejected', `exchange_failed:${errorDetail(error)}`);
         }
         this.runtime.delete(id);
@@ -480,9 +474,26 @@ export class RemotePairingService {
       }
       if (wrongAccount) {
         await this.restartAfterWrongAccount(journal, runtime);
+        // Un código válido de otra cuenta también cuenta como rechazo: sin esto, la misma
+        // transacción repetiría canje, PUT y DELETE hasta caducar con el cupo común de Lumbre.
+        await this.countRejectedCode(journal, runtime);
         throw new RemotePairingError('wrong_lumbre_account');
       }
     });
+  }
+
+  /**
+   * Suma un código que no sirvió (rechazado por Lumbre o de otra cuenta) a la transacción y a la
+   * persona. Al llegar a cualquiera de los dos topes cierra la transacción y lo dice.
+   */
+  private async countRejectedCode(journal: RemotePairingJournal, runtime: RuntimePairing): Promise<void> {
+    runtime.rejectedCodes = (runtime.rejectedCodes ?? 0) + 1;
+    this.rejectedBySub.set(journal.sub, [...(this.rejectedBySub.get(journal.sub) ?? []), this.now()]);
+    if (runtime.rejectedCodes >= MAX_REJECTED_CODES_PER_TRANSACTION ||
+      this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
+      await this.cleanup(journal);
+      throw new RemotePairingError('too_many_codes', 'rejected_codes');
+    }
   }
 
   /**
