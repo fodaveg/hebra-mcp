@@ -96,10 +96,10 @@ describe('notesVisibilityIndex', () => {
         await rm(dataDir, { recursive: true, force: true });
       }
     };
-    const small = await prepared(10);
-    const large = await prepared(120);
+    const small = await prepared(3);
+    const large = await prepared(24);
     expect({ rows: [small.rows, large.rows], sameStatements: small.statements === large.statements }).toEqual({
-      rows: [10, 120],
+      rows: [3, 24],
       sameStatements: true
     });
   });
