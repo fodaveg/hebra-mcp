@@ -209,6 +209,22 @@ describe('router del emparejado remoto', () => {
       expect(await journals.read(started.id)).toMatchObject({ phase: 'credential', cleanupRequired: false });
     });
 
+    it('tras un código rechazado la página puente no se autoenvía: pide un clic; antes sí', async () => {
+      const { address, started, cookie } = await app();
+      const first = await fetch(`${address}/lumbre/connect`, { headers: { cookie } });
+      const firstHtml = await first.text();
+      expect(firstHtml).toContain('f.submit()');
+      expect(first.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+      exchange.mockRejectedValue(new PairError('exchange_rejected', 401));
+      expect((await post(address, cookie, { form_token: started.formToken, code: CODE })).status).toBe(400);
+      const second = await fetch(`${address}/lumbre/connect`, { headers: { cookie } });
+      const secondHtml = await second.text();
+      expect(second.status).toBe(200);
+      expect(secondHtml).not.toContain('f.submit()');
+      expect(secondHtml).toContain('type="submit"');
+      expect(second.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    });
+
     it('el aviso previo nombra la cuenta y dice lo que hace falta antes de salir hacia Lumbre', async () => {
       const { address, started, cookie } = await app();
       const page = await fetch(`${address}/lumbre/pairing/start`, { headers: { cookie } });

@@ -280,6 +280,11 @@ export class RemotePairingService {
   }
 
   /** ¿Espera esta transacción el código de Lumbre? Solo entonces la página puente puede enviarlo. */
+  /** La transacción ya tuvo un código rechazado: su página puente exige un clic (SPEC.md §12.10). */
+  hasRejectedCode(id: string): boolean {
+    return (this.runtime.get(id)?.rejectedCodes ?? 0) > 0;
+  }
+
   async awaitsCredential(id: string): Promise<boolean> {
     return (await this.options.journals.read(id).catch(() => null))?.phase === 'credential';
   }

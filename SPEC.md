@@ -2467,6 +2467,11 @@ un agente desactivado, a propósito, y hebra-mcp no los distingue.
   los dos la transacción termina (`too_many_codes`), y con el tope por `sub` ya alcanzado no se vuelve
   a gastar un canje. Un 429 de `/exchange` no cuenta como rechazo y conserva la transacción, que sigue
   esperando el código con la espera que indica Lumbre.
+  También cuenta el código válido de una cuenta de Lumbre distinta (`wrong_lumbre_account`).
+- Tras el primer código rechazado de una transacción, la página puente (`/lumbre/connect`) no envía
+  el código sola: pide un clic. Así una página hostil que renavegue esa ventana solo puede causar un
+  rechazo por transacción y no puede cerrar la de la persona ni bloquear sus altas. Las páginas del
+  emparejado llevan `Cross-Origin-Opener-Policy: same-origin`; el flujo no usa `window.opener`.
 - Si la biblioteca nueva es otra bóveda distinta de la conectada y la copia anterior tiene escrituras
   sin subir (o no se ha podido comprobar), confirmar exige marcar la casilla `accept_loss`; sin ella
   responde `loss_unconfirmed` y no se retira nada.

@@ -127,7 +127,7 @@ export function createRemotePairingRouter(
       if (!cookie) throw new RemotePairingError('invalid_session');
       const page = await service.pageForCookie(cookie);
       if (!page) throw new RemotePairingError('invalid_session');
-      if (await service.awaitsCredential(page.session.id)) sendBridgePage(res, page.formToken);
+      if (await service.awaitsCredential(page.session.id)) sendBridgePage(res, page.formToken, service.hasRejectedCode(page.session.id));
       else sendWaitingPage(res, page.formToken);
     } catch (error) { handleError(res, error); }
   });
