@@ -377,6 +377,40 @@ describe('DTO cerrado', () => {
     expect(parses(directory)).toBe(false);
   });
 
+  it('la misma persona puede estar en dos organizaciones, pero no repetida dentro de una', () => {
+    const person = 'd'.repeat(64);
+    const two = () => {
+      const directory = directoryFor(person);
+      directory.organizations.push({
+        orgId: ORG_B,
+        name: 'Otra organización',
+        members: [{ accountId: person, role: 'member', name: MEMBER_NAME }],
+        spaces: []
+      });
+      return directory;
+    };
+    expect(parses(two())).toBe(true);
+    const repeated = two();
+    repeated.organizations[1]!.members.push({ accountId: person, role: 'admin', name: null });
+    expect(parses(repeated)).toBe(false);
+  });
+
+  it('spaceId y orgId son únicos en toda la respuesta, no por organización', () => {
+    const person = 'd'.repeat(64);
+    const withSecondOrg = (spaces: Array<{ spaceId: string; name: string | null; granted: boolean }>, orgId = ORG_B) => {
+      const directory = directoryFor(person);
+      directory.organizations.push({ orgId, name: 'Otra', members: [], spaces: spaces as never });
+      return directory;
+    };
+    expect(parses(withSecondOrg([{ spaceId: randomUUID(), name: null, granted: false }]))).toBe(true);
+    // El mismo espacio en dos organizaciones.
+    expect(parses(withSecondOrg([{ spaceId: GRANTED_SPACE, name: null, granted: true }]))).toBe(false);
+    // Un espacio de una organización repetido entre los sueltos.
+    expect(parses(withSecondOrg([{ spaceId: LOOSE_SPACE, name: null, granted: false }]))).toBe(false);
+    // El mismo orgId en dos organizaciones.
+    expect(parses(withSecondOrg([], ORG_A))).toBe(false);
+  });
+
   it('un campo de más en la respuesta degrada en vez de filtrarse', async () => {
     const agent = await connectAgent('alice');
     const accountId = await grant(agent);
@@ -497,6 +531,80 @@ describe('contexto de cuenta de serve-http', () => {
     const { organizations } = await runListOrganizations(lease.ctx, {});
     expect(organizations.map((organization) => organization.orgId)).toEqual([ORG_A]);
     lease.release();
+  });
+});
+
+describe('directorio a través del contexto de cuenta de serve-http', () => {
+  const alice = { id: 'alice', generation: 1 } as AuthorizedAccount;
+
+  /** Un registro cuyo `assertActive` falla en cuanto se retira la cuenta. */
+  function registryWith(state: { active: boolean }): AccountRegistry {
+    return {
+      assertActive() {
+        if (!state.active) throw new Error('account_inactive');
+      }
+    } as unknown as AccountRegistry;
+  }
+
+  it('cuenta activa: las herramientas de organización llegan al directorio por el MCP real', async () => {
+    const agent = await connectAgent('alice');
+    const accountId = await grant(agent);
+    agent.reply = { status: 200, body: directoryFor(accountId) };
+    const contexts = new AccountContexts(registryWith({ active: true }), async () => agent.served);
+    const lease = await contexts.acquire(alice);
+    const server = buildMcpServer(lease.ctx, 'test');
+    const client = new Client({ name: 'guarded', version: '1' });
+    const [a, b] = InMemoryTransport.createLinkedPair();
+    await Promise.all([server.connect(b), client.connect(a)]);
+    const organizations = JSON.parse(
+      ((await client.callTool({ name: 'hebra_list_organizations', arguments: {} })) as { content: Array<{ text: string }> }).content[0]!.text
+    );
+    expect(organizations.organizations.map((o: { orgId: string }) => o.orgId)).toEqual([ORG_A]);
+    const spaces = JSON.parse(
+      ((await client.callTool({ name: 'hebra_list_spaces', arguments: {} })) as { content: Array<{ text: string }> }).content[0]!.text
+    );
+    expect(spaces.organizationsAvailable).toBe(true);
+    await client.close();
+    await server.close();
+    lease.release();
+  });
+
+  it('cuenta retirada antes de pedirlo: ni lee el directorio ni llama al relé', async () => {
+    const agent = await connectAgent('alice');
+    const accountId = await grant(agent);
+    agent.reply = { status: 200, body: directoryFor(accountId) };
+    const state = { active: true };
+    const contexts = new AccountContexts(registryWith(state), async () => agent.served);
+    const lease = await contexts.acquire(alice);
+    state.active = false;
+    directoryCalls.length = 0;
+    await expect(lease.ctx.directory!()).rejects.toThrow('account_inactive');
+    await expect(runListOrganizations(lease.ctx, {})).rejects.toThrow('account_inactive');
+    expect(directoryCalls).toEqual([]);
+    lease.release();
+  });
+
+  it('cuenta retirada a mitad de la llamada: no devuelve el directorio y el contexto no se cierra bajo la llamada', async () => {
+    const agent = await connectAgent('alice');
+    const accountId = await grant(agent);
+    const state = { active: true };
+    const closed = vi.fn(async () => undefined);
+    const served = { ...agent.served, close: closed } as ServeContext;
+    const contexts = new AccountContexts(registryWith(state), async () => served);
+    const lease = await contexts.acquire(alice);
+    let closedDuringCall: number | null = null;
+    replies.set(agent.paired.connection.readToken, () => {
+      // Mitad de la llamada: se retira la cuenta y termina la respuesta HTTP.
+      state.active = false;
+      lease.release();
+      closedDuringCall = closed.mock.calls.length;
+      return { status: 200, body: directoryFor(accountId) };
+    });
+    const tracked = lease.ctx.trackInvocation!(() => lease.ctx.directory!());
+    await expect(tracked).rejects.toThrow('account_inactive');
+    // La llamada contaba como uso: nada se cerró mientras corría.
+    expect(closedDuringCall).toBe(0);
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
   });
 });
 
