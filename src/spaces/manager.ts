@@ -9,8 +9,8 @@ import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ContextUnavailableError, type AdmissionTicket } from '../accounts/capacity';
-import { realClock, ResourceLifecycle, type Clock } from '../accounts/lifecycle';
+import { ContextUnavailableError, DEFAULT_OPEN_WAIT_MS, type AdmissionTicket } from '../accounts/capacity';
+import { realClock, ResourceLifecycle, WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../accounts/lifecycle';
 import { logEvent } from '../log/logger';
 import type { DirectoryView, ServerContext, SpaceLease, SpaceLifecycleControl, SpaceRouter } from '../server/context';
 import { ToolError } from '../server/errors';
@@ -291,7 +291,10 @@ export class AgentSpaceManager implements SpaceRouter {
           if (this.entries.get(key) === entry) this.entries.delete(key);
           this.onClosed?.();
         },
-        resource: 'space'
+        resource: 'space',
+        waitMs: DEFAULT_OPEN_WAIT_MS + WAIT_BACKSTOP_MARGIN_MS,
+        waitTimeoutError: () =>
+          new ContextUnavailableError('open_failed', Math.ceil(DEFAULT_OPEN_WAIT_MS / 1000))
       })
     };
     this.entries.set(key, entry);

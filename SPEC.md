@@ -2308,6 +2308,10 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
 - Una petición en `cerrando` espera a que termine el cierre y abre de nuevo. Nunca hay dos instancias
   sobre el mismo directorio, tampoco en el mismo proceso. El bloqueo entre procesos no cubre este
   caso, porque comparte PID: lo cubre esta máquina de estados.
+- Ninguna espera de una apertura o un cierre en curso es ilimitada: a los `HEBRA_MCP_OPEN_WAIT_MS`
+  más 5 s de margen (tope de seguridad; las esperas con plazo propio, memoria y `writer.lock`, acaban
+  antes y dan su motivo), la petición recibe 503 `open_failed` con `Retry-After`. La apertura o el
+  cierre siguen en segundo plano y la persona vuelve a entrar en cuanto terminan, sin reiniciar.
 - `abierto` se cierra cuando lleva `HEBRA_MCP_CONTEXT_IDLE_MS` (120 s por defecto) sin peticiones en
   curso. No se cierra un escritor con peticiones en curso.
 - Una cuenta revocada o retirada se cierra en cuanto termina lo que tenga en curso.

@@ -66,11 +66,23 @@ export interface ResourceLifecycleOptions<V> {
   onDisposable?(): void;
   /** Para el log de los cierres fallidos y recuperados. */
   resource: 'account' | 'space';
+  /**
+   * Plazo de quien espera una apertura o un cierre en curso (SPEC.md §12.10): al cumplirse,
+   * `acquire` rechaza con `waitTimeoutError()` y el trabajo de fondo sigue. Cuenta desde la
+   * primera espera de esa petición y es un tope de seguridad, no el plazo normal: las esperas
+   * con plazo propio (memoria, `writer.lock`) terminan antes y dan su motivo preciso. Sin él,
+   * un cierre o una apertura colgados dejarían la petición HTTP colgada, sin 503.
+   */
+  waitMs: number;
+  waitTimeoutError(): Error;
   /** Primera espera entre reintentos de un cierre fallido (se duplica hasta `closeRetryMaxMs`). */
   closeRetryBaseMs?: number;
   closeRetryMaxMs?: number;
 }
 
+/** Lo que `waitMs` suma a `HEBRA_MCP_OPEN_WAIT_MS`: para que gane el motivo preciso de las esperas
+ *  que tienen plazo propio (memoria, `writer.lock`) y este quede de tope de seguridad. */
+export const WAIT_BACKSTOP_MARGIN_MS = 5_000;
 const DEFAULT_CLOSE_RETRY_BASE_MS = 1_000;
 const DEFAULT_CLOSE_RETRY_MAX_MS = 30_000;
 /** Cada cuántos intentos fallidos seguidos se dice `contexts.close_stuck`. */
@@ -110,14 +122,20 @@ export class ResourceLifecycle<V> {
   async acquire(): Promise<ResourceLease<V>> {
     this.pending += 1;
     this.stopIdle();
+    // El plazo de las esperas de esta petición: un solo temporizador, creado en la primera.
+    let limit: { expired: Promise<never>; cancel(): void } | null = null;
+    const bounded = (work: Promise<unknown> | null): Promise<unknown> => {
+      limit ??= this.startWaitLimit();
+      return Promise.race([work, limit.expired]);
+    };
     try {
       for (;;) {
         if (this.retired) throw this.options.retiredError();
         if (this.state === 'cerrado') this.startOpening();
         if (this.state === 'abriendo') {
-          await this.opening;
+          await bounded(this.opening);
         } else if (this.state === 'cerrando') {
-          await this.closing;
+          await bounded(this.closing);
           if (this.closeFailure) throw this.closeFailure.error;
         } else {
           return this.lease(this.value as V);
@@ -127,9 +145,20 @@ export class ResourceLifecycle<V> {
       if (this.retired) throw this.options.retiredError();
       throw error;
     } finally {
+      (limit as { cancel(): void } | null)?.cancel();
       this.pending -= 1;
       this.settle();
     }
+  }
+
+  private startWaitLimit(): { expired: Promise<never>; cancel(): void } {
+    let cancel = (): void => undefined;
+    const expired = new Promise<never>((_, reject) => {
+      cancel = this.options.clock.setTimer(() => reject(this.options.waitTimeoutError()), this.options.waitMs);
+    });
+    // Se compite siempre con ella, pero si la petición acaba antes no debe quedar un rechazo suelto.
+    expired.catch(() => undefined);
+    return { expired, cancel };
   }
 
   /** Deja de admitir peticiones y resuelve cuando el recurso está cerrado. */
