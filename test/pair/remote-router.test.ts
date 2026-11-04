@@ -49,6 +49,28 @@ describe('router del emparejado remoto', () => {
     expect(service.sessionForCookie).not.toHaveBeenCalled();
   });
 
+  it('agente desactivado en Hebra: página que dice qué hacer, la solicitud OAuth se cierra y no es la genérica', async () => {
+    const { RemotePairingError } = await import('../../src/pair/remote/types');
+    const service = {
+      sessionForCookie: vi.fn(async () => ({ id: 's', oauthRequestId: 'oauth-1', sub: 'sumego|david' })),
+      receiveCredential: vi.fn(async () => { throw new RemotePairingError('agent_disabled'); })
+    } as unknown as RemotePairingService;
+    const cancelOauth = vi.fn(async () => undefined);
+    const app = express();
+    app.use(createRemotePairingRouter(service, { resumeOauth: async () => '/x', cancelOauth, reauthenticate: async () => undefined }));
+    const address = await listen(app);
+    const reply = await fetch(`${address}/lumbre/connect`, { method: 'POST',
+      headers: { origin: REMOTE_PAIRING_ORIGIN, cookie: '__Host-hebra_mcp_pair=c', 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ form_token: 't', code: 'ab'.repeat(32) }) });
+    expect(reply.status).toBe(409);
+    const html = await reply.text();
+    expect(html).toContain('El agente está desactivado en Hebra');
+    expect(html).toContain('tu conexión anterior sigue guardada');
+    expect(html).not.toContain('No disponible');
+    expect(cancelOauth).toHaveBeenCalledWith({ oauthRequestId: 'oauth-1' });
+    expect(reply.headers.get('set-cookie')).toMatch(/__Host-hebra_mcp_pair=;/);
+  });
+
   describe('con el servicio real', () => {
     const NOW = Date.parse('2026-11-04T08:00:00.000Z');
     const CODE = 'ab'.repeat(32);

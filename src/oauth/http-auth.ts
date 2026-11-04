@@ -231,7 +231,7 @@ export async function loadOAuthHttpAuth(
       }
       // D22: los cupos por IP cuentan solo los fallos, y `/token` frena por `sub` con 429 y
       // `Retry-After`, que un proveedor no puede dar desde dentro del handler del SDK.
-      installFailureLimits(app, now);
+      installFailureLimits(app, now, { '/token': (req) => provider.presentsLiveCredential(req) });
       app.use('/token', express.urlencoded({ extended: false }), (req: Request, res: Response, next: NextFunction) => {
         provider.guardFamilyRate(req, res, next);
       });

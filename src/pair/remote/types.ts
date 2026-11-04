@@ -116,6 +116,13 @@ export interface RemotePairingRenewals {
   target(sub: string): Promise<RenewalTarget | null>;
   /** La clave de agente guardada: una credencial que sobrevive exige la misma pública. */
   agentKey(renewal: RemotePairingRenewal): Promise<JsonWebKey | undefined>;
+  /**
+   * ¿Sigue activo el agente de la cuenta? Se pregunta con las credenciales GUARDADAS, antes de
+   * canjear ninguna: el canje rota los tokens, y si luego el registro del agente no puede
+   * terminar, el limpiado revoca la credencial nueva y la guardada ya no sirve al reactivar.
+   * `false` solo si Lumbre dice que no existe (404); cualquier otra respuesta o fallo es `true`.
+   */
+  agentEnabled?(renewal: RemotePairingRenewal, fetcher: typeof globalThis.fetch): Promise<boolean>;
   /** Misma bóveda: conserva raíz e identidad y publica vínculo y generación nueva a la vez. */
   publish(input: PublishRenewalInput): Promise<CommittedAccount>;
   /** Otra bóveda: retira la cuenta anterior por el camino normal. */
@@ -148,7 +155,9 @@ export class RemotePairingError extends Error {
       /** Lumbre no reconoce el código: sin efecto remoto y la transacción sigue viva. */
       | 'code_rejected'
       /** La sesión de Lumbre de este navegador es de otra cuenta; aún no hay aprobación. */
-      | 'wrong_lumbre_account',
+      | 'wrong_lumbre_account'
+      /** El agente de la persona está desactivado en Hebra: no se ha tocado ninguna credencial. */
+      | 'agent_disabled',
     /** Motivo cerrado para el log (nunca mensajes, tokens, sub ni email). */
     readonly reason?: string
   ) {

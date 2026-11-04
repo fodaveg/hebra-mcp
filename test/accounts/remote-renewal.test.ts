@@ -63,6 +63,7 @@ describe('renovación con estado real', () => {
   let revoke: ReturnType<typeof vi.fn>;
   let invalidate: ReturnType<typeof vi.fn>;
   let drain: ReturnType<typeof vi.fn>;
+  let exchanged: ReturnType<typeof vi.fn>;
   const sharedRecovery: Record<string, string> = {};
 
   beforeEach(async () => {
@@ -80,12 +81,14 @@ describe('renovación con estado real', () => {
     revoke = vi.fn(async () => undefined);
     invalidate = vi.fn(async () => 1);
     drain = vi.fn(async () => undefined);
+    exchanged = vi.fn();
   });
 
   afterEach(async () => { await rm(root, { recursive: true, force: true }); });
 
   function build(options: { registry?: AccountRegistry; syncVaultId?: string; services?: RemotePairingAccountServices;
-    credential?: string; revokeDevice?: boolean } = {}) {
+    credential?: string; revokeDevice?: boolean; fetcher?: typeof globalThis.fetch;
+    prepareFails?: Error } = {}) {
     const current = options.registry ?? registry;
     const syncVaultId = options.syncVaultId ?? VAULT;
     const services: RemotePairingAccountServices = options.services ?? {
@@ -95,13 +98,16 @@ describe('renovación con estado real', () => {
     const journals = new RemotePairingJournalStore(join(root, 'journals'));
     const credential = options.credential ?? NEW_CREDENTIAL;
     return { journals, adapters, service: new RemotePairingService({ journals, publisher: adapters.publisher,
-      renewals: adapters.renewals, revoke: revoke as never,
-      exchangeCode: async () => connection(credential, 'nueva'),
-      prepareAgent: async (_connection, deviceId) => ({
+      renewals: adapters.renewals, revoke: revoke as never, fetcher: options.fetcher,
+      exchangeCode: async () => { (exchanged as () => void)(); return connection(credential, 'nueva'); },
+      prepareAgent: async (_connection, deviceId) => {
+        if (options.prepareFails) throw options.prepareFails;
+        return {
         privateKey: { kty: 'EC', crv: 'P-256', d: 'private', x: 'x', y: 'y' },
         registration: { credentialId: credential, deviceId, accountId: ACCOUNT, actorKind: 'agent', keyId: 'key',
           publicKey: { kty: 'EC', crv: 'P-256', x: 'x', y: 'y' } }
-      }),
+        };
+      },
       startLink: async () => link(sharedRecovery[syncVaultId]!, syncVaultId),
       registerDevice: async () => 'ok',
       ownership: { verify: async ({ sub, binding }) => ({ sub, grant: grant(binding.pairedCredentialId, binding.syncVaultId, binding.opaqueDeviceId) }) } }) };
@@ -114,6 +120,75 @@ describe('renovación con estado real', () => {
     await service.poll(started.id, { cookie: started.cookie, formToken: await service.formToken(started.id) });
     return { started, form: { cookie: started.cookie, formToken: await service.formToken(started.id) } };
   }
+
+  describe('agente desactivado en Hebra (Lumbre responde 404 al registrar su clave)', () => {
+    /** Una clave de agente guardada de verdad: el sondeo la reusa y Lumbre solo mira su pública. */
+    async function storeAgentKey(): Promise<void> {
+      const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
+      const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
+      await openFileSecretStore(accountDataDir(root, account)).set('agent-device-key',
+        JSON.stringify({ binding: 'b', privateKey, accountId: ACCOUNT }));
+    }
+    const start = (service: RemotePairingService) => service.start({ oauthRequestId: 'oauth-1', sub: SUB,
+      identityExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), renew: true });
+
+    it('404 con las credenciales guardadas: no se canjea nada, no se revoca nada y la conexión guardada queda intacta', async () => {
+      await storeAgentKey();
+      const fetcher = vi.fn(async () => new Response('{}', { status: 404 }));
+      const { service, journals } = build({ fetcher: fetcher as never });
+      const started = await start(service);
+      await expect(service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code'))
+        .rejects.toMatchObject({ code: 'agent_disabled' });
+      // Se preguntó con la credencial GUARDADA y su clave, no con una nueva.
+      const [target, init] = fetcher.mock.calls[0]! as unknown as [string, RequestInit];
+      expect(target).toBe(`${API}/api/integrations/hebra/agent-device-key`);
+      expect(new Headers(init.headers).get('authorization')).toBe('Bearer write-vieja');
+      expect(exchanged).not.toHaveBeenCalled();
+      expect(revoke).not.toHaveBeenCalled();
+      expect(invalidate).not.toHaveBeenCalled();
+      const record = registry.findById(account.id)!;
+      expect(record).toMatchObject({ state: 'active', binding: account.binding, generation: account.generation });
+      expect(record.renewing).toBeUndefined();
+      const stored = await readPairedSecrets(openFileSecretStore(accountDataDir(root, record)));
+      expect(stored?.connection).toEqual(paired.connection);
+      expect(await journals.read(started.id)).toBeNull();
+      // Reactivado el agente, la misma cuenta se renueva sin más.
+      fetcher.mockImplementation(async () => { throw new Error('offline'); });
+      const again = await toConfirmation(service);
+      await expect(service.confirm(again.started.id, again.form)).resolves.toMatchObject({ kind: 'confirmed' });
+    });
+
+    it.each([[500], [401], [403]])('un %s al sondear no es "desactivado": la renovación sigue su camino', async (status) => {
+      await storeAgentKey();
+      const fetcher = vi.fn(async () => new Response('{}', { status }));
+      const { service } = build({ fetcher: fetcher as never });
+      const started = await start(service);
+      await service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code');
+      expect(exchanged).toHaveBeenCalledOnce();
+    });
+
+    it('si se desactiva entre el sondeo y el canje, la página lo dice y lo nuevo se revoca', async () => {
+      await storeAgentKey();
+      const { AgentKeyNotFoundError } = await import('../../src/spaces/device');
+      const fetcher = vi.fn(async () => new Response('{}', { status: 500 }));
+      const { service, journals } = build({ fetcher: fetcher as never, prepareFails: new AgentKeyNotFoundError() });
+      const started = await start(service);
+      await expect(service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code'))
+        .rejects.toMatchObject({ code: 'agent_disabled' });
+      expect(revoke).toHaveBeenCalledOnce();
+      expect(registry.findById(account.id)?.renewing).toBeUndefined();
+      expect(await journals.read(started.id)).toBeNull();
+    });
+
+    it('sin clave de agente guardada no hay nada que sondear: sigue', async () => {
+      const fetcher = vi.fn(async () => new Response('{}', { status: 404 }));
+      const { service } = build({ fetcher: fetcher as never });
+      const started = await start(service);
+      await service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code');
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(exchanged).toHaveBeenCalledOnce();
+    });
+  });
 
   it('misma bóveda: conserva raíz, notas e identidad; vínculo y generación nuevos; ni contextos ni familias viejos', async () => {
     const order: string[] = [];

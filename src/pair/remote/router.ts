@@ -6,6 +6,7 @@ import express, {
 } from 'express';
 import { PAIRING_CODE_PATTERN } from '../loopback';
 import {
+  sendAgentDisabledPage,
   sendBridgePage,
   sendCodeRejectedPage,
   sendContinuePage,
@@ -140,15 +141,22 @@ export function createRemotePairingRouter(
   });
 
   router.post('/lumbre/connect', form, async (req, res) => {
+    let oauthRequestId: string | null = null;
     try {
       const { session, authorization } = await authorizedSession(req, service);
+      oauthRequestId = session.oauthRequestId;
       const code = bodyString(req, 'code');
       // Con otra forma no es un código de Lumbre: ni se persiste ni llega a canjearse.
       if (!PAIRING_CODE_PATTERN.test(code)) throw new RemotePairingError('invalid_form');
       await service.receiveCredential(session.id, authorization, code);
       sendWaitingPage(res, await service.formToken(session.id));
     } catch (error) {
-      if (error instanceof RemotePairingError && error.code === 'wrong_lumbre_account') {
+      if (error instanceof RemotePairingError && error.code === 'agent_disabled') {
+        // La transacción ya está cerrada: la solicitud OAuth no puede seguir.
+        if (oauthRequestId) await hooks.cancelOauth({ oauthRequestId }).catch(() => undefined);
+        clearCookie(res);
+        sendAgentDisabledPage(res);
+      } else if (error instanceof RemotePairingError && error.code === 'wrong_lumbre_account') {
         sendWrongLumbreAccountPage(res, await currentNotice(req, service));
       } else if (error instanceof RemotePairingError && error.code === 'code_rejected') {
         sendCodeRejectedPage(res, await currentNotice(req, service));
