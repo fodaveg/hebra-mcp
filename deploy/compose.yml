@@ -32,9 +32,12 @@ services:
     # Apagado ordenado (A1 del audit de robustez, 10 oct 2026): con SIGTERM,
     # `serve-http` deja de esperar las rondas de las escrituras en curso,
     # espera hasta 12 s a que respondan las peticiones HTTP (la espera de
-    # ronda va dentro de esas, no se suma) y después espera la ronda en vuelo
-    # (hasta ~30 s con el relé colgado), vacía la cola y cierra la SQLite:
-    # 12 + 30 caben en 50. Con los 10 s por defecto de Docker, el SIGKILL
+    # ronda va dentro de esas, no se suma; las retiradas de cuentas drenan en
+    # paralelo con ese mismo tope), luego la ronda final de cada biblioteca
+    # al cerrar (5 s en el apagado) y la ronda en vuelo de `stop()` (hasta
+    # ~30 s con el relé colgado), vacía la cola y cierra la SQLite:
+    # 12 + 5 + 30 = 47 caben en 50. Lo que no sube queda en la SQLite y en la
+    # lista de pendientes, y el barrido lo recoge al arrancar. Con los 10 s por defecto de Docker, el SIGKILL
     # cortaba respuestas de escrituras ya guardadas (y el reintento de un
     # append lo duplicaba).
     stop_grace_period: 50s

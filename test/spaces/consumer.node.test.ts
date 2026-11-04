@@ -249,6 +249,18 @@ describe('nombre de los espacios', () => {
     }
   });
 
+  it('el nombre de un espacio que sale del catálogo no se queda en memoria', async () => {
+    const original = await grant();
+    await seedMeta();
+    const names = (served.ctx.spaces as unknown as { names: Map<string, unknown> }).names;
+    await call('hebra_list_spaces');
+    expect(names.size).toBe(1);
+    fake.agentSpaces.set(paired.connection.credentialId, []);
+    await call('hebra_list_spaces');
+    expect(names.size).toBe(0);
+    fake.agentSpaces.set(paired.connection.credentialId, [original]);
+  });
+
   it('un fallo no se repite antes de 60 segundos y sí después', async () => {
     await grant();
     vi.useFakeTimers({ toFake: ['Date'] });

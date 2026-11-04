@@ -589,19 +589,76 @@ describe('memoria real, no recuento', () => {
     await contexts.close();
   });
 
-  it('no acorta la espera de quien tiene subidas pendientes', async () => {
+  it('bajo presión cierra primero las ociosas sin pendientes y después las que tienen subidas pendientes', async () => {
     const { clock, memory, libraries, contexts } = harness();
     libraries.decorate = (context, id) => ({
       ...context,
-      instance: { status: async () => ({ pendingUpload: id === 'pendiente' ? 3 : 0, revoked: false }) } as never
+      instance: { beginShutdown() {}, status: async () => ({ pendingUpload: id.startsWith('pendiente') ? 3 : 0, revoked: false }) } as never
     });
-    (await contexts.acquire(account('pendiente'))).release();
+    (await contexts.acquire(account('pendiente-1'))).release();
+    (await contexts.acquire(account('libre'))).release();
+    (await contexts.acquire(account('pendiente-2'))).release();
     memory.usedBytes = 900 * MIB;
-    const failure = contexts.acquire(account('nueva')).catch((error: unknown) => error);
-    await clock.advance(WAIT_MS);
-    expect(await failure).toMatchObject({ reason: 'capacity_wait_timeout' });
-    expect(libraries.closed).toEqual([]);
+    // Cada cierre libera memoria: la libre no basta, las dos con pendientes sí.
+    libraries.beforeClose = async (id) => { memory.usedBytes -= id === 'libre' ? 10 * MIB : 400 * MIB; };
+    let entered = false;
+    const waiting = contexts.acquire(account('nueva')).then((lease) => { entered = true; return lease; });
+    await clock.advance(WAIT_MS / 2);
+    expect(entered).toBe(true);
+    expect(libraries.closed[0]).toBe('libre');
+    expect([...libraries.closed].sort()).toEqual(['libre', 'pendiente-1', 'pendiente-2']);
+    (await waiting).release();
     await contexts.close();
+  });
+
+  it('con memoria alta y todo ocioso con pendientes, una apertura no se queda sin cupo por cuentas que nadie usa', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    libraries.decorate = (context) => ({
+      ...context,
+      instance: { beginShutdown() {}, status: async () => ({ pendingUpload: 2, revoked: false }) } as never
+    });
+    (await contexts.acquire(account('a'))).release();
+    memory.usedBytes = 900 * MIB;
+    libraries.beforeClose = async () => { memory.usedBytes = 100 * MIB; };
+    const lease = await Promise.race([
+      contexts.acquire(account('b')),
+      clock.advance(WAIT_MS - 1).then(() => null)
+    ]);
+    expect(lease).not.toBeNull();
+    expect(libraries.closed).toEqual(['a']);
+    lease?.release();
+    await contexts.close();
+  });
+
+  it('un uso del barrido solo cierra lo que abrió él', async () => {
+    const registry = { assertActive() {}, findById: (id: string) => account(id) } as unknown as AccountRegistry;
+    // Abierto por una persona: el barrido lo deja abierto al terminar.
+    const first = harness({ registry });
+    (await first.contexts.acquire(account('a'))).release();
+    await first.contexts.use({ id: 'a', generation: 1 }, async () => undefined);
+    expect(first.libraries.closed).toEqual([]);
+    await first.clock.advance(IDLE_MS);
+    expect(first.libraries.closed).toEqual(['a']);
+    await first.contexts.close();
+
+    // Abierto por el barrido: lo cierra en cuanto nadie más lo usa.
+    const second = harness({ registry });
+    await second.contexts.use({ id: 'b', generation: 1 }, async () => undefined);
+    expect(second.libraries.closed).toEqual(['b']);
+
+    // Abierto por el barrido y con una persona que llega a mitad: no se cierra mientras esté en uso.
+    const third = harness({ registry });
+    let person: Awaited<ReturnType<AccountContexts['acquire']>> | null = null;
+    await third.contexts.use({ id: 'c', generation: 1 }, async () => {
+      person = await third.contexts.acquire(account('c'));
+    });
+    expect(third.libraries.closed).toEqual([]);
+    person!.release();
+    await third.clock.advance(IDLE_MS);
+    expect(third.libraries.closed).toEqual(['c']);
+    expect(third.libraries.opened).toEqual(['c']);
+    await third.contexts.close();
+    await second.contexts.close();
   });
 
   it('si no basta, espera y entra en cuanto baja; quien ya tiene su contexto no espera', async () => {

@@ -17,6 +17,7 @@ import {
   PENDING_UPLOADS_FILE,
   PendingSweep,
   PendingUploadList,
+  pendingUploadsTemporaryName,
   RETRY_BACKOFF_BASE_MS,
   RETRY_BACKOFF_MAX_MS,
   SWEEP_ELEMENT_TIMEOUT_MS,
@@ -34,7 +35,7 @@ import { buildMcpServer } from '../../src/server/build-server';
 import type { ServerContext } from '../../src/server/context';
 import { ToolError } from '../../src/server/errors';
 import { openServeContext, type OpenServeOptions, type ServeContext } from '../../src/server/serve';
-import { STARTUP_READ_WAIT_MS } from '../../src/sync/runner';
+import { SHUTDOWN_ROUND_WAIT_MS, STARTUP_READ_WAIT_MS } from '../../src/sync/runner';
 import { deferred } from '../fixtures/deferred';
 import { NO_PRIVATE } from '../fixtures/no-private';
 import { appCreate, appDevice, IDENTITY, InMemoryLibraryRelay, VAULT_KEY } from '../sync/devices';
@@ -759,5 +760,200 @@ describe('lecturas en la biblioteca personal: esperan a la ronda de abrir, como 
     expect(status.lastSyncOutcome).toBe('ok');
     await close();
     await served.close();
+  });
+});
+
+describe('revisión del barrido (D22): lista, carreras, renovación, memoria y apagado', () => {
+  const A: AccountRef = { id: 'a', generation: 1 };
+  const T = { account: 'a', space: null };
+  const targetKey = JSON.stringify(['a', null]);
+  const status = (pendingUpload: number) => ({ pendingUpload, errorsByCode: {}, revoked: false, lastSyncOutcome: null });
+  const fakeCtx = (pendingUpload: number): ServerContext => ({
+    firstRound: async () => undefined,
+    status: { getStatus: async () => status(pendingUpload) }
+  }) as never;
+
+  it('si la lista no se puede escribir, la llamada se entera y la siguiente reintenta lo no guardado', async () => {
+    // `control` es un fichero: crear el directorio falla, como un disco que no deja escribir.
+    await writeFile(control, 'ocupado');
+    const list = await PendingUploadList.open(control);
+    await expect(list.put(A, null, false)).rejects.toBeDefined();
+    await rm(control);
+    await list.put(A, null, false);
+    expect((await listFile()).entries).toHaveLength(1);
+
+    // Lo mismo con un borrado.
+    await rm(control, { recursive: true });
+    await writeFile(control, 'ocupado');
+    await expect(list.remove(T)).rejects.toBeDefined();
+    await rm(control);
+    await list.remove(T);
+    expect((await listFile()).entries).toEqual([]);
+  });
+
+  it('el barrido reintenta lo no guardado antes de mirar la lista', async () => {
+    await writeFile(control, 'ocupado');
+    const list = await PendingUploadList.open(control);
+    await expect(list.put(A, null, false)).rejects.toBeDefined();
+    await rm(control);
+    let onDisk = -1;
+    const sweep = sweepOf(list, async () => {
+      onDisk = (await listFile()).entries.length;
+      throw new Error('relé caído');
+    });
+    await sweep.runOnce();
+    expect(onDisk).toBe(1);
+  });
+
+  it('una escritura cuya anotación falló la reintenta la escritura siguiente de la misma biblioteca', async () => {
+    const account = testAccount('a');
+    account.mode = 'down';
+    await writeFile(control, 'ocupado');
+    const list = await PendingUploadList.open(control);
+    const served = await openAccount(account, list);
+    await served.instance.createNote({ body: '# Primera', privacy: NO_PRIVATE });
+    await vi.waitFor(() => { expect(list.has({ account: account.ref.id, space: null })).toBe(true); }, { timeout: 20_000 });
+    await rm(control);
+    await served.instance.createNote({ body: '# Segunda', privacy: NO_PRIVATE });
+    await vi.waitFor(async () => { expect((await listFile()).entries).toHaveLength(1); }, { timeout: 20_000 });
+    await served.close();
+  });
+
+  it('una persona que abre la biblioteca a mitad del intento conserva su anotación', async () => {
+    const list = await PendingUploadList.open(control);
+    await list.put(A, null, false);
+    const sweep = sweepOf(list, async (_ref, fn) => {
+      const result = await fn(fakeCtx(0));
+      // Llega una persona y escribe: su instancia ya está anotada (`ledgerMarked`) y no vuelve a anotar.
+      list.noteOpen(targetKey);
+      return result;
+    });
+    expect(await sweep.runOnce()).toMatchObject({ skipped: 1, uploaded: 0, kept: 0 });
+    expect(list.has(T)).toBe(true);
+  });
+
+  it('sin nadie más, lo ya subido sale de la lista', async () => {
+    const list = await PendingUploadList.open(control);
+    await list.put(A, null, false);
+    const sweep = sweepOf(list, (_ref, fn) => fn(fakeCtx(0)));
+    expect(await sweep.runOnce()).toMatchObject({ uploaded: 1 });
+    expect(list.has(T)).toBe(false);
+  });
+
+  it('durante una renovación no cuenta como fallo ni añade espera, y al publicarse se sigue la generación nueva', async () => {
+    const list = await PendingUploadList.open(control);
+    await list.put(A, null, false);
+    let renewing = true;
+    let generation = 1;
+    let calls = 0;
+    const sweep = sweepOf(list, async (ref, fn) => {
+      calls += 1;
+      expect(ref.generation).toBe(2);
+      return fn(fakeCtx(0));
+    }, {
+      accountRenewing: () => renewing,
+      currentRef: () => ({ id: 'a', generation }),
+      accountActive: (ref) => ref.generation === generation && !renewing
+    });
+    expect(await sweep.runOnce()).toMatchObject({ skipped: 1, kept: 0 });
+    expect(calls).toBe(0);
+    renewing = false;
+    generation = 2;
+    // Sin avanzar el reloj: ninguna espera se acumuló.
+    expect(await sweep.runOnce()).toMatchObject({ uploaded: 1 });
+    expect(calls).toBe(1);
+  });
+
+  it('una renovación que empieza a mitad del intento no descarta la entrada', async () => {
+    const list = await PendingUploadList.open(control);
+    await list.put(A, null, false);
+    let generation = 1;
+    const sweep = sweepOf(list, async () => {
+      generation = 2;
+      throw new Error('account_inactive');
+    }, {
+      currentRef: () => ({ id: 'a', generation }),
+      accountActive: (ref) => ref.generation === generation
+    });
+    expect(await sweep.runOnce()).toMatchObject({ skipped: 1, dropped: 0, kept: 0 });
+    expect(list.has(T)).toBe(true);
+  });
+
+  it('la memoria del barrido se poda contra lo que sigue vivo y ningún plazo queda sin cancelar', async () => {
+    const list = await PendingUploadList.open(control);
+    await list.put(A, null, false);
+    await list.put({ id: 'b', generation: 1 }, null, true);
+    let active = 0;
+    let journals: string[] = ['j1', 'j2'];
+    const sweep = sweepOf(list, async () => { throw new Error('relé caído'); }, {
+      sleep: (_ms, signal) => new Promise<void>((resolve) => {
+        active += 1;
+        signal?.addEventListener('abort', () => { active -= 1; });
+        void resolve;
+      }),
+      expireJournals: async (retry) => {
+        for (const id of journals) {
+          if (retry.ready(id)) retry.failed(id);
+        }
+        return { expired: 0, failed: journals.length };
+      }
+    });
+    await sweep.runOnce();
+    // Los plazos de los elementos terminados se cancelaron; no queda ninguno vivo.
+    expect(active).toBe(0);
+    const inside = sweep as unknown as { backoff: { size: number }; triedBlocked: Map<string, number> };
+    expect(inside.backoff.size).toBe(4);
+    expect(inside.triedBlocked.size).toBe(1);
+
+    // La cuenta y los diarios desaparecen por otra vía: la pasada siguiente no guarda nada de ellos.
+    await list.remove(T);
+    await list.remove({ account: 'b', space: null });
+    journals = [];
+    await sweep.runOnce();
+    expect(inside.backoff.size).toBe(0);
+    expect(inside.triedBlocked.size).toBe(0);
+  });
+
+  it('al abrir la lista se borran los temporales huérfanos y no el de una escritura en curso', async () => {
+    await mkdir(control, { recursive: true });
+    const orphan = join(control, pendingUploadsTemporaryName());
+    await writeFile(orphan, '{}');
+    const ajeno = join(control, 'otro.tmp');
+    await writeFile(ajeno, 'x');
+    const list = await PendingUploadList.open(control);
+    expect((await readdir(control)).sort()).toEqual(['otro.tmp']);
+
+    // Una escritura en curso de este proceso: su temporal no se toca al abrir otra vez.
+    const first = list.put(A, null, false);
+    const second = PendingUploadList.open(control);
+    await Promise.all([first, second]);
+    expect((await listFile()).entries).toHaveLength(1);
+    expect((await readdir(control)).sort()).toEqual(['otro.tmp', PENDING_UPLOADS_FILE]);
+  });
+
+  it('en el apagado la ronda final espera 5 s, no 10', async () => {
+    const account = testAccount('a');
+    const list = await PendingUploadList.open(control);
+    const limits: Array<ReturnType<typeof deferred>> = [];
+    const asked: number[] = [];
+    const served = await openAccount(account, list, { waitTimer: (ms) => {
+      asked.push(ms);
+      const limit = deferred();
+      limits.push(limit);
+      return limit.promise;
+    } });
+    await served.ctx.firstRound?.();
+    account.mode = 'down';
+    await served.instance.createNote({ body: '# Colgada', privacy: NO_PRIVATE });
+    await served.instance.syncRunner!.requestRound();
+    account.mode = 'hang';
+    served.instance.beginShutdown();
+    const closing = served.close();
+    await vi.waitFor(() => { expect(asked).toHaveLength(2); }, { timeout: 20_000 });
+    expect(asked).toEqual([STARTUP_READ_WAIT_MS, SHUTDOWN_ROUND_WAIT_MS]);
+    expect((await listFile()).entries).toHaveLength(1);
+    limits[1]!.resolve();
+    account.hang.resolve();
+    await closing;
   });
 });

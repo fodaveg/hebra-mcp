@@ -6,6 +6,7 @@ import { openFileSecretStore, writePairedSecrets, type PairedSecrets } from '../
 import { linkedSyncFrom, registerLinkedDevice } from '../../sync/linked';
 import {
   AgentKeyNotFoundError,
+  AgentKeyUnauthorizedError,
   prepareAgentDevice,
   savePreparedAgentDevice
 } from '../../spaces/device';
@@ -323,12 +324,6 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase !== 'credential') throw new RemotePairingError('replayed');
       if (!code || code.length > 4_096) throw new RemotePairingError('invalid_form');
-      // Renovar: antes de canjear nada (el canje rota los tokens de la credencial), comprobar que
-      // el agente está activo. Si no, la conexión guardada queda intacta para cuando se reactive.
-      if (journal.renewal && await this.options.renewals?.agentEnabled?.(journal.renewal, this.fetcher) === false) {
-        await this.cleanup(journal).catch(() => undefined);
-        throw new RemotePairingError('agent_disabled');
-      }
       // El intent queda durable ANTES del efecto remoto. Sin idempotencia/revocación por
       // deviceId, una respuesta perdida no se puede clasificar como «sin efecto».
       journal.phase = 'exchange-pending';
@@ -380,11 +375,21 @@ export class RemotePairingService {
       let wrongAccount = false;
       try {
         const existingKey = journal.renewal ? await this.options.renewals?.agentKey(journal.renewal) : undefined;
-        journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher, existingKey);
+        try {
+          journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher, existingKey);
+        } catch (error) {
+          // 404: espacios apagados, credencial no encontrada o carrera con una desactivación; no se
+          // sabe cuál. La biblioteca personal no depende de espacios (SPEC: funciona sin la API de
+          // H-L7), así que se sigue sin clave de agente: los espacios la registran al usarse y, si
+          // siguen sin poder, dan su error normal. Que la credencial exista lo comprueba el enlace
+          // de aprobación que viene ahora, y la propiedad, la concesión de Lumbre.
+          if (!(error instanceof AgentKeyNotFoundError)) throw error;
+          journal.preparedAgent = undefined;
+        }
         // Antes de pedir la aprobación: el registro dice de qué cuenta es la credencial. La prueba
         // de propiedad sigue siendo la concesión de Lumbre, esto ahorra aprobar para nada.
         const expected = journal.renewal?.accountId ?? hebraAccountIdOf(journal.sub);
-        wrongAccount = journal.preparedAgent.registration.accountId !== expected;
+        wrongAccount = journal.preparedAgent !== undefined && journal.preparedAgent.registration.accountId !== expected;
         if (!wrongAccount) {
           const link = await this.startLink({
             connection,
@@ -397,9 +402,22 @@ export class RemotePairingService {
           await this.options.journals.write(journal);
         }
       } catch (error) {
+        if (error instanceof AgentKeyUnauthorizedError) {
+          // 401: agente desactivado o credencial revocada, Lumbre no lo distingue y el sondeo
+          // previo tampoco. Una renovación conserva los tokens nuevos de la credencial que
+          // sobrevive (el canje rotó los guardados): al reactivar el agente vuelve sin otro login.
+          // Esa credencial no se revoca ni se borra nada. Con otro id, o en un alta, el camino de
+          // siempre: se revoca lo canjeado.
+          let kept = false;
+          if (journal.renewal) {
+            kept = await this.options.renewals?.keepRotatedTokens(journal.renewal, connection).catch(() => false) ?? false;
+          }
+          if (kept) { journal.connection = undefined; journal.cleanupRequired = false; }
+          await this.cleanup(journal);
+          throw new RemotePairingError('agent_rejected', kept ? 'tokens_kept' : 'credential_revoked');
+        }
         await this.cleanup(journal);
-        // Solo si se desactivó entre la comprobación y el canje.
-        throw new RemotePairingError(error instanceof AgentKeyNotFoundError ? 'agent_disabled' : 'unavailable');
+        throw new RemotePairingError('unavailable');
       }
       if (wrongAccount) {
         await this.restartAfterWrongAccount(journal, runtime);
@@ -504,7 +522,7 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       if (
         journal.phase !== 'confirmation' || !runtime.preview || !runtime.ownership ||
-        !journal.connection || !journal.preparedAgent || !journal.paired
+        !journal.connection || !journal.paired
       ) throw new RemotePairingError(journal.phase === 'committing' ? 'replayed' : 'not_ready');
       if (!validFuture(journal.identityExpiresAt, this.now())) return { kind: 'reauthenticate' };
       journal.phase = 'committing';
@@ -551,7 +569,7 @@ export class RemotePairingService {
   ): Promise<Awaited<ReturnType<RemotePairingPublisher['publish']>>> {
     const { paired, preparedAgent } = journal;
     const ownership = runtime.ownership;
-    if (!paired || !preparedAgent || !ownership) throw new RemotePairingError('not_ready');
+    if (!paired || !ownership) throw new RemotePairingError('not_ready');
     const renewal = journal.renewal;
     if (renewal && !journal.replacesAccount) {
       if (!this.options.renewals) throw new RemotePairingError('unavailable', 'renewals_not_attached');
@@ -566,7 +584,7 @@ export class RemotePairingService {
     await mkdir(preparedDir, { recursive: true, mode: 0o700 });
     await chmod(preparedDir, 0o700);
     const secrets = openFileSecretStore(preparedDir);
-    await savePreparedAgentDevice(secrets, paired, preparedAgent);
+    if (preparedAgent) await savePreparedAgentDevice(secrets, paired, preparedAgent);
     await writePairedSecrets(secrets, paired);
     try { await runtime.link?.complete(); } catch { /* El sobre caduca solo. */ }
     return this.options.publisher.publish({ ownership, paired, preparedDir, journalId: id });

@@ -123,6 +123,7 @@ import {
 import {
   retryableUploads,
   retryIsUseless,
+  SHUTDOWN_ROUND_WAIT_MS,
   SyncRunner,
   STARTUP_READ_WAIT_MS,
   type SyncConflictCopy,
@@ -229,6 +230,8 @@ export class LibraryInstance implements NoteWriteTarget {
   /** La lista durable ya nombra esta biblioteca por una escritura (`afterWrite`). */
   private ledgerMarked = false;
   private markShuttingDown!: () => void;
+  /** El proceso se apaga (`beginShutdown`): la ronda final de cerrar espera menos (`SHUTDOWN_ROUND_WAIT_MS`). */
+  private processShutdown = false;
   /** Resuelve al empezar el apagado (`beginShutdown`, o `close`). */
   private readonly shuttingDown = new Promise<void>((resolve) => {
     this.markShuttingDown = resolve;
@@ -566,7 +569,7 @@ export class LibraryInstance implements NoteWriteTarget {
         return;
       }
       await ledger.record(space, 'retry');
-      const round = this.stillActive() ? await runner.finalRound() : null;
+      const round = this.stillActive() ? await runner.finalRound(this.processShutdown ? SHUTDOWN_ROUND_WAIT_MS : undefined) : null;
       const left = await this.uploadsLeft(runner);
       const blocked = runner.clientOutdated() !== null || retryIsUseless(await runner.syncStatus());
       await ledger.record(space, left === 0 ? 'clear' : blocked ? 'blocked' : 'retry');
@@ -812,6 +815,7 @@ export class LibraryInstance implements NoteWriteTarget {
    * en curso; `close()` lo llama siempre. Idempotente; no cierra nada.
    */
   beginShutdown(): void {
+    this.processShutdown = true;
     this.markShuttingDown();
   }
 
@@ -829,7 +833,7 @@ export class LibraryInstance implements NoteWriteTarget {
    */
   close(): Promise<void> {
     this.closed = true;
-    this.beginShutdown();
+    this.markShuttingDown();
     if (this.timer) clearInterval(this.timer);
     this.closePromise ??= this.runClose().catch((error: unknown) => {
       this.closePromise = null;

@@ -107,7 +107,8 @@ export interface PublishRenewalInput {
   journalId: string;
   ownership: VerifiedOwnership;
   paired: PairedSecrets;
-  preparedAgent: PreparedAgentDevice;
+  /** Ausente si Lumbre respondió 404 al registrar la clave: los espacios la registran al usarse. */
+  preparedAgent?: PreparedAgentDevice;
 }
 
 /** Renovar una cuenta activa. Sin esta pieza, una revocación no se puede resolver aquí. */
@@ -117,12 +118,13 @@ export interface RemotePairingRenewals {
   /** La clave de agente guardada: una credencial que sobrevive exige la misma pública. */
   agentKey(renewal: RemotePairingRenewal): Promise<JsonWebKey | undefined>;
   /**
-   * ¿Sigue activo el agente de la cuenta? Se pregunta con las credenciales GUARDADAS, antes de
-   * canjear ninguna: el canje rota los tokens, y si luego el registro del agente no puede
-   * terminar, el limpiado revoca la credencial nueva y la guardada ya no sirve al reactivar.
-   * `false` solo si Lumbre dice que no existe (404); cualquier otra respuesta o fallo es `true`.
+   * El canje rota los tokens de la credencial que sobrevive. Si luego Lumbre rechaza (401) el
+   * registro de la clave de agente (agente desactivado o credencial revocada: no se distinguen),
+   * los tokens guardados ya no valen. Guarda los nuevos de esa misma credencial, sin tocar nada
+   * más, para que al reactivar el agente la cuenta vuelva sin otro login. `false` si la
+   * credencial canjeada tiene otro id que la guardada: no hay nada que conservar.
    */
-  agentEnabled?(renewal: RemotePairingRenewal, fetcher: typeof globalThis.fetch): Promise<boolean>;
+  keepRotatedTokens(renewal: RemotePairingRenewal, connection: LumbreConnection): Promise<boolean>;
   /** Misma bóveda: conserva raíz e identidad y publica vínculo y generación nueva a la vez. */
   publish(input: PublishRenewalInput): Promise<CommittedAccount>;
   /** Otra bóveda: retira la cuenta anterior por el camino normal. */
@@ -156,8 +158,11 @@ export class RemotePairingError extends Error {
       | 'code_rejected'
       /** La sesión de Lumbre de este navegador es de otra cuenta; aún no hay aprobación. */
       | 'wrong_lumbre_account'
-      /** El agente de la persona está desactivado en Hebra: no se ha tocado ninguna credencial. */
-      | 'agent_disabled',
+      /**
+       * Lumbre rechazó (401) el registro de la clave de agente: agente desactivado o credencial
+       * revocada, indistinguibles. Nada se borra; una renovación conserva los tokens nuevos.
+       */
+      | 'agent_rejected',
     /** Motivo cerrado para el log (nunca mensajes, tokens, sub ni email). */
     readonly reason?: string
   ) {

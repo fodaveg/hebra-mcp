@@ -35,6 +35,8 @@ export class PairingRevocation {
   private readonly relayLatched = new Set<string>();
   /** Runners abiertos por credencial; se sueltan al cerrar el contexto (`attachRelay`). */
   private readonly relayLive = new Map<string, () => boolean>();
+  /** Por credencial: ¿el runner abierto ya tuvo una ronda correcta con el relé? */
+  private readonly relayRecovered = new Map<string, () => boolean>();
 
   /** `relayRevoked`: el `revoked` global del runner de sync en modo de una sola cuenta, si lo hay. */
   constructor(private readonly relayRevoked: () => boolean = () => false) {}
@@ -45,17 +47,24 @@ export class PairingRevocation {
    * captura) se suelta, así que cerrar no da un estado falso ni retiene la instancia.
    * Devuelve la función que desacopla.
    */
-  attachRelay(credentialId: string, revoked: () => boolean): () => void {
+  attachRelay(credentialId: string, revoked: () => boolean, recovered: () => boolean = () => false): () => void {
     // No se toca `relayLatched`: una cuenta revocada que se cerró por inactividad y se reabre
     // tiene un runner nuevo que aún no ha hablado con el relé, y no por eso deja de estar
-    // revocada. Solo la renovación (`clear`) o una credencial con otro id la levantan.
+    // revocada. La levantan la renovación (`clear`), una credencial con otro id o una prueba de
+    // que ya funciona: una ronda correcta de ese runner o un GET de lectura correcto al hacer login
+    // (agente desactivado y reactivado en Hebra, sin reconectar).
     this.relayLive.set(credentialId, revoked);
+    this.relayRecovered.set(credentialId, recovered);
     return () => {
       if (this.relayLive.get(credentialId) !== revoked) return;
       this.relayLive.delete(credentialId);
+      this.relayRecovered.delete(credentialId);
       let value = false;
+      let ok = false;
       try { value = revoked(); } catch { /* instancia ya cerrada: sin dato nuevo */ }
-      if (value) this.relayLatched.add(credentialId);
+      try { ok = recovered(); } catch { /* idem */ }
+      if (ok && !value) this.clear(credentialId);
+      else if (value) this.relayLatched.add(credentialId);
     };
   }
 
@@ -67,7 +76,11 @@ export class PairingRevocation {
   isRevoked(currentCredentialId?: string | null): boolean {
     if (this.relayRevoked()) return true;
     if (currentCredentialId == null) return false;
-    if (this.revokedCredentials.has(currentCredentialId) || this.relayLatched.has(currentCredentialId)) return true;
+    if (this.revokedCredentials.has(currentCredentialId) || this.relayLatched.has(currentCredentialId)) {
+      // Una ronda correcta del runner abierto prueba que el relé vuelve a aceptar la credencial.
+      if (!(this.relayRecovered.get(currentCredentialId)?.() ?? false)) return true;
+      this.clear(currentCredentialId);
+    }
     return this.relayLive.get(currentCredentialId)?.() ?? false;
   }
 
@@ -75,7 +88,7 @@ export class PairingRevocation {
    * Olvida lo que se sabía de esta credencial: la marca de Lumbre y la del relé ya cerrado. Lo
    * llama la renovación (`commitRenewal`): una credencial renovada con la misma bóveda puede
    * conservar su id, y sin esto seguiría revocada hasta reiniciar. El runner abierto, si lo
-   * hay, sigue diciendo lo suyo.
+   * hay, sigue diciendo lo suyo. También lo llama el login cuando un GET de lectura sale bien.
    */
   clear(credentialId: string): void {
     this.revokedCredentials.delete(credentialId);

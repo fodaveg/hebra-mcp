@@ -158,6 +158,9 @@ export class AgentSpaceManager implements SpaceRouter {
         if (!result.spaces.some((item) => grantHash(item) === grantHash(entry.access)))
           await this.deny(entry);
       }
+      // Los nombres de espacios que ya no están en el catálogo no se guardan más.
+      const live = new Set(result.spaces.map((item) => this.nameKey(item)));
+      for (const key of [...this.names.keys()]) if (!live.has(key)) this.names.delete(key);
       return result.spaces;
     } catch {
       throw new ToolError('space_access_denied');

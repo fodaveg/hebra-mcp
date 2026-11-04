@@ -219,18 +219,23 @@ export class AccountContexts {
   /**
    * Da `fn` con el contexto de la cuenta por la misma adquisición que una petición (el barrido de
    * lo pendiente, D22): comparte el contexto con quien ya lo tenga abierto, cuenta como uso mientras
-   * dura y, al soltarlo, lo cierra si nadie más lo usa. No retira nada: la persona que llama
-   * mientras tanto recibe respuesta normal.
+   * dura y, al soltarlo, lo cierra si nadie más lo usa, pero solo si lo abrió este uso: un
+   * contexto que ya estaba abierto o que se abre para una persona mientras tanto es de ella, y
+   * lo cierra su inactividad. No retira nada: la persona que llama mientras tanto recibe
+   * respuesta normal.
    */
   async use<T>(ref: AccountRef, fn: (ctx: ServerContext) => Promise<T>): Promise<T> {
     const account = this.registry.findById(ref.id);
     if (!account || account.generation !== ref.generation) throw new Error('account_inactive');
+    const current = this.entries.get(ref.id);
+    const openedByUs = !current || current.account.generation !== ref.generation || current.life.state === 'cerrado';
     const lease = await this.acquire(account);
     try {
       return await fn(lease.ctx);
     } finally {
       lease.release();
-      await this.closeIfIdle(ref).catch(() => undefined);
+      // `closeIfIdle` no cierra con peticiones en curso: si llegó una persona, queda abierto.
+      if (openedByUs) await this.closeIfIdle(ref).catch(() => undefined);
     }
   }
 
@@ -374,16 +379,31 @@ export class AccountContexts {
    * Con la memoria por encima del límite, cierra ya lo que no tiene peticiones en curso ni
    * subidas pendientes, aunque no haya agotado su espera: solo la acorta. No espera a que
    * terminen los cierres (un relé colgado los retrasa); los mira la siguiente medición.
+   *
+   * Si no queda nada de eso por cerrar y la presión sigue (la compuerta vuelve a llamar mientras
+   * alguien espera), cierra también las ociosas CON subidas pendientes: su cierre apunta la
+   * biblioteca en la lista durable antes de intentar la ronda final (`settleUploads`) y el barrido
+   * la reabre cuando el relé conteste. Sin esto, con el relé caído y la memoria alta, las
+   * aperturas esperarían por cuentas que nadie usa.
    */
   private async reclaim(): Promise<void> {
-    await Promise.allSettled([...this.entries.values()].map(async (entry) => {
-      const opened = entry.life.peek();
-      if (!opened) return;
-      if (entry.life.idle && !(await hasPendingUploads(opened.instance))) {
+    const opened = [...this.entries.values()].flatMap((entry) => {
+      const value = entry.life.peek();
+      return value ? [{ entry, value }] : [];
+    });
+    let closed = 0;
+    const withPending: typeof opened = [];
+    await Promise.allSettled(opened.map(async ({ entry, value }) => {
+      if (entry.life.idle && !(await hasPendingUploads(value.instance))) {
+        closed += 1;
         void entry.life.closeIfIdle().catch(() => undefined);
       } else {
-        await opened.ctx.spaces?.lifecycle?.reclaimIdle();
+        if (entry.life.idle) withPending.push({ entry, value });
+        await value.ctx.spaces?.lifecycle?.reclaimIdle();
       }
     }));
+    const closing = [...this.entries.values()].some((entry) => entry.life.state === 'cerrando');
+    if (closed > 0 || closing) return;
+    for (const { entry } of withPending) void entry.life.closeIfIdle().catch(() => undefined);
   }
 }
