@@ -228,34 +228,23 @@ export class WriterLock {
   private signalReleaseDeferred = false;
   /** Ya llegó una señal con el soltado aplazado: la siguiente suelta y termina. */
   private deferredSignalSeen = false;
-  private readonly onExit = (): void => this.release();
-  private readonly onSignal = (signal: NodeJS.Signals): void => {
-    // Con un apagado propio (`serve`, `serve-http`: `deferSignalRelease`), la primera señal
-    // no suelta el bloqueo: ese apagado vacía la ronda y la cola y lo suelta al final
-    // (`LibraryInstance.close()`), y el hook de `exit` queda de red. Soltarlo aquí dejaba
-    // entrar a otro escritor mientras este seguía escribiendo (M1 del audit de robustez,
-    // 10 oct 2026: hasta 28 s con dos escritores). Lo decide el indicador y no cuántos
-    // oyentes quedan: con `process.once`, Node quita el envoltorio antes de llamarlo, y un
-    // `serve` que toma el relevo después de arrancar tiene su oyente DELANTE del de aquí
-    // (vería 0 oyentes y mataría el proceso a mitad del apagado). Se vuelve a armar para
-    // que una segunda señal suelte el bloqueo y termine.
+  /**
+   * Una señal del proceso para este bloqueo. `deferred`: era la primera con el soltado
+   * aplazado y no se suelta. `released`: se soltó; `second` dice si era la segunda señal de un
+   * apagado aplazado. Con un apagado propio (`serve`, `serve-http`: `deferSignalRelease`), la
+   * primera señal no suelta el bloqueo: ese apagado vacía la ronda y la cola y lo suelta al
+   * final (`LibraryInstance.close()`), y el hook de `exit` queda de red. Soltarlo aquí dejaba
+   * entrar a otro escritor mientras este seguía escribiendo (M1 del audit de robustez, 10 oct
+   * 2026: hasta 28 s con dos escritores). Lo decide el indicador y no cuántos oyentes quedan.
+   */
+  handleSignal(): { outcome: 'deferred' } | { outcome: 'released'; second: boolean } {
     if (this.signalReleaseDeferred && !this.deferredSignalSeen) {
       this.deferredSignalSeen = true;
-      process.once(signal, this.onSignal);
-      return;
+      return { outcome: 'deferred' };
     }
     this.release();
-    this.removeHooks();
-    if (process.listenerCount(signal) === 0) {
-      // Nadie más escucha la señal: se repite para que el proceso termine como lo habría
-      // hecho sin este manejador (con el código de la señal).
-      process.kill(process.pid, signal);
-    } else if (this.deferredSignalSeen) {
-      // Segunda señal con otro oyente que no termina el proceso: se termina aquí, con el
-      // código convencional de una muerte por señal.
-      process.exit(128 + (osConstants.signals[signal] ?? 0));
-    }
-  };
+    return { outcome: 'released', second: this.deferredSignalSeen };
+  }
 
   constructor(private readonly options: WriterLockOptions) {
     this.path = join(options.dataDir, WRITER_LOCK_FILE);
@@ -410,14 +399,65 @@ export class WriterLock {
   private installHooks(): void {
     if (this.hooksInstalled || this.options.releaseOnExit === false) return;
     this.hooksInstalled = true;
-    process.once('exit', this.onExit);
-    for (const signal of SIGNALS) process.once(signal, this.onSignal);
+    hookLock(this);
   }
 
   private removeHooks(): void {
     if (!this.hooksInstalled) return;
     this.hooksInstalled = false;
-    process.removeListener('exit', this.onExit);
-    for (const signal of SIGNALS) process.removeListener(signal, this.onSignal);
+    unhookLock(this);
   }
+}
+
+/**
+ * Un único oyente de `exit` y uno por señal para TODO el proceso, con el registro de los
+ * bloqueos vivos: cada bloqueo se quita al soltarse. Un oyente por bloqueo (`serve-http`
+ * abre uno por cuenta y por espacio) pasaba de los 10 que tolera Node y daba
+ * `MaxListenersExceededWarning`, además de acumularse con muchas cuentas. No se sube
+ * `setMaxListeners`: el recuento ya no crece. Sin bloqueos vivos no queda ningún oyente nuestro.
+ */
+const HOOKED = new Set<WriterLock>();
+let processHooksInstalled = false;
+
+function onProcessExit(): void {
+  for (const lock of [...HOOKED]) lock.release();
+}
+
+function onProcessSignal(signal: NodeJS.Signals): void {
+  let anyDeferred = false;
+  let anySecond = false;
+  for (const lock of [...HOOKED]) {
+    const result = lock.handleSignal();
+    if (result.outcome === 'deferred') anyDeferred = true;
+    else if (result.second) anySecond = true;
+  }
+  // Algún bloqueo espera a su apagado propio: el proceso no termina aquí. Sigue en el
+  // registro, así que una segunda señal vuelve a llegar a este mismo oyente.
+  if (anyDeferred) return;
+  // Todos soltados: `release` los quitó del registro y, con el último, nuestros oyentes.
+  if (process.listenerCount(signal) === 0) {
+    // Nadie más escucha la señal: se repite para que el proceso termine como lo habría
+    // hecho sin este manejador (con el código de la señal).
+    process.kill(process.pid, signal);
+  } else if (anySecond) {
+    // Segunda señal con otro oyente que no termina el proceso: se termina aquí, con el
+    // código convencional de una muerte por señal.
+    process.exit(128 + (osConstants.signals[signal] ?? 0));
+  }
+}
+
+function hookLock(lock: WriterLock): void {
+  HOOKED.add(lock);
+  if (processHooksInstalled) return;
+  processHooksInstalled = true;
+  process.on('exit', onProcessExit);
+  for (const signal of SIGNALS) process.on(signal, onProcessSignal);
+}
+
+function unhookLock(lock: WriterLock): void {
+  HOOKED.delete(lock);
+  if (HOOKED.size > 0 || !processHooksInstalled) return;
+  processHooksInstalled = false;
+  process.removeListener('exit', onProcessExit);
+  for (const signal of SIGNALS) process.removeListener(signal, onProcessSignal);
 }
