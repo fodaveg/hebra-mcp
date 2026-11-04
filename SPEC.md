@@ -2878,8 +2878,12 @@ reenvían al mismo escritor y éste vuelve a autorizar; JDex y workdir quedan ce
 
 Cada invocación de herramienta en un espacio consulta el catálogo sin caché exactamente dos
 veces: al resolver el selector y al aceptar la respuesta, sea un resultado o un error. Ninguna
-consulta se reutiliza en otra invocación. Cada petición del sync compartido lo consulta antes y
-después, y cada escritura que llega por `writer.sock` al entrar y antes de contestar. Dentro del
+consulta anterior a la petición se reutiliza en otra invocación: quien llega con una lectura en
+curso espera a una posterior, que comparten los que lleguen entonces (una en vuelo y una en cola
+por cuenta como mucho, D22). Un lote JSON-RPC abre por adelantado como mucho 4 espacios, solo con
+UUID canónico y sin repetir, con un único catálogo para todo el lote, y para si el cliente se fue; el
+resto lo abre la herramienta al ejecutarse. Cada petición del sync compartido lo consulta antes y
+después, y puede reutilizar una lectura de menos de 2 s (el relé controla además cada fragmento), y cada escritura que llega por `writer.sock` al entrar y antes de contestar. Dentro del
 turno FIFO no hay red: antes de cada mutación, y de cada uso de los registros propios del MCP
 (idempotencia, planes de sustitución y del JDex, contenido anterior de un fichero), se mira lo
 ya sabido en local (una revocación vista por este proceso o marcada en disco por otro). Así una

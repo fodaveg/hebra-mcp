@@ -163,13 +163,26 @@ function sendUnavailable(res: Response, error: unknown): void {
   sendJsonRpcError(res, 503, -32603, 'No disponible.');
 }
 
-/** Los espacios que nombran las llamadas de este cuerpo, para abrirlos antes de responder. */
-function requestedSpaces(body: unknown): string[] {
+/** Cuántos espacios se abren de antemano por petición. El resto los abre la herramienta al
+ * ejecutarse: abrirlos aquí solo sirve para responder 503 con `Retry-After` antes de empezar
+ * (D22), y un cuerpo no puede obligar a abrir todos los espacios de la persona. */
+export const MAX_PREPARED_SPACES = 4;
+const SPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Los espacios que nombran las llamadas de este cuerpo, para abrirlos antes de responder: solo
+ * UUID canónicos, sin repetir y como mucho `MAX_PREPARED_SPACES`. Lo demás no se rechaza aquí; la
+ * herramienta responde `space_access_denied` como siempre.
+ */
+export function requestedSpaces(body: unknown): string[] {
   const spaces = new Set<string>();
   for (const message of Array.isArray(body) ? body : [body]) {
     const call = message as { method?: unknown; params?: { arguments?: { space?: unknown } } } | null;
     const space = call?.method === 'tools/call' ? call.params?.arguments?.space : undefined;
-    if (typeof space === 'string' && space !== 'personal') spaces.add(space);
+    if (typeof space === 'string' && SPACE_ID_PATTERN.test(space)) {
+      spaces.add(space);
+      if (spaces.size >= MAX_PREPARED_SPACES) break;
+    }
   }
   return [...spaces];
 }
@@ -234,7 +247,8 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
     if (!options.contexts) { sendUnavailable(res, new Error('no_contexts')); return; }
     void options.contexts.acquire(account).then(async (lease) => {
       try {
-        await lease.prepareSpaces(requestedSpaces(req.body));
+        await lease.prepareSpaces(requestedSpaces(req.body), () => res.destroyed);
+        if (res.destroyed) return;
         await handleMcp(lease.ctx, version, req, res);
       } finally { lease.release(); }
     }).catch((error: unknown) => {

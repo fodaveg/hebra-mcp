@@ -456,12 +456,12 @@ describe('herramientas MCP por espacio', () => {
       const { lifecycle } = managed();
       const held = await lifecycle.acquire(SPACE);
       const before = fake.requested.filter((url) => url.endsWith('/spaces/agent-access')).length;
-      const prepared = await lifecycle.prepare(SPACE);
-      expect(prepared).not.toBeNull();
+      const [prepared] = await lifecycle.prepare([SPACE]);
+      expect(prepared).toBeDefined();
       expect(fake.requested.filter((url) => url.endsWith('/spaces/agent-access')).length).toBe(before);
-      prepared!.release();
+      prepared.release();
       held.release();
-      expect(await lifecycle.prepare('ffffffff-ffff-4fff-8fff-ffffffffffff')).toBeNull();
+      expect(await lifecycle.prepare(['ffffffff-ffff-4fff-8fff-ffffffffffff'])).toEqual([]);
     });
 
     it('sin memoria, prepare propaga el motivo y no deja el espacio a medias', async () => {
@@ -469,7 +469,7 @@ describe('herramientas MCP por espacio', () => {
       const lifecycle = served.ctx.spaces!.lifecycle!;
       lifecycle.configure({ idleMs: IDLE_MS, clock: fakeClock(), onClosed() {},
         admit: async () => { throw new ContextUnavailableError('capacity_wait_timeout', 20); } });
-      await expect(lifecycle.prepare(SPACE)).rejects.toMatchObject({ reason: 'capacity_wait_timeout' });
+      await expect(lifecycle.prepare([SPACE])).rejects.toMatchObject({ reason: 'capacity_wait_timeout' });
       expect(await writerLocks()).toBe(0);
     });
   });
