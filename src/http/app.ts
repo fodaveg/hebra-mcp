@@ -43,6 +43,7 @@ import { logEvent } from '../log/logger';
 import { buildMcpServer } from '../server/build-server';
 import type { ServerContext } from '../server/context';
 import type { AccountContexts, AuthorizedAccount } from '../accounts';
+import { ContextUnavailableError } from '../accounts/capacity';
 import { MAX_WRITE_MESSAGE_BYTES } from '../store/writes';
 import { isLoopbackHostname, MCP_PATH, type HttpConfig } from './config';
 
@@ -59,6 +60,9 @@ export const MAX_MCP_BODY_BYTES = MAX_WRITE_MESSAGE_BYTES;
 
 /** Código JSON-RPC del 413 (rango de errores de servidor), el mismo que lumbre-mcp. */
 const JSON_RPC_PAYLOAD_TOO_LARGE = -32002;
+
+/** `Retry-After` de un 503 que no sale de una espera con su propio plazo. */
+const RETRY_AFTER_SECONDS = 5;
 
 /**
  * La autenticación de `/mcp`. `serve-http` no arranca sin una (SPEC.md §12.2). La
@@ -143,6 +147,33 @@ function sendJsonRpcError(res: Response, status: number, code: number, message: 
   res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
 }
 
+/**
+ * El 503 de `/mcp`, siempre con `Retry-After` y con su motivo en el log (SPEC.md §12.10). El
+ * log lleva un conjunto cerrado de motivos y, si el error no es de capacidad, el nombre de
+ * su clase: nunca su mensaje, `sub`, email ni títulos.
+ */
+function sendUnavailable(res: Response, error: unknown): void {
+  const known = error instanceof ContextUnavailableError ? error : null;
+  logEvent({
+    event: 'mcp.unavailable',
+    reason: known?.reason ?? 'open_failed',
+    ...(known ? {} : { error: error instanceof Error ? error.name : 'unknown' })
+  });
+  res.setHeader('retry-after', String(known?.retryAfterSeconds ?? RETRY_AFTER_SECONDS));
+  sendJsonRpcError(res, 503, -32603, 'No disponible.');
+}
+
+/** Los espacios que nombran las llamadas de este cuerpo, para abrirlos antes de responder. */
+function requestedSpaces(body: unknown): string[] {
+  const spaces = new Set<string>();
+  for (const message of Array.isArray(body) ? body : [body]) {
+    const call = message as { method?: unknown; params?: { arguments?: { space?: unknown } } } | null;
+    const space = call?.method === 'tools/call' ? call.params?.arguments?.space : undefined;
+    if (typeof space === 'string' && space !== 'personal') spaces.add(space);
+  }
+  return [...spaces];
+}
+
 export function createHttpApp(options: CreateHttpAppOptions): Express {
   const { ctx, version, config, auth } = options;
   const nullOriginPostPaths = new Set(auth.nullOriginPostPaths ?? []);
@@ -196,20 +227,22 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
     const account = auth.account?.(req) ?? null;
     if (!account) {
       if (auth.account) { sendJsonRpcError(res, 401, -32000, 'Token no válido.'); return; }
-      if (!ctx) { sendJsonRpcError(res, 503, -32603, 'No disponible.'); return; }
+      if (!ctx) { sendUnavailable(res, new Error('no_context')); return; }
       void handleMcp(ctx, version, req, res);
       return;
     }
-    if (!options.contexts) { sendJsonRpcError(res, 503, -32603, 'No disponible.'); return; }
+    if (!options.contexts) { sendUnavailable(res, new Error('no_contexts')); return; }
     void options.contexts.acquire(account).then(async (lease) => {
-      try { await handleMcp(lease.ctx, version, req, res); }
-      finally { lease.release(); }
+      try {
+        await lease.prepareSpaces(requestedSpaces(req.body));
+        await handleMcp(lease.ctx, version, req, res);
+      } finally { lease.release(); }
     }).catch((error: unknown) => {
       if (res.headersSent) return;
       if (error instanceof Error && error.message === 'account_inactive') {
         sendJsonRpcError(res, 401, -32000, 'Token no válido.');
       } else {
-        sendJsonRpcError(res, 503, -32603, 'No disponible.');
+        sendUnavailable(res, error);
       }
     });
   });
@@ -250,8 +283,15 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
   return app;
 }
 
-/** Una petición MCP: servidor y transporte nuevos, cerrados al terminar la respuesta. */
+/**
+ * Una petición MCP: servidor y transporte nuevos, cerrados al terminar la respuesta. Resuelve
+ * cuando la respuesta se envió o se cortó. No basta `handleRequest`: en modo JSON, con el
+ * cliente ya desconectado, no resuelve nunca y retendría el contexto para siempre.
+ */
 async function handleMcp(ctx: ServerContext, version: string, req: Request, res: Response): Promise<void> {
+  // El cliente se fue mientras su contexto abría: no hay a quién responder.
+  if (res.destroyed) return;
+  const responseClosed = new Promise<void>((resolve) => res.once('close', () => resolve()));
   const server = buildMcpServer(ctx, version);
   // `enableJsonResponse`: una respuesta JSON por petición, sin stream SSE (lumbre-mcp
   // igual). Las herramientas de hebra-mcp no mandan notificaciones a mitad de llamada.
@@ -265,9 +305,11 @@ async function handleMcp(ctx: ServerContext, version: string, req: Request, res:
   });
   try {
     await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
+    await Promise.race([transport.handleRequest(req, res, req.body), responseClosed]);
   } catch (error) {
     logEvent({ event: 'http.error', error: error instanceof Error ? error.name : 'unknown' });
     if (!res.headersSent) sendJsonRpcError(res, 500, -32603, 'Error interno.');
+    else if (!res.writableEnded) res.end();
   }
+  await responseClosed;
 }

@@ -9,7 +9,10 @@ import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ServerContext, SpaceRouter } from '../server/context';
+import { ContextUnavailableError, type AdmissionTicket } from '../accounts/capacity';
+import { realClock, ResourceLifecycle, type Clock } from '../accounts/lifecycle';
+import { logEvent } from '../log/logger';
+import type { ServerContext, SpaceLease, SpaceLifecycleControl, SpaceRouter } from '../server/context';
 import { ToolError } from '../server/errors';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { registerLinkedDevice } from '../sync/linked';
@@ -57,13 +60,22 @@ interface Entry {
   access: AgentSpaceAccess;
   directory: string;
   denied: boolean;
-  opening?: Promise<ServerContext>;
+  /** Una sola instancia por directorio (`ResourceLifecycle`, SPEC.md §12.10). */
+  life: ResourceLifecycle<ServerContext>;
+  /** `resolve` no sabe cuándo termina su uso: retiene el espacio hasta `close`. */
+  pin?: SpaceLease;
   instance?: LibraryInstance;
   vaultKey?: Uint8Array;
 }
 
 export class AgentSpaceManager implements SpaceRouter {
   private readonly entries = new Map<string, Entry>();
+  /** `serve-http` activa con `configure` el cierre por uso y la admisión por memoria. */
+  private idleMs: number | null = null;
+  private clock: Clock = realClock;
+  private admit?: (signal: AbortSignal) => Promise<AdmissionTicket>;
+  private onClosed?: () => void;
+  private shuttingDown = false;
   /** Nombre de cada espacio por origen y hash del grant. Es contenido del usuario: nunca
    * se loguea. `value` vale hasta `until` (10 min un nombre leído, 60 s un fallo o un meta
    * ausente, para no repetir el sondeo en cada listado); `last` es el último nombre leído,
@@ -72,7 +84,41 @@ export class AgentSpaceManager implements SpaceRouter {
     string,
     { value: string | null; until: number; last: string | null }
   >();
+  /** Deja de abrir y adquirir; hasta `closed`, la ronda final de un cierre sigue autorizada. */
+  private accepting = true;
   private closed = false;
+  readonly lifecycle: SpaceLifecycleControl = {
+    configure: ({ idleMs, clock, admit, onClosed }) => {
+      this.idleMs = idleMs;
+      this.clock = clock;
+      this.admit = admit;
+      this.onClosed = onClosed;
+    },
+    acquire: async (spaceId) => (await this.leaseFor(spaceId)).lease,
+    prepare: async (spaceId) => {
+      const open = [...this.entries.values()].find(
+        (entry) => entry.access.spaceId === spaceId && !entry.denied && entry.life.state === 'abierto'
+      );
+      try {
+        return open ? await open.life.acquire() : (await this.leaseFor(spaceId)).lease;
+      } catch (error) {
+        if (error instanceof ContextUnavailableError) throw error;
+        return null;
+      }
+    },
+    reclaimIdle: async () => {
+      await Promise.allSettled([...this.entries.values()].map(async (entry) => {
+        if (!entry.life.idle) return;
+        const status = await entry.instance?.status().catch(() => null);
+        if (status && status.pendingUpload > 0 && !status.revoked) return;
+        void entry.life.closeIfIdle().catch(() => undefined);
+      }));
+    },
+    beginShutdown: () => {
+      this.shuttingDown = true;
+      for (const entry of this.entries.values()) entry.instance?.beginShutdown();
+    }
+  };
   constructor(
     readonly device: AgentDevice,
     private readonly dataDir: string,
@@ -119,15 +165,21 @@ export class AgentSpaceManager implements SpaceRouter {
 
   private async deny(entry: Entry): Promise<void> {
     if (entry.denied) return;
+    this.retireDenied(entry);
+    await mkdir(entry.directory, { recursive: true, mode: 0o700 });
+    await writeFile(join(entry.directory, 'access-denied'), '', { mode: 0o600 });
+  }
+
+  /** Síncrono y sin esperar el cierre: quizá nos llamó una ronda, y `close` espera a esa
+   * ronda. stop() cancela el temporizador en el acto. El puerto se cierra al terminar lo que
+   * el espacio tenga en curso, para no cortar lectores. */
+  private retireDenied(entry: Entry): void {
     entry.denied = true;
-    // stop() cancela el temporizador inmediatamente, sin esperar aquí la ronda que
-    // quizá nos llamó. El puerto queda abierto hasta close para no cortar lectores.
     void entry.instance?.syncRunner
       ?.stop()
       .then(() => entry.vaultKey?.fill(0))
       .catch(() => {});
-    await mkdir(entry.directory, { recursive: true, mode: 0o700 });
-    await writeFile(join(entry.directory, 'access-denied'), '', { mode: 0o600 });
+    void entry.life.retire().catch(() => {});
   }
 
   private nameKey(item: AgentSpaceAccess): string {
@@ -194,29 +246,68 @@ export class AgentSpaceManager implements SpaceRouter {
   /** La primera validación fresca de la invocación: el catálogo de ahora mismo. Un UUID
    * ausente, apagado, malformado o con otra grafía responde igual que uno inexistente. */
   async resolve(spaceId: string): Promise<ServerContext> {
+    const { entry, lease } = await this.leaseFor(spaceId);
+    if (entry.pin) lease.release();
+    else entry.pin = lease;
+    return lease.value;
+  }
+
+  private async leaseFor(spaceId: string): Promise<{ entry: Entry; lease: SpaceLease }> {
     const item = (await this.catalogue()).find((space) => space.spaceId === spaceId);
-    if (!item) throw new ToolError('space_access_denied');
+    if (!item || !this.accepting) throw new ToolError('space_access_denied');
     const key = this.nameKey(item);
     const existing = this.entries.get(key);
-    if (existing) {
-      // El catálogo de arriba ya retiró la entrada si su grant cambió; otro proceso puede
-      // haberla retirado en disco.
-      this.assertActive(existing);
-      return existing.opening!;
-    }
+    // El catálogo de arriba ya retiró la entrada si su grant cambió; otro proceso puede
+    // haberla retirado en disco.
+    if (existing) this.assertActive(existing);
+    const entry = existing ?? this.createEntry(key, item);
+    return { entry, lease: await entry.life.acquire() };
+  }
+
+  private createEntry(key: string, access: AgentSpaceAccess): Entry {
     const entry: Entry = {
-      access: item,
+      access,
       directory: join(this.dataDir, 'spaces', key),
-      denied: false
+      denied: false,
+      life: new ResourceLifecycle<ServerContext>({
+        clock: this.clock,
+        idleMs: () => this.idleMs,
+        open: (signal) => this.openAdmitted(entry, signal),
+        close: async () => this.closeInstance(entry),
+        retiredError: () => new ToolError('space_access_denied'),
+        closeAfterUse: () => entry.denied || !this.accepting,
+        onDisposable: () => {
+          if (this.entries.get(key) === entry) this.entries.delete(key);
+          this.onClosed?.();
+        },
+        onCloseFailed: (error) => {
+          logEvent({ event: 'contexts.close_failed', resource: 'space',
+            error: error instanceof Error ? error.name : 'unknown' });
+        }
+      })
     };
     this.entries.set(key, entry);
-    entry.opening = this.open(entry).catch(async (error: unknown) => {
-      await entry.instance?.close();
-      entry.vaultKey?.fill(0);
-      this.entries.delete(key);
+    return entry;
+  }
+
+  private async openAdmitted(entry: Entry, signal: AbortSignal): Promise<ServerContext> {
+    const ticket = await this.admit?.(signal);
+    try {
+      return await this.open(entry);
+    } catch (error) {
+      await this.closeInstance(entry);
       throw error;
-    });
-    return entry.opening;
+    } finally {
+      ticket?.done();
+    }
+  }
+
+  private async closeInstance(entry: Entry): Promise<void> {
+    const { instance, vaultKey } = entry;
+    await instance?.close();
+    vaultKey?.fill(0);
+    entry.instance = undefined;
+    entry.vaultKey = undefined;
   }
 
   /** Sin red: lo que este proceso o la marca en disco de otro ya saben. Síncrono, para
@@ -226,12 +317,13 @@ export class AgentSpaceManager implements SpaceRouter {
     if (entry.denied || this.closed) throw new ToolError('space_access_denied');
     try {
       statSync(join(entry.directory, 'access-denied'));
-      entry.denied = true;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
-        throw new ToolError('space_access_denied');
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw new ToolError('space_access_denied');
     }
-    if (entry.denied) throw new ToolError('space_access_denied');
+    // La marca de otro proceso. La de este ya llevaba `denied`.
+    this.retireDenied(entry);
+    throw new ToolError('space_access_denied');
   }
 
   /** Validación fresca: catálogo del relé, sin caché. Nunca dentro del turno FIFO. */
@@ -341,10 +433,8 @@ export class AgentSpaceManager implements SpaceRouter {
       throw error;
     }
     entry.instance = instance;
-    if (this.closed) {
-      await instance.close();
-      throw new ToolError('space_access_denied');
-    }
+    if (!this.accepting) throw new ToolError('space_access_denied');
+    if (this.shuttingDown) instance.beginShutdown();
     await instance.whenReady();
     await authorize();
     // Sin red de más si el listado ya lo leyó; si falla, el bloque de origen lleva null.
@@ -369,13 +459,14 @@ export class AgentSpaceManager implements SpaceRouter {
   }
 
   async close(): Promise<void> {
-    this.closed = true;
+    this.accepting = false;
     await Promise.allSettled(
       [...this.entries.values()].map(async (entry) => {
-        await entry.opening?.catch(() => {});
-        await entry.instance?.close();
-        entry.vaultKey?.fill(0);
+        entry.pin?.release();
+        entry.pin = undefined;
+        await entry.life.retire();
       })
     );
+    this.closed = true;
   }
 }

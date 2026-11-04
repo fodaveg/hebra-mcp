@@ -2,10 +2,13 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { deferred } from '../fixtures/deferred';
 /** Consumidor H-L7 real: HTTP local, MCP, SQLite y sobres cifrados. Sin cuentas reales. */
+import { ContextUnavailableError } from '../../src/accounts/capacity';
 import { AccountContexts } from '../../src/accounts/contexts';
 import { AccountRemovalService } from '../../src/accounts/removal';
 import { AccountRegistry } from '../../src/accounts/registry';
+import { LibraryInstance } from '../../src/sync/library-instance';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { cp, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -360,6 +363,114 @@ describe('herramientas MCP por espacio', () => {
     );
     await grant(); // consentimiento nuevo, nueva efímera/salt y base; no reenvía la cola antigua.
     expect(text(await call('hebra_read_note', { space: SPACE, id: NOTE }))).toContain('Equipo');
+  });
+
+  describe('ciclo de vida por uso (D22)', () => {
+    const IDLE_MS = 120_000;
+    /** Solo los temporizadores de inactividad: nada espera tiempo de verdad. */
+    function fakeClock() {
+      let timers: Array<() => void> = [];
+      return {
+        now: () => 0,
+        setTimer(run: () => void) {
+          timers.push(run);
+          return () => { timers = timers.filter((timer) => timer !== run); };
+        },
+        fire() { const due = timers; timers = []; for (const run of due) run(); }
+      };
+    }
+    function managed() {
+      const clock = fakeClock();
+      const lifecycle = served.ctx.spaces!.lifecycle!;
+      lifecycle.configure({ idleMs: IDLE_MS, clock, admit: async () => ({ done() {} }), onClosed() {} });
+      return { clock, lifecycle };
+    }
+    const writerLocks = async () => {
+      const spaces = await readdir(join(directory, 'spaces')).catch(() => [] as string[]);
+      return spaces.filter((entry) => existsSync(join(directory, 'spaces', entry, 'writer.lock'))).length;
+    };
+    const closedSoon = () => vi.waitFor(async () => expect(await writerLocks()).toBe(0));
+
+    it('se cierra por su propio uso, sin esperar a la cuenta, y vuelve a abrir', async () => {
+      await grant();
+      const { clock, lifecycle } = managed();
+      const lease = await lifecycle.acquire(SPACE);
+      expect(await writerLocks()).toBe(1);
+      clock.fire();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(await writerLocks()).toBe(1);
+      lease.release();
+      expect(await writerLocks()).toBe(1);
+      clock.fire();
+      await closedSoon();
+      expect(served.instance.role).toBe('this');
+      const again = await lifecycle.acquire(SPACE);
+      expect(text(await again.value.port.noteRead(NOTE))).toContain('Equipo');
+      again.release();
+      clock.fire();
+      await closedSoon();
+    });
+
+    it('denegado: cierra el puerto en cuanto termina lo que tenía en curso', async () => {
+      await grant();
+      const { lifecycle } = managed();
+      const lease = await lifecycle.acquire(SPACE);
+      fake.agentSpaces.set(paired.connection.credentialId, []);
+      await served.ctx.spaces!.list();
+      await expect(lifecycle.acquire(SPACE)).rejects.toMatchObject({ code: 'space_access_denied' });
+      expect(await writerLocks()).toBe(1);
+      lease.release();
+      await closedSoon();
+      await expect(lease.value.port.noteRead(NOTE)).rejects.toBeDefined();
+      expect(text(await call('hebra_read_note', { space: SPACE, id: NOTE }))).toContain('space_access_denied');
+    });
+
+    it('denegado sin nada en curso se cierra ya, y el mismo grant no revive', async () => {
+      const original = await grant();
+      const { lifecycle } = managed();
+      (await lifecycle.acquire(SPACE)).release();
+      expect(await writerLocks()).toBe(1);
+      fake.agentSpaces.set(paired.connection.credentialId, []);
+      await served.ctx.spaces!.list();
+      await closedSoon();
+      fake.agentSpaces.set(paired.connection.credentialId, [original]);
+      await expect(lifecycle.acquire(SPACE)).rejects.toMatchObject({ code: 'space_access_denied' });
+      expect(await writerLocks()).toBe(0);
+    });
+
+    it('beginShutdown llega a los espacios abiertos', async () => {
+      await grant();
+      const { lifecycle } = managed();
+      const lease = await lifecycle.acquire(SPACE);
+      const spy = vi.spyOn(LibraryInstance.prototype, 'beginShutdown');
+      try {
+        lifecycle.beginShutdown();
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally { spy.mockRestore(); }
+      lease.release();
+    });
+
+    it('prepare no consulta el catálogo si ya está abierto, y un espacio ajeno da null', async () => {
+      await grant();
+      const { lifecycle } = managed();
+      const held = await lifecycle.acquire(SPACE);
+      const before = fake.requested.filter((url) => url.endsWith('/spaces/agent-access')).length;
+      const prepared = await lifecycle.prepare(SPACE);
+      expect(prepared).not.toBeNull();
+      expect(fake.requested.filter((url) => url.endsWith('/spaces/agent-access')).length).toBe(before);
+      prepared!.release();
+      held.release();
+      expect(await lifecycle.prepare('ffffffff-ffff-4fff-8fff-ffffffffffff')).toBeNull();
+    });
+
+    it('sin memoria, prepare propaga el motivo y no deja el espacio a medias', async () => {
+      await grant();
+      const lifecycle = served.ctx.spaces!.lifecycle!;
+      lifecycle.configure({ idleMs: IDLE_MS, clock: fakeClock(), onClosed() {},
+        admit: async () => { throw new ContextUnavailableError('capacity_wait_timeout', 20); } });
+      await expect(lifecycle.prepare(SPACE)).rejects.toMatchObject({ reason: 'capacity_wait_timeout' });
+      expect(await writerLocks()).toBe(0);
+    });
   });
 
   it('reordenar JSON no cambia la clave estable ni crea otra caché de espacio', async () => {
