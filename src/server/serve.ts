@@ -16,6 +16,7 @@ import { accountAccessGuard } from '../accounts/registry';
 import { StoreError } from '../store/errors';
 import { AgentDevice } from '../spaces/device';
 import { AgentSpaceManager } from '../spaces/manager';
+import type { AccountUploadLedger } from '../accounts/pending-sweep';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
 import { PrivacyConfigSource } from '../privacy/config-source';
@@ -57,6 +58,12 @@ export interface OpenServeOptions {
   authorize?: () => Promise<void>;
   /** Sin red: vuelve a comprobar la cuenta dentro de cada turno y mutación. */
   assertActive?: () => void;
+  /**
+   * `serve-http` multiusuario (D22, §12.10): el contexto puede cerrarse con la persona aún
+   * conectada, así que `close()` intenta subir lo pendiente y apunta en la lista durable lo que
+   * no suba, de la biblioteca personal y de cada espacio abierto.
+   */
+  uploadLedger?: AccountUploadLedger;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -166,7 +173,11 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
   // red y con un relé sin la API de H-L7, como antes de los espacios.
   const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive) : null;
-  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance, assertActive) : undefined;
+  const { uploadLedger } = options;
+  // El gestor abre cada espacio con estas opciones tal cual, así que la lista llega también a
+  // sus bibliotecas sin que el gestor sepa de ella.
+  const spaceInstance = uploadLedger ? { ...options.instance, uploadLedger } : options.instance;
+  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive) : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
@@ -201,8 +212,24 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       await privacyWithMemory(port, await privacySource.current());
     },
     ...options.instance,
+    ...(uploadLedger ? { uploadLedger } : {}),
     assertActive
   });
+  // §8 y §12.10: la ronda de abrir ya está en marcha, y las lecturas la esperan como mucho 10 s
+  // desde aquí, no desde cada llamada. Espera la lectura y no la apertura: `serve` no retrasa el
+  // saludo de MCP, y una escritura no tiene por qué pagarla.
+  const firstRound = instance.whenReady();
+  // Primero la ronda final de todo lo abierto: `spaces.close()` corta las guardias del relé, y
+  // una ronda de un espacio ya no podría salir después.
+  let closing: Promise<void> | null = null;
+  const close = (): Promise<void> => {
+    closing ??= (async () => {
+      await uploadLedger?.settleAll();
+      await spaces?.close();
+      await instance.close();
+    })();
+    return closing;
+  };
   if (options.writerOnly) {
     if (instance.role !== 'this') {
       await instance.close();
@@ -217,9 +244,10 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       privacyConfigSource: privacySource,
       status: new LibraryInstanceStatusSource(instance, linked !== null),
       authorize,
+      firstRound: () => firstRound,
       write: localWriteContext(instance, authorize)
     };
-    return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
+    return { ctx, instance, linked: linked !== null, close };
   }
   // `privacyConfig` sin resolver a `PrivacyFilter` aquí: `register-tools.ts` lo hace en
   // CADA llamada, con el almacén tal como esté en ese momento (un filtro construido una
@@ -236,7 +264,8 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     privacyConfig,
     privacyConfigSource: privacySource,
     status: new RoutedStatusSource(instance, linked !== null, options.forward),
+    firstRound: () => firstRound,
     write
   };
-  return { ctx, instance, linked: linked !== null, close: async () => { await spaces?.close(); await instance.close(); } };
+  return { ctx, instance, linked: linked !== null, close };
 }

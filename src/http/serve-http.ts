@@ -11,12 +11,16 @@
 import { createServer, type Server } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
+import { join } from 'node:path';
 import { logEvent } from '../log/logger';
 import { acquireServerLock, type ServerLock } from '../lock';
 import { openFileSecretStore, readPairedSecrets, type SecretStore } from '../secrets';
 import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir, openRemotePairing,
-  accountControlDir, openAccountControlServer, type AccountControlServer, type RemotePairingRuntime } from '../accounts';
+  accountControlDir, expireRemotePairings, openAccountControlServer, PendingSweep, PendingUploadList,
+  REMOTE_PAIRING_JOURNAL_DIR, type AccountControlServer, type RemotePairingRuntime,
+  type WithAccountContext } from '../accounts';
 import { readCapacityConfig } from '../accounts/capacity';
+import { RemotePairingJournalStore } from '../pair/remote/journal';
 import { revokeRemoteCredential } from '../pair/remote/revoke';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
@@ -81,6 +85,8 @@ export interface ServeHttpHandle {
   serve: ServeContext | null;
   server: Server;
   contexts: AccountContexts | null;
+  /** El barrido de lo pendiente (D22, §12.10); solo en multiusuario y con listener. */
+  sweep: PendingSweep | null;
   /** Retirada administrativa por id opaco, bajo el lock global de este proceso. */
   removeAccount(id: string): Promise<void>;
   /**
@@ -178,6 +184,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   let remotePairing: RemotePairingRuntime | null = null;
   let serverLock: ServerLock | null = null;
   let controlServer: AccountControlServer | null = null;
+  let sweep: PendingSweep | null = null;
   let acceptingRemovals = true;
   const removalJobs = new Set<Promise<void>>();
   const removeById = (id: string): Promise<void> => {
@@ -220,13 +227,15 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     registry = options.multiuser && 'accounts' in auth && auth.accounts instanceof AccountRegistry ? auth.accounts : null;
     if (registry) {
       const activeRegistry = registry;
+      const pendingUploads = await PendingUploadList.open(accountControlDir(options.dataDir));
       contexts = new AccountContexts(activeRegistry, async (account) => {
         const dataDir = accountDataDir(options.dataDir, account);
         const secrets = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
         const opened = await openServeContext({ dataDir, secrets,
           fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
           writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
-          assertActive: () => { activeRegistry.assertActive(account); } });
+          assertActive: () => { activeRegistry.assertActive(account); },
+          uploadLedger: pendingUploads.ledger(account) });
         opened.instance.deferSignalRelease();
         const accountPairing = account.storage === 'legacy-root' ? pairing :
           new PairingRevocation(() => opened.instance.syncRunner?.revoked ?? false);
@@ -256,6 +265,30 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       await removal.resumePending();
       if (!options.maintenance) {
         controlServer = await openAccountControlServer(options.dataDir, removeById);
+        const openContexts = contexts;
+        const activeRemoval = removal;
+        const activePairing = remotePairing;
+        const journals = new RemotePairingJournalStore(join(options.dataDir, REMOTE_PAIRING_JOURNAL_DIR));
+        // Punto de enganche del lote de ciclo de vida: abrir, usar y soltar. Hasta que los contextos
+        // se cierren solos, se cierra aquí mismo; el barrido no entra si ya estaba abierto.
+        const withAccountContext: WithAccountContext = async (ref, fn) => {
+          const account = activeRegistry.findById(ref.id);
+          if (!account || account.generation !== ref.generation) throw new Error('account_inactive');
+          const lease = await openContexts.acquire(account);
+          try {
+            return await fn(lease.ctx);
+          } finally {
+            lease.release();
+            await openContexts.drainAndClose(ref);
+          }
+        };
+        sweep = new PendingSweep({ list: pendingUploads, withAccountContext,
+          accountActive: (ref) => {
+            const account = activeRegistry.findById(ref.id);
+            return account?.state === 'active' && account.generation === ref.generation;
+          },
+          resumeRemovals: () => activeRemoval.resumePending(),
+          expireJournals: () => expireRemotePairings(journals, activePairing.service, Date.now()) });
       }
     } else {
       if (!serve) throw new ServeHttpError('auth_not_configured', 'El modo multiusuario requiere autenticación por cuenta.');
@@ -278,6 +311,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   }
   const port = server.listening ? (server.address() as AddressInfo).port : 0;
   if (server.listening) logEvent({ event: 'serve_http.listening', port });
+  sweep?.start();
 
   let closing: Promise<void> | null = null;
   return {
@@ -285,12 +319,14 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     serve,
     server,
     contexts,
+    sweep,
     removeAccount(id) {
       return removeById(id);
     },
     close() {
       closing ??= (async () => {
         acceptingRemovals = false;
+        const sweepStopped = sweep?.stop();
         // Primero, que ninguna escritura en curso siga esperando su ronda: la respuesta
         // sale ya (con `sync: "pending"` donde lo haya).
         if (contexts) contexts.beginShutdown();
@@ -305,6 +341,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         if (wasListening) server.closeAllConnections();
         await closed;
         logEvent({ event: 'serve_http.closed', drained });
+        await sweepStopped;
         await controlServer?.close();
         await drainRemovalJobs();
         if (contexts) await contexts.close();

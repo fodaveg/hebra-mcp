@@ -74,6 +74,9 @@ export interface ServerContext {
   };
   status: StatusSource;
   write?: WriteContext;
+  /** Biblioteca personal (§8, §12.10): resuelve al terminar la primera ronda, o a los 10 s de
+   *  abrir, y nunca rechaza. Los espacios no lo llevan: su apertura ya espera esa ronda. */
+  firstRound?: () => Promise<void>;
 }
 
 /** Todo lo que una herramienta necesita PARA ESTA llamada: el almacén, un filtro de

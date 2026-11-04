@@ -431,6 +431,9 @@ async function runTool(
   const unresolved = (): Promise<ReturnType<typeof toOkResult>> =>
     finish({ ok: false, error: new ToolError('privacy_config_unresolved') });
 
+  // §8: una lectura espera a la ronda de abrir, como mucho 10 s. Pasado el plazo responde lo
+  // local, y `hebra_status` lo dice con `lastSyncAt: null`. Una escritura no la espera.
+  if (policy.kind === 'repeat') await ctx.firstRound?.();
   gateStats.calls += 1;
   for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt += 1) {
     let toolCtx: ToolContext;
