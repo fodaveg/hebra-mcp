@@ -9,8 +9,8 @@ import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { ContextUnavailableError, type AdmissionTicket } from '../accounts/capacity';
-import { realClock, ResourceLifecycle, type Clock } from '../accounts/lifecycle';
+import { ContextUnavailableError, DEFAULT_OPEN_WAIT_MS, type AdmissionTicket } from '../accounts/capacity';
+import { realClock, ResourceLifecycle, WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../accounts/lifecycle';
 import { logEvent } from '../log/logger';
 import type { DirectoryView, ServerContext, SpaceLease, SpaceLifecycleControl, SpaceRouter } from '../server/context';
 import { ToolError } from '../server/errors';
@@ -107,13 +107,27 @@ export class AgentSpaceManager implements SpaceRouter {
         return null;
       }
     },
+    // Mismo criterio que `AccountContexts.reclaim`: primero los ociosos sin subidas pendientes; solo
+    // si no queda ninguno ni hay cierres en curso, también los ociosos CON pendientes. Su cierre
+    // anota el espacio en la lista durable ANTES de intentar la ronda final (`settleUploads`), y el
+    // barrido lo reabre cuando el relé conteste: con el relé caído y la memoria alta no se retiene
+    // memoria por espacios que nadie usa.
     reclaimIdle: async () => {
+      let closed = 0;
+      const withPending: Entry[] = [];
       await Promise.allSettled([...this.entries.values()].map(async (entry) => {
         if (!entry.life.idle) return;
         const status = await entry.instance?.status().catch(() => null);
-        if (status && status.pendingUpload > 0 && !status.revoked) return;
+        if (status && status.pendingUpload > 0 && !status.revoked) {
+          withPending.push(entry);
+          return;
+        }
+        closed += 1;
         void entry.life.closeIfIdle().catch(() => undefined);
       }));
+      const closing = [...this.entries.values()].some((entry) => entry.life.state === 'cerrando');
+      if (closed > 0 || closing) return;
+      for (const entry of withPending) void entry.life.closeIfIdle().catch(() => undefined);
     },
     beginShutdown: () => {
       this.shuttingDown = true;
@@ -294,7 +308,10 @@ export class AgentSpaceManager implements SpaceRouter {
           if (this.entries.get(key) === entry) this.entries.delete(key);
           this.onClosed?.();
         },
-        resource: 'space'
+        resource: 'space',
+        waitMs: DEFAULT_OPEN_WAIT_MS + WAIT_BACKSTOP_MARGIN_MS,
+        waitTimeoutError: () =>
+          new ContextUnavailableError('open_failed', Math.ceil(DEFAULT_OPEN_WAIT_MS / 1000))
       })
     };
     this.entries.set(key, entry);
@@ -444,6 +461,10 @@ export class AgentSpaceManager implements SpaceRouter {
       throw error;
     }
     entry.instance = instance;
+    // El proceso tiene su propio apagado con señal: sin esto, SIGTERM suelta el `writer.lock` de
+    // cada espacio abierto en el acto, con su ronda final todavía en vuelo (`checkWriter` vería
+    // `verify() === false` y pasaría a lector, que no sube nada).
+    instance.deferSignalRelease();
     if (!this.accepting) throw new ToolError('space_access_denied');
     if (this.shuttingDown) instance.beginShutdown();
     await instance.whenReady();
@@ -469,15 +490,26 @@ export class AgentSpaceManager implements SpaceRouter {
     };
   }
 
+  /**
+   * Cierra todos los espacios. Si alguno no cierra, rechaza con su error y NO se marca `closed`:
+   * la cuenta se queda en `cerrando`, no cierra la biblioteca personal ni se da por cerrada, y
+   * el reintento con espera creciente de `ResourceLifecycle` vuelve a llamar aquí. Reintentar es
+   * seguro: `retire` de lo ya cerrado resuelve sin cerrar otra vez, y de lo que falló reutiliza
+   * su propio cierre (`closeInstance` es idempotente). Si cerrara de todos modos, la siguiente
+   * petición crearía otro gestor que abriría de lector la SQLite que el cierre viejo sigue
+   * reintentando.
+   */
   async close(): Promise<void> {
     this.accepting = false;
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       [...this.entries.values()].map(async (entry) => {
         entry.pin?.release();
         entry.pin = undefined;
         await entry.life.retire();
       })
     );
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
     this.closed = true;
   }
 }

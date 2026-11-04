@@ -12,7 +12,7 @@ import {
   type HighWater,
   type MemoryReader
 } from './capacity';
-import { realClock, ResourceLifecycle, type Clock } from './lifecycle';
+import { realClock, ResourceLifecycle, WAIT_BACKSTOP_MARGIN_MS, type Clock } from './lifecycle';
 import { RemoteStatusSource } from '../status/pairing-revocation';
 import type { AccountRef, AuthorizedAccount } from './types';
 import type { AccountRegistry } from './registry';
@@ -294,7 +294,9 @@ export class AccountContexts {
           if (this.entries.get(account.id) === entry) this.entries.delete(account.id);
           this.gate.recheck();
         },
-        resource: 'account'
+        resource: 'account',
+        waitMs: this.openWaitMs + WAIT_BACKSTOP_MARGIN_MS,
+        waitTimeoutError: () => new ContextUnavailableError('open_failed', this.gate.retryAfterSeconds)
       })
     };
     this.entries.set(account.id, entry);

@@ -28,7 +28,7 @@
  */
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { WriterLock } from '../lock';
+import { acquireServerLock } from '../lock';
 import { logEvent } from '../log/logger';
 import { CONTROL_ROLLBACK_MARK, CONTROL_SECRET_KEYS, FileSecretStore, fileSecretStorePath, openFileSecretStore, syncDirectory,
   type SecretFileState, type SecretStore, type StoredSecrets } from '../secrets';
@@ -193,12 +193,17 @@ export async function restoreControlSecrets(source: FileSecretStore, control: Fi
   return { restored };
 }
 
-/** `hebra-mcp control-secrets-rollback`: con el servicio parado, bajo su mismo bloqueo. */
+/**
+ * `hebra-mcp control-secrets-rollback`: con el servicio parado, bajo su mismo bloqueo. El que
+ * toma `serve-http` es `control/server.lock` (`acquireServerLock`, que lo ve cualquier proceso
+ * que abra el fichero, también el de otro contenedor sobre el volumen); un `WriterLock` sobre
+ * `control/` no lo vería nunca.
+ */
 export async function rollbackControlSecrets(dataDir: string): Promise<ControlSecretsRollback> {
   const directory = accountControlDir(dataDir);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  const lock = new WriterLock({ dataDir: directory });
-  if (!lock.tryAcquire()) {
+  const lock = acquireServerLock(dataDir, directory);
+  if (!lock) {
     throw new ControlSecretsError('control_secrets_busy', 'Otro proceso de hebra-mcp tiene el bloqueo de control.');
   }
   try {

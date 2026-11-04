@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CapacityGate, ContextUnavailableError, readCapacityConfig, readMemoryUsage } from '../../src/accounts/capacity';
 import { AccountContexts, type AccountContextsOptions } from '../../src/accounts/contexts';
 import type { WriterLockOwner } from '../../src/lock';
-import type { Clock } from '../../src/accounts/lifecycle';
+import { WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../../src/accounts/lifecycle';
 import type { AccountRegistry } from '../../src/accounts/registry';
 import type { AuthorizedAccount } from '../../src/accounts/types';
 import { createHttpApp } from '../../src/http/app';
@@ -306,6 +306,56 @@ describe('ciclo de vida sin recuento (D22)', () => {
     libraries.beforeClose = null;
     await contexts.close();
     expect(libraries.openCount).toBe(0);
+  });
+
+  it('un cierre colgado no cuelga la petición: 503 open_failed al cabo del plazo, y al terminar vuelve a entrar', async () => {
+    const { clock, libraries, contexts } = harness();
+    (await contexts.acquire(account('a'))).release();
+    const closing = deferred();
+    libraries.beforeClose = () => closing.promise;
+    await clock.advance(IDLE_MS);
+    const waiting = contexts.acquire(account('a'));
+    const outcome = waiting.then(() => null, (error: unknown) => error);
+    await clock.advance(WAIT_MS);
+    // El plazo es el de la espera más el margen del tope de seguridad: antes no responde.
+    expect(libraries.opened).toEqual(['a']);
+    await clock.advance(WAIT_BACKSTOP_MARGIN_MS);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(ContextUnavailableError);
+    expect(error).toMatchObject({ reason: 'open_failed', retryAfterSeconds: WAIT_MS / 1000 });
+
+    // El cierre sigue en marcha; cuando termina, esa persona entra sin reiniciar nada.
+    closing.resolve();
+    await settled();
+    libraries.beforeClose = null;
+    const back = await contexts.acquire(account('a'));
+    expect(libraries.opened).toEqual(['a', 'a']);
+    expect(libraries.overlap).toBe(false);
+    back.release();
+    await contexts.close();
+  });
+
+  it('una apertura colgada tampoco cuelga a quien espera ni a quien la lanzó, y la siguiente petición abre', async () => {
+    const { clock, libraries, contexts } = harness();
+    const opening = deferred();
+    libraries.beforeOpen = () => opening.promise;
+    const first = contexts.acquire(account('a')).then(() => null, (error: unknown) => error);
+    await settled();
+    const joined = contexts.acquire(account('a')).then(() => null, (error: unknown) => error);
+    await clock.advance(WAIT_MS + WAIT_BACKSTOP_MARGIN_MS);
+    for (const error of [await first, await joined]) {
+      expect(error).toBeInstanceOf(ContextUnavailableError);
+      expect(error).toMatchObject({ reason: 'open_failed' });
+    }
+
+    opening.resolve();
+    await settled();
+    libraries.beforeOpen = null;
+    const back = await contexts.acquire(account('a'));
+    expect(libraries.openCount).toBe(1);
+    expect(libraries.overlap).toBe(false);
+    back.release();
+    await contexts.close();
   });
 
   it('peticiones concurrentes comparten la apertura, y su fallo no impide reintentar', async () => {

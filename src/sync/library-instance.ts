@@ -335,8 +335,10 @@ export class LibraryInstance implements NoteWriteTarget {
    * transacción abierta más allá de `SQLITE_BUSY_TIMEOUT_MS`), suelta el bloqueo antes de
    * relanzar: un proceso que no escribe no puede quedárselo, porque los lectores verían un
    * escritor vivo que no escucha en el socket y responderían `busy_other_instance`.
-   * Si falla después de abrir (ya es el escritor, con la base en lectura-escritura), el
-   * bloqueo es suyo de verdad y se queda.
+   * Si falla después de abrir (el runner no se crea, por ejemplo), el montaje se deshace
+   * igual: una apertura que falla no puede dejar el bloqueo cogido por una instancia que
+   * `open` descarta (todas las peticiones de esa persona esperarían a un escritor que nadie
+   * cierra hasta reiniciar). Ver `abandonWriter`. El error que sale es siempre el original.
    */
   private async becomeWriterOrRelease(previous: NodeLibraryPort | null): Promise<void> {
     try {
@@ -344,8 +346,42 @@ export class LibraryInstance implements NoteWriteTarget {
     } catch (error) {
       // `current` solo pasa a la base en lectura-escritura cuando ya se abrió; antes es la
       // de solo lectura (relevo) o ninguna (primer montaje).
-      if (this.current?.writable !== true) this.lock.release();
+      if (this.current?.writable === true) await this.abandonWriter(previous);
+      else this.lock.release();
       throw error;
+    }
+  }
+
+  /**
+   * Deshace un montaje de escritor a medias: socket, runner y conexión de lectura-escritura.
+   * El bloqueo se suelta solo si la conexión se cerró de verdad (soltarlo con la SQLite aún
+   * abierta dejaría entrar a otro escritor); si no se pudo cerrar, se queda y lo suelta el
+   * cierre de la instancia. En un relevo se vuelve a abrir de lectora, que es lo que esta
+   * instancia era. Nunca rechaza: el error que importa es el de la apertura.
+   */
+  private async abandonWriter(previous: NodeLibraryPort | null): Promise<void> {
+    const failed = this.current;
+    await this.closeWriterSocket().catch(() => undefined);
+    const runner = this.runner;
+    this.runner = null;
+    if (runner) {
+      await runner.stop().catch(() => undefined);
+      this.options.uploadLedger?.closed(this.ledgerSpace);
+    }
+    try {
+      failed.close();
+    } catch {
+      logEvent({ event: 'writer.takeover', result: 'failed', error: 'close' });
+      return;
+    }
+    this.lock.release();
+    if (!previous) return;
+    try {
+      previous.close();
+      this.current = await this.openPort('readOnly');
+    } catch {
+      // Sin lectora, `current` queda cerrado: `role` dice `other_instance` y el siguiente
+      // `checkWriter` vuelve a intentar el relevo.
     }
   }
 

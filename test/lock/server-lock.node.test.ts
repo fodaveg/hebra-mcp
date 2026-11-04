@@ -21,7 +21,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { AccountRegistry } from '../../src/accounts';
+import { AccountRegistry, rollbackControlSecrets } from '../../src/accounts';
 import { httpConfigFor } from '../../src/http/config';
 import { startServeHttp, type ServeHttpHandle } from '../../src/http/serve-http';
 import { acquireServerLock, classifyWriterLock, SERVER_LOCK_FILE, WRITER_LOCK_FILE, WriterLock,
@@ -158,6 +158,18 @@ describe('control/server.lock', () => {
     const handle = await startServeHttp(serverOptions(paths.dataDir, auth));
     handles.push(handle);
     expect(existsSync(join(paths.controlDir, SERVER_LOCK_FILE))).toBe(true);
+  }, SPAWN_TIMEOUT_MS);
+
+  it('control-secrets-rollback se niega con un serve-http vivo de OTRO proceso y entra cuando muere', async () => {
+    const paths = layout();
+    const { child } = await launch(paths);
+    await expect(rollbackControlSecrets(paths.dataDir)).rejects.toMatchObject({ code: 'control_secrets_busy' });
+
+    await killAndWait(child);
+
+    await expect(rollbackControlSecrets(paths.dataDir)).resolves.toEqual({ restored: [] });
+    // No deja un registro de arranque ni el server.lock tomado: un servidor puede arrancar ya.
+    boot(paths);
   }, SPAWN_TIMEOUT_MS);
 
   it('el writer.lock del servidor muerto queda obsoleto aunque su PID siga vivo en otro proceso', async () => {
