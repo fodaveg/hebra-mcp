@@ -223,11 +223,31 @@ export class TokenStore {
   /** Cuándo creó familias cada persona en la última hora, de la más antigua a la más reciente. */
   private readonly familyStarts = new Map<string, number[]>();
 
+  /** Índices de hash a familia, para no recorrer todas en cada petición (D22). Solo en memoria: el
+   *  fichero no cambia. Se tiran en cuanto algo cambia las familias o sus access y se rehacen al
+   *  primer uso, que es O(familias) como ya lo era cada mutación (`structuredClone` y escritura). */
+  private index: { byId: Map<string, Family>; byAccess: Map<string, Family> } | null = null;
+  private current: Family[];
+
   private constructor(
     private readonly dataDir: string,
-    private families: Family[],
+    families: Family[],
     private readonly now: () => number
-  ) {}
+  ) { this.current = families; }
+
+  private get families(): Family[] { return this.current; }
+  private set families(value: Family[]) { this.current = value; this.index = null; }
+
+  private lookups(): { byId: Map<string, Family>; byAccess: Map<string, Family> } {
+    if (this.index) return this.index;
+    const byId = new Map<string, Family>();
+    const byAccess = new Map<string, Family>();
+    for (const family of this.current) {
+      byId.set(family.id, family);
+      for (const entry of family.access) byAccess.set(entry.hash, family);
+    }
+    return (this.index = { byId, byAccess });
+  }
 
   static async open(dataDir: string, now: () => number = Date.now): Promise<TokenStore> {
     let families: Family[] = [];
@@ -346,11 +366,13 @@ export class TokenStore {
     for (const family of this.families) {
       family.access = family.access.filter((entry) => entry.expiresAt > now);
     }
+    this.index = null;
   }
 
   private newAccess(family: Family, now: number): string {
     const token = `${ACCESS_PREFIX}${randomBytes(32).toString('base64url')}`;
     family.access.push({ hash: sha256(token), expiresAt: now + ACCESS_TOKEN_TTL_MS });
+    this.index = null;
     while (family.access.length > MAX_ACCESS_PER_FAMILY) family.access.shift();
     return token;
   }
@@ -417,6 +439,7 @@ export class TokenStore {
       const refreshToken = this.newRefresh(family);
       await input.authorize?.();
       this.families.push(family);
+      this.index = null;
       // Conservar bearers de familias podadas hasta que la eliminación sea durable;
       // el observador los revoca y retira después de persistir los tokens.
       await storeBearer(family.id, [...priorIds, family.id]);
@@ -437,13 +460,13 @@ export class TokenStore {
     // Sin familia no hay nada que guardar: un refresh inventado no gasta una escritura del
     // fichero, que con muchas familias retrasaría las rotaciones de todas las demás personas.
     const presented = REFRESH_PATTERN.exec(refreshToken);
-    if (!presented || !this.families.some((candidate) => candidate.id === presented[1])) {
+    if (!presented || !this.lookups().byId.has(presented[1]!)) {
       return Promise.resolve({ ok: false, reason: 'invalid' });
     }
     return this.mutate(async (): Promise<RefreshOutcome> => {
       const now = this.now();
       const match = REFRESH_PATTERN.exec(refreshToken);
-      const family = match ? this.families.find((candidate) => candidate.id === match[1]) : undefined;
+      const family = match ? this.lookups().byId.get(match[1]!) : undefined;
       if (!family) return { ok: false, reason: 'invalid' };
       if (!this.alive(family, revokedBefore, now)) {
         this.prune(revokedBefore, now);
@@ -488,7 +511,7 @@ export class TokenStore {
 
   /** Refresh de Sumego (cifrado) de una familia y su última renovación; `null` sin login de Sumego. */
   sumegoRefreshOf(familyId: string): SumegoRefreshState | null {
-    const family = this.families.find((candidate) => candidate.id === familyId);
+    const family = this.lookups().byId.get(familyId);
     if (!family || family.sumegoRefresh === null || family.sumegoRenewedAt === null) return null;
     return { sealedRefresh: family.sumegoRefresh, renewedAt: family.sumegoRenewedAt };
   }
@@ -503,30 +526,26 @@ export class TokenStore {
     if (!ACCESS_PATTERN.test(accessToken)) return null;
     const hash = sha256(accessToken);
     const now = this.now();
-    for (const family of this.families) {
-      if (!this.alive(family, revokedBefore, now)) continue;
-      for (const entry of family.access) {
-        if (entry.expiresAt > now && entry.hash === hash) {
-          return {
-            clientId: family.clientId,
-            scope: family.scope,
-            resource: family.resource,
-            expiresAt: Math.floor(entry.expiresAt / 1000),
-            familyId: family.id,
-            grant: family.grant,
-            identity: family.sub === null ? null : { sub: family.sub, sid: family.sid }
-          };
-        }
-      }
-    }
-    return null;
+    const family = this.lookups().byAccess.get(hash);
+    if (!family || !this.alive(family, revokedBefore, now)) return null;
+    const entry = family.access.find((candidate) => candidate.hash === hash);
+    if (!entry || entry.expiresAt <= now) return null;
+    return {
+      clientId: family.clientId,
+      scope: family.scope,
+      resource: family.resource,
+      expiresAt: Math.floor(entry.expiresAt / 1000),
+      familyId: family.id,
+      grant: family.grant,
+      identity: family.sub === null ? null : { sub: family.sub, sid: family.sid }
+    };
   }
 
   /** Vínculo de la familia del refresh vigente, sin revelar el bearer upstream. */
   lookupRefresh(token: string, clientId: string, revokedBefore: number):
     { familyId: string; grant: ActiveGrant; identity: FamilyIdentity | null } | null {
     const match = REFRESH_PATTERN.exec(token);
-    const family = match ? this.families.find((candidate) => candidate.id === match[1]) : undefined;
+    const family = match ? this.lookups().byId.get(match[1]!) : undefined;
     if (!family || family.clientId !== clientId || !this.alive(family, revokedBefore, this.now()) ||
       !sameHash(sha256(token), family.refreshHash)) return null;
     return { familyId: family.id, grant: family.grant,
@@ -571,11 +590,12 @@ export class TokenStore {
     const hash = sha256(token);
     const refresh = REFRESH_PATTERN.exec(token);
     if (refresh) {
-      const family = this.families.find((candidate) => candidate.id === refresh[1]);
+      const family = this.lookups().byId.get(refresh[1]!);
       return family && family.clientId === clientId && sameHash(hash, family.refreshHash) ? family : undefined;
     }
     if (!ACCESS_PATTERN.test(token)) return undefined;
-    return this.families.find((family) => family.clientId === clientId && family.access.some((entry) => sameHash(hash, entry.hash)));
+    const family = this.lookups().byAccess.get(hash);
+    return family && family.clientId === clientId ? family : undefined;
   }
 
   /**

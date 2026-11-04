@@ -1,7 +1,7 @@
 /**
  * Cuánto cuesta `oauth-tokens.json` sin máximo de familias (D22, SPEC.md §12.10): una rotación de
  * refresh (la escritura atómica entera, con sus `fsync`), una verificación de access y abrir el
- * fichero, con 100, 1 000 y 5 000 familias. Fuera de la suite normal, porque mide milisegundos:
+ * fichero, con 100, 1 000, 5 000 y 10 000 familias. Fuera de la suite normal, porque mide milisegundos:
  * `npx vitest run --config vitest.perf.config.ts test/perf/oauth-tokens.perf.ts --maxWorkers=1`.
  *
  * Familias con la forma de una de Sumego, con su refresh cifrado de un tamaño real. Directorio
@@ -15,7 +15,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { tokensFilePath } from '../../src/oauth/files';
 import { TokenStore } from '../../src/oauth/token-store';
 
-const SIZES = [100, 1_000, 5_000];
+const SIZES = [100, 1_000, 5_000, 10_000];
 const WRITES = 50;
 const VERIFICATIONS = 500;
 const CLIENT = 'hebra-mcp-claude-ai';
