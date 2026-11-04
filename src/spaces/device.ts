@@ -9,6 +9,7 @@ import type { SecretStore, PairedSecrets } from '../secrets';
 import { readPairedSecrets } from '../secrets';
 import { ToolError } from '../server/errors';
 import {
+  DEVICE_RESPONSE_MAX_BYTES,
   publicKeySchema,
   registrationSchema,
   deviceKeyId,
@@ -18,6 +19,26 @@ import {
 } from './protocol';
 
 type Fetcher = typeof globalThis.fetch;
+
+/** El JSON de la respuesta, leído por trozos para cortar en cuanto pase del tope. Lanza si pasa. */
+async function readLimitedJson(response: Response): Promise<unknown> {
+  if (Number(response.headers.get('content-length')) > DEVICE_RESPONSE_MAX_BYTES) throw new Error();
+  const reader = response.body?.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const read = await reader?.read();
+    if (!read || read.done) break;
+    size += read.value.byteLength;
+    if (size > DEVICE_RESPONSE_MAX_BYTES) {
+      await reader?.cancel();
+      throw new Error();
+    }
+    chunks.push(read.value);
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+}
+
 interface StoredAgentKey {
   binding: string;
   privateKey: JsonWebKey;
@@ -175,7 +196,7 @@ export class AgentDevice {
         }
       );
       if (!response.ok) throw new Error();
-      const value: unknown = await response.json();
+      const value = await readLimitedJson(response);
       await this.assertPairing();
       return value;
     } catch {
