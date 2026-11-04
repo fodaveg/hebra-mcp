@@ -43,7 +43,9 @@ export class PairError extends Error {
   /** Detalle cerrado adicional (un código del relé o un estado HTTP), nunca contenido. */
   constructor(
     readonly code: PairErrorCode,
-    readonly detail?: string | number
+    readonly detail?: string | number,
+    /** Segundos de `Retry-After` de un 429 del relé, si los dio. */
+    readonly retryAfterSeconds?: number
   ) {
     super(MESSAGES[code]);
     this.name = 'PairError';

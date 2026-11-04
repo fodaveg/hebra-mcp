@@ -417,6 +417,63 @@ describe('RemotePairingService', () => {
     expect(publish).toHaveBeenCalledOnce();
   });
 
+  it('cinco códigos rechazados en una transacción la terminan, sin tocar a Lumbre más', async () => {
+    const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 401); });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode });
+    const started = await service.start(startInput());
+    for (let attempt = 1; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+        .rejects.toMatchObject({ code: 'code_rejected' });
+    }
+    await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(5);
+    expect(await journals.read(started.id)).toBeNull();
+  });
+
+  it('los rechazos de una persona suman entre transacciones; con el tope no se canjea nada más', async () => {
+    let clock = NOW;
+    const exchangeCode = vi.fn(async () => { throw new PairError('exchange_rejected', 401); });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, now: () => clock });
+    for (let round = 0; round < 2; round += 1) {
+      const started = await service.start(startInput());
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'basura'))
+          .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'code_rejected' });
+      }
+    }
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+    const third = await service.start(startInput());
+    await expect(service.receiveCredential(third.id, auth(third, third.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+    // La ventana es de una hora: pasada, la persona vuelve a poder intentarlo.
+    clock += 60 * 60_000 + 1;
+    const later = await service.start(startInput(new Date(clock + 60_000).toISOString()));
+    await expect(service.receiveCredential(later.id, auth(later, later.formToken), 'basura'))
+      .rejects.toMatchObject({ code: 'code_rejected' });
+  });
+
+  it('un 429 de /exchange no cuenta, conserva la transacción y trae el Retry-After', async () => {
+    const revoke = vi.fn(async () => undefined);
+    let limited = true;
+    const exchangeCode = vi.fn(async () => {
+      if (limited) throw new PairError('exchange_failed', 429, 17);
+      return CONNECTION;
+    });
+    const service = createService({ link: fakeLink(recoveryCode, []), exchangeCode, revoke });
+    const started = await service.start(startInput());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'bueno'))
+        .rejects.toMatchObject({ code: 'rate_limited', retryAfterSeconds: 17 });
+    }
+    expect(await journals.read(started.id)).toMatchObject({ phase: 'credential', cleanupRequired: false });
+    limited = false;
+    await service.receiveCredential(started.id, await currentAuth(service, started), 'bueno');
+    expect((await journals.read(started.id))?.phase).toBe('approval');
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
   it('un canje perdido cuyo código resulta inválido en recovery se resuelve sin revocar nada', async () => {
     const revoke = vi.fn(async () => undefined);
     const first = createService({ link: fakeLink(recoveryCode, []), exchangeCode: async () => { throw new Error('offline'); } });

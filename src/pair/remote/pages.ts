@@ -102,6 +102,29 @@ export function sendCodeRejectedPage(res: Response, page: RemotePairingNoticePag
 }
 
 /**
+ * Lumbre está atendiendo demasiadas solicitudes y no ha mirado el código: no ha pasado nada y se
+ * puede reintentar pasado el tiempo que indica. La transacción sigue viva.
+ */
+export function sendRateLimitedPage(res: Response, page: RemotePairingNoticePage | null, retryAfterSeconds: number): void {
+  const seconds = Math.max(1, Math.min(3600, Math.ceil(retryAfterSeconds)));
+  const retry = page
+    ? `<p>Pasado ese tiempo, continúa en Lumbre.</p>${lumbreLink(page.authorizationUrl)}<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(page.formToken)}<button class="secondary" type="submit">Cancelar</button></form>`
+    : '<p>Pasado ese tiempo, vuelve a conectar desde tu aplicación.</p>';
+  securityHeaders(res);
+  res.setHeader('retry-after', String(seconds));
+  res.status(429).type('html').send(document('Inténtalo en un momento',
+    `<p>Lumbre está atendiendo muchas solicitudes y no ha podido comprobar la autorización. No se ha conectado nada. Espera unos ${seconds} segundos y vuelve a intentarlo.</p>${retry}`));
+}
+
+/** La transacción terminó por demasiadas autorizaciones rechazadas seguidas. */
+export function sendTooManyCodesPage(res: Response): void {
+  securityHeaders(res, BASE_CSP.replace("form-action 'self'; ", ''));
+  res.status(429).type('html').send(document('Demasiados intentos',
+    '<p>Lumbre ha rechazado varias autorizaciones seguidas, así que esta conexión se ha cerrado. No se ha conectado nada ni se ha borrado nada.</p>' +
+    '<p>Espera un rato y vuelve a conectar desde tu aplicación.</p>'));
+}
+
+/**
  * Lumbre rechazó (401) el registro de la clave de agente. Con la credencial revocada y con el
  * agente desactivado en Hebra responde igual, así que la página dice solo lo que se sabe.
  * No se ha borrado nada. `tokensKept`: la renovación guardó los tokens nuevos de la credencial

@@ -12,6 +12,8 @@ import {
   sendContinuePage,
   sendNoticePage,
   sendPreviewPage,
+  sendRateLimitedPage,
+  sendTooManyCodesPage,
   sendRemotePairingMessage,
   sendWaitingPage,
   sendWrongLumbreAccountPage
@@ -160,6 +162,13 @@ export function createRemotePairingRouter(
         sendWrongLumbreAccountPage(res, await currentNotice(req, service));
       } else if (error instanceof RemotePairingError && error.code === 'code_rejected') {
         sendCodeRejectedPage(res, await currentNotice(req, service));
+      } else if (error instanceof RemotePairingError && error.code === 'rate_limited') {
+        sendRateLimitedPage(res, await currentNotice(req, service), error.retryAfterSeconds ?? 60);
+      } else if (error instanceof RemotePairingError && error.code === 'too_many_codes') {
+        // La transacción ya está cerrada: la solicitud OAuth no puede seguir.
+        if (oauthRequestId) await hooks.cancelOauth({ oauthRequestId }).catch(() => undefined);
+        clearCookie(res);
+        sendTooManyCodesPage(res);
       } else handleError(res, error);
     }
   });

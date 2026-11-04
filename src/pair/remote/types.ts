@@ -156,6 +156,10 @@ export class RemotePairingError extends Error {
       | 'unavailable'
       /** Lumbre no reconoce el código: sin efecto remoto y la transacción sigue viva. */
       | 'code_rejected'
+      /** Lumbre limita los canjes por IP (429): no se procesó nada y la transacción sigue viva. */
+      | 'rate_limited'
+      /** Demasiados códigos rechazados en esta transacción o por esta persona: la transacción termina. */
+      | 'too_many_codes'
       /** La sesión de Lumbre de este navegador es de otra cuenta; aún no hay aprobación. */
       | 'wrong_lumbre_account'
       /**
@@ -164,7 +168,9 @@ export class RemotePairingError extends Error {
        */
       | 'agent_rejected',
     /** Motivo cerrado para el log (nunca mensajes, tokens, sub ni email). */
-    readonly reason?: string
+    readonly reason?: string,
+    /** Segundos de espera para `rate_limited`. */
+    readonly retryAfterSeconds?: number
   ) {
     super(code);
     this.name = 'RemotePairingError';

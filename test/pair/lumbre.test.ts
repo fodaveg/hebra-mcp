@@ -114,6 +114,14 @@ describe('exchangePairingCode', () => {
     expect(failure).toBeInstanceOf(PairError);
     expect((failure as PairError).code).toBe('exchange_rejected');
   });
+
+  it('un 429 es exchange_failed con su Retry-After, no un rechazo del código', async () => {
+    const fetcher = (async () => new Response('', { status: 429, headers: { 'retry-after': '17' } })) as typeof fetch;
+    const failure = await exchangePairingCode({
+      apiOrigin: origin, code: 'ab'.repeat(32), deviceId: DEVICE_ID, verifier: 'v'.repeat(43), fetcher
+    }).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: 'exchange_failed', detail: 429, retryAfterSeconds: 17 });
+  });
 });
 
 describe('checkPairingAccount (lumbre-pairing.ts de Hebra)', () => {

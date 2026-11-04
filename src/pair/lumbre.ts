@@ -108,6 +108,11 @@ export async function exchangePairingCode(input: {
     await response.body?.cancel();
     throw new PairError('exchange_rejected', response.status);
   }
+  if (response.status === 429) {
+    const raw = response.headers.get('retry-after')?.trim();
+    await response.body?.cancel();
+    throw new PairError('exchange_failed', 429, raw && /^\d{1,5}$/.test(raw) ? Number(raw) : undefined);
+  }
   if (!response.ok) {
     await response.body?.cancel();
     throw new PairError('exchange_failed', response.status);

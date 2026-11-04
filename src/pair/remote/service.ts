@@ -51,6 +51,8 @@ interface RuntimePairing {
   granted?: GrantedPoll;
   preview?: PairingPreview;
   ownership?: VerifiedOwnership;
+  /** Códigos que Lumbre rechazó en esta transacción. */
+  rejectedCodes?: number;
 }
 
 /** Lo que enseña el aviso previo, antes de salir hacia Lumbre. */
@@ -129,6 +131,18 @@ function errorDetail(error: unknown): string {
  * caducado o credencial ya revocada, y su 400 un cuerpo que nunca llegó a la transacción. Cualquier
  * otro estado (404, 410, 5xx, red) sigue siendo ambiguo y conserva la intención para resolverla.
  */
+/** 429 de `/exchange`: el limitador de Lumbre corta antes de mirar el código, sin efecto alguno. */
+function exchangeRateLimited(error: unknown): error is PairError {
+  return error instanceof PairError && error.code === 'exchange_failed' && error.detail === 429;
+}
+
+/** Códigos que Lumbre puede rechazar antes de cortar la transacción y la ventana por persona. */
+export const MAX_REJECTED_CODES_PER_TRANSACTION = 5;
+export const MAX_REJECTED_CODES_PER_SUB = 10;
+export const REJECTED_CODES_WINDOW_MS = 60 * 60_000;
+/** Espera que se pide si Lumbre no da `Retry-After`. */
+const DEFAULT_EXCHANGE_RETRY_SECONDS = 60;
+
 function exchangeLeftNoEffect(error: unknown): boolean {
   return error instanceof PairError && error.code === 'exchange_rejected' &&
     (error.detail === 400 || error.detail === 401);
@@ -137,6 +151,8 @@ function exchangeLeftNoEffect(error: unknown): boolean {
 /** Orquesta el emparejado sin confiar nunca en identidad ni sesión recibidas del formulario. */
 export class RemotePairingService {
   private readonly runtime = new Map<string, RuntimePairing>();
+  /** Instantes de los códigos rechazados por persona. Gasta el límite de canjes por IP de Lumbre. */
+  private readonly rejectedBySub = new Map<string, number[]>();
   private readonly locks = new Map<string, Promise<void>>();
   /** Diarios que están publicando: retirar la cuenta anterior no puede limpiarse a sí mismo. */
   private readonly publishing = new Set<string>();
@@ -312,6 +328,13 @@ export class RemotePairingService {
     await this.options.journals.write(journal);
   }
 
+  private rejectedRecently(sub: string): number {
+    const since = this.now() - REJECTED_CODES_WINDOW_MS;
+    const recent = (this.rejectedBySub.get(sub) ?? []).filter((at) => at > since);
+    if (recent.length > 0) this.rejectedBySub.set(sub, recent); else this.rejectedBySub.delete(sub);
+    return recent.length;
+  }
+
   async receiveCredential(
     id: string,
     authorization: RemotePairingFormAuthorization,
@@ -324,6 +347,12 @@ export class RemotePairingService {
       await this.authorizeFormLocked(journal, runtime, authorization);
       if (journal.phase !== 'credential') throw new RemotePairingError('replayed');
       if (!code || code.length > 4_096) throw new RemotePairingError('invalid_form');
+      // Cada canje gasta el límite de Lumbre por IP, que comparten todas las personas: quien ya
+      // acumuló rechazos no vuelve a gastarlo y su transacción termina.
+      if (this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
+        await this.cleanup(journal);
+        throw new RemotePairingError('too_many_codes', 'sub_limit');
+      }
       // El intent queda durable ANTES del efecto remoto. Sin idempotencia/revocación por
       // deviceId, una respuesta perdida no se puede clasificar como «sin efecto».
       journal.phase = 'exchange-pending';
@@ -342,14 +371,26 @@ export class RemotePairingService {
           now: this.now
         });
       } catch (error) {
-        if (exchangeLeftNoEffect(error)) {
-          // Un código que Lumbre no reconoce (un enlace `#code=` ajeno, uno caducado) no deja nada
-          // que limpiar: la transacción vuelve a esperar el código bueno, con el mismo verifier.
+        if (exchangeLeftNoEffect(error) || exchangeRateLimited(error)) {
+          // Un código que Lumbre no reconoce (un enlace `#code=` ajeno, uno caducado) o un 429 no
+          // dejan nada que limpiar: la transacción vuelve a esperar el código bueno, con el mismo
+          // verifier.
           journal.phase = 'credential';
           journal.cleanupRequired = false;
           journal.pairingCode = undefined;
           journal.updatedAt = new Date(this.now()).toISOString();
           await this.options.journals.write(journal);
+          if (exchangeRateLimited(error)) {
+            throw new RemotePairingError('rate_limited', 'exchange_failed:429',
+              error.retryAfterSeconds ?? DEFAULT_EXCHANGE_RETRY_SECONDS);
+          }
+          runtime.rejectedCodes = (runtime.rejectedCodes ?? 0) + 1;
+          this.rejectedBySub.set(journal.sub, [...(this.rejectedBySub.get(journal.sub) ?? []), this.now()]);
+          if (runtime.rejectedCodes >= MAX_REJECTED_CODES_PER_TRANSACTION ||
+            this.rejectedRecently(journal.sub) >= MAX_REJECTED_CODES_PER_SUB) {
+            await this.cleanup(journal);
+            throw new RemotePairingError('too_many_codes', 'rejected_codes');
+          }
           throw new RemotePairingError('code_rejected', `exchange_failed:${errorDetail(error)}`);
         }
         this.runtime.delete(id);
