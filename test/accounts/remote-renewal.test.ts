@@ -22,6 +22,8 @@ import { RemotePairingService } from '../../src/pair/remote/service';
 import { MemorySecretStore, openFileSecretStore, readPairedSecrets, writePairedSecrets, type PairedSecrets } from '../../src/secrets';
 import { PairingRevocation } from '../../src/status/pairing-revocation';
 import type { ServerContext } from '../../src/server/context';
+import { LibraryInstance } from '../../src/sync/library-instance';
+import { NO_PRIVATE } from '../fixtures/no-private';
 
 const SUB = 'sumego|david';
 const ACCOUNT = '44'.repeat(32);
@@ -317,7 +319,12 @@ describe('renovación con estado real', () => {
     const { service } = build({ syncVaultId: OTHER_VAULT, services: { contexts, removal, legacySecrets } });
     const { started, form } = await toConfirmation(service);
     expect(registry.findById(account.id)?.state).toBe('active');
-    const result = await service.confirm(started.id, form);
+    // La SQLite de la cuenta anterior es un fichero que no se puede leer: no se sabe si pierde
+    // algo, y confirmar lo exige aparte.
+    await expect(service.confirm(started.id, form)).rejects.toMatchObject({ code: 'loss_unconfirmed' });
+    expect(registry.findById(account.id)?.state).toBe('active');
+    const result = await service.confirm(started.id, { ...form, formToken: await service.formToken(started.id) },
+      { acknowledgeLoss: true });
     expect(result).toMatchObject({ kind: 'confirmed', account: { id: started.id, generation: 1 } });
     expect(removed).toEqual(['oauth', 'revoke']);
     expect(registry.findById(account.id)?.state).toBe('removed');
@@ -331,6 +338,29 @@ describe('renovación con estado real', () => {
     expect((await readPairedSecrets(openFileSecretStore(directory)))?.recoveryCode).toBe(sharedRecovery[OTHER_VAULT]);
   });
 
+  describe('escrituras sin subir de la cuenta anterior', () => {
+    const target = () => ({ id: account.id, generation: account.generation, accountId: ACCOUNT, syncVaultId: VAULT });
+
+    it('cuenta las de la SQLite personal y las de cada espacio, y devuelve null si no se pueden leer', async () => {
+      const { adapters } = build();
+      const directory = accountDataDir(root, account);
+      // Un fichero que no es una base: no se sabe qué hay.
+      expect(await adapters.renewals.pendingWrites!(target())).toBeNull();
+      await rm(join(directory, 'library.sqlite'));
+      expect(await adapters.renewals.pendingWrites!(target())).toBe(0);
+      const personal = await LibraryInstance.open({ dataDir: directory, checkIntervalMs: null, lock: { releaseOnExit: false } });
+      await personal.createNote({ body: '# Uno', privacy: NO_PRIVATE });
+      await personal.createNote({ body: '# Dos', privacy: NO_PRIVATE });
+      await personal.close();
+      expect(await adapters.renewals.pendingWrites!(target())).toBe(2);
+      const space = await LibraryInstance.open({ dataDir: join(directory, 'spaces', 'uno'), checkIntervalMs: null,
+        lock: { releaseOnExit: false } });
+      await space.createNote({ body: '# Compartida', privacy: NO_PRIVATE });
+      await space.close();
+      expect(await adapters.renewals.pendingWrites!(target())).toBe(3);
+    });
+  });
+
   it('retirar la cuenta anterior no se limpia a sí misma aunque el inventario pida los diarios de ese sub', async () => {
     const legacySecrets = new MemorySecretStore();
     let service!: RemotePairingService;
@@ -341,7 +371,7 @@ describe('renovación con estado real', () => {
     ({ service } = build({ syncVaultId: OTHER_VAULT,
       services: { contexts: { drainAndClose: drain as never }, removal: { remove }, legacySecrets } }));
     const { started, form } = await toConfirmation(service);
-    await expect(service.confirm(started.id, form)).resolves.toMatchObject({ kind: 'confirmed' });
+    await expect(service.confirm(started.id, form, { acknowledgeLoss: true })).resolves.toMatchObject({ kind: 'confirmed' });
     expect(remove).toHaveBeenCalledOnce();
     expect(revoke).not.toHaveBeenCalled();
   });

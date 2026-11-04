@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import type { Response } from 'express';
-import type { PairingPreview } from './types';
+import type { ClientLabel, PairingPreview } from './types';
 
 const BASE_CSP = "default-src 'none'; form-action 'self'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'";
 const KEY_CUSTODY_NOTICE = '<p>Al aprobar esta conexión, autorizas al servidor del conector a guardar la clave de tu biblioteca. Quien administre ese servidor con acceso root podrá leer sus notas.</p>';
@@ -45,10 +45,25 @@ export function sendBridgePage(res: Response, formToken: string): void {
 }
 
 export interface RemotePairingNoticePage {
+  client?: ClientLabel;
   email: string | null;
   renewal: boolean;
   authorizationUrl: string;
   formToken: string;
+}
+
+/**
+ * Quién pidió esta conexión, como en el consentimiento normal (`Aplicación`), más el host al que
+ * volverá el acceso: sin esto, un enlace preparado por otro completaría el alta sin que se sepa a qué
+ * conector va a parar.
+ */
+function clientBlock(client: ClientLabel | undefined): string {
+  if (!client) return '';
+  const host = client.callbackHost
+    ? `<dt>Devuelve el acceso a</dt><dd>${escapeRemoteHtml(client.callbackHost)}</dd>` : '';
+  return `<p><strong>${escapeRemoteHtml(client.name)}</strong> quiere conectarse a tu biblioteca de Hebra. ` +
+    'Si no lo has pedido tú, cancela.</p>' +
+    `<dl><dt>Aplicación</dt><dd>${escapeRemoteHtml(client.name)}</dd>${host}</dl>`;
 }
 
 function accountLabel(email: string | null): string {
@@ -69,7 +84,7 @@ export function sendNoticePage(res: Response, page: RemotePairingNoticePage): vo
   const intro = page.renewal
     ? `<p>La conexión de ${accountLabel(page.email)} con su biblioteca se cortó. Al renovarla conservas tus notas y no hay que volver a descargar nada.</p>`
     : `<p>Vas a conectar la biblioteca de ${accountLabel(page.email)}.</p>`;
-  const body = intro +
+  const body = clientBlock(page.client) + intro +
     '<p>Antes de empezar, comprueba que tienes:</p><ul>' +
     '<li>Hebra instalada con esta misma cuenta.</li>' +
     '<li>El código de recuperación exportado en el dispositivo con el que vas a aprobar (Hebra &gt; Ajustes &gt; Sincronización).</li>' +
@@ -150,20 +165,38 @@ export function sendWaitingPage(res: Response, formToken: string, remainingMs?: 
   res.status(200).type('html').send(document('Aprueba en Hebra', body));
 }
 
-export function sendPreviewPage(res: Response, formToken: string, preview: PairingPreview): void {
+/** Lo que se pierde al retirar la copia anterior, y la casilla aparte que lo acepta. */
+function lossBlock(preview: PairingPreview, unconfirmed: boolean): string {
+  if (!preview.replacesLibrary || preview.pendingWrites === 0) return '';
+  const what = typeof preview.pendingWrites === 'number'
+    ? `En la copia anterior hay ${preview.pendingWrites} ${preview.pendingWrites === 1 ? 'escritura' : 'escrituras'} que todavía no se ${preview.pendingWrites === 1 ? 'ha subido' : 'han subido'} a tu biblioteca. Si continúas, se perderán.`
+    : 'No se ha podido comprobar si la copia anterior tiene escrituras sin subir. Si las tiene, se perderán.';
+  const reminder = unconfirmed ? '<p><strong>Marca la casilla para continuar.</strong></p>' : '';
+  return `<p><strong>${what}</strong></p>${reminder}` +
+    '<p><label><input type="checkbox" name="accept_loss" value="1" form="confirm"> ' +
+    'Entiendo que se pueden perder esas escrituras</label></p>';
+}
+
+export function sendPreviewPage(
+  res: Response,
+  formToken: string,
+  preview: PairingPreview,
+  options: { unconfirmedLoss?: boolean } = {}
+): void {
   const titles = preview.titles.length === 0
     ? '<p class="empty">La biblioteca no contiene títulos que mostrar.</p>'
     : `<ul>${preview.titles.slice(0, 3).map((title) => `<li>${escapeRemoteHtml(title || 'Sin título')}</li>`).join('')}</ul>`;
   const records = preview.more ? `más de ${preview.recordsRead}` : String(preview.recordsRead);
   const replaces = preview.replacesLibrary
-    ? '<p><strong>Esta biblioteca es distinta de la que tenías conectada.</strong> Al confirmar se retira la conexión anterior y se borra su copia de este servidor. Las notas que tengas en Hebra no se tocan.</p>'
+    ? '<p><strong>Esta biblioteca es distinta de la que tenías conectada.</strong> Al confirmar se retira la conexión anterior y se borra su copia de este servidor. Las notas que tengas en Hebra no se tocan.</p>' +
+      lossBlock(preview, options.unconfirmedLoss === true)
     : '';
-  const body = replaces + '<p>Comprueba que estas notas pertenecen a la biblioteca que quieres conectar:</p>' + titles +
+  const body = clientBlock(preview.client) + replaces + '<p>Comprueba que estas notas pertenecen a la biblioteca que quieres conectar:</p>' + titles +
     `<p class="meta">Biblioteca creada el ${escapeRemoteHtml(preview.vaultCreatedAt)}; ${records} registros leídos.</p>` + KEY_CUSTODY_NOTICE +
-    `<form method="post" action="/lumbre/pairing/confirm">${hiddenToken(formToken)}<button type="submit">Sí, conectar esta biblioteca</button></form>` +
+    `<form id="confirm" method="post" action="/lumbre/pairing/confirm">${hiddenToken(formToken)}<button type="submit">Sí, conectar esta biblioteca</button></form>` +
     `<form method="post" action="/lumbre/pairing/cancel">${hiddenToken(formToken)}<button class="secondary" type="submit">No, cancelar</button></form>`;
   securityHeaders(res);
-  res.status(200).type('html').send(document('Confirma tu biblioteca', body));
+  res.status(options.unconfirmedLoss ? 409 : 200).type('html').send(document('Confirma tu biblioteca', body));
 }
 
 /** Rompe la cadena de redirect del POST: `form-action` no bloquea el clic posterior. */

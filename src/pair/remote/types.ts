@@ -61,6 +61,12 @@ export interface VerifiedOwnership {
   grant: ActiveGrant;
 }
 
+/** El conector que inició el alta: su nombre y el host de su callback, solo para mostrarlos. */
+export interface ClientLabel {
+  name: string;
+  callbackHost: string;
+}
+
 export interface PairingPreview {
   titles: string[];
   vaultCreatedAt: string;
@@ -68,6 +74,13 @@ export interface PairingPreview {
   more: boolean;
   /** Es otra biblioteca que la conectada: la página avisa de lo que hará confirmar. */
   replacesLibrary?: boolean;
+  /**
+   * Otra biblioteca: escrituras de la cuenta anterior que aún no subieron y se perderían al
+   * confirmar (SQLite personal y de espacios). `null`: no se pudieron leer. Ausente: no aplica.
+   */
+  pendingWrites?: number | null;
+  /** Quién pidió la conexión: lo mismo que enseña el consentimiento normal. */
+  client?: ClientLabel;
 }
 
 export interface RemotePairingSession {
@@ -127,6 +140,11 @@ export interface RemotePairingRenewals {
   keepRotatedTokens(renewal: RemotePairingRenewal, connection: LumbreConnection): Promise<boolean>;
   /** Misma bóveda: conserva raíz e identidad y publica vínculo y generación nueva a la vez. */
   publish(input: PublishRenewalInput): Promise<CommittedAccount>;
+  /**
+   * Cuántas escrituras sin subir tiene la cuenta anterior (cuenta exacta de sus SQLite, no la
+   * lista de subidas pendientes), o `null` si no se pueden leer. Sin ella, se trata como `null`.
+   */
+  pendingWrites?(renewal: RemotePairingRenewal): Promise<number | null>;
   /** Otra bóveda: retira la cuenta anterior por el camino normal. */
   retire(renewal: RemotePairingRenewal): Promise<void>;
   /** Suelta la publicación a medias de este diario, si la había. Idempotente. */
@@ -160,6 +178,8 @@ export class RemotePairingError extends Error {
       | 'rate_limited'
       /** Demasiados códigos rechazados en esta transacción o por esta persona: la transacción termina. */
       | 'too_many_codes'
+      /** Otra biblioteca con escrituras sin subir (o sin poder contarlas): falta la confirmación aparte. */
+      | 'loss_unconfirmed'
       /** La sesión de Lumbre de este navegador es de otra cuenta; aún no hay aprobación. */
       | 'wrong_lumbre_account'
       /**

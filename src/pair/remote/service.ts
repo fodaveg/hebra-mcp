@@ -26,6 +26,7 @@ import { revokeRemoteCredential, RevokeError } from './revoke';
 import {
   RemotePairingError,
   type OwnershipVerifier,
+  type ClientLabel,
   type PairingPreview,
   type RemotePairingJournal,
   type RemotePairingFormAuthorization,
@@ -47,6 +48,7 @@ interface RuntimePairing {
   /** Solo en memoria: el aviso previo nombra la cuenta; no entra en el diario, URLs ni logs. */
   email: string | null;
   authorizationUrl: string;
+  client?: ClientLabel;
   link?: RemoteLinkRequest;
   granted?: GrantedPoll;
   preview?: PairingPreview;
@@ -64,6 +66,7 @@ export interface RecoverRetry {
 }
 
 export interface RemotePairingNotice {
+  client?: ClientLabel;
   email: string | null;
   renewal: boolean;
   authorizationUrl: string;
@@ -95,6 +98,8 @@ export interface StartRemotePairingInput {
   email?: string | null;
   /** La credencial de esta persona está revocada o rechazada: renovar en vez de dar de alta. */
   renew?: boolean;
+  /** El conector que inició el alta (nombre registrado y callback); solo se muestra. */
+  client?: { name: string; redirectUri: string };
 }
 
 export interface StartedRemotePairing {
@@ -102,6 +107,13 @@ export interface StartedRemotePairing {
   cookie: string;
   formToken: string;
   authorizationUrl: string;
+}
+
+/** Nombre y host del callback como los muestra el consentimiento normal (el nombre ya viene acotado). */
+function clientLabel(client: { name: string; redirectUri: string }): ClientLabel {
+  let callbackHost = '';
+  try { callbackHost = new URL(client.redirectUri).host; } catch { /* sin host que mostrar */ }
+  return { name: client.name.slice(0, 120), callbackHost };
 }
 
 function digest(value: string): string {
@@ -239,7 +251,8 @@ export class RemotePairingService {
         syncVaultId: target.syncVaultId, opaqueDeviceId: target.opaqueDeviceId } } : {})
     };
     await this.options.journals.write(journal);
-    this.runtime.set(id, { cookie, csrf, email: input.email ?? null, authorizationUrl: url });
+    this.runtime.set(id, { cookie, csrf, email: input.email ?? null, authorizationUrl: url,
+      ...(input.client ? { client: clientLabel(input.client) } : {}) });
     return { id, cookie, formToken: csrf, authorizationUrl: url };
   }
 
@@ -255,6 +268,7 @@ export class RemotePairingService {
         await this.ensureAlive(journal);
         if (journal.phase !== 'credential') return null;
         return { email: current.email, renewal: journal.renewal !== undefined,
+          ...(current.client ? { client: current.client } : {}),
           authorizationUrl: current.authorizationUrl, formToken: current.csrf };
       });
     }
@@ -549,9 +563,19 @@ export class RemotePairingService {
     });
   }
 
+  /** La vista previa vigente de una transacción en confirmación, para volver a enseñarla. */
+  async previewOf(id: string): Promise<PairingPreview | null> {
+    return this.exclusive(id, async () => {
+      const journal = await this.requireJournal(id);
+      await this.ensureAlive(journal);
+      return journal.phase === 'confirmation' ? this.requireRuntime(id).preview ?? null : null;
+    });
+  }
+
   async confirm(
     id: string,
-    authorization: RemotePairingFormAuthorization
+    authorization: RemotePairingFormAuthorization,
+    options: { acknowledgeLoss?: boolean } = {}
   ): Promise<
     | { kind: 'reauthenticate' }
     | { kind: 'confirmed'; account: Awaited<ReturnType<RemotePairingPublisher['publish']>> }
@@ -566,6 +590,16 @@ export class RemotePairingService {
         !journal.connection || !journal.paired
       ) throw new RemotePairingError(journal.phase === 'committing' ? 'replayed' : 'not_ready');
       if (!validFuture(journal.identityExpiresAt, this.now())) return { kind: 'reauthenticate' };
+      if (journal.replacesAccount && runtime.preview.pendingWrites !== 0) {
+        // Escrituras sin subir, o sin poder contarlas: se borran con la cuenta anterior. Hace falta
+        // una confirmación aparte, y si desde la vista previa hay más (o ya no se pueden contar),
+        // la anterior no vale.
+        const seen = runtime.preview.pendingWrites ?? null;
+        const now = await this.options.renewals?.pendingWrites?.(journal.renewal!).catch(() => null) ?? null;
+        const worse = now === null ? seen !== null : seen !== null && now > seen;
+        if (worse) runtime.preview = { ...runtime.preview, pendingWrites: now };
+        if (!options.acknowledgeLoss || worse) throw new RemotePairingError('loss_unconfirmed');
+      }
       journal.phase = 'committing';
       journal.updatedAt = new Date(this.now()).toISOString();
       await this.options.journals.write(journal);
@@ -735,12 +769,18 @@ export class RemotePairingService {
     }
     const verified = await runtime.link!.verify(granted);
     const replacesAccount = journal.renewal !== undefined && !sameVault;
+    // Antes de enseñar la vista previa: retirar la cuenta anterior borra su copia, con lo que no
+    // haya subido. Se cuenta ahora para decirlo; si no se puede leer, también se dice.
+    const pendingWrites = replacesAccount
+      ? await this.options.renewals?.pendingWrites?.(journal.renewal!).catch(() => null) ?? null
+      : undefined;
     const preview: PairingPreview = {
       titles: verified.titles.slice(0, 3),
       vaultCreatedAt: verified.vaultCreatedAt,
       recordsRead: verified.recordsRead,
       more: verified.more,
-      ...(replacesAccount ? { replacesLibrary: true } : {})
+      ...(replacesAccount ? { replacesLibrary: true, pendingWrites } : {}),
+      ...(runtime.client ? { client: runtime.client } : {})
     };
     runtime.ownership = ownership;
     runtime.preview = preview;

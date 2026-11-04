@@ -200,7 +200,8 @@ export function createRemotePairingRouter(
     try {
       const authorized = await authorizedSession(req, service);
       session = authorized.session;
-      const result = await service.confirm(session.id, authorized.authorization);
+      const result = await service.confirm(session.id, authorized.authorization,
+        { acknowledgeLoss: bodyString(req, 'accept_loss') === '1' });
       if (result.kind === 'reauthenticate') {
         const location = await hooks.reauthenticate({ oauthRequestId: session.oauthRequestId,
           expectedSub: session.sub, pairingSessionId: session.id }, res);
@@ -217,6 +218,14 @@ export function createRemotePairingRouter(
         'La biblioteca está conectada. Continúa para volver a tu aplicación.', location,
         'Continuar');
     } catch (error) {
+      if (session && error instanceof RemotePairingError && error.code === 'loss_unconfirmed') {
+        // Nada se ha cancelado: la misma vista previa, ahora con la casilla pendiente.
+        const preview = await service.previewOf(session.id).catch(() => null);
+        if (preview) {
+          sendPreviewPage(res, await service.formToken(session.id), preview, { unconfirmedLoss: true });
+          return;
+        }
+      }
       if (session) await hooks.cancelOauth({ oauthRequestId: session.oauthRequestId }).catch(() => undefined);
       handleError(res, error);
     }
