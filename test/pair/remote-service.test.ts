@@ -661,6 +661,30 @@ describe('RemotePairingService', () => {
       expect(set.retire).not.toHaveBeenCalled();
     });
 
+    it('si la vista previa dio 0 y al confirmar hay escrituras, pide la casilla y no retira nada', async () => {
+      let pending: number | null = 0;
+      const set = renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        pendingWrites: vi.fn(async () => pending),
+        retire: vi.fn(async () => undefined)
+      });
+      const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, agentAccountId: () => RENEWAL_ACCOUNT });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      expect(await service.poll(started.id, await currentAuth(service, started)))
+        .toMatchObject({ kind: 'preview', preview: { pendingWrites: 0 } });
+      pending = 4;
+      await expect(service.confirm(started.id, await currentAuth(service, started)))
+        .rejects.toMatchObject({ code: 'loss_unconfirmed' });
+      expect(set.retire).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      // La página vuelve a enseñar el recuento nuevo, y con la casilla termina.
+      expect(await service.previewOf(started.id)).toMatchObject({ pendingWrites: 4 });
+      await expect(service.confirm(started.id, await currentAuth(service, started), { acknowledgeLoss: true }))
+        .resolves.toMatchObject({ kind: 'confirmed' });
+    });
+
     it('si retirar la cuenta anterior falla, revoca la nueva y no da de alta nada', async () => {
       const revoke = vi.fn(async () => undefined);
       const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));

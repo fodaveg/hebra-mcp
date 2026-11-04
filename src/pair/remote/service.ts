@@ -594,15 +594,18 @@ export class RemotePairingService {
         !journal.connection || !journal.paired
       ) throw new RemotePairingError(journal.phase === 'committing' ? 'replayed' : 'not_ready');
       if (!validFuture(journal.identityExpiresAt, this.now())) return { kind: 'reauthenticate' };
-      if (journal.replacesAccount && runtime.preview.pendingWrites !== 0) {
-        // Escrituras sin subir, o sin poder contarlas: se borran con la cuenta anterior. Hace falta
-        // una confirmación aparte, y si desde la vista previa hay más (o ya no se pueden contar),
-        // la anterior no vale.
+      if (journal.replacesAccount) {
+        // Se recuenta SIEMPRE al confirmar, también si la vista previa dio 0: lo escrito entre la
+        // vista previa y aquí se borraría con la cuenta anterior. Escrituras sin subir, o sin
+        // poder contarlas, exigen una confirmación aparte; si hay más que en la vista previa (o ya
+        // no se pueden contar), la anterior no vale y la página enseña el recuento nuevo.
         const seen = runtime.preview.pendingWrites ?? null;
         const now = await this.options.renewals?.pendingWrites?.(journal.renewal!).catch(() => null) ?? null;
-        const worse = now === null ? seen !== null : seen !== null && now > seen;
-        if (worse) runtime.preview = { ...runtime.preview, pendingWrites: now };
-        if (!options.acknowledgeLoss || worse) throw new RemotePairingError('loss_unconfirmed');
+        if (now !== 0) {
+          const worse = now === null ? seen !== null : seen !== null && now > seen;
+          if (worse) runtime.preview = { ...runtime.preview, pendingWrites: now };
+          if (!options.acknowledgeLoss || worse) throw new RemotePairingError('loss_unconfirmed');
+        }
       }
       journal.phase = 'committing';
       journal.updatedAt = new Date(this.now()).toISOString();
