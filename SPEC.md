@@ -2495,6 +2495,7 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   nombre) y si este agente tiene permiso. Lista los que vería su persona. Un restringido del que no
   es miembro no sale.
 - Una herramienta nueva de solo lectura lista las organizaciones de la persona con sus miembros.
+- Un 429 de Lumbre en el catálogo o en el registro de la clave no es una denegación: la herramienta responde `space_unavailable` con `reason: rate_limited` y `retryAfterSeconds` (el `Retry-After` de Lumbre en segundos, o 5). No se guarda ni marca nada: la siguiente llamada vuelve a preguntar al relé.
 - Pasar a un `space` sin permiso sigue dando `space_access_denied`. Ser miembro de la organización no
   concede contenido.
 - Contrato con el relé: `GET /api/integrations/hebra/agent-directory`, solo credencial de agente, en
