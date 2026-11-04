@@ -6,7 +6,7 @@ import express, {
 } from 'express';
 import { PAIRING_CODE_PATTERN } from '../loopback';
 import {
-  sendAgentDisabledPage,
+  sendAgentRejectedPage,
   sendBridgePage,
   sendCodeRejectedPage,
   sendContinuePage,
@@ -151,11 +151,11 @@ export function createRemotePairingRouter(
       await service.receiveCredential(session.id, authorization, code);
       sendWaitingPage(res, await service.formToken(session.id));
     } catch (error) {
-      if (error instanceof RemotePairingError && error.code === 'agent_disabled') {
+      if (error instanceof RemotePairingError && error.code === 'agent_rejected') {
         // La transacción ya está cerrada: la solicitud OAuth no puede seguir.
         if (oauthRequestId) await hooks.cancelOauth({ oauthRequestId }).catch(() => undefined);
         clearCookie(res);
-        sendAgentDisabledPage(res);
+        sendAgentRejectedPage(res, error.reason === 'tokens_kept');
       } else if (error instanceof RemotePairingError && error.code === 'wrong_lumbre_account') {
         sendWrongLumbreAccountPage(res, await currentNotice(req, service));
       } else if (error instanceof RemotePairingError && error.code === 'code_rejected') {

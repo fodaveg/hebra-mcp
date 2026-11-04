@@ -123,72 +123,109 @@ describe('renovación con estado real', () => {
     return { started, form: { cookie: started.cookie, formToken: await service.formToken(started.id) } };
   }
 
-  describe('agente desactivado en Hebra (Lumbre responde 404 al registrar su clave)', () => {
-    /** Una clave de agente guardada de verdad: el sondeo la reusa y Lumbre solo mira su pública. */
-    async function storeAgentKey(): Promise<void> {
-      const pair = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']);
-      const privateKey = await crypto.subtle.exportKey('jwk', pair.privateKey);
-      await openFileSecretStore(accountDataDir(root, account)).set('agent-device-key',
-        JSON.stringify({ binding: 'b', privateKey, accountId: ACCOUNT }));
-    }
+  describe('registro de la clave de agente que Lumbre no acepta tras el canje', () => {
     const start = (service: RemotePairingService) => service.start({ oauthRequestId: 'oauth-1', sub: SUB,
       identityExpiresAt: new Date(Date.now() + 5 * 60_000).toISOString(), renew: true });
 
-    it('404 con las credenciales guardadas: no se canjea nada, no se revoca nada y la conexión guardada queda intacta', async () => {
-      await storeAgentKey();
-      const fetcher = vi.fn(async () => new Response('{}', { status: 404 }));
-      const { service, journals } = build({ fetcher: fetcher as never });
+    it('401 (agente desactivado o revocado, indistinguibles) con la misma credencial: guarda los tokens nuevos, no revoca ni borra', async () => {
+      const { AgentKeyUnauthorizedError } = await import('../../src/spaces/device');
+      const { service, journals } = build({ credential: OLD_CREDENTIAL, prepareFails: new AgentKeyUnauthorizedError() });
       const started = await start(service);
       await expect(service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code'))
-        .rejects.toMatchObject({ code: 'agent_disabled' });
-      // Se preguntó con la credencial GUARDADA y su clave, no con una nueva.
-      const [target, init] = fetcher.mock.calls[0]! as unknown as [string, RequestInit];
-      expect(target).toBe(`${API}/api/integrations/hebra/agent-device-key`);
-      expect(new Headers(init.headers).get('authorization')).toBe('Bearer write-vieja');
-      expect(exchanged).not.toHaveBeenCalled();
-      expect(revoke).not.toHaveBeenCalled();
-      expect(invalidate).not.toHaveBeenCalled();
+        .rejects.toMatchObject({ code: 'agent_rejected', reason: 'tokens_kept' });
+      // El canje rotó los tokens: los guardados ya no valen y los nuevos de la MISMA credencial
+      // son los que permiten volver al reactivar el agente, sin otro login.
       const record = registry.findById(account.id)!;
       expect(record).toMatchObject({ state: 'active', binding: account.binding, generation: account.generation });
       expect(record.renewing).toBeUndefined();
       const stored = await readPairedSecrets(openFileSecretStore(accountDataDir(root, record)));
-      expect(stored?.connection).toEqual(paired.connection);
+      expect(stored?.connection).toMatchObject({ credentialId: OLD_CREDENTIAL, readToken: 'read-nueva', writeToken: 'write-nueva' });
+      expect(stored?.recoveryCode).toBe(paired.recoveryCode);
+      expect(stored?.device).toEqual(paired.device);
+      expect(revoke).not.toHaveBeenCalled();
+      expect(invalidate).not.toHaveBeenCalled();
+      expect(drain).toHaveBeenCalledOnce();
+      await expect(readFile(join(accountDataDir(root, record), 'library.sqlite'), 'utf8')).resolves.toBe('notas de david');
       expect(await journals.read(started.id)).toBeNull();
-      // Reactivado el agente, la misma cuenta se renueva sin más.
-      fetcher.mockImplementation(async () => { throw new Error('offline'); });
-      const again = await toConfirmation(service);
-      await expect(service.confirm(again.started.id, again.form)).resolves.toMatchObject({ kind: 'confirmed' });
     });
 
-    it.each([[500], [401], [403]])('un %s al sondear no es "desactivado": la renovación sigue su camino', async (status) => {
-      await storeAgentKey();
-      const fetcher = vi.fn(async () => new Response('{}', { status }));
-      const { service } = build({ fetcher: fetcher as never });
-      const started = await start(service);
-      await service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code');
-      expect(exchanged).toHaveBeenCalledOnce();
-    });
-
-    it('si se desactiva entre el sondeo y el canje, la página lo dice y lo nuevo se revoca', async () => {
-      await storeAgentKey();
-      const { AgentKeyNotFoundError } = await import('../../src/spaces/device');
-      const fetcher = vi.fn(async () => new Response('{}', { status: 500 }));
-      const { service, journals } = build({ fetcher: fetcher as never, prepareFails: new AgentKeyNotFoundError() });
+    it('401 y el canje devuelve una credencial con otro id: nada que conservar, se revoca lo canjeado', async () => {
+      const { AgentKeyUnauthorizedError } = await import('../../src/spaces/device');
+      const { service, journals } = build({ credential: NEW_CREDENTIAL, prepareFails: new AgentKeyUnauthorizedError() });
       const started = await start(service);
       await expect(service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code'))
-        .rejects.toMatchObject({ code: 'agent_disabled' });
+        .rejects.toMatchObject({ code: 'agent_rejected', reason: 'credential_revoked' });
       expect(revoke).toHaveBeenCalledOnce();
+      const stored = await readPairedSecrets(openFileSecretStore(accountDataDir(root, registry.findById(account.id)!)));
+      expect(stored?.connection).toEqual(paired.connection);
       expect(registry.findById(account.id)?.renewing).toBeUndefined();
       expect(await journals.read(started.id)).toBeNull();
     });
 
-    it('sin clave de agente guardada no hay nada que sondear: sigue', async () => {
-      const fetcher = vi.fn(async () => new Response('{}', { status: 404 }));
-      const { service } = build({ fetcher: fetcher as never });
+    it('404 (espacios apagados, credencial no encontrada o carrera): no es "desactivado", la biblioteca se renueva sin clave de agente', async () => {
+      const { AgentKeyNotFoundError } = await import('../../src/spaces/device');
+      const { service } = build({ prepareFails: new AgentKeyNotFoundError() });
+      const { started, form } = await toConfirmation(service);
+      await expect(service.confirm(started.id, form)).resolves.toMatchObject({ kind: 'confirmed', account: { id: account.id } });
+      expect(revoke).not.toHaveBeenCalled();
+      const record = registry.findById(account.id)!;
+      expect(record.binding.pairedCredentialId).toBe(NEW_CREDENTIAL);
+      const store = openFileSecretStore(accountDataDir(root, record));
+      // Sin clave guardada: los espacios la registran al usarse y dan su error normal si no pueden.
+      expect(await store.get('agent-device-key')).toBeNull();
+      expect((await readPairedSecrets(store))?.connection.readToken).toBe('read-nueva');
+    });
+
+    it('404 con una credencial que no existe: el enlace de aprobación falla y no se da por renovada', async () => {
+      const { AgentKeyNotFoundError } = await import('../../src/spaces/device');
+      const built = build({ prepareFails: new AgentKeyNotFoundError() });
+      const service = new RemotePairingService({ journals: built.journals, publisher: built.adapters.publisher,
+        renewals: built.adapters.renewals, revoke: revoke as never,
+        exchangeCode: async () => connection(NEW_CREDENTIAL, 'nueva'),
+        prepareAgent: async () => { throw new AgentKeyNotFoundError(); },
+        startLink: async () => { throw new Error('credential_not_found'); },
+        ownership: { verify: async () => { throw new Error('no'); } } });
       const started = await start(service);
-      await service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code');
-      expect(fetcher).not.toHaveBeenCalled();
-      expect(exchanged).toHaveBeenCalledOnce();
+      await expect(service.receiveCredential(started.id, { cookie: started.cookie, formToken: started.formToken }, 'code'))
+        .rejects.toMatchObject({ code: 'unavailable' });
+      expect(revoke).toHaveBeenCalledOnce();
+      expect(registry.findById(account.id)).toMatchObject({ generation: account.generation, binding: account.binding });
+    });
+  });
+
+  describe('marca de revocado tras reactivar el agente', () => {
+    it('desactivado (401), marca, reactivado: una ronda correcta del runner nuevo la levanta', () => {
+      const pairing = new PairingRevocation();
+      // Runner viejo: el relé dio 401 (agente desactivado) y el contexto se cerró.
+      const detachOld = pairing.attachRelay(OLD_CREDENTIAL, () => true, () => false);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      detachOld();
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      // Reabrir no borra la marca: el runner nuevo todavía no ha hablado con el relé.
+      let ok = false;
+      const detachNew = pairing.attachRelay(OLD_CREDENTIAL, () => false, () => ok);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      // Reactivado en Hebra: la siguiente ronda sale bien.
+      ok = true;
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
+      detachNew();
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
+    });
+
+    it('la marca de Lumbre (410) también se levanta con una ronda correcta, y otra cuenta no se toca', () => {
+      const pairing = new PairingRevocation();
+      pairing.markRevoked(OLD_CREDENTIAL);
+      pairing.markRevoked(NEW_CREDENTIAL);
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => true);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
+      expect(pairing.isRevoked(NEW_CREDENTIAL)).toBe(true);
+    });
+
+    it('un runner que no ha tenido una ronda correcta no levanta la marca', () => {
+      const pairing = new PairingRevocation();
+      pairing.markRevoked(OLD_CREDENTIAL);
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => false);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
     });
   });
 
@@ -446,6 +483,20 @@ describe('renovación con estado real', () => {
         expect(target.origin).toBe(API);
         expect(new Headers(init.headers).get('authorization')).toBe('Bearer read-vieja');
       });
+
+    it('un GET de lectura correcto al hacer login levanta la marca de revocado; un 401 no la toca', async () => {
+      for (const [status, revoked] of [[200, false], [401, true]] as const) {
+        const { hooks, provider } = fakeProvider();
+        const pairing = (provider as unknown as { pairing: PairingRevocation }).pairing;
+        pairing.markRevoked(OLD_CREDENTIAL);
+        const runtime = await openRemotePairing({ dataDir: root, registry, provider, lumbreOrigin: API,
+          fetcher: async () => new Response('{}', { status }) });
+        runtime.attachAccountServices({ contexts: { drainAndClose: drain as never }, removal: { remove: vi.fn() },
+          legacySecrets: new MemorySecretStore() });
+        await hooks.current!.renewal!.credentialRejected(account);
+        expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(revoked);
+      }
+    });
 
     it('sin red, la credencial no se da por rechazada', async () => {
       const { hooks, provider } = fakeProvider();

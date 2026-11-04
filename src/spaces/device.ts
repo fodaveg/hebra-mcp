@@ -45,11 +45,19 @@ interface StoredAgentKey {
   accountId?: string;
 }
 /**
- * Lumbre responde 404 a `PUT /agent-device-key` cuando el agente de la persona está desactivado
- * en Hebra. Sigue siendo `space_access_denied` hacia fuera; el alta lo distingue por la clase.
- * Un relé sin esta API da el mismo 404: el contrato no tiene un código propio todavía.
+ * Lumbre responde 404 a `PUT /agent-device-key` cuando `HEBRA_SPACES_2B` está apagado, la
+ * credencial no existe o el agente se desactivó entre la autenticación y la transacción. No
+ * dice cuál de las tres, y NO significa "agente desactivado". Hacia fuera sigue siendo
+ * `space_access_denied`; el alta lo distingue por la clase para seguir sin espacios.
  */
 export class AgentKeyNotFoundError extends ToolError {
+  constructor() { super('space_access_denied'); }
+}
+/**
+ * 401 `credential_revoked` al registrar la clave de agente. Lumbre responde igual a una
+ * credencial revocada y a un agente desactivado (docs/80 §8g.1): no se pueden distinguir.
+ */
+export class AgentKeyUnauthorizedError extends ToolError {
   constructor() { super('space_access_denied'); }
 }
 export interface PreparedAgentDevice {
@@ -114,6 +122,7 @@ export async function prepareAgentDevice(
       }
     );
     if (response.status === 404) throw new AgentKeyNotFoundError();
+    if (response.status === 401) throw new AgentKeyUnauthorizedError();
     if (!response.ok) throw new Error();
     return {
       privateKey,
@@ -125,7 +134,7 @@ export async function prepareAgentDevice(
       )
     };
   } catch (error) {
-    if (error instanceof AgentKeyNotFoundError) throw error;
+    if (error instanceof AgentKeyNotFoundError || error instanceof AgentKeyUnauthorizedError) throw error;
     throw new ToolError('space_access_denied');
   }
 }

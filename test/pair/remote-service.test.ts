@@ -493,6 +493,7 @@ describe('RemotePairingService', () => {
         target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: SYNC_VAULT,
           opaqueDeviceId: STORED_DEVICE, lumbreDeviceId: STORED_LUMBRE_DEVICE }),
         agentKey: async () => ({ kty: 'EC', crv: 'P-256', d: 'guardada', x: 'x', y: 'y' }),
+        keepRotatedTokens: vi.fn(async () => true),
         publish: vi.fn(async () => ({ id: 'cuenta-david', generation: 5 })),
         retire: vi.fn(async () => undefined),
         abort: vi.fn(async () => undefined),
