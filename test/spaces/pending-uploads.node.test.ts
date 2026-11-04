@@ -122,6 +122,33 @@ describe('subidas pendientes de un espacio', () => {
     expect(list.entries()).toEqual([]);
   });
 
+  it('con memoria alta se cierra un espacio ocioso con pendientes (si no hay nada más que cerrar), ya anotado en la lista', async () => {
+    const served = await open();
+    const { client, close } = await connect(served);
+    uploadsBlocked = true;
+    await writeInSpace(client);
+    await close();
+    const manager = served.ctx.spaces as unknown as {
+      entries: Map<string, { pin?: { release(): void } }>;
+    };
+    expect(manager.entries.size).toBe(1);
+    // En stdio `resolve` retiene el espacio hasta `close`; en `serve-http` lo sueltan las
+    // peticiones (`acquire`/`prepare`). Aquí se suelta a mano para dejarlo ocioso.
+    for (const entry of manager.entries.values()) {
+      entry.pin?.release();
+      entry.pin = undefined;
+    }
+    // Anotado por la escritura, antes de cualquier cierre.
+    expect(list.entries().map((entry) => entry.space)).toEqual([SPACE]);
+
+    await served.ctx.spaces!.lifecycle!.reclaimIdle();
+    await vi.waitFor(() => expect(manager.entries.size).toBe(0));
+    // Sigue anotado: el barrido lo retoma cuando el relé conteste.
+    expect(list.entries().map((entry) => entry.space)).toEqual([SPACE]);
+    expect(uploadsAccepted).toBe(0);
+    await served.close();
+  });
+
   it('si no sube, queda por cuenta y espacio, y el barrido la retoma tras reiniciar', async () => {
     const served = await open();
     const { client, close } = await connect(served);

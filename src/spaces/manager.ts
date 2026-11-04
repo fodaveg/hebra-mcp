@@ -107,13 +107,27 @@ export class AgentSpaceManager implements SpaceRouter {
         return null;
       }
     },
+    // Mismo criterio que `AccountContexts.reclaim`: primero los ociosos sin subidas pendientes; solo
+    // si no queda ninguno ni hay cierres en curso, también los ociosos CON pendientes. Su cierre
+    // anota el espacio en la lista durable ANTES de intentar la ronda final (`settleUploads`), y el
+    // barrido lo reabre cuando el relé conteste: con el relé caído y la memoria alta no se retiene
+    // memoria por espacios que nadie usa.
     reclaimIdle: async () => {
+      let closed = 0;
+      const withPending: Entry[] = [];
       await Promise.allSettled([...this.entries.values()].map(async (entry) => {
         if (!entry.life.idle) return;
         const status = await entry.instance?.status().catch(() => null);
-        if (status && status.pendingUpload > 0 && !status.revoked) return;
+        if (status && status.pendingUpload > 0 && !status.revoked) {
+          withPending.push(entry);
+          return;
+        }
+        closed += 1;
         void entry.life.closeIfIdle().catch(() => undefined);
       }));
+      const closing = [...this.entries.values()].some((entry) => entry.life.state === 'cerrando');
+      if (closed > 0 || closing) return;
+      for (const entry of withPending) void entry.life.closeIfIdle().catch(() => undefined);
     },
     beginShutdown: () => {
       this.shuttingDown = true;
