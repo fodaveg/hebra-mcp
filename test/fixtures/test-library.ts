@@ -10,7 +10,9 @@
  * (SPEC.md §10 L1).
  */
 import { createHash } from 'node:crypto';
+import { cpSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { inject } from 'vitest';
 import { deriveNote, SqliteLibraryEngine, type NoteRow } from '../../src/hebra';
 import { FsBlobStore } from '../../src/store/blob-store-fs';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
@@ -252,7 +254,23 @@ export interface TestLibraryOptions {
   lockedNote?: boolean;
 }
 
+/**
+ * Biblioteca de prueba en `sqlitePath`. Construirla con el motor cuesta de 0,7 a 3 s (más con la
+ * máquina ocupada), así que `test/fixtures/library-templates-setup.ts` (globalSetup) la construye
+ * UNA vez por variante y aquí se COPIA su directorio (sqlite y `blobs/`): mismos ids, mismos
+ * bytes, sin reloj. Sin plantilla (otra configuración de vitest) se construye como siempre.
+ */
 export async function buildTestLibrary(
+  sqlitePath: string,
+  options: TestLibraryOptions = {}
+): Promise<TestLibrary> {
+  const template = inject('libraryTemplates')?.[options.lockedNote ? 'locked' : 'plain'];
+  if (!template) return buildTestLibraryFresh(sqlitePath, options);
+  cpSync(dirname(template.library.sqlitePath), dirname(sqlitePath), { recursive: true });
+  return { ...template.library, sqlitePath };
+}
+
+export async function buildTestLibraryFresh(
   sqlitePath: string,
   options: TestLibraryOptions = {}
 ): Promise<TestLibrary> {

@@ -4,7 +4,6 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/perf/**/*.perf.ts'],
-    maxWorkers: 1,
-    minWorkers: 1
+    maxWorkers: 1
   }
 });
