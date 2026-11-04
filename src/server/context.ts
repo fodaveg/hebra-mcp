@@ -1,3 +1,5 @@
+import type { AdmissionTicket } from '../accounts/capacity';
+import type { Clock } from '../accounts/lifecycle';
 import type { HebraLibraryPort } from '../store/types';
 import type { PrivacyFilter } from '../privacy/filter';
 import type { PrivacyConfig } from '../privacy/config';
@@ -21,11 +23,39 @@ import type { WriteContext } from './write-context';
  */
 export interface SpaceRouter {
   list(): Promise<Array<{ spaceId: string; name: string | null }>>;
+  /** Abre el espacio y lo retiene hasta cerrar el router: el uso por stdio. */
   resolve(spaceId: string): Promise<ServerContext>;
+  /** `serve-http`: cada uso se adquiere y se suelta, y el espacio se cierra cuando termina. */
+  lifecycle?: SpaceLifecycleControl;
+}
+
+export interface SpaceLease {
+  value: ServerContext;
+  release(): void;
+}
+
+/** Lo que `AccountContexts` necesita de los espacios de una cuenta (SPEC.md §12.10, D22). */
+export interface SpaceLifecycleControl {
+  /** Antes del primer uso: activa el cierre por inactividad y la admisión por memoria. */
+  configure(options: {
+    idleMs: number;
+    clock: Clock;
+    admit(signal: AbortSignal): Promise<AdmissionTicket>;
+    onClosed(): void;
+  }): void;
+  acquire(spaceId: string): Promise<SpaceLease>;
+  /** Como `acquire`, sin red si ya está abierto. `null`: que lo diga la herramienta. Solo
+   *  rechaza una apertura sin capacidad. */
+  prepare(spaceId: string): Promise<SpaceLease | null>;
+  /** Cierra ya los espacios sin peticiones en curso ni subidas pendientes. */
+  reclaimIdle(): Promise<void>;
+  beginShutdown(): void;
 }
 
 export interface ServerContext {
   spaces?: SpaceRouter;
+  /** `serve-http`: la petición dura hasta que acabe esta llamada, aunque el cliente se vaya. */
+  trackInvocation?<T>(run: () => Promise<T>): Promise<T>;
   spaceId?: string;
   /** Nombre del espacio compartido (cacheado; `null` si no se pudo leer). Contenido del usuario: nunca a logs. */
   spaceName?: () => string | null;

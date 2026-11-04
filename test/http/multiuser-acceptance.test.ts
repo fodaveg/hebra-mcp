@@ -348,6 +348,27 @@ describe('acceptance multiusuario por HTTP, con bibliotecas reales y relé sint�
     } finally { release(); await pending; }
   });
 
+  it('sin peticiones no queda ninguna biblioteca abierta, y la siguiente llamada reabre la misma (D22)', async () => {
+    await clients.david.close(); await clients.mikel.close();
+    await handle!.close();
+    vi.stubEnv('HEBRA_MCP_CONTEXT_IDLE_MS', '1');
+    try {
+      handle = await startServeHttp(serveOptions);
+      const url = `http://127.0.0.1:${handle.port}`;
+      clients.david = await connectHttpClient(url, tokens.david.accessToken);
+      clients.mikel = await connectHttpClient(url, tokens.mikel.accessToken);
+      const writers = () => (['david', 'mikel'] as const).filter(
+        (who) => existsSync(join(accountDataDir(root, records[who]), 'writer.lock')));
+      const id = seed!.test.library.publicNote2Id;
+      expect((await call('david', 'hebra_append_to_note', { id, text: 'ANTES_DE_CERRAR', operationId: 'idle-1' })).isError).toBe(false);
+      await vi.waitFor(() => expect(writers()).toEqual([]));
+      expect((await call('david', 'hebra_read_note', { id })).value.body).toContain('ANTES_DE_CERRAR');
+      expect((await call('david', 'hebra_append_to_note', { id, text: 'ANTES_DE_CERRAR', operationId: 'idle-1' })).value.replayed).toBe(true);
+      expect((await call('mikel', 'hebra_read_note', { id })).value.body).not.toContain('ANTES_DE_CERRAR');
+      await vi.waitFor(() => expect(writers()).toEqual([]));
+    } finally { vi.unstubAllEnvs(); }
+  });
+
   it('retirar A con relé caído la bloquea; reintentar borra solo A y conserva OAuth y datos de B', async () => {
     const id = seed!.test.library.publicNote2Id;
     expect((await call('mikel', 'hebra_append_to_note', { id, text: 'B_SOBREVIVE', operationId: 'removal-b' })).isError).toBe(false);

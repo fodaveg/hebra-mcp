@@ -1,8 +1,8 @@
 /**
  * `hebra-mcp serve-http` (SPEC.md §12.1): el conector remoto de claude.ai. Un único
  * proceso atiende a todas las sesiones y cada contexto abierto es el escritor único de su
- * cuenta. Si otro proceso tiene su `writer.lock`, esa apertura falla (`writer_lock_held`).
- * Nunca reenvía por `writer.sock` (`openServeContext({ writerOnly: true })`).
+ * cuenta. Si otro proceso tiene su `writer.lock`, esa apertura espera y al agotar el plazo
+ * responde 503 `lock_held` (§12.10). Nunca reenvía por `writer.sock` (`openServeContext({ writerOnly: true })`).
  *
  * Orden de arranque: preflight de configuración, OAuth/registro global y listener. Los
  * contextos se abren bajo demanda después de autenticar la cuenta; cualquier fallo de
@@ -16,6 +16,7 @@ import { WriterLock } from '../lock';
 import { openFileSecretStore, readPairedSecrets, type SecretStore } from '../secrets';
 import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir, openRemotePairing,
   accountControlDir, openAccountControlServer, type AccountControlServer, type RemotePairingRuntime } from '../accounts';
+import { readCapacityConfig } from '../accounts/capacity';
 import { revokeRemoteCredential } from '../pair/remote/revoke';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
@@ -124,6 +125,33 @@ function trackInFlight(server: Server): { idle(timeoutMs: number): Promise<boole
   };
 }
 
+/**
+ * El contexto heredado se cierra por inactividad: su `revoked` no puede depender de una
+ * instancia cerrada, ni volver a `false` porque ya no haya runner. Al cerrar se queda en la
+ * marca de `PairingRevocation`, atada a la credencial, que olvida un emparejado nuevo.
+ * `onClosed` suelta la referencia a la instancia.
+ */
+export function rememberRevocationOnClose(
+  opened: ServeContext,
+  pairing: PairingRevocation,
+  credentialId: string,
+  onClosed: () => void
+): ServeContext {
+  const runner = opened.instance.syncRunner;
+  const remember = (): void => {
+    if (runner?.revoked) pairing.markRevoked(credentialId);
+  };
+  return { ...opened, close: async () => {
+    remember();
+    try {
+      await opened.close();
+    } finally {
+      remember();
+      onClosed();
+    }
+  } };
+}
+
 function listen(server: Server, port: number, host: string): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (error: Error) => reject(error);
@@ -210,12 +238,16 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
           assertActive: () => { activeRegistry.assertActive(account); } });
         opened.instance.deferSignalRelease();
-        if (account.storage === 'legacy-root') serve = opened;
         const accountPairing = account.storage === 'legacy-root' ? pairing :
           new PairingRevocation(() => opened.instance.syncRunner?.revoked ?? false);
         opened.ctx.status = new PairingStatusSource(opened.ctx.status, accountPairing);
-        return opened;
-      });
+        if (account.storage !== 'legacy-root') return opened;
+        const legacy = rememberRevocationOnClose(opened, pairing, account.binding.pairedCredentialId, () => {
+          if (serve === legacy) serve = null;
+        });
+        serve = legacy;
+        return legacy;
+      }, readCapacityConfig());
       const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
       if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');
       remotePairing = await openRemotePairing({ dataDir: options.dataDir, registry: activeRegistry, provider: oauth.provider,

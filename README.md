@@ -202,7 +202,10 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   (`127.0.0.1`; en el contenedor, `0.0.0.0`), `HEBRA_MCP_PUBLIC_URL`
   (`https://mcp.hebra.pro`), `LUMBRE_APP_ORIGIN` (`https://app.lumbre.pro`: el origen de
   Lumbre, el mismo que su `ORIGIN`; la URL de consentimiento de otro origen se rechaza) y,
-  para los secretos del dispositivo, `HEBRA_MCP_SECRET_STORE=file`.
+  para los secretos del dispositivo, `HEBRA_MCP_SECRET_STORE=file`. La capacidad se regula
+  por memoria real, sin máximo de cuentas (D22): `HEBRA_MCP_CONTEXT_IDLE_MS` (120000),
+  `HEBRA_MCP_OPEN_WAIT_MS` (20000) y `HEBRA_MCP_MEMORY_HIGH_WATER` (`80%` del límite del
+  contenedor; admite `0.8`, `80%` o bytes).
 - En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. El navegador
   pasa por Sumego y por el consentimiento de hebra-mcp; Claude recibe un access token de 1 h y un
   refresh rotatorio. La autorización caduca 30 días después de aprobarla o del último

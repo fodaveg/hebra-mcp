@@ -504,7 +504,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     const policy = GATE_POLICIES[name];
     if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
     gatedNames.add(name);
-    return async (input) => {
+    const invoke = async (input: Input): Promise<ReturnType<typeof toOkResult>> => {
       try {
         const { space, ...fields } = (input ?? {}) as Record<string, unknown>;
         let selected = ctx;
@@ -530,6 +530,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
         return toErrorResult(error);
       }
     };
+    return (input) => (ctx.trackInvocation ? ctx.trackInvocation(() => invoke(input)) : invoke(input));
   }
 
   server.registerTool('hebra_list_spaces', {
