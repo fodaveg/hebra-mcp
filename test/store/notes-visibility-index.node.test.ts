@@ -12,16 +12,17 @@
  *    resto de la suite (147 tests antes de este fichero) ya prueba, sin haber
  *    cambiado una sola aserción, que el comportamiento observable de las 7
  *    herramientas es el mismo que con la composición anterior.
- * 2. Coste medido (no estimado) con 5 000 notas sintéticas: el número exacto va en el
- *    informe de cierre del lote, tomado de la salida de este test.
+ * 2. Que sea UNA vuelta de SQL (las sentencias que prepara no crecen con las notas). Los
+ *    milisegundos con 5 000 notas están en `test/perf/notes-visibility-index.perf.ts`.
  */
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { SqliteLibraryEngine } from '../../src/hebra';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { openNodeLibraryPort } from '../../src/store/node-port';
+import { noteVisibilityRows } from '../../src/store/privacy-sql';
+import { createSyntheticLibrary } from '../fixtures/synthetic-notes';
 import { buildTestLibrary } from '../fixtures/test-library';
 
 describe('notesVisibilityIndex', () => {
@@ -68,79 +69,38 @@ describe('notesVisibilityIndex', () => {
     }
   });
 
-  it(
-    'mide 5 000 notas sintéticas (medido, no estimado)',
-    async () => {
-      const NOTE_COUNT = 5000;
-      const FOLDER_COUNT = 20;
-      const TAGS_PER_NOTE = 3;
-      const TAG_UNIVERSE = 30;
-
-      const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-visindex-perf-'));
-      const sqlitePath = join(dataDir, 'library.sqlite');
-
-      // Se generan con el motor DIRECTAMENTE (como `test-library.ts`), sin `deriveNote`:
-      // lo que se mide es la consulta de `notesVisibilityIndex`, no el analizador de
-      // Markdown, y saltárselo deja crear 5 000 notas en segundos, no en minutos.
-      const { db, conn } = openNodeSqliteConn(sqlitePath);
-      const engine = await SqliteLibraryEngine.open(conn, 'perf-fixture');
-      const folderIds: string[] = [];
-      for (let i = 0; i < FOLDER_COUNT; i += 1) {
-        const folder = await engine.folderCreate(null, `Carpeta ${i}`);
-        folderIds.push(folder.id);
-      }
-      const createStart = Date.now();
-      for (let i = 0; i < NOTE_COUNT; i += 1) {
-        const folderId = folderIds[i % FOLDER_COUNT]!;
-        const created = await engine.noteCreate(folderId);
-        const tags = Array.from({ length: TAGS_PER_NOTE }, (_, t) => {
-          const tag = `tag${(i + t) % TAG_UNIVERSE}`;
-          return { tag, label: tag, direct: true };
-        });
-        await engine.noteSave({
-          id: created.id,
-          body: `# Nota ${i}\ncuerpo sintético ${i}`,
-          title: `Nota ${i}`,
-          titleNorm: `nota ${i}`,
-          excerpt: `cuerpo sintético ${i}`,
-          expectedLocalSeq: created.localSeq,
-          baseBodySha256: created.bodySha256,
-          tags
-        });
-      }
-      const createMs = Date.now() - createStart;
-      db.close();
-
-      const port = await openNodeLibraryPort({ sqlitePath, dataDir });
+  it('es UNA vuelta de SQL: las sentencias que prepara no crecen con el número de notas', async () => {
+    const prepared = async (notes: number): Promise<{ statements: number; rows: number }> => {
+      const dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-visindex-count-'));
       try {
-        const rounds = 5;
-        const roundsMs: number[] = [];
-        let rows: Awaited<ReturnType<typeof port.notesVisibilityIndex>> = [];
-        for (let round = 0; round < rounds; round += 1) {
-          const start = Date.now();
-          rows = await port.notesVisibilityIndex();
-          roundsMs.push(Date.now() - start);
-        }
-        expect(rows).toHaveLength(NOTE_COUNT);
-
-        // eslint-disable-next-line no-console
-        console.log(
-          `notesVisibilityIndex perf: ${JSON.stringify({
-            notes: NOTE_COUNT,
-            folders: FOLDER_COUNT,
-            createMs,
-            notesVisibilityIndexMs: roundsMs
-          })}`
-        );
-
-        // Cota generosa (no de rendimiento fino): esto es una guarda de regresión, no
-        // un objetivo de latencia. El número medido de verdad va en el informe.
-        expect(Math.min(...roundsMs)).toBeLessThan(2000);
+        const sqlitePath = join(dataDir, 'library.sqlite');
+        await createSyntheticLibrary(sqlitePath, { notes, folders: 4, tagsPerNote: 3, tagUniverse: 8 });
+        const { db } = openNodeSqliteConn(sqlitePath, 'readOnly');
+        let statements = 0;
+        const counted = new Proxy(db, {
+          get(target, prop) {
+            if (prop === 'prepare') {
+              return (sql: string) => {
+                statements += 1;
+                return target.prepare(sql);
+              };
+            }
+            const value = Reflect.get(target, prop, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+        const rows = noteVisibilityRows(counted).length;
+        db.close();
+        return { statements, rows };
       } finally {
-        port.close();
         await rm(dataDir, { recursive: true, force: true });
       }
-    },
-    120_000
-  );
+    };
+    const small = await prepared(10);
+    const large = await prepared(120);
+    expect({ rows: [small.rows, large.rows], sameStatements: small.statements === large.statements }).toEqual({
+      rows: [10, 120],
+      sameStatements: true
+    });
+  });
 });
