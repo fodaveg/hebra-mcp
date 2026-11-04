@@ -819,6 +819,11 @@ export class LibraryInstance implements NoteWriteTarget {
     this.markShuttingDown();
   }
 
+  /** ¿Ya empezó el apagado del proceso (`beginShutdown`)? */
+  get processShuttingDown(): boolean {
+    return this.processShutdown;
+  }
+
   /** Resuelve cuando empieza el apagado (`beginShutdown`). */
   whenShuttingDown(): Promise<void> {
     return this.shuttingDown;
