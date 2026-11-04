@@ -35,8 +35,15 @@ export class PairingRevocation {
   private readonly relayLatched = new Set<string>();
   /** Runners abiertos por credencial; se sueltan al cerrar el contexto (`attachRelay`). */
   private readonly relayLive = new Map<string, () => boolean>();
-  /** Por credencial: ¿el runner abierto ya tuvo una ronda correcta con el relé? */
-  private readonly relayRecovered = new Map<string, () => boolean>();
+  /** Por credencial: el runner abierto y cuántas rondas correctas lleva. */
+  private readonly relayRounds = new Map<string, { id: number; okRounds: () => number }>();
+  /**
+   * Por credencial marcada: en qué punto estaba la cuenta cuando se marcó (el runner abierto y sus
+   * rondas correctas hasta ese momento). Solo una ronda correcta POSTERIOR levanta la marca; sin
+   * reloj, con contadores.
+   */
+  private readonly marks = new Map<string, { attachId: number | null; okRounds: number }>();
+  private attachSeq = 0;
 
   /** `relayRevoked`: el `revoked` global del runner de sync en modo de una sola cuenta, si lo hay. */
   constructor(private readonly relayRevoked: () => boolean = () => false) {}
@@ -47,25 +54,46 @@ export class PairingRevocation {
    * captura) se suelta, así que cerrar no da un estado falso ni retiene la instancia.
    * Devuelve la función que desacopla.
    */
-  attachRelay(credentialId: string, revoked: () => boolean, recovered: () => boolean = () => false): () => void {
+  attachRelay(credentialId: string, revoked: () => boolean, okRounds: () => number = () => 0): () => void {
     // No se toca `relayLatched`: una cuenta revocada que se cerró por inactividad y se reabre
     // tiene un runner nuevo que aún no ha hablado con el relé, y no por eso deja de estar
     // revocada. La levantan la renovación (`clear`), una credencial con otro id o una prueba de
-    // que ya funciona: una ronda correcta de ese runner o un GET de lectura correcto al hacer login
-    // (agente desactivado y reactivado en Hebra, sin reconectar).
+    // que ya funciona: una ronda correcta de ese runner POSTERIOR a la marca o un GET de lectura
+    // correcto al hacer login (agente desactivado y reactivado en Hebra, sin reconectar).
+    this.attachSeq += 1;
     this.relayLive.set(credentialId, revoked);
-    this.relayRecovered.set(credentialId, recovered);
+    this.relayRounds.set(credentialId, { id: this.attachSeq, okRounds });
     return () => {
       if (this.relayLive.get(credentialId) !== revoked) return;
-      this.relayLive.delete(credentialId);
-      this.relayRecovered.delete(credentialId);
       let value = false;
       let ok = false;
       try { value = revoked(); } catch { /* instancia ya cerrada: sin dato nuevo */ }
-      try { ok = recovered(); } catch { /* idem */ }
+      try { ok = this.recoveredSince(credentialId); } catch { /* idem */ }
+      this.relayLive.delete(credentialId);
+      this.relayRounds.delete(credentialId);
       if (ok && !value) this.clear(credentialId);
-      else if (value) this.relayLatched.add(credentialId);
+      else if (value) {
+        this.relayLatched.add(credentialId);
+        this.marks.set(credentialId, { attachId: null, okRounds: 0 });
+      }
     };
+  }
+
+  /** ¿El runner abierto tuvo una ronda correcta después de la marca de esta credencial? */
+  private recoveredSince(credentialId: string): boolean {
+    const attached = this.relayRounds.get(credentialId);
+    if (!attached) return false;
+    const mark = this.marks.get(credentialId);
+    const base = mark && mark.attachId === attached.id ? mark.okRounds : 0;
+    return attached.okRounds() > base;
+  }
+
+  /** Anota dónde estaba el runner abierto al marcar, para que solo cuente lo posterior. */
+  private markNow(credentialId: string): void {
+    const attached = this.relayRounds.get(credentialId);
+    let okRounds = 0;
+    try { okRounds = attached?.okRounds() ?? 0; } catch { /* instancia ya cerrada */ }
+    this.marks.set(credentialId, { attachId: attached?.id ?? null, okRounds });
   }
 
   /**
@@ -78,7 +106,7 @@ export class PairingRevocation {
     if (currentCredentialId == null) return false;
     if (this.revokedCredentials.has(currentCredentialId) || this.relayLatched.has(currentCredentialId)) {
       // Una ronda correcta del runner abierto prueba que el relé vuelve a aceptar la credencial.
-      if (!(this.relayRecovered.get(currentCredentialId)?.() ?? false)) return true;
+      if (!this.recoveredSince(currentCredentialId)) return true;
       this.clear(currentCredentialId);
     }
     return this.relayLive.get(currentCredentialId)?.() ?? false;
@@ -93,12 +121,14 @@ export class PairingRevocation {
   clear(credentialId: string): void {
     this.revokedCredentials.delete(credentialId);
     this.relayLatched.delete(credentialId);
+    this.marks.delete(credentialId);
   }
 
   /** Lumbre dijo `pairing_revoked` para esta credencial. El evento sale una sola vez. */
   markRevoked(credentialId: string): void {
     const already = this.isRevoked(credentialId);
     this.revokedCredentials.add(credentialId);
+    this.markNow(credentialId);
     if (!already) logEvent({ event: 'pairing.revoked', source: 'lumbre' });
   }
 }
