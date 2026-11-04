@@ -76,6 +76,8 @@ export interface RemotePairingServiceOptions {
   publicOrigin?: string;
   lumbreOrigin?: string;
   fetcher?: Fetcher;
+  /** Fetcher de la cuenta de ese `sub` (identidad ante Lumbre, P14); sin él, `fetcher`. */
+  fetcherFor?: (sub: string) => Fetcher;
   now?: () => number;
   exchangeCode?: typeof exchangePairingCode;
   prepareAgent?: typeof prepareAgentDevice;
@@ -141,6 +143,7 @@ export class RemotePairingService {
   /** Diarios que están publicando: retirar la cuenta anterior no puede limpiarse a sí mismo. */
   private readonly publishing = new Set<string>();
   private readonly fetcher: Fetcher;
+  private readonly fetcherFor: (sub: string) => Fetcher;
   private readonly now: () => number;
   private readonly publicOrigin: string;
   private readonly exchangeCode: typeof exchangePairingCode;
@@ -153,6 +156,7 @@ export class RemotePairingService {
     this.publicOrigin = options.publicOrigin ?? REMOTE_PAIRING_ORIGIN;
     if (this.publicOrigin !== REMOTE_PAIRING_ORIGIN) throw new Error('invalid_remote_pairing_origin');
     this.fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+    this.fetcherFor = options.fetcherFor ?? (() => this.fetcher);
     this.now = options.now ?? Date.now;
     this.exchangeCode = options.exchangeCode ?? exchangePairingCode;
     this.prepareAgent = options.prepareAgent ?? prepareAgentDevice;
@@ -338,7 +342,7 @@ export class RemotePairingService {
           code,
           deviceId: journal.deviceId,
           verifier: journal.verifier,
-          fetcher: this.fetcher,
+          fetcher: this.fetcherFor(journal.sub),
           now: this.now
         });
       } catch (error) {
@@ -364,7 +368,7 @@ export class RemotePairingService {
       } catch {
         this.runtime.delete(id);
         try {
-          await this.revoke(connection, this.fetcher);
+          await this.revoke(connection, this.fetcherFor(journal.sub));
           journal.phase = 'cancelled';
           journal.cleanupRequired = false;
           await this.options.journals.write(journal);
@@ -376,7 +380,7 @@ export class RemotePairingService {
       try {
         const existingKey = journal.renewal ? await this.options.renewals?.agentKey(journal.renewal) : undefined;
         try {
-          journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcher, existingKey);
+          journal.preparedAgent = await this.prepareAgent(connection, journal.deviceId, this.fetcherFor(journal.sub), existingKey);
         } catch (error) {
           // 404: espacios apagados, credencial no encontrada o carrera con una desactivación; no se
           // sabe cuál. La biblioteca personal no depende de espacios (SPEC: funciona sin la API de
@@ -394,7 +398,7 @@ export class RemotePairingService {
           const link = await this.startLink({
             connection,
             label: DEFAULT_PAIR_LABEL,
-            fetcher: this.fetcher
+            fetcher: this.fetcherFor(journal.sub)
           });
           runtime.link = link;
           journal.phase = 'approval';
@@ -433,7 +437,7 @@ export class RemotePairingService {
    */
   private async restartAfterWrongAccount(journal: RemotePairingJournal, runtime: RuntimePairing): Promise<void> {
     try {
-      await this.revoke(journal.connection!, this.fetcher);
+      await this.revoke(journal.connection!, this.fetcherFor(journal.sub));
       const { url, verifier } = await pairingUrl({
         lumbreOrigin: this.options.lumbreOrigin ?? DEFAULT_LUMBRE_ORIGIN,
         deviceId: journal.deviceId,
@@ -670,7 +674,7 @@ export class RemotePairingService {
       syncVaultId: recovered.syncVaultId,
       opaqueDeviceId: paired.device.opaqueDeviceId
     };
-    if (await this.registerDevice(paired, this.fetcher) !== 'ok') {
+    if (await this.registerDevice(paired, this.fetcherFor(journal.sub)) !== 'ok') {
       await this.cleanup(journal);
       throw new RemotePairingError('unavailable');
     }
@@ -736,7 +740,7 @@ export class RemotePairingService {
           code: journal.pairingCode,
           deviceId: journal.deviceId,
           verifier: journal.verifier,
-          fetcher: this.fetcher,
+          fetcher: this.fetcherFor(journal.sub),
           now: this.now
         });
         journal.pairingCode = undefined;
@@ -755,7 +759,7 @@ export class RemotePairingService {
     try { await link?.cancel(); } catch { /* Caduca en el relé. */ }
     if (journal.connection && journal.cleanupRequired) {
       try {
-        await this.revoke(journal.connection, this.fetcher);
+        await this.revoke(journal.connection, this.fetcherFor(journal.sub));
       } catch (error) {
         throw new RemotePairingError('unavailable',
           error instanceof RevokeError ? `cleanup_revoke_failed:${error.status}` : 'cleanup_revoke_failed');

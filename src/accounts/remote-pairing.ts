@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import type { Response, Router } from 'express';
 import type { HebraOAuthProvider } from '../oauth/provider';
 import { BackchannelError } from '../oauth/backchannel';
+import { withLumbreIdentity, type LumbreIdentity } from '../oauth/lumbre-identity';
 import {
   createRemotePairingRouter,
   RemotePairingJournalStore,
@@ -46,6 +47,8 @@ export interface OpenRemotePairingOptions {
   provider: HebraOAuthProvider;
   lumbreOrigin: string;
   fetcher?: Fetcher;
+  /** Identidad ante Lumbre (P14): `X-Hebra-Mcp-*` de cada cuenta, solo hacia su origen. */
+  lumbreIdentity?: LumbreIdentity | null;
 }
 
 export interface RemotePairingRuntime {
@@ -180,7 +183,8 @@ export async function openRemotePairing(options: OpenRemotePairingOptions): Prom
         throw error;
       }
     } },
-    lumbreOrigin: options.lumbreOrigin, fetcher: options.fetcher });
+    lumbreOrigin: options.lumbreOrigin, fetcher: options.fetcher,
+    fetcherFor: (sub) => withLumbreIdentity(options.fetcher, options.lumbreIdentity, sub) });
   await service.recover();
   options.provider.attachRemotePairing({
     async start(input, res: Response) {
@@ -199,7 +203,7 @@ export async function openRemotePairing(options: OpenRemotePairingOptions): Prom
         try {
           const paired = await readPairedSecrets(storeOf(account, services));
           if (!paired) return true;
-          const fetcher = options.fetcher ?? globalThis.fetch.bind(globalThis);
+          const fetcher = withLumbreIdentity(options.fetcher, options.lumbreIdentity, account.sub);
           const response = await fetcher(new URL(PROBE_PATH, paired.connection.apiOrigin), {
             redirect: 'error', cache: 'no-store', signal: AbortSignal.timeout(5_000),
             headers: { Authorization: `Bearer ${paired.connection.readToken}` }

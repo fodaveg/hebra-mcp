@@ -39,6 +39,7 @@ import { runUnpair } from '../pair/unpair';
 import { resolveDataDir } from '../privacy';
 import { openSecretStoreForMode, resolveSecretStoreMode, type SecretStore } from '../secrets';
 import { HttpConfigError, readHttpConfig } from '../http/config';
+import { lumbreIdentityFromEnv } from '../oauth/lumbre-identity';
 import { ServeHttpError, startServeHttp, type ServeHttpHandle } from '../http/serve-http';
 import {
   loadOAuthHttpAuth,
@@ -127,6 +128,7 @@ async function serveHttp(): Promise<void> {
       dataDir,
       secrets,
       multiuser: true,
+      lumbreIdentity: lumbreIdentityFromEnv(),
       config: readHttpConfig(),
       version,
       authConfigured: () => oauthHttpAuthConfigured(secrets),
@@ -177,6 +179,7 @@ async function removeAccountCommand(id: string | undefined, rest: string[]): Pro
     secrets,
     multiuser: true,
     maintenance: true,
+    lumbreIdentity: lumbreIdentityFromEnv(),
     config: { ...configured, listenHost: '127.0.0.1', port: 0 },
     version,
     authConfigured: () => oauthHttpAuthConfigured(secrets),

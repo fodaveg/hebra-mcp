@@ -22,6 +22,7 @@ import { readCapacityConfig } from '../accounts/capacity';
 import { revokeRemoteCredential } from '../pair/remote/revoke';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
+import { withLumbreIdentity, type LumbreIdentity } from '../oauth/lumbre-identity';
 import { openServeContext, WriterRequiredError, type OpenServeOptions, type ServeContext } from '../server/serve';
 import { AWAIT_ROUND_TIMEOUT_MS } from '../server/write-context';
 import { createHttpApp, type HttpAuth } from './app';
@@ -61,6 +62,8 @@ export interface StartServeHttpOptions
   secrets: SecretStore | null;
   config: HttpConfig;
   version: string;
+  /** Secreto y origen de Lumbre para las cabeceras `X-Hebra-Mcp-*` por cuenta (P14); solo multiusuario. */
+  lumbreIdentity?: LumbreIdentity | null;
   /** Tests: espera más corta a las peticiones en curso (`HTTP_DRAIN_TIMEOUT_MS`). */
   drainTimeoutMs?: number;
   /** Producción remota: difiere la apertura hasta conocer la cuenta autenticada. */
@@ -222,7 +225,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         const dataDir = accountDataDir(options.dataDir, account);
         const secrets = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
         const opened = await openServeContext({ dataDir, secrets,
-          fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
+          fetcher: withLumbreIdentity(options.fetcher, options.lumbreIdentity, activeRegistry.findById(account.id)?.sub),
+          instance: options.instance, syncIntervalMs: options.syncIntervalMs,
           writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
           assertActive: () => { activeRegistry.assertActive(account); },
           uploadLedger: pendingUploads.ledger(account) });
@@ -242,7 +246,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
       if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');
       remotePairing = await openRemotePairing({ dataDir: options.dataDir, registry: activeRegistry, provider: oauth.provider,
-        lumbreOrigin: oauth.lumbreOrigin, fetcher: options.fetcher });
+        lumbreOrigin: oauth.lumbreOrigin, fetcher: options.fetcher, lumbreIdentity: options.lumbreIdentity });
       removal = new AccountRemovalService({ dataDir: options.dataDir, registry: activeRegistry, contexts,
         oauth: oauth.provider, legacySecrets: options.secrets!,
         cleanupLegacyShared: (account) => remotePairing!.cleanupForSub(account.sub),
@@ -252,7 +256,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           if (!store) throw new Error('account_secrets_unavailable');
           const paired = await readPairedSecrets(store);
           if (!paired) throw new Error('account_pairing_unavailable');
-          await revokeRemoteCredential(paired.connection, options.fetcher);
+          await revokeRemoteCredential(paired.connection, withLumbreIdentity(options.fetcher, options.lumbreIdentity, account.sub));
         } });
       // Sin esto, a una persona revocada no se le ofrece renovar desde el conector (D22).
       remotePairing.attachAccountServices({ contexts, removal, legacySecrets: options.secrets! });
