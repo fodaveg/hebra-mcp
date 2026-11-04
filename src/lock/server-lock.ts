@@ -23,7 +23,7 @@
  * de tocar el fichero.
  */
 import { randomUUID } from 'node:crypto';
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, existsSync, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { registerServerBoot, serverBootIdFor } from './writer-lock';
@@ -75,4 +75,26 @@ export function acquireServerLock(dataDir: string, controlDir: string): ServerLo
       db.close();
     }
   };
+}
+
+export type DataRootGuard =
+  | { kind: 'single-account' }
+  | { kind: 'held'; lock: ServerLock }
+  | { kind: 'busy' };
+
+/**
+ * Para las órdenes que abren la biblioteca de un directorio de datos y pueden escribir
+ * (`serve` por stdio, los ficheros de trabajo, `pair`, `unpair`). Una orden en OTRO contenedor
+ * sobre el mismo volumen (`compose run`) también es PID 1: el PID de un `writer.lock` vivo del
+ * servidor no la distingue y lo trataría como huérfano, con dos escritores. Si el directorio es
+ * la raíz de un `serve-http` (tiene `control/server.lock`), la orden toma ese bloqueo como lo hace
+ * el servidor: ocupado = hay un servidor vivo y la orden no escribe; libre = ningún servidor y
+ * queda registrado su arranque, con lo que el `writer.lock` de uno caído se reconoce obsoleto.
+ * Un directorio de una sola cuenta en local (sin `server.lock`) no cambia.
+ */
+export function acquireDataRootGuard(dataDir: string): DataRootGuard {
+  const controlDir = join(dataDir, 'control');
+  if (!existsSync(join(controlDir, SERVER_LOCK_FILE))) return { kind: 'single-account' };
+  const lock = acquireServerLock(dataDir, controlDir);
+  return lock ? { kind: 'held', lock } : { kind: 'busy' };
 }

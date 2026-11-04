@@ -30,6 +30,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 // `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
 import { version } from '../../package.json';
 import { logEvent } from '../log/logger';
+import { acquireDataRootGuard, type ServerLock } from '../lock';
 import { requestAccountRemoval, rollbackControlSecrets } from '../accounts';
 import { PairError } from '../pair/errors';
 import { DEFAULT_LUMBRE_ORIGIN } from '../pair/lumbre';
@@ -87,8 +88,27 @@ async function openPairingSecretStore(dataDir: string): Promise<SecretStore> {
   return openSecretStoreForMode(resolveSecretStoreMode(), dataDir);
 }
 
+/** El bloqueo de raíz de la orden en curso; vive lo que el proceso. */
+let dataRootLock: ServerLock | null = null;
+
+/**
+ * Las órdenes que abren la biblioteca y pueden escribir (`serve`, ficheros de trabajo, `pair`,
+ * `unpair`) no corren a la vez que un `serve-http` sobre el mismo directorio de datos: lo
+ * impide `control/server.lock`, también desde otro contenedor (`compose run`). Un directorio de
+ * una sola cuenta en local no lo tiene y no cambia.
+ */
+function guardDataRoot(dataDir: string): void {
+  const guard = acquireDataRootGuard(dataDir);
+  if (guard.kind === 'held') dataRootLock = guard.lock;
+  if (guard.kind !== 'busy') return;
+  logEvent({ event: 'cli.data_root_busy' });
+  process.stderr.write('Hay un serve-http vivo sobre este directorio de datos (control/server.lock): esta orden escribe datos y no puede correr a la vez. Para el servicio o usa las herramientas del servidor.\n');
+  process.exit(1);
+}
+
 async function serve(): Promise<void> {
   const dataDir = resolveDataDir();
+  guardDataRoot(dataDir);
   const { ctx, instance, close } = await openServeContext({
     dataDir,
     secrets: await openServeSecretStore(dataDir)
@@ -238,6 +258,7 @@ async function interactive(
   dataDir: string,
   run: (secrets: SecretStore, terminal: ReturnType<typeof stdioTerminal>) => Promise<void>
 ): Promise<void> {
+  guardDataRoot(dataDir);
   const secrets = await openPairingSecretStore(dataDir);
   const terminal = stdioTerminal();
   try {
@@ -260,6 +281,7 @@ async function interactive(
  */
 async function workdir(subcommand: Parameters<typeof runWorkdirCommand>[0], rest: string[]): Promise<void> {
   const dataDir = resolveDataDir();
+  guardDataRoot(dataDir);
   const code = await runWorkdirCommand(
     subcommand,
     rest,

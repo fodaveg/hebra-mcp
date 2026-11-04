@@ -1979,6 +1979,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
 - Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
   se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
+  Aun así, las órdenes que abren la biblioteca y pueden escribir (`serve` por stdio, ficheros de trabajo, `pair`, `unpair`) toman `control/server.lock` cuando el directorio es la raíz de un `serve-http` (`acquireDataRootGuard`): con el servidor vivo, aunque sea en otro contenedor, salen con un mensaje claro y sin escribir. Un directorio de una sola cuenta en local no cambia.
 - `config.json` de privados vive en el volumen; se lee al arrancar y se relee cuando cambia, sin
   reiniciar (M5 de D16, §6.3).
 
