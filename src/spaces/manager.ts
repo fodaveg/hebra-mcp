@@ -76,6 +76,7 @@ export class AgentSpaceManager implements SpaceRouter {
   private readonly entries = new Map<string, Entry>();
   /** `serve-http` activa con `configure` el cierre por uso y la admisión por memoria. */
   private idleMs: number | null = null;
+  private openWaitMs = DEFAULT_OPEN_WAIT_MS;
   private clock: Clock = realClock;
   private admit?: (signal: AbortSignal) => Promise<AdmissionTicket>;
   private onClosed?: () => void;
@@ -95,8 +96,9 @@ export class AgentSpaceManager implements SpaceRouter {
   private accepting = true;
   private closed = false;
   readonly lifecycle: SpaceLifecycleControl = {
-    configure: ({ idleMs, clock, admit, onClosed }) => {
+    configure: ({ idleMs, openWaitMs, clock, admit, onClosed }) => {
       this.idleMs = idleMs;
+      this.openWaitMs = openWaitMs ?? DEFAULT_OPEN_WAIT_MS;
       this.clock = clock;
       this.admit = admit;
       this.onClosed = onClosed;
@@ -384,9 +386,9 @@ export class AgentSpaceManager implements SpaceRouter {
           this.onClosed?.();
         },
         resource: 'space',
-        waitMs: DEFAULT_OPEN_WAIT_MS + WAIT_BACKSTOP_MARGIN_MS,
+        waitMs: this.openWaitMs + WAIT_BACKSTOP_MARGIN_MS,
         waitTimeoutError: () =>
-          new ContextUnavailableError('open_failed', Math.ceil(DEFAULT_OPEN_WAIT_MS / 1000))
+          new ContextUnavailableError('open_failed', Math.ceil(this.openWaitMs / 1000))
       })
     };
     this.entries.set(key, entry);
