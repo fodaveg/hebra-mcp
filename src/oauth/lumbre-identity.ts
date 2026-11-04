@@ -41,9 +41,15 @@ function originOf(input: unknown): string | null {
   return null;
 }
 
+/** La forma exacta que Lumbre acepta en `X-Hebra-Mcp-Subject` (sin exigir versión del UUID). */
+const LUMBRE_SUBJECT = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
 /**
- * Envuelve `base` para la cuenta de `sub`. Sin identidad o sin `sub`, devuelve `base` sin tocar.
- * El `sub` va en minúsculas, igual que `hebraAccountIdOf`.
+ * Envuelve `base` para la cuenta de `sub`. Sin identidad, devuelve `base` sin tocar.
+ * El `sub` va en minúsculas, igual que `hebraAccountIdOf`, y solo si tiene la forma que valida
+ * Lumbre en `X-Hebra-Mcp-Subject` (UUID en minúsculas; cualquier otra cosa da 400). Un `sub`
+ * que no la tiene, como el `__legacy_unclaimed__` de un vínculo heredado sin reclamar, no manda
+ * NINGUNA de las dos cabeceras: Lumbre trata esa petición como la de antes de la identidad.
  */
 export function withLumbreIdentity(
   base: LumbreFetcher | undefined,
@@ -51,14 +57,15 @@ export function withLumbreIdentity(
   sub: string | null | undefined
 ): LumbreFetcher {
   const inner: LumbreFetcher = base ?? globalThis.fetch.bind(globalThis);
-  const subject = typeof sub === 'string' ? sub.toLowerCase() : '';
-  if (!identity || !subject || /[\r\n]/.test(subject)) return inner;
+  if (!identity) return inner;
+  const lowered = typeof sub === 'string' ? sub.toLowerCase() : '';
+  const subject = LUMBRE_SUBJECT.test(lowered) ? lowered : null;
   return (input, init) => {
     const headers = new Headers(init?.headers);
     // Lo que traiga el llamador nunca se reenvía: ni a Lumbre (manda el envoltorio) ni a otros.
     headers.delete(BACKCHANNEL_HEADER);
     headers.delete(SUBJECT_HEADER);
-    if (originOf(input) !== identity.origin) return inner(input, { ...init, headers });
+    if (!subject || originOf(input) !== identity.origin) return inner(input, { ...init, headers });
     headers.set(BACKCHANNEL_HEADER, identity.secret);
     headers.set(SUBJECT_HEADER, subject);
     return inner(input, { ...init, headers, redirect: 'error' });

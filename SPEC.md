@@ -2480,6 +2480,7 @@ espacios y el resto de su API) llevan `X-Hebra-Mcp-Backchannel` (el secreto de
 Lumbre reparta sus límites por persona y no por la IP única del conector. Solo las pone
 `src/oauth/lumbre-identity.ts`.
 
+- Solo con un `sub` en la forma que valida Lumbre (UUID en minúsculas, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`). Con otro, como el `__legacy_unclaimed__` de un vínculo heredado sin reclamar, no viaja ninguna de las dos.
 - Solo al origen exacto de `LUMBRE_APP_ORIGIN`: a cualquier otro no viaja ninguna de las dos, y las que
   traiga el llamador se descartan.
 - Con `redirect: 'error'`: ninguna redirección puede llevar el secreto a otro origen.
