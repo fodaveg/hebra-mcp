@@ -193,7 +193,7 @@ async function removeAccountCommand(id: string | undefined, rest: string[]): Pro
 
 function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | HttpConfigError): string {
   if (error instanceof WriterRequiredError) {
-    return 'serve-http tiene que ser el escritor único y otro proceso de hebra-mcp tiene writer.lock.';
+    return 'Ya hay otro serve-http vivo sobre este directorio de datos (control/server.lock).';
   }
   return error.message;
 }

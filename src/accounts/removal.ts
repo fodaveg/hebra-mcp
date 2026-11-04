@@ -1,6 +1,6 @@
-import { lstat, mkdir, readdir, readFile, rm, rmdir } from 'node:fs/promises';
+import { lstat, mkdir, readdir, rm, rmdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { WriterLock } from '../lock/writer-lock';
+import { classifyWriterLock, WriterLock } from '../lock/writer-lock';
 import type { AccountContexts } from './contexts';
 import { accountDataDir, type AccountRegistry } from './registry';
 import { eraseLegacyAccountData } from './legacy-inventory';
@@ -95,16 +95,15 @@ async function lockAccountLibraries(directory: string): Promise<{
   const protectedPaths = new Set<string>();
   const directories = new Set<string>();
   const acquire = async (path: string): Promise<void> => {
-    // WriterLock permits replacement by the same PID for restart fixtures. Removal
-    // must also respect a library still owned by another context in this process.
-    try {
-      const current = JSON.parse(await readFile(join(path, 'writer.lock'), 'utf8')) as { pid?: unknown };
-      if (current.pid === process.pid) throw new Error('account_writer_busy');
-    } catch (error) {
-      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
+    // Never act on a writer of this boot (another context in this process) or of another
+    // live process. A lock left by an earlier boot is stale even with the same PID, so a
+    // removal interrupted by SIGKILL can finish; tryAcquire clears it.
+    const owner = classifyWriterLock(path);
+    if (owner === 'this-boot' || owner === 'other-process') throw new Error('account_writer_busy');
     const lock = new WriterLock({ dataDir: path });
     if (!lock.tryAcquire()) throw new Error('account_writer_busy');
+    // The shutdown waits for running removals: a signal must not free the mutex mid-erase.
+    lock.deferSignalRelease();
     locks.push(lock);
     protectedPaths.add(lock.path);
     if (path !== directory) directories.add(path);
