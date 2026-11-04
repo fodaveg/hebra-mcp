@@ -173,7 +173,9 @@ del directorio de datos, en 0600 y con escritura atómica: solo pensado para el
 contenedor Linux del conector remoto (`SPEC.md` §12.3), donde no hay Secret Service y
 `@napi-rs/keyring` caería en silencio a keyutils, que no persiste tras reiniciar. Nunca
 es un fallback automático: hay que pedirlo explícitamente, y un valor que no sea `file`
-ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa.
+ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa. En ese modo,
+los secretos globales del conector viven aparte, en `control/secrets.json` (D22,
+`deploy/README-deploy.md`).
 
 ## Conector remoto de Claude y Codex (`serve-http`)
 

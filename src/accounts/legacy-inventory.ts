@@ -1,9 +1,10 @@
 import { readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { SECRET_KEYS, type SecretStore } from '../secrets';
+import { CONTROL_SECRET_KEYS, SECRET_KEYS, type SecretStore } from '../secrets';
+import { accountControlDir } from './control-ipc';
 
 /** Cambiar la clasificación exige una migración/revisión explícita antes de borrar. */
-export const LEGACY_INVENTORY_VERSION = 1;
+export const LEGACY_INVENTORY_VERSION = 2;
 
 const PERSONAL_ENTRIES = new Set([
   'library.sqlite', 'library.sqlite-shm', 'library.sqlite-wal',
@@ -13,16 +14,35 @@ const PERSONAL_ENTRIES = new Set([
   'writer.lock', 'writer.sock', 'agent-key-lock'
 ]);
 
+/** `secrets.json` es de la persona de `legacy-root`, pero el fichero se queda: su retirada
+ *  borra las claves de `SECRET_KEYS`, y los secretos globales viven en `control/secrets.json`
+ *  (D22). Si una vuelta atrás los hubiera dejado también aquí, tampoco son suyos. */
 const GLOBAL_ENTRIES = new Set([
   'accounts', 'control', 'accounts-v1.json', 'oauth-tokens.json', 'oauth-revocations-v2.json',
   'oauth-logout-jtis.json', 'secrets.json', 'remote-pairing-v1'
 ]);
+
+/** Contenido de `control/`, global entero y nunca borrado: tampoco aquí se presume nada por
+ *  la ubicación, y un fichero nuevo tiene que clasificarse antes de poder retirar a nadie. */
+const CONTROL_ENTRIES = new Set(['writer.lock', 'accounts.sock', 'secrets.json']);
 
 function globalTemporary(name: string): boolean {
   return /^\.(?:accounts-v1|oauth-tokens|oauth-revocations-v2|oauth-logout-jtis)\.json\..+\.tmp$/.test(name);
 }
 function personalEntry(name: string): boolean {
   return PERSONAL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name);
+}
+function controlEntry(name: string): boolean {
+  return CONTROL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name) || /^writer\.lock\.stale-.+$/.test(name);
+}
+
+async function controlEntries(dataDir: string): Promise<string[]> {
+  try {
+    return await readdir(accountControlDir(dataDir));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
+  }
 }
 
 export interface LegacyInventoryOptions {
@@ -36,13 +56,21 @@ export interface LegacyInventoryOptions {
 
 /**
  * Inventario cerrado del `legacy-root`. Clasifica todo antes de tocar nada: una entrada
- * desconocida detiene la retirada y conserva los datos para ampliar el inventario.
+ * o una clave de `secrets.json` desconocida detiene la retirada y conserva los datos para
+ * ampliar el inventario.
  */
 export async function eraseLegacyAccountData(options: LegacyInventoryOptions): Promise<void> {
   const entries = await readdir(options.dataDir);
   const unknown = entries.filter((name) => !personalEntry(name) && !GLOBAL_ENTRIES.has(name) &&
     !globalTemporary(name));
   if (unknown.length > 0) throw new Error('legacy_inventory_unknown');
+  if ((await controlEntries(options.dataDir)).some((name) => !controlEntry(name))) {
+    throw new Error('legacy_inventory_unknown');
+  }
+  const classified = new Set<string>([...SECRET_KEYS, ...CONTROL_SECRET_KEYS]);
+  if (((await options.secrets.keys?.()) ?? []).some((key) => !classified.has(key))) {
+    throw new Error('legacy_inventory_unknown');
+  }
 
   await options.cleanupShared?.();
   if (options.secrets.deleteKeysAndTemporaryFiles) {

@@ -30,7 +30,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 // `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
 import { version } from '../../package.json';
 import { logEvent } from '../log/logger';
-import { requestAccountRemoval } from '../accounts';
+import { requestAccountRemoval, rollbackControlSecrets } from '../accounts';
 import { PairError } from '../pair/errors';
 import { DEFAULT_LUMBRE_ORIGIN } from '../pair/lumbre';
 import { DEFAULT_PAIR_LABEL, runPair } from '../pair/pair';
@@ -61,6 +61,7 @@ const USAGE = [
   '  hebra-mcp serve-http',
   '  hebra-mcp account-remove <account-id>',
   '  hebra-mcp oauth-revoke-all',
+  '  hebra-mcp control-secrets-rollback',
   ...WORKDIR_USAGE
 ].join('\n');
 
@@ -191,6 +192,25 @@ async function removeAccountCommand(id: string | undefined, rest: string[]): Pro
   process.exit(0);
 }
 
+/**
+ * Vuelta atrás a una imagen que espera los secretos globales en `secrets.json` (D22,
+ * `deploy/README-deploy.md`): con el servicio parado, sin borrar `control/secrets.json`.
+ * Un error sale por `main().catch` con su `code`, sin valores.
+ */
+async function controlSecretsRollbackCommand(rest: string[]): Promise<void> {
+  if (rest.length > 0) {
+    process.stderr.write(`${USAGE}\n`);
+    process.exit(1);
+  }
+  if (resolveSecretStoreMode() !== 'file') {
+    process.stderr.write('control-secrets-rollback solo aplica con HEBRA_MCP_SECRET_STORE=file.\n');
+    process.exit(1);
+  }
+  const report = await rollbackControlSecrets(resolveDataDir());
+  process.stdout.write(`${JSON.stringify(report)}\n`);
+  process.exit(0);
+}
+
 function serveHttpFailureMessage(error: ServeHttpError | WriterRequiredError | HttpConfigError): string {
   if (error instanceof WriterRequiredError) {
     return 'serve-http tiene que ser el escritor único y otro proceso de hebra-mcp tiene writer.lock.';
@@ -265,6 +285,9 @@ async function main(): Promise<void> {
       return;
     case 'account-remove':
       await removeAccountCommand(rest[0], rest.slice(1));
+      return;
+    case 'control-secrets-rollback':
+      await controlSecretsRollbackCommand(rest);
       return;
     case 'oauth-set-secret':
       await oauthCommand(() => runOAuthSetSecret());

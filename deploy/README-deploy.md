@@ -42,6 +42,7 @@ no prueban publicación, login real ni acceso a la biblioteca en producción.
 | `serve-http` | Subcomando que arranca el transporte HTTP | — | `src/server/main.ts` |
 | `oauth-set-secret` | Comando retirado: falla con mensaje de método sustituido | — | `src/oauth/cli.ts` |
 | `oauth-revoke-all` | Subcomando que revoca todos los tokens vigentes | — | `src/oauth/cli.ts` |
+| `control-secrets-rollback` | Copia los secretos globales de vuelta a `secrets.json` sin borrar `control/secrets.json`, con el servicio parado. Ver «Secretos globales en `control/secrets.json`» | — | `src/accounts/control-secrets.ts` |
 | `/healthz` | Ruta de liveness, sin autenticación, responde **204 sin cuerpo** | — | `src/http/app.ts` |
 | `/mcp` | Ruta del transporte Streamable HTTP (`POST`; `GET`/`DELETE` dan 405) | — | `src/http/app.ts` |
 | `HEBRA_MCP_DATA_DIR` | Directorio de datos: SQLite, privados, secretos, `oauth-revocations-v2.json` y `oauth-tokens.json` | ninguno (obligatorio en el contenedor) | `src/privacy/data-dir.ts` |
@@ -225,11 +226,12 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    -a` como el resto del fichero, y recrear el contenedor. Las dos piezas de
    Lumbre (`identityProvider` en
    `/requests` y `sumego/exchange`) tienen que estar desplegadas antes de pasar
-   a `sumego`. Con cliente configurado, el primer arranque crea en el almacén
-   de secretos (`HEBRA_MCP_SECRET_STORE=file`, dentro de `/data`) la clave
-   `hebra-mcp-sumego-refresh-key`, con la que se cifran los refresh de Sumego
-   de `oauth-tokens.json`. Si se pierde, las familias de Sumego se cortan en su
-   siguiente renovación horaria y hay que volver a conectar.
+   a `sumego`. Con cliente configurado, el primer arranque crea en
+   `control/secrets.json` (dentro de `/data`, con
+   `HEBRA_MCP_SECRET_STORE=file`) la clave `hebra-mcp-sumego-refresh-key`, con
+   la que se cifran los refresh de Sumego de `oauth-tokens.json`. Si se pierde,
+   las familias de Sumego se cortan en su siguiente renovación horaria y hay
+   que volver a conectar.
 
    Antes de la primera migración D21, crear una copia cifrada consistente del
    estado monousuario y ensayar su restauración en un entorno aislado. Después
@@ -381,6 +383,74 @@ desplegados el catálogo y los grants del relay. Además hacen falta, a la vez,
 la membresía vigente, el grant del recurso y el permiso del agente de esa
 persona. Pertenecer a una organización no abre bibliotecas personales. Si la
 ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
+
+## Secretos globales en `control/secrets.json` (D22, SPEC.md §12.10)
+
+Los bearers de Lumbre de todas las cuentas, sus pendientes y la clave de refresh
+de Sumego (`hebra-mcp-oauth-grants`, `hebra-mcp-oauth-pending`,
+`hebra-mcp-sumego-refresh-key`) viven en `control/secrets.json` (0600, directorio
+0700). El `secrets.json` de la raíz conserva solo el emparejado de `legacy-root`.
+Retirar a esa persona borra sus claves de ese fichero y nunca toca `control/`.
+
+**Hacia delante no hay nada que hacer.** `serve-http` migra al arrancar, antes
+de atender tráfico y con el bloqueo de control tomado. Copia los campos con
+escritura atómica, comprueba lo escrito, lo lleva a disco y solo entonces los
+retira de `secrets.json`. No cambia ningún valor, así que nadie vuelve a emparejar
+y los refresh ya emitidos siguen descifrándose. Una caída en cualquier punto se
+reanuda en el arranque siguiente; repetirla sin nada que mover no escribe. El log
+registra `control_secrets.migrated` con el número de campos, nunca sus valores.
+Solo se migra `HEBRA_MCP_SECRET_STORE=file`; con el llavero (uso local) estos
+secretos siguen en sus entradas.
+
+**Si no arranca**, sale con 1 y escribe en stderr un JSON con el `code`. En los
+tres casos no ha retirado nada:
+
+| `code` | Qué significa | Qué hacer |
+|---|---|---|
+| `control_secrets_conflict` | `secrets.json` y `control/secrets.json` tienen un valor distinto para el mismo campo. Lo normal es que se arrancara una imagen anterior sin la orden de abajo, que crea concesiones vacías y otra clave de refresh | No elegir fuente sin revisar. Con copia de los dos ficheros, comprobar cuál conserva las familias de `oauth-tokens.json` y quitar los campos sobrantes de `secrets.json`. Sin ese análisis, el conector sigue cerrado |
+| `control_secrets_corrupt` | `control/secrets.json` no se puede interpretar. No se trata como vacío porque eso cortaría a todas las personas | Corregir el fichero; la imagen no regenera nada mientras siga así |
+| `control_secrets_source_corrupt` | `secrets.json` no se puede interpretar y podía ser la única copia (aún sin migrar o tras una vuelta atrás) | Corregir el fichero antes de arrancar |
+
+Las escrituras atómicas no producen estos estados por sí solas: apuntan a una
+intervención externa o a un fallo de disco. Ninguno se resuelve restaurando una
+instantánea por encima de escrituras o revocaciones posteriores (§12.10).
+
+### Volver a una imagen anterior a esta migración
+
+Una imagen anterior lee estos campos de `secrets.json`. Si arranca sin ellos, no
+encuentra los bearers y genera otra clave de refresh: las personas conectadas
+pierden la sesión aunque `control/secrets.json` siga intacto. Por eso **la orden
+va antes de arrancarla**, y se lanza con la imagen nueva, que es la que la
+conoce:
+
+```bash
+# Desde $HEBRA_MCP_DEST, en el servidor. Primero parar y comprobar que está parado:
+docker compose --env-file deploy/.env -f deploy/compose.yml stop mcp
+docker compose --env-file deploy/.env -f deploy/compose.yml ps --status running
+
+docker compose --env-file deploy/.env -f deploy/compose.yml run --rm --no-deps mcp \
+  node dist/cli.mjs control-secrets-rollback
+```
+
+Imprime `{"restored":[...]}` con los nombres de los campos, sin valores. No borra
+`control/secrets.json` y deja en él una marca que dice que `secrets.json` vuelve a
+ser la fuente vigente. Se puede repetir: no pisa lo que ya haya en `secrets.json`
+tras esa marca. Después se arranca la imagen anterior siguiendo la advertencia de
+«Publicar una versión nueva»: solo una versión que entienda el registro
+multiusuario puede volver a servir tráfico.
+
+El bloqueo de control no protege entre contenedores, porque cada uno tiene su
+propio espacio de PID: por eso el paso de parar y comprobar es obligatorio.
+
+Mientras la imagen anterior atienda, `secrets.json` es la fuente vigente y
+`control/secrets.json` queda atrasado, con los bearers revocados desde entonces
+todavía dentro. Conservarlo cifrado en el mismo volumen, sin copiarlo aparte ni
+restaurarlo a mano. Al volver a publicar la imagen nueva no hay que lanzar nada:
+la migración ve la marca, gana lo que escribió la imagen anterior, también sus
+revocaciones, y retira otra vez los campos de `secrets.json`.
+
+Esta orden solo cubre estos tres campos. Antes de volver atrás, comprobar en las
+notas del candidato si cambió también el formato de otro estado del volumen.
 
 ## Cambiar el fragmento de Caddy
 
