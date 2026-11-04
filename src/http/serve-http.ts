@@ -26,6 +26,7 @@ import { openServeContext, WriterRequiredError, type OpenServeOptions, type Serv
 import { AWAIT_ROUND_TIMEOUT_MS } from '../server/write-context';
 import { createHttpApp, type HttpAuth } from './app';
 import type { HttpConfig } from './config';
+import { drainWithin } from './shutdown-budget';
 
 /** No arranca: sin autenticación configurada. El mensaje dice qué hacer, sin valores. */
 export class ServeHttpError extends Error {
@@ -50,7 +51,8 @@ export class ServeHttpError extends Error {
  * (`AWAIT_ROUND_TIMEOUT_MS`, 10 s), por si alguna espera de dentro de una petición no
  * pasara por ese corte. Las dos esperas no se suman: la de ronda va dentro de esta.
  * Después, `serve.close()` espera a la ronda en vuelo (hasta unos 30 s con el relé
- * colgado) y vacía la cola: 12 + 30 caben en el `stop_grace_period` del contenedor
+ * colgado) y vacía la cola. Presupuesto completo en `shutdown-budget.ts`: 12 + 5 de ronda
+ * final (`SHUTDOWN_ROUND_WAIT_MS`) + 30 = 47 s caben en el `stop_grace_period` del contenedor
  * (`deploy/compose.yml`, 50 s).
  */
 export const HTTP_DRAIN_TIMEOUT_MS = AWAIT_ROUND_TIMEOUT_MS + 2_000;
@@ -187,9 +189,9 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     void job.finally(() => removalJobs.delete(job)).catch(() => undefined);
     return job;
   };
-  const drainRemovalJobs = async (): Promise<void> => {
-    while (removalJobs.size > 0) await Promise.allSettled([...removalJobs]);
-  };
+  // `revokeDevice` es una llamada de red: sin tope, un relé colgado retendría el apagado hasta el
+  // SIGKILL. La retirada que no acabó se reanuda tras reiniciar (`AccountRemovalService.resumePending`).
+  const drainRemovalJobs = (ms: number): Promise<boolean> => drainWithin(() => removalJobs, ms);
   try {
     // El modo monousuario conserva el orden de robustez histórico: toma el writer lock
     // antes de recuperar OAuth. Producción multiusuario difiere la apertura de cada cuenta
@@ -269,6 +271,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
             const account = activeRegistry.findById(ref.id);
             return account?.state === 'active' && account.generation === ref.generation;
           },
+          accountRenewing: (id) => activeRegistry.findById(id)?.renewing !== undefined,
           currentRef: (id) => {
             const account = activeRegistry.findById(id);
             return account?.state === 'active' ? { id: account.id, generation: account.generation } : null;
@@ -293,7 +296,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   } catch (error) {
     acceptingRemovals = false;
     await controlServer?.close();
-    await drainRemovalJobs();
+    await drainRemovalJobs(options.drainTimeoutMs ?? HTTP_DRAIN_TIMEOUT_MS);
     if (contexts) await contexts.close();
     else await serve?.close();
     serverLock?.release();
@@ -317,6 +320,9 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
       closing ??= (async () => {
         acceptingRemovals = false;
         const sweepStopped = sweep?.stop();
+        const drainMs = options.drainTimeoutMs ?? HTTP_DRAIN_TIMEOUT_MS;
+        // Las retiradas drenan en paralelo con las peticiones, dentro del mismo plazo.
+        const removalsDrained = drainRemovalJobs(drainMs);
         // Primero, que ninguna escritura en curso siga esperando su ronda: la respuesta
         // sale ya (con `sync: "pending"` donde lo haya).
         if (contexts) contexts.beginShutdown();
@@ -327,13 +333,13 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         const closed = wasListening
           ? new Promise<void>((resolve) => server.close(() => resolve()))
           : Promise.resolve();
-        const drained = await inFlight.idle(options.drainTimeoutMs ?? HTTP_DRAIN_TIMEOUT_MS);
+        const drained = await inFlight.idle(drainMs);
         if (wasListening) server.closeAllConnections();
         await closed;
         logEvent({ event: 'serve_http.closed', drained });
         await sweepStopped;
         await controlServer?.close();
-        await drainRemovalJobs();
+        await removalsDrained;
         if (contexts) await contexts.close();
         else await serve?.close();
         serverLock?.release();

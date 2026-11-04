@@ -52,6 +52,12 @@ export const STARTUP_READ_WAIT_MS = 10_000;
  * nada, porque la escritura ya está en la SQLite y la lista ya la nombra.
  */
 export const CLOSE_ROUND_WAIT_MS = 10_000;
+/**
+ * La misma espera cuando el proceso se apaga: 12 s de drenaje HTTP + 5 + 30 de `stop()` = 47 s
+ * caben en los 50 s de `stop_grace_period`. Lo que no suba queda en la SQLite y en la lista
+ * durable, y el barrido lo recoge al arrancar.
+ */
+export const SHUTDOWN_ROUND_WAIT_MS = 5_000;
 
 /**
  * Subidas que un reintento aún puede sacar adelante: las pendientes menos los registros que el
