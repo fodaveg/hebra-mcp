@@ -250,7 +250,8 @@ export class AgentSpaceManager implements SpaceRouter {
       const live = new Set(result.spaces.map((item) => this.nameKey(item)));
       for (const key of [...this.names.keys()]) if (!live.has(key)) this.names.delete(key);
       return result.spaces;
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
       throw new ToolError('space_access_denied');
     }
   }
@@ -319,7 +320,9 @@ export class AgentSpaceManager implements SpaceRouter {
         vaultKey
       });
       return remember(meta?.name ?? null);
-    } catch {
+    } catch (error) {
+      // Un 429 del relé no es un fallo del nombre: no se recuerda como ausente.
+      if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
       return remember(null);
     } finally {
       own?.fill(0);

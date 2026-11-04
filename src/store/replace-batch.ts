@@ -614,7 +614,7 @@ export class ReplaceBatch {
     const afterLastDone = (fallback: { id: string; inclusive: boolean }): { id: string; inclusive: boolean } =>
       lastDone === null ? fallback : { id: lastDone, inclusive: false };
     let session: GrepBodiesSession | null = null;
-    const worker = pattern.literal ? null : await RegexReplaceWorker.start(re, parts);
+    const worker = pattern.literal ? null : await RegexReplaceWorker.start(re, parts, this.port);
     // El plazo cuenta desde el primer cuerpo leído, como en `hebra_grep`.
     let deadline = Infinity;
     try {

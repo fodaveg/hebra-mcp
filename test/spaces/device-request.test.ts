@@ -39,4 +39,32 @@ describe('AgentDevice.request', () => {
     await device.request('/x');
     expect(contentType).toBeNull();
   });
+
+  it('un 429 del relé es "no disponible" con el Retry-After de Lumbre, no una denegación', async () => {
+    const device = new AgentDevice(paired, new MemorySecretStore(), async () =>
+      new Response('{}', { status: 429, headers: { 'retry-after': '17' } })
+    );
+    vi.spyOn(device, 'assertPairing').mockResolvedValue();
+    await expect(device.request('/x')).rejects.toMatchObject({
+      code: 'space_unavailable',
+      extra: { reason: 'rate_limited', retryAfterSeconds: 17 }
+    });
+  });
+
+  it('un 429 sin Retry-After válido propone un plazo por defecto', async () => {
+    const device = new AgentDevice(paired, new MemorySecretStore(), async () =>
+      new Response('{}', { status: 429, headers: { 'retry-after': 'mañana' } })
+    );
+    vi.spyOn(device, 'assertPairing').mockResolvedValue();
+    await expect(device.request('/x')).rejects.toMatchObject({
+      code: 'space_unavailable',
+      extra: { reason: 'rate_limited', retryAfterSeconds: 5 }
+    });
+  });
+
+  it('un 403 sigue siendo space_access_denied', async () => {
+    const device = new AgentDevice(paired, new MemorySecretStore(), async () => new Response('{}', { status: 403 }));
+    vi.spyOn(device, 'assertPairing').mockResolvedValue();
+    await expect(device.request('/x')).rejects.toMatchObject({ code: 'space_access_denied' });
+  });
 });

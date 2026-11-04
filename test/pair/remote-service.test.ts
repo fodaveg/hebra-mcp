@@ -538,6 +538,30 @@ describe('RemotePairingService', () => {
     expect((await journals.read(started.id))?.phase).toBe('approval');
   });
 
+  it('un código válido de otra cuenta cuenta como rechazo: a los 5 cierra la transacción y suma por persona', async () => {
+    const revoke = vi.fn(async () => undefined);
+    const exchangeCode = vi.fn(async () => CONNECTION);
+    const service = createService({ link: fakeLink(recoveryCode, []), revoke, exchangeCode,
+      agentAccountId: () => hebraAccountIdOf('sumego|otra') });
+    const started = await service.start(startInput());
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(started.id, await currentAuth(service, started), 'code'))
+        .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'wrong_lumbre_account' });
+    }
+    expect(exchangeCode).toHaveBeenCalledTimes(5);
+    expect(await journals.read(started.id)).toBeNull();
+    // Y suman al contador de la persona: otra transacción de 5 llega a 10 y la siguiente se bloquea.
+    const second = await service.start(startInput());
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await expect(service.receiveCredential(second.id, await currentAuth(service, second), 'code'))
+        .rejects.toMatchObject({ code: attempt === 4 ? 'too_many_codes' : 'wrong_lumbre_account' });
+    }
+    const third = await service.start(startInput());
+    await expect(service.receiveCredential(third.id, auth(third, third.formToken), 'code'))
+      .rejects.toMatchObject({ code: 'too_many_codes' });
+    expect(exchangeCode).toHaveBeenCalledTimes(10);
+  });
+
   it('si no se puede revocar la credencial de la otra cuenta, queda pendiente sin atascar el login', async () => {
     const revoke = vi.fn().mockRejectedValue(new RevokeError(503));
     const service = createService({ link: fakeLink(recoveryCode, []), revoke,
@@ -659,6 +683,30 @@ describe('RemotePairingService', () => {
         .rejects.toMatchObject({ code: 'loss_unconfirmed' });
       expect(await service.previewOf(started.id)).toMatchObject({ pendingWrites: 5 });
       expect(set.retire).not.toHaveBeenCalled();
+    });
+
+    it('si la vista previa dio 0 y al confirmar hay escrituras, pide la casilla y no retira nada', async () => {
+      let pending: number | null = 0;
+      const set = renewals({
+        target: async () => ({ id: 'cuenta-david', generation: 3, accountId: RENEWAL_ACCOUNT, syncVaultId: 'ee'.repeat(16) }),
+        pendingWrites: vi.fn(async () => pending),
+        retire: vi.fn(async () => undefined)
+      });
+      const publish = vi.fn(async () => ({ id: 'cuenta-nueva', generation: 1 }));
+      const service = createService({ link: fakeLink(recoveryCode, []), renewals: set, publish, agentAccountId: () => RENEWAL_ACCOUNT });
+      const started = await service.start({ ...startInput(), renew: true });
+      await service.receiveCredential(started.id, auth(started, started.formToken), 'code');
+      expect(await service.poll(started.id, await currentAuth(service, started)))
+        .toMatchObject({ kind: 'preview', preview: { pendingWrites: 0 } });
+      pending = 4;
+      await expect(service.confirm(started.id, await currentAuth(service, started)))
+        .rejects.toMatchObject({ code: 'loss_unconfirmed' });
+      expect(set.retire).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      // La página vuelve a enseñar el recuento nuevo, y con la casilla termina.
+      expect(await service.previewOf(started.id)).toMatchObject({ pendingWrites: 4 });
+      await expect(service.confirm(started.id, await currentAuth(service, started), { acknowledgeLoss: true }))
+        .resolves.toMatchObject({ kind: 'confirmed' });
     });
 
     it('si retirar la cuenta anterior falla, revoca la nueva y no da de alta nada', async () => {

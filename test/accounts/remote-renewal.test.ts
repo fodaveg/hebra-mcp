@@ -199,16 +199,16 @@ describe('renovación con estado real', () => {
     it('desactivado (401), marca, reactivado: una ronda correcta del runner nuevo la levanta', () => {
       const pairing = new PairingRevocation();
       // Runner viejo: el relé dio 401 (agente desactivado) y el contexto se cerró.
-      const detachOld = pairing.attachRelay(OLD_CREDENTIAL, () => true, () => false);
+      const detachOld = pairing.attachRelay(OLD_CREDENTIAL, () => true, () => 0);
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
       detachOld();
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
       // Reabrir no borra la marca: el runner nuevo todavía no ha hablado con el relé.
-      let ok = false;
-      const detachNew = pairing.attachRelay(OLD_CREDENTIAL, () => false, () => ok);
+      let okRounds = 0;
+      const detachNew = pairing.attachRelay(OLD_CREDENTIAL, () => false, () => okRounds);
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
       // Reactivado en Hebra: la siguiente ronda sale bien.
-      ok = true;
+      okRounds = 1;
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
       detachNew();
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
@@ -218,7 +218,7 @@ describe('renovación con estado real', () => {
       const pairing = new PairingRevocation();
       pairing.markRevoked(OLD_CREDENTIAL);
       pairing.markRevoked(NEW_CREDENTIAL);
-      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => true);
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => 1);
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
       expect(pairing.isRevoked(NEW_CREDENTIAL)).toBe(true);
     });
@@ -226,8 +226,33 @@ describe('renovación con estado real', () => {
     it('un runner que no ha tenido una ronda correcta no levanta la marca', () => {
       const pairing = new PairingRevocation();
       pairing.markRevoked(OLD_CREDENTIAL);
-      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => false);
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => 0);
       expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+    });
+
+    it('una ronda correcta ANTERIOR a la marca no la borra; la siguiente sí', () => {
+      const pairing = new PairingRevocation();
+      let okRounds = 2;
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => okRounds);
+      // Lumbre dice 410 con el runner abierto, que ya había tenido rondas correctas.
+      pairing.markRevoked(OLD_CREDENTIAL);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      okRounds = 3;
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
+    });
+
+    it('cerrar el contexto con una ronda correcta anterior a la marca no la borra', () => {
+      const pairing = new PairingRevocation();
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => 4)();
+      pairing.markRevoked(OLD_CREDENTIAL);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      // Un runner nuevo empieza de cero: su primera ronda correcta es posterior a la marca.
+      let okRounds = 0;
+      pairing.attachRelay(OLD_CREDENTIAL, () => false, () => okRounds);
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(true);
+      okRounds = 1;
+      expect(pairing.isRevoked(OLD_CREDENTIAL)).toBe(false);
     });
   });
 

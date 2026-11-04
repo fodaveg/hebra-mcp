@@ -153,7 +153,7 @@ export function bindPairingRevocation(opened: ServeContext, pairing: PairingRevo
     return (runner ?? lastRunner)?.revoked ?? false;
   };
   const detachRelay = pairing.attachRelay(credentialId, revoked,
-    () => (opened.instance.syncRunner ?? lastRunner)?.lastRoundOk ?? false);
+    () => (opened.instance.syncRunner ?? lastRunner)?.okRounds ?? 0);
   opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
   return { ...opened, close: async () => {
     revoked();

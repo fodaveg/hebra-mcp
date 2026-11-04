@@ -227,9 +227,12 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     // Si falla se borra, para que el reintento del ciclo de vida repita lo que quedó sin hacer
     // (cada paso es idempotente) en vez de recibir el mismo rechazo para siempre.
     closing ??= (async () => {
-      await uploadLedger?.settleAll();
-      await spaces?.close();
-      await instance.close();
+      await closeServeResources({
+        shuttingDown: instance.processShuttingDown,
+        settle: uploadLedger ? () => uploadLedger.settleAll() : undefined,
+        spaces,
+        instance
+      });
     })().catch((error: unknown) => {
       closing = null;
       throw error;
@@ -276,4 +279,27 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     write
   };
   return { ctx, instance, linked: linked !== null, close };
+}
+
+/**
+ * Cierra lo abierto de un contexto. Primero lo que debe ir antes: la ronda final de todo lo que
+ * sube (`settle`). Después, en un cierre normal, los espacios y la biblioteca personal en serie.
+ * Con el proceso apagándose (`beginShutdown`), a la vez: en serie, 12 s de espacios + 35 + 35 s de
+ * la biblioteca no caben en los 47 s de `shutdown-budget.ts` ni en el `stop_grace_period`; en
+ * paralelo dura lo del más lento. Si uno falla, el otro termina igualmente y sale el primer error.
+ */
+export async function closeServeResources(parts: {
+  shuttingDown: boolean;
+  settle?: () => Promise<void>;
+  spaces?: { close(): Promise<void> };
+  instance: { close(): Promise<void> };
+}): Promise<void> {
+  await parts.settle?.();
+  if (!parts.shuttingDown) {
+    await parts.spaces?.close();
+    await parts.instance.close();
+    return;
+  }
+  const results = await Promise.allSettled([parts.spaces?.close(), parts.instance.close()]);
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
 }

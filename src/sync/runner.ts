@@ -276,6 +276,7 @@ export class SyncRunner implements SyncStatusSource {
   private timer: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
   private revokedFlag = false;
+  private okRoundCount = 0;
   private lastRound: { at: number; result: LibrarySyncResultCode } | null = null;
   private readonly firstRound: Promise<void>;
   private resolveFirstRound!: () => void;
@@ -360,9 +361,9 @@ export class SyncRunner implements SyncStatusSource {
     return this.revokedFlag;
   }
 
-  /** ¿La última ronda de ESTE runner terminó bien? Un runner nuevo no arrastra el valor anterior. */
-  get lastRoundOk(): boolean {
-    return this.lastRound?.result === 'ok';
+  /** Rondas correctas de ESTE runner hasta ahora: un contador, no un reloj. */
+  get okRounds(): number {
+    return this.okRoundCount;
   }
 
   /** Formato incompatible visto por la última ronda: se puede bajar, nunca subir. */
@@ -461,6 +462,7 @@ export class SyncRunner implements SyncStatusSource {
     }
     const result: LibrarySyncResultCode = round?.result ?? 'unknown';
     this.lastRound = { at: this.now(), result };
+    if (result === 'ok') this.okRoundCount += 1;
     if (isRevocation(result)) {
       if (!this.revokedFlag) this.options.emit?.('pairing.revoked', { source: 'relay' });
       this.revokedFlag = true;

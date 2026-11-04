@@ -10,6 +10,8 @@ export type ToolErrorCode =
   | 'client_outdated'
   | 'space_not_ready'
   | 'space_access_denied'
+  // El relé de Lumbre no atiende ahora (429): no es una denegación; lleva `retryAfterSeconds`.
+  | 'space_unavailable'
   | 'space_not_supported'
   // El directorio del agente no está disponible (D22, `src/spaces/directory.ts`).
   | 'organizations_unavailable'

@@ -277,7 +277,7 @@ export async function runGrep(
   const afterLastScanned = (): string | null => (lastScanned === null ? null : usedCursor(lastScanned, 0));
   // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
-  const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re);
+  const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re, ctx.port);
   const deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
   try {
     for (let first = 0; first < pending.length && !stop; first += GREP_BATCH_NOTES) {

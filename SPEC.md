@@ -1979,6 +1979,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
 - Los comandos de mantenimiento van por `compose exec`, nunca por `run`: dentro de un contenedor el PID
   se repite y `writer-lock.ts` tomaría el bloqueo de otro como huérfano.
+  Aun así, las órdenes que abren la biblioteca y pueden escribir (`serve` por stdio, ficheros de trabajo, `pair`, `unpair`) toman `control/server.lock` cuando el directorio es la raíz de un `serve-http` (`acquireDataRootGuard`): con el servidor vivo, aunque sea en otro contenedor, salen con un mensaje claro y sin escribir. Un directorio de una sola cuenta en local no cambia.
 - `config.json` de privados vive en el volumen; se lee al arrancar y se relee cuando cambia, sin
   reiniciar (M5 de D16, §6.3).
 
@@ -2467,6 +2468,11 @@ un agente desactivado, a propósito, y hebra-mcp no los distingue.
   los dos la transacción termina (`too_many_codes`), y con el tope por `sub` ya alcanzado no se vuelve
   a gastar un canje. Un 429 de `/exchange` no cuenta como rechazo y conserva la transacción, que sigue
   esperando el código con la espera que indica Lumbre.
+  También cuenta el código válido de una cuenta de Lumbre distinta (`wrong_lumbre_account`).
+- Tras el primer código rechazado de una transacción, la página puente (`/lumbre/connect`) no envía
+  el código sola: pide un clic. Así una página hostil que renavegue esa ventana solo puede causar un
+  rechazo por transacción y no puede cerrar la de la persona ni bloquear sus altas. Las páginas del
+  emparejado llevan `Cross-Origin-Opener-Policy: same-origin`; el flujo no usa `window.opener`.
 - Si la biblioteca nueva es otra bóveda distinta de la conectada y la copia anterior tiene escrituras
   sin subir (o no se ha podido comprobar), confirmar exige marcar la casilla `accept_loss`; sin ella
   responde `loss_unconfirmed` y no se retira nada.
@@ -2480,6 +2486,7 @@ espacios y el resto de su API) llevan `X-Hebra-Mcp-Backchannel` (el secreto de
 Lumbre reparta sus límites por persona y no por la IP única del conector. Solo las pone
 `src/oauth/lumbre-identity.ts`.
 
+- Solo con un `sub` en la forma que valida Lumbre (UUID en minúsculas, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`). Con otro, como el `__legacy_unclaimed__` de un vínculo heredado sin reclamar, no viaja ninguna de las dos.
 - Solo al origen exacto de `LUMBRE_APP_ORIGIN`: a cualquier otro no viaja ninguna de las dos, y las que
   traiga el llamador se descartan.
 - Con `redirect: 'error'`: ninguna redirección puede llevar el secreto a otro origen.
@@ -2495,6 +2502,7 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   nombre) y si este agente tiene permiso. Lista los que vería su persona. Un restringido del que no
   es miembro no sale.
 - Una herramienta nueva de solo lectura lista las organizaciones de la persona con sus miembros.
+- Un 429 de Lumbre en el catálogo o en el registro de la clave no es una denegación: la herramienta responde `space_unavailable` con `reason: rate_limited` y `retryAfterSeconds` (el `Retry-After` de Lumbre en segundos, o 5). No se guarda ni marca nada: la siguiente llamada vuelve a preguntar al relé.
 - Pasar a un `space` sin permiso sigue dando `space_access_denied`. Ser miembro de la organización no
   concede contenido.
 - Contrato con el relé: `GET /api/integrations/hebra/agent-directory`, solo credencial de agente, en

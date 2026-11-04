@@ -8,6 +8,9 @@ import { SHUTDOWN_ROUND_WAIT_MS } from '../sync/runner';
  *   + `runner.stop()` esperando la ronda en vuelo (hasta ~30 s con el relé colgado)
  *   = 47 s de 50.
  *
+ * Cada cuenta cierra sus espacios y su biblioteca personal a la vez durante el apagado
+ * (`closeServeResources`, `src/server/serve.ts`): en serie no cabrían.
+ *
  * Lo que no sube queda en la SQLite y en la lista durable, y el barrido lo recoge al arrancar. Una
  * retirada que no acabó se reanuda tras reiniciar (`AccountRemovalService.resumePending`).
  */

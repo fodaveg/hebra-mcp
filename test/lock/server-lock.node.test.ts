@@ -24,7 +24,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { AccountRegistry, rollbackControlSecrets } from '../../src/accounts';
 import { httpConfigFor } from '../../src/http/config';
 import { startServeHttp, type ServeHttpHandle } from '../../src/http/serve-http';
-import { acquireServerLock, classifyWriterLock, SERVER_LOCK_FILE, WRITER_LOCK_FILE, WriterLock,
+import { acquireDataRootGuard, acquireServerLock, classifyWriterLock, SERVER_LOCK_FILE, WRITER_LOCK_FILE, WriterLock,
   type ServerLock } from '../../src/lock';
 import type { OAuthHttpAuth } from '../../src/oauth/http-auth';
 import { MemorySecretStore } from '../../src/secrets';
@@ -332,5 +332,27 @@ describe('classifyWriterLock', () => {
     expect(classifyWriterLock(paths.accountDir)).toBe('other-process');
     const order = new WriterLock({ dataDir: paths.accountDir, releaseOnExit: false });
     expect(order.tryAcquire()).toBe(false);
+  });
+});
+
+describe('órdenes que escriben datos sobre la raíz de un serve-http', () => {
+  it('con el servidor vivo (otro proceso, aunque sea otro contenedor) la orden no entra; muerto, entra y registra su arranque', async () => {
+    const paths = layout();
+    const { child } = await launch(paths);
+    expect(acquireDataRootGuard(paths.dataDir)).toEqual({ kind: 'busy' });
+
+    await killAndWait(child);
+
+    const guard = acquireDataRootGuard(paths.dataDir);
+    expect(guard.kind).toBe('held');
+    if (guard.kind === 'held') locks.push(guard.lock);
+    // Con el arranque registrado, el writer.lock del servidor muerto es obsoleto y se recupera.
+    expect(classifyWriterLock(paths.accountDir)).toBe('stale');
+  }, SPAWN_TIMEOUT_MS);
+
+  it('un directorio de datos de una sola cuenta (sin control/server.lock) no cambia', () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hebra-single-'));
+    dirs.push(dataDir);
+    expect(acquireDataRootGuard(dataDir)).toEqual({ kind: 'single-account' });
   });
 });

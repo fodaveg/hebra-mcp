@@ -8,4 +8,4 @@ export {
   type WriterLockOptions,
   type WriterLockOwner
 } from './writer-lock';
-export { acquireServerLock, SERVER_LOCK_FILE, type ServerLock } from './server-lock';
+export { acquireDataRootGuard, acquireServerLock, SERVER_LOCK_FILE, type DataRootGuard, type ServerLock } from './server-lock';

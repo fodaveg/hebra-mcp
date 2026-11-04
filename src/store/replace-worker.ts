@@ -59,8 +59,8 @@ export class RegexReplaceWorker {
   private failure: (() => void) | null = null;
 
   /** Espera un hueco del semáforo compartido y arranca el hilo; `close` lo devuelve. */
-  static async start(re: RegExp, parts: readonly ReplacementPart[]): Promise<RegexReplaceWorker> {
-    await acquireSlot();
+  static async start(re: RegExp, parts: readonly ReplacementPart[], key?: object): Promise<RegexReplaceWorker> {
+    await acquireSlot(key);
     try {
       return new RegexReplaceWorker(re, parts);
     } catch (error) {

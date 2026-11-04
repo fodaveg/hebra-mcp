@@ -76,25 +76,49 @@ parentPort.on('message', (batch) => {
 export const REGEX_WORKERS_MAX = 3;
 
 let slotsInUse = 0;
-const slotWaiters: Array<() => void> = [];
+/**
+ * Los que esperan hueco, agrupados por biblioteca (`key`) y con turno rotatorio entre
+ * bibliotecas: una que encola 100 trabajos no retrasa a otra que encola 1, y ninguna tiene
+ * tope. Dentro de una biblioteca, por orden de llegada. Sin `key`, cada llamada es su propia
+ * biblioteca, es decir, una cola por orden de llegada.
+ */
+const slotWaiters = new Map<object, Array<() => void>>();
+/** El turno: las bibliotecas con espera, en el orden en que les toca. */
+const slotTurns: object[] = [];
 
 /** Espera un hueco del semáforo. Lo comparten el hilo de `hebra_grep` y el de
  *  `hebra_replace_in_notes` (D14, `./replace-worker.ts`): como mucho `REGEX_WORKERS_MAX`
- *  hilos de expresiones regulares vivos en todo el proceso, sean de quien sean. */
-export function acquireSlot(): Promise<void> {
+ *  hilos de expresiones regulares vivos en todo el proceso, sean de quien sean. `key` es la
+ *  biblioteca que pide (su puerto): el reparto es entre bibliotecas, no entre llamadas. */
+export function acquireSlot(key: object = {}): Promise<void> {
   if (slotsInUse < REGEX_WORKERS_MAX) {
     slotsInUse += 1;
     return Promise.resolve();
   }
-  // El que suelta un hueco se lo pasa directamente al primero que espera.
-  return new Promise<void>((resolve) => slotWaiters.push(resolve));
+  return new Promise<void>((resolve) => {
+    const queue = slotWaiters.get(key);
+    if (queue) queue.push(resolve);
+    else {
+      slotWaiters.set(key, [resolve]);
+      slotTurns.push(key);
+    }
+  });
 }
 
 /** Suelta el hueco de `acquireSlot`, una vez por hueco. */
 export function releaseSlot(): void {
-  const next = slotWaiters.shift();
-  if (next) next();
-  else slotsInUse -= 1;
+  // El que suelta un hueco se lo pasa directamente a la biblioteca a la que le toca; si le
+  // quedan esperas, pasa al final del turno.
+  const key = slotTurns.shift();
+  if (key === undefined) {
+    slotsInUse -= 1;
+    return;
+  }
+  const queue = slotWaiters.get(key)!;
+  const next = queue.shift()!;
+  if (queue.length > 0) slotTurns.push(key);
+  else slotWaiters.delete(key);
+  next();
 }
 
 /** Huecos ocupados (hilos arrancados y aún sin terminar de cerrar). Para los tests. */
@@ -111,8 +135,8 @@ export class RegexScanWorker {
   private failure: (() => void) | null = null;
 
   /** Espera un hueco (`REGEX_WORKERS_MAX`) y arranca el hilo; `close` lo devuelve. */
-  static async start(re: RegExp): Promise<RegexScanWorker> {
-    await acquireSlot();
+  static async start(re: RegExp, key?: object): Promise<RegexScanWorker> {
+    await acquireSlot(key);
     try {
       return new RegexScanWorker(re);
     } catch (error) {

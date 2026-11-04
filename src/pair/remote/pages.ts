@@ -25,20 +25,35 @@ function securityHeaders(res: Response, csp = BASE_CSP): void {
   res.setHeader('cache-control', 'private, no-store');
   res.setHeader('referrer-policy', 'same-origin');
   res.setHeader('x-content-type-options', 'nosniff');
+  // Una ventana abierta por otra página no conserva su control sobre esta: no puede volver a
+  // navegarla ni enviar por ella un código ajeno. El flujo no usa `window.opener`: Lumbre vuelve
+  // aquí con una redirección de la misma ventana.
+  res.setHeader('cross-origin-opener-policy', 'same-origin');
 }
 
 function hiddenToken(formToken: string): string {
   return `<input type="hidden" name="form_token" value="${escapeRemoteHtml(formToken)}">`;
 }
 
-export function sendBridgePage(res: Response, formToken: string): void {
+/**
+ * La página a la que vuelve Lumbre con el código en el fragmento. Con `requireClick` (la
+ * transacción ya tuvo un código rechazado) el código no se envía solo: la persona pulsa un botón.
+ * Así una página hostil que renavegue esta ventana con códigos inventados no puede gastar los
+ * intentos de la persona sin que ella haga nada.
+ */
+export function sendBridgePage(res: Response, formToken: string, requireClick = false): void {
   const nonce = randomBytes(18).toString('base64url');
   // Solo se envía un código con la forma que emite Lumbre: lo demás no llega a tocar la transacción.
-  const script = `(function(){var f=document.getElementById('bridge'),p=new URLSearchParams(location.hash.slice(1)),v=p.getAll('code');history.replaceState(null,'','/lumbre/connect');if(v.length!==1||!/^[a-f0-9]{64}$/.test(v[0])){document.getElementById('problem').hidden=false;return}f.elements.code.value=v[0];f.submit()}())`;
-  const body = '<p>Terminando la conexión con Lumbre…</p>' +
+  const accept = requireClick ? "document.getElementById('go').hidden=false" : 'f.submit()';
+  const script = `(function(){var f=document.getElementById('bridge'),p=new URLSearchParams(location.hash.slice(1)),v=p.getAll('code');history.replaceState(null,'','/lumbre/connect');if(v.length!==1||!/^[a-f0-9]{64}$/.test(v[0])){document.getElementById('problem').hidden=false;return}f.elements.code.value=v[0];${accept}}())`;
+  const intro = requireClick
+    ? '<p>Lumbre ha devuelto un código nuevo. Pulsa el botón para terminar la conexión.</p>'
+    : '<p>Terminando la conexión con Lumbre…</p>';
+  const body = intro +
     '<p id="problem" hidden>No se ha recibido una autorización válida. <a href="/lumbre/pairing/start">Vuelve a autorizar en Lumbre</a>.</p>' +
     '<form id="bridge" method="post" action="/lumbre/connect">' + hiddenToken(formToken) +
-    '<input type="hidden" name="code" value=""></form>' +
+    '<input type="hidden" name="code" value="">' +
+    (requireClick ? '<button id="go" type="submit" hidden>Terminar la conexión</button>' : '') + '</form>' +
     `<script nonce="${nonce}">${script}</script>`;
   securityHeaders(res, `${BASE_CSP}; script-src 'nonce-${nonce}'`);
   res.status(200).type('html').send(document('Conectar biblioteca', body));

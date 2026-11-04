@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { MAX_PREPARED_SPACES, requestedSpaces } from '../../src/http/app';
+import { ToolError } from '../../src/server/errors';
 import { AgentSpaceManager } from '../../src/spaces/manager';
 import { deferred } from '../fixtures/deferred';
 
@@ -119,5 +120,28 @@ describe('catálogo del relé', () => {
     fail = false;
     await expect(manager.catalogue(2000)).resolves.toEqual([]);
     expect(requests.count).toBe(2);
+  });
+});
+
+describe('429 del relé en el catálogo', () => {
+  it('llega a la herramienta como no disponible y no queda pegado: la siguiente lectura vuelve a ir al relé', async () => {
+    let calls = 0;
+    const device = {
+      paired: { connection: { apiOrigin: 'https://relay.test' } },
+      ensureRegistered: async () => ({ accountId: 'a', credentialId: 'c', deviceId: 'd', keyId: 'k' }),
+      request: async () => {
+        calls += 1;
+        if (calls === 1) throw new ToolError('space_unavailable', { reason: 'rate_limited', retryAfterSeconds: 9 });
+        return { spaces: [] };
+      }
+    };
+    const manager = new AgentSpaceManager(device as never, '/nunca', undefined, null);
+    await expect(manager.resolve(randomUUID())).rejects.toMatchObject({
+      code: 'space_unavailable',
+      extra: { reason: 'rate_limited', retryAfterSeconds: 9 }
+    });
+    // Sin 429, el espacio inexistente es una denegación normal: no hubo caché negativa.
+    await expect(manager.resolve(randomUUID())).rejects.toMatchObject({ code: 'space_access_denied' });
+    expect(calls).toBe(2);
   });
 });

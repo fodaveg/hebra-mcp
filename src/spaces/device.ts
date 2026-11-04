@@ -176,6 +176,19 @@ export function pairingFingerprint(p: PairedSecrets): string {
     )
     .digest('hex');
 }
+const DEFAULT_RETRY_AFTER_SECONDS = 5;
+
+/** El 429 del relé como `space_unavailable`, con el `Retry-After` en segundos si es válido (la
+ *  forma de fecha HTTP se ignora: el aviso es orientativo). */
+function rateLimited(response: Response): ToolError {
+  const raw = response.headers.get('retry-after')?.trim();
+  const seconds = raw && /^\d+$/u.test(raw) ? Number(raw) : NaN;
+  return new ToolError('space_unavailable', {
+    reason: 'rate_limited',
+    retryAfterSeconds: Number.isSafeInteger(seconds) && seconds > 0 ? seconds : DEFAULT_RETRY_AFTER_SECONDS
+  });
+}
+
 export class AgentDevice {
   private registration: AgentRegistration | null = null;
   private privateKey: CryptoKey | null = null;
@@ -217,11 +230,15 @@ export class AgentDevice {
           ...(body === undefined ? {} : { body: JSON.stringify(body) })
         }
       );
+      // Un 429 es falta de cupo del relé, no una denegación: la persona recibe cuándo reintentar
+      // y nada se marca ni se recuerda (el catálogo solo guarda lecturas correctas).
+      if (response.status === 429) throw rateLimited(response);
       if (!response.ok) throw new Error();
       const value = await readLimitedJson(response);
       await this.assertPairing();
       return value;
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
       throw new ToolError('space_access_denied');
     }
   }
@@ -303,7 +320,8 @@ export class AgentDevice {
       this.assertAccountActive?.();
       this.registration = registration;
       return registration;
-    } catch {
+    } catch (error) {
+      if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
       throw new ToolError('space_access_denied');
     }
   }
