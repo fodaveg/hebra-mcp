@@ -22,6 +22,11 @@ export const PAIRING_REVOKED_REASON =
   'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
   'Hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed`, que conserva la identidad y la clave de la biblioteca.';
 
+/** La misma página en el conector multiusuario, donde nadie puede lanzar `hebra-mcp pair` (D22). */
+export const PAIRING_REVOKED_REMOTE_REASON =
+  'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
+  'Vuelve a conectar Hebra desde tu aplicación: al iniciar sesión podrás renovarla, sin perder tus notas.';
+
 export class PairingRevocation {
   /** Credencial que Lumbre dio por revocada; `null` si Lumbre no ha dicho nada. */
   private revokedCredential: string | null = null;
