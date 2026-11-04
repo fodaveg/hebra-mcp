@@ -12,7 +12,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
 import { logEvent } from '../log/logger';
-import { WriterLock } from '../lock';
+import { acquireServerLock, type ServerLock } from '../lock';
 import { openFileSecretStore, readPairedSecrets, type SecretStore } from '../secrets';
 import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir, openRemotePairing,
   accountControlDir, openAccountControlServer, type AccountControlServer, type RemotePairingRuntime } from '../accounts';
@@ -51,7 +51,6 @@ export class ServeHttpError extends Error {
  * (`deploy/compose.yml`, 50 s).
  */
 export const HTTP_DRAIN_TIMEOUT_MS = AWAIT_ROUND_TIMEOUT_MS + 2_000;
-const ACTIVE_CONTROL_DIRS = new Set<string>();
 
 export interface StartServeHttpOptions
   extends Pick<OpenServeOptions, 'fetcher' | 'instance' | 'syncIntervalMs'> {
@@ -149,10 +148,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   let removal: AccountRemovalService | null = null;
   let registry: AccountRegistry | null = null;
   let remotePairing: RemotePairingRuntime | null = null;
-  let controlLock: WriterLock | null = null;
+  let serverLock: ServerLock | null = null;
   let controlServer: AccountControlServer | null = null;
-  let controlKey: string | null = null;
-  let controlRegistered = false;
   let acceptingRemovals = true;
   const removalJobs = new Set<Promise<void>>();
   const removeById = (id: string): Promise<void> => {
@@ -172,8 +169,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
   };
   try {
     // El modo monousuario conserva el orden de robustez histórico: toma el writer lock
-    // antes de recuperar OAuth. Solo producción multiusuario puede diferir la apertura,
-    // porque no existe un lock global que represente a todas las cuentas.
+    // antes de recuperar OAuth. Producción multiusuario difiere la apertura de cada cuenta
+    // y toma antes `control/server.lock`, que registra este arranque (D22, §12.10).
     if (!options.multiuser) {
       serve = await openServeContext({ dataDir: options.dataDir, secrets: options.secrets,
         fetcher: options.fetcher, instance: options.instance, syncIntervalMs: options.syncIntervalMs,
@@ -181,15 +178,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     } else {
       const controlDir = accountControlDir(options.dataDir);
       await mkdir(controlDir, { recursive: true, mode: 0o700 });
-      controlKey = controlDir;
-      if (ACTIVE_CONTROL_DIRS.has(controlKey)) throw new WriterRequiredError();
-      ACTIVE_CONTROL_DIRS.add(controlKey);
-      controlRegistered = true;
-      controlLock = new WriterLock({ dataDir: controlDir });
-      if (!controlLock.tryAcquire()) {
-        ACTIVE_CONTROL_DIRS.delete(controlKey); controlRegistered = false; throw new WriterRequiredError();
-      }
-      controlLock.deferSignalRelease();
+      serverLock = acquireServerLock(options.dataDir, controlDir);
+      if (!serverLock) throw new WriterRequiredError();
     }
     // Emparejado revocado (SPEC.md §12.9): el `revoked` del relé o el `410 pairing_revoked` de
     // Lumbre que vea el OAuth; `hebra_status` dice lo mismo que la página de `/authorize`.
@@ -251,8 +241,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     await drainRemovalJobs();
     if (contexts) await contexts.close();
     else await serve?.close();
-    controlLock?.release();
-    if (controlKey && controlRegistered) ACTIVE_CONTROL_DIRS.delete(controlKey);
+    serverLock?.release();
     throw error;
   }
   const port = server.listening ? (server.address() as AddressInfo).port : 0;
@@ -288,8 +277,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         await drainRemovalJobs();
         if (contexts) await contexts.close();
         else await serve?.close();
-        controlLock?.release();
-        if (controlKey && controlRegistered) ACTIVE_CONTROL_DIRS.delete(controlKey);
+        serverLock?.release();
       })();
       return closing;
     }

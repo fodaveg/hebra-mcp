@@ -22,7 +22,8 @@ function globalTemporary(name: string): boolean {
   return /^\.(?:accounts-v1|oauth-tokens|oauth-revocations-v2|oauth-logout-jtis)\.json\..+\.tmp$/.test(name);
 }
 function personalEntry(name: string): boolean {
-  return PERSONAL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name);
+  // `writer.lock.stale-*`: lo deja `WriterLock` si muere mientras retira un bloqueo obsoleto.
+  return PERSONAL_ENTRIES.has(name) || /^\.secrets\.json\..+\.tmp$/.test(name) || /^writer\.lock\.stale-/.test(name);
 }
 
 export interface LegacyInventoryOptions {

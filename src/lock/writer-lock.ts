@@ -25,6 +25,15 @@
  * el bloqueo parece vivo hasta que ese proceso termine. Un fichero con el MISMO PID que
  * este proceso y otro `nonce` es de un proceso anterior (el PID no puede estar vivo dos
  * veces): se trata como huérfano.
+ *
+ * Dentro de `serve-http` (D22, §12.10) el PID no distingue nada: en el contenedor es
+ * siempre el mismo, y un mismo proceso tiene abiertas muchas bibliotecas. Por eso cada
+ * bloqueo tomado bajo una raíz con un arranque registrado (`registerServerBoot`) lleva su
+ * `serverBootId`, y `classifyWriterLock` decide por ese identificador: lo de otro arranque
+ * está obsoleto aunque repita PID, y lo de este arranque no se le quita a nadie, porque
+ * dos instancias del mismo proceso las evita el ciclo de vida de los contextos. Registrar
+ * un arranque exige tener `control/server.lock` (`./server-lock.ts`), y eso es lo que
+ * prueba que los arranques anteriores están muertos.
  */
 import {
   closeSync,
@@ -39,7 +48,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { constants as osConstants } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 
 export const WRITER_LOCK_FILE = 'writer.lock';
 
@@ -51,6 +60,107 @@ interface LockContent {
   pid: number;
   nonce: string;
   startedAt: string;
+  /** Arranque de `serve-http` que lo tomó. Sin él: una orden suelta o un binario anterior a D22. */
+  serverBootId?: string;
+}
+
+/**
+ * Arranques de `serve-http` vivos en este proceso, por raíz de datos. No selecciona nada:
+ * solo dice a qué arranque pertenece un bloqueo que se toma o se lee bajo esa raíz, sin
+ * pasar el identificador por cada apertura de biblioteca y de espacio. Va por raíz porque
+ * los tests levantan varios servidores en un proceso, cada uno sobre su directorio.
+ */
+const SERVER_BOOTS = new Map<string, string>();
+
+/** Lo llama `acquireServerLock`. Devuelve la función que retira el registro. */
+export function registerServerBoot(rootDir: string, bootId: string): () => void {
+  const root = resolve(rootDir);
+  SERVER_BOOTS.set(root, bootId);
+  return () => {
+    if (SERVER_BOOTS.get(root) === bootId) SERVER_BOOTS.delete(root);
+  };
+}
+
+/** El arranque vivo cuya raíz contiene `dataDir`, o `undefined` fuera de `serve-http`. */
+export function serverBootIdFor(dataDir: string): string | undefined {
+  let current = resolve(dataDir);
+  for (;;) {
+    const bootId = SERVER_BOOTS.get(current);
+    if (bootId !== undefined) return bootId;
+    const parent = dirname(current);
+    if (parent === current) return undefined;
+    current = parent;
+  }
+}
+
+/**
+ * De quién es un `writer.lock` (D22, §12.10):
+ * - `none`: no hay fichero.
+ * - `stale`: de un arranque anterior del servidor (aunque repita PID) o de un proceso
+ *   muerto. Lo limpia `WriterLock.tryAcquire` al abrir o retirar esa cuenta.
+ * - `this-boot`: de este arranque. Lo gestiona el ciclo de vida de los contextos: hay que
+ *   esperar a que se cierre, nunca quitárselo.
+ * - `other-process`: de otro proceso vivo, como una orden por `compose exec`. Bloquea.
+ */
+export type WriterLockOwner = 'none' | 'stale' | 'this-boot' | 'other-process';
+
+export interface ClassifyWriterLockOptions {
+  /** ¿Sigue vivo ese PID? Por defecto, `process.kill(pid, 0)`. */
+  isAlive?: (pid: number) => boolean;
+  now?: () => number;
+}
+
+interface LockObserver {
+  pid: number;
+  bootId: string | undefined;
+  isAlive: (pid: number) => boolean;
+}
+
+function ownerOfContent(content: LockContent, me: LockObserver): Exclude<WriterLockOwner, 'none'> {
+  if (me.bootId !== undefined) {
+    if (content.serverBootId === me.bootId) return 'this-boot';
+    // Tener `server.lock` prueba que el arranque que lo escribió ya no vive.
+    if (content.serverBootId !== undefined) return 'stale';
+    // Sin identificador y con el PID de este servidor: un binario anterior a D22 que murió
+    // aquí. Una orden externa vive en otro PID.
+    if (content.pid === me.pid) return 'stale';
+  } else if (content.pid === me.pid) {
+    // Fuera de un arranque no hay con qué probar que sea anterior: el lado seguro.
+    return 'this-boot';
+  }
+  return me.isAlive(content.pid) ? 'other-process' : 'stale';
+}
+
+/** ¿Lleva un fichero ilegible más tiempo del que tarda otra instancia en escribirlo? */
+function unreadableIsStale(path: string, now: number): boolean {
+  try {
+    return now - statSync(path).mtimeMs > UNREADABLE_LOCK_GRACE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clasifica el `writer.lock` de `dataDir` sin tocarlo. Toma el arranque de la raíz que
+ * contiene `dataDir` (`serverBootIdFor`). Sin arranque registrado, un mismo PID sale
+ * `this-boot`: no se puede probar que sea anterior.
+ */
+export function classifyWriterLock(dataDir: string, options: ClassifyWriterLockOptions = {}): WriterLockOwner {
+  const path = join(dataDir, WRITER_LOCK_FILE);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'none';
+    throw error;
+  }
+  const content = parseLock(raw);
+  if (!content) return unreadableIsStale(path, (options.now ?? Date.now)()) ? 'stale' : 'other-process';
+  return ownerOfContent(content, {
+    pid: process.pid,
+    bootId: serverBootIdFor(dataDir),
+    isAlive: options.isAlive ?? processIsAlive
+  });
 }
 
 export interface WriterLockOptions {
@@ -85,7 +195,12 @@ function parseLock(text: string): LockContent | null {
       typeof value.nonce === 'string' &&
       value.nonce.length > 0
     ) {
-      return { pid: value.pid, nonce: value.nonce, startedAt: String(value.startedAt ?? '') };
+      return {
+        pid: value.pid,
+        nonce: value.nonce,
+        startedAt: String(value.startedAt ?? ''),
+        ...(typeof value.serverBootId === 'string' ? { serverBootId: value.serverBootId } : {})
+      };
     }
   } catch {
     // JSON a medias o basura.
@@ -106,6 +221,7 @@ export class WriterLock {
   private readonly nonce = randomUUID();
   private readonly isAlive: (pid: number) => boolean;
   private readonly now: () => number;
+  private readonly serverBootId: string | undefined;
   private owned = false;
   private hooksInstalled = false;
   /** `deferSignalRelease`: el proceso tiene su propio apagado, que suelta el bloqueo. */
@@ -146,6 +262,7 @@ export class WriterLock {
     this.pid = options.pid ?? process.pid;
     this.isAlive = options.isAlive ?? processIsAlive;
     this.now = options.now ?? Date.now;
+    this.serverBootId = serverBootIdFor(options.dataDir);
   }
 
   /** ¿Tiene esta instancia el bloqueo (según su última comprobación)? */
@@ -224,7 +341,8 @@ export class WriterLock {
       const content: LockContent = {
         pid: this.pid,
         nonce: this.nonce,
-        startedAt: new Date(this.now()).toISOString()
+        startedAt: new Date(this.now()).toISOString(),
+        ...(this.serverBootId !== undefined ? { serverBootId: this.serverBootId } : {})
       };
       writeSync(fd, JSON.stringify(content));
       fsyncSync(fd);
@@ -243,26 +361,18 @@ export class WriterLock {
     }
   }
 
-  private mtimeMs(): number | null {
-    try {
-      return statSync(this.path).mtimeMs;
-    } catch {
-      return null;
-    }
-  }
-
   private observe(): Observed {
     const raw = this.readRaw();
     if (raw === null) return { kind: 'absent' };
     const content = parseLock(raw);
     if (!content) {
-      const mtime = this.mtimeMs();
-      const stale = mtime !== null && this.now() - mtime > UNREADABLE_LOCK_GRACE_MS;
-      return stale ? { kind: 'orphan', raw } : { kind: 'held', content: null, raw };
+      return unreadableIsStale(this.path, this.now()) ? { kind: 'orphan', raw } : { kind: 'held', content: null, raw };
     }
-    const samePidOtherProcess = content.pid === this.pid && content.nonce !== this.nonce;
-    if (!samePidOtherProcess && this.isAlive(content.pid)) return { kind: 'held', content, raw };
-    return { kind: 'orphan', raw };
+    const owner = ownerOfContent(content, { pid: this.pid, bootId: this.serverBootId, isAlive: this.isAlive });
+    // Fuera de `serve-http`, un mismo PID con otro `nonce` es un proceso anterior: aquí cada
+    // proceso abre una sola biblioteca por directorio.
+    const samePidOutsideServer = owner === 'this-boot' && this.serverBootId === undefined && content.nonce !== this.nonce;
+    return owner === 'stale' || samePidOutsideServer ? { kind: 'orphan', raw } : { kind: 'held', content, raw };
   }
 
   /** Retira el huérfano `raw` sin llevarse por error un bloqueo recién creado. */
