@@ -371,6 +371,13 @@ export class LibraryInstance implements NoteWriteTarget {
     try {
       failed.close();
     } catch {
+      // Límite conocido, a propósito: la conexión no se pudo cerrar y el bloqueo se queda. En un
+      // relevo, la instancia sigue viva y su `close` repite este paso. En el PRIMER montaje la
+      // instancia la descarta `open` y nadie vuelve a cerrarla, así que el bloqueo (de este
+      // arranque) dura hasta reiniciar. Soltarlo con la conexión abierta dejaría entrar a otro
+      // escritor sobre la misma SQLite, que es peor; y cerrar una SQLite recién abierta solo
+      // falla con una consulta sin finalizar, que no hay en este camino. Si algún día se mide,
+      // lo correcto es que `open` conserve la instancia y reintente el cierre, no soltar el bloqueo.
       logEvent({ event: 'writer.takeover', result: 'failed', error: 'close' });
       return;
     }
