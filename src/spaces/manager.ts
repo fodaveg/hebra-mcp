@@ -441,6 +441,10 @@ export class AgentSpaceManager implements SpaceRouter {
       throw error;
     }
     entry.instance = instance;
+    // El proceso tiene su propio apagado con señal: sin esto, SIGTERM suelta el `writer.lock` de
+    // cada espacio abierto en el acto, con su ronda final todavía en vuelo (`checkWriter` vería
+    // `verify() === false` y pasaría a lector, que no sube nada).
+    instance.deferSignalRelease();
     if (!this.accepting) throw new ToolError('space_access_denied');
     if (this.shuttingDown) instance.beginShutdown();
     await instance.whenReady();
@@ -466,15 +470,26 @@ export class AgentSpaceManager implements SpaceRouter {
     };
   }
 
+  /**
+   * Cierra todos los espacios. Si alguno no cierra, rechaza con su error y NO se marca `closed`:
+   * la cuenta se queda en `cerrando`, no cierra la biblioteca personal ni se da por cerrada, y
+   * el reintento con espera creciente de `ResourceLifecycle` vuelve a llamar aquí. Reintentar es
+   * seguro: `retire` de lo ya cerrado resuelve sin cerrar otra vez, y de lo que falló reutiliza
+   * su propio cierre (`closeInstance` es idempotente). Si cerrara de todos modos, la siguiente
+   * petición crearía otro gestor que abriría de lector la SQLite que el cierre viejo sigue
+   * reintentando.
+   */
   async close(): Promise<void> {
     this.accepting = false;
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       [...this.entries.values()].map(async (entry) => {
         entry.pin?.release();
         entry.pin = undefined;
         await entry.life.retire();
       })
     );
+    const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (failed) throw failed.reason;
     this.closed = true;
   }
 }
