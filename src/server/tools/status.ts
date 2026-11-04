@@ -17,6 +17,6 @@ export async function runStatus(
   serverVersion = 'unknown'
 ): Promise<HebraStatus & { revokedReason?: string; capabilities: Capabilities }> {
   const status = await ctx.status.getStatus();
-  const reason = status.revoked === true ? { revokedReason: PAIRING_REVOKED_REASON } : {};
+  const reason = status.revoked === true ? { revokedReason: status.revokedReason ?? PAIRING_REVOKED_REASON } : {};
   return { ...status, ...reason, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
 }

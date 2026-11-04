@@ -131,7 +131,10 @@ export function remotePairingAdapters(options: RemotePairingAdapterOptions): {
       await savePreparedAgentDevice(store, input.paired, input.preparedAgent);
       await writePairedSecrets(store, input.paired);
       const record = await options.registry.commitRenewal(held, input.journalId, input.ownership);
-      options.provider.pairing.isRevoked(record.binding.pairedCredentialId);
+      // Misma bóveda: la credencial puede conservar su id, y la marca de revocación (Lumbre o relé)
+      // es por id. Se olvida aquí, no al reiniciar. Con otro id la marca vieja ya no casa.
+      options.provider.pairing.clear(held.binding.pairedCredentialId);
+      options.provider.pairing.clear(record.binding.pairedCredentialId);
       return { id: record.id, generation: record.generation };
     },
     async retire(renewal) {
