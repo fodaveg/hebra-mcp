@@ -103,7 +103,8 @@ Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
   Las herramientas de contenido aceptan `space`, solo con un espacio de `granted: true`; sin él
   trabajan en la biblioteca personal de la cuenta autenticada. Ser miembro de una organización
   no concede contenido, y pertenecer a un espacio u organización nunca abre la biblioteca
-  personal de otro miembro.
+  personal de otro miembro. Privacidad: `hebra_list_organizations` entrega el nombre y el
+  `accountId` de otros miembros de la organización al proveedor de IA del cliente conectado.
 
 Fuera del MCP, `hebra-mcp checkout` y `apply` sacan notas como ficheros `.md` y las
 devuelven (D12, 10 oct 2026; ver «Ficheros de trabajo» abajo).
@@ -209,7 +210,14 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   para los secretos del dispositivo, `HEBRA_MCP_SECRET_STORE=file`. La capacidad se regula
   por memoria real, sin máximo de cuentas (D22): `HEBRA_MCP_CONTEXT_IDLE_MS` (120000),
   `HEBRA_MCP_OPEN_WAIT_MS` (20000) y `HEBRA_MCP_MEMORY_HIGH_WATER` (`80%` del límite del
-  contenedor; admite `0.8`, `80%` o bytes).
+  contenedor; admite `0.8`, `80%` o bytes). Las dos primeras dicen cuánto tarda en cerrarse una
+  biblioteca sin uso y cuánto espera una apertura antes del 503 con `Retry-After`; la tercera, a
+  partir de qué memoria se cierra antes lo que no se usa. `mem_limit` de `deploy/compose.yml` no
+  cuenta personas: es la barrera de la máquina compartida y su valor sale de la medición de
+  aceptación. Para más capacidad se sube ese límite o se añade máquina.
+- Para volver a una imagen anterior a los secretos globales (`control/secrets.json`), con el
+  servicio parado y antes de arrancarla, `hebra-mcp control-secrets-rollback`; el procedimiento
+  está en `deploy/README-deploy.md`.
 - En claude.ai se añade el conector con la URL `https://mcp.hebra.pro/mcp`. El navegador
   pasa por Sumego y por el consentimiento de hebra-mcp; Claude recibe un access token de 1 h y un
   refresh rotatorio. La autorización caduca 30 días después de aprobarla o del último

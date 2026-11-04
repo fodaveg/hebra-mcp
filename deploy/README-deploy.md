@@ -389,6 +389,32 @@ la membresía vigente, el grant del recurso y el permiso del agente de esa
 persona. Pertenecer a una organización no abre bibliotecas personales. Si la
 ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
 
+## Capacidad, cierres y pendientes (D22, SPEC.md §12.10)
+
+- `mem_limit` de `compose.yml` es la barrera de la máquina compartida, no un cupo de personas. Su
+  valor sale de la medición de aceptación con bibliotecas de tamaño real; para más capacidad se sube
+  o se añade máquina. `HEBRA_MCP_MEMORY_HIGH_WATER` se mide contra ese límite. Un 503 de `/mcp` lleva
+  `Retry-After` y su motivo en el log (`mcp.unavailable`): `capacity_wait_timeout`, `open_failed` o
+  `lock_held`.
+- `control/server.lock` lo toma el servicio y lo ve cualquier proceso, también de otro contenedor
+  sobre el mismo volumen. Un segundo `serve-http` no arranca. Es un fichero vacío que no se borra.
+- `control/pending-uploads-v1.json` es la lista de subidas que quedaron al cerrar una biblioteca.
+  Se conserva con el volumen y no hay que tocarla: el barrido (cada 60 s) la vacía solo. Se mira el
+  log solo si algo falla:
+
+| Evento | Qué hacer |
+|---|---|
+| `pending_sweep.round` | Nada. Resume lo que hizo una pasada con trabajo; en reposo no sale |
+| `pending_sweep.element`, `pending_uploads.write` | Si se repiten, mirar el disco y el relé: se reintenta solo, con espera de 2 a 30 min por elemento |
+| `pending_uploads.read` | El fichero era ilegible y se trató como vacío. Lo escrito sigue en cada SQLite y sube al volver a abrirla |
+| `sync.close_round` | Nada. La ronda final al cerrar; `pending: true` deja la biblioteca en la lista |
+| `contexts.close_failed`, `contexts.close_recovered` | Un cierre falló y se reintenta (1 s, doblando hasta 30 s). Mientras, esa cuenta o espacio recibe 503 `open_failed` |
+| `contexts.close_stuck` | El cierre lleva 10 intentos o más. Quitar la causa (disco lleno o de solo lectura, directorio desmontado); el siguiente reintento lo recoge. Reiniciar solo si no se arregla desde dentro |
+
+- El apagado cabe en `stop_grace_period: 50s`: 12 s de drenaje, 5 s de ronda final y hasta 30 s de
+  cierre del sync (47 s). No hace falta subir ese valor sin cambiar esos tiempos.
+- La vuelta atrás de los secretos globales (`control-secrets-rollback`) está en la sección siguiente.
+
 ## Secretos globales en `control/secrets.json` (D22, SPEC.md §12.10)
 
 Los bearers de Lumbre de todas las cuentas, sus pendientes y la clave de refresh

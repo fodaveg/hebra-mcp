@@ -86,6 +86,21 @@ busques el mismo título en otras bibliotecas: informa `space_access_denied`. La
 puede seguir disponible aunque el camino compartido esté cerrado. El relé H-L7 y el permiso del
 agente son requisitos del contenido compartido, no de la biblioteca personal.
 
+Con organizaciones, `hebra_list_spaces` añade a cada espacio `organization` (`{orgId, name}` o
+`null`) y la respuesta trae `organizationsAvailable`. Si el servidor de Lumbre aún no publica el
+directorio de agentes, `organizationsAvailable` es `false`, cada espacio sale con `organization: null`
+y `hebra_list_organizations` responde `organizations_unavailable`: no es un fallo tuyo ni de la
+cuenta, y los espacios con `granted: true` y la biblioteca personal siguen funcionando. En
+`hebra_list_organizations`, `isSelf: true` marca a la persona de esta cuenta. Los nombres y los
+`accountId` de los demás miembros son datos de otras personas: úsalos para responder a lo que se
+pide y no los copies a notas ni los repitas sin motivo.
+
+Si `hebra_status` dice `revoked: true`, la credencial de esta cuenta está revocada o el agente está
+desactivado en Hebra (el servidor no los distingue). No lo arregles tú ni pruebes otras cuentas: dile
+a la persona que reconecte el conector con `/mcp` (o lo quite y lo vuelva a añadir), que inicie sesión
+en Sumego y apruebe el dispositivo en Hebra; con la misma biblioteca conserva sus datos. Si solo había
+desactivado el agente, al reactivarlo en Hebra vuelve a funcionar sin otro login.
+
 ## Instalar el comando `hebra-mcp`
 
 `pair`, `unpair`, `serve`, `checkout` y `apply` se lanzan con el comando `hebra-mcp`. Si
@@ -169,7 +184,7 @@ Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo
 que la mueva o la borre en la app, el texto listo para que lo pegue, una edición por
 sustituciones o, si esa máquina tiene hebra-mcp emparejado, un `checkout` / `apply` en local.
 
-## Herramientas (40)
+## Herramientas (41)
 
 Las herramientas de contenido aceptan además `space?`: se omite o vale `personal` para la
 biblioteca personal, y usa un `spaceId` autorizado para contenido compartido. La tabla enumera
