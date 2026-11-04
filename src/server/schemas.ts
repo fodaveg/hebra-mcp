@@ -301,6 +301,12 @@ export const listFilesInputShape = {
   cursor: cursorField
 };
 
+/** `hebra_list_organizations` (D22): sin `space`, una organización no es un selector. */
+export const listOrganizationsInputShape = {
+  limit: z.number().int().min(1).max(100).optional(),
+  cursor: cursorField
+};
+
 export const trashFileInputShape = {
   id: z.string().describe('Id de un fichero de hebra_list_files.')
 };

@@ -175,7 +175,8 @@ const probes = () =>
   fake.requested.filter((url) => url.includes(SHARED_VAULT) && url.endsWith('/records')).length;
 function listed(result: unknown): Array<{ spaceId: string; name: string | null }> {
   const content = (result as { content: Array<{ text: string }> }).content;
-  return JSON.parse(content[0]!.text).spaces;
+  const spaces: Array<{ spaceId: string; name: string | null }> = JSON.parse(content[0]!.text).spaces;
+  return spaces.map(({ spaceId, name }) => ({ spaceId, name }));
 }
 
 describe('nombre de los espacios', () => {
@@ -291,9 +292,9 @@ describe('nombre de los espacios', () => {
 describe('herramientas MCP por espacio', () => {
   it('todas las herramientas de contenido anuncian selector y conservan la puerta común', async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(40);
+    expect(tools).toHaveLength(41);
     for (const tool of tools) {
-      if (tool.name !== 'hebra_list_spaces')
+      if (tool.name !== 'hebra_list_spaces' && tool.name !== 'hebra_list_organizations')
         expect(tool.inputSchema.properties, tool.name).toHaveProperty('space');
     }
   });

@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import { statSync } from 'node:fs';
 import { lstat, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { ServerContext, SpaceRouter } from '../server/context';
+import type { DirectoryView, ServerContext, SpaceRouter } from '../server/context';
 import { ToolError } from '../server/errors';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { registerLinkedDevice } from '../sync/linked';
@@ -23,6 +23,7 @@ import {
 } from '../server/forward';
 import { HttpLibraryTransport, readSpaceMeta } from '../hebra';
 import { AgentDevice } from './device';
+import { fetchAgentDirectory } from './directory';
 import { catalogueSchema, type AgentSpaceAccess } from './protocol';
 
 /** Cuánto vale un nombre leído, y cuánto un fallo o un meta ausente. */
@@ -189,6 +190,16 @@ export class AgentSpaceManager implements SpaceRouter {
     const out: Array<{ spaceId: string; name: string | null }> = [];
     for (const item of items) out.push({ spaceId: item.spaceId, name: await this.readName(item) });
     return out;
+  }
+
+  /** El directorio de la persona (D22), fresco. Solo lectura: no abre ninguna biblioteca. */
+  async directory(): Promise<DirectoryView> {
+    this.assertAccountActive?.();
+    if (this.closed) throw new ToolError('space_access_denied');
+    const { accountId } = await this.device.ensureRegistered();
+    const directory = await fetchAgentDirectory(this.device, this.fetcher);
+    this.assertAccountActive?.();
+    return { selfAccountId: accountId, directory };
   }
 
   /** La primera validación fresca de la invocación: el catálogo de ahora mismo. Un UUID

@@ -167,6 +167,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // red y con un relé sin la API de H-L7, como antes de los espacios.
   const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive) : null;
   const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, options.instance, assertActive) : undefined;
+  const directory = spaces ? () => spaces.directory() : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
@@ -212,6 +213,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     // rechazan con `busy_other_instance` en vez de saltar a `writer.sock`.
     const ctx: ServerContext = {
       spaces,
+      directory,
       port: instance.port,
       privacyConfig,
       privacyConfigSource: privacySource,
@@ -231,6 +233,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const write = buildRoutedWriteContext(instance, localWriteContext(instance, authorize), options.forward);
   const ctx: ServerContext = {
     spaces,
+    directory,
     authorize,
     port: instance.port,
     privacyConfig,

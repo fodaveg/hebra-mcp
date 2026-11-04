@@ -32,6 +32,7 @@ export const LIMITS = {
   listFolders: { default: null, max: 500 },
   listTrash: { default: 50, max: 100 },
   listFiles: { default: 50, max: 100 },
+  listOrganizations: { default: 50, max: 100 },
   listVersions: { default: 50, max: 200 },
   listAttachments: { default: null, max: 200 },
   noteOutline: { default: 200, max: 500 },
@@ -52,8 +53,9 @@ export function storePageSize(want: number): number {
 
 /** `fl1` es el de `hebra_list_files` (D10); `f1`, el de las carpetas; `o1`, el de
  *  `hebra_note_outline` (D11); `g1`, el de `hebra_grep` (D13); `j1`, el de
- *  `hebra_jd_audit` (D18: la posición en la lista de hallazgos, todos visibles). */
-export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1' | 'fl1' | 'o1' | 'g1' | 'j1';
+ *  `hebra_jd_audit` (D18: la posición en la lista de hallazgos, todos visibles); `og1`, el de
+ *  `hebra_list_organizations` (D22). */
+export type CursorKind = 'n1' | 's1' | 'l1' | 't1' | 'f1' | 'r1' | 'v1' | 'a1' | 'fl1' | 'o1' | 'g1' | 'j1' | 'og1';
 
 const CURSOR_MAX_LENGTH = 2_048;
 

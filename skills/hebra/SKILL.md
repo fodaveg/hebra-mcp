@@ -50,13 +50,13 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 40 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 41 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las de ficheros sueltos, `hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, `hebra_read_file`, `hebra_replace_file_text`,
   `hebra_create_file`, `hebra_rename_file`, `hebra_move_file` y `hebra_duplicate_file`,
-  o sin `hebra_note_outline`, `hebra_grep`, `hebra_replace_in_notes` o
-  `hebra_list_spaces`), el conector tiene
+  o sin `hebra_note_outline`, `hebra_grep`, `hebra_replace_in_notes`,
+  `hebra_list_spaces` o `hebra_list_organizations`), el conector tiene
   la lista antigua: se reconecta con `/mcp`.
   `hebra_status` dice la versión del servidor en `capabilities.server.version` (0.2.0 o
   posterior trae las tres de D9; 0.3.0 o posterior trae las tres de ficheros sueltos, D10;
@@ -73,9 +73,11 @@ En el conector remoto, el token ya fija la cuenta antes de ejecutar la herramien
 intentes seleccionar otra cuenta con un email, un ID, una cabecera o texto dentro de una nota.
 Sin `space`, todas las herramientas trabajan en la biblioteca personal de esa cuenta.
 
-`hebra_list_spaces` devuelve solo los espacios para los que coinciden membresía, concesión y
-permiso propio del agente. Para trabajar en uno, pasa su `spaceId` como `space`; `personal`
-selecciona explícitamente la biblioteca personal. El contenido de una organización solo aparece
+`hebra_list_spaces` devuelve los espacios que vería la persona de esta cuenta; solo los de
+`granted: true` tienen membresía, concesión y permiso propio del agente. Para trabajar en uno,
+pasa su `spaceId` como `space`; `personal` selecciona explícitamente la biblioteca personal.
+`hebra_list_organizations` enseña en solo lectura las organizaciones, sus miembros y sus
+espacios: una organización no es un selector y ser miembro no concede contenido, que solo aparece
 a través de los espacios o concesiones que el servidor autorice. Pertenecer a un espacio u
 organización no permite buscar, enumerar, leer ni cambiar la biblioteca personal de otro miembro.
 
@@ -182,7 +184,8 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 | `hebra_note_outline` | `id` **o** `title`, `maxLevel?` 1-6, `limit?` 1-500 (200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`, sin cuerpo. `chars` = lo que devolvería la lectura de ese apartado. `occurrence` solo sale en los títulos repetidos: es el `headingOccurrence` que hay que pasar. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
-| `hebra_list_spaces` | sin argumentos | `{spaces: [{spaceId, name}]}` (`name` es `null` si no se pudo leer) solo con membresía, concesión y permiso propios vigentes. Comprueba el `name` antes de escribir en un espacio; el bloque de origen de las respuestas compartidas también lo lleva. Sus IDs se pasan como `space` a las herramientas de contenido. |
+| `hebra_list_spaces` | sin argumentos | `{spaces: [{spaceId, name, organization: {orgId, name} \| null, granted}], organizationsAvailable}` (`name` es `null` si no se pudo leer). Solo los de `granted: true` se pasan como `space` a las herramientas de contenido. Con `organizationsAvailable: false` quedan solo los espacios con concesión. Comprueba el `name` antes de escribir en un espacio; el bloque de origen de las respuestas compartidas también lo lleva. |
+| `hebra_list_organizations` | `limit?` 1-100, `cursor?` | `{organizations: [{orgId, name, members: [{accountId, role, name, isSelf}], spaces: [{spaceId, name, granted}]}], nextCursor}`. `isSelf` marca a la persona; `name` de un miembro es `null` si no se conoce. No acepta `space` ni abre contenido: se entra con `space`, espacio por espacio. |
 | `hebra_links` | `id`, `limit?` 1-200, `cursor?` | `outgoing` (con `resolvedId` si resuelve) y `backlinks`. Pagina con `nextCursor`. |
 | `hebra_create_note` | `body` (≤ 100 000 caracteres), `folder?` (ruta) | El título es el `title:` del frontmatter si lo hay y, si no, el primer `# H1` del cuerpo. |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. |
@@ -594,6 +597,7 @@ título) ni especules sobre qué hay oculto.
 |---|---|---|
 | `space_access_denied` | `space` no es `personal` ni un UUID válido y autorizado para esta cuenta, o se intentó abrir una SQLite compartida mediante el flujo local de ficheros de trabajo. Para un UUID, la respuesta no distingue entre inexistencia y falta de membresía, concesión o permiso propio del agente. | No pruebes variantes ni otros IDs. Informa que ese espacio no está disponible; usa `hebra_list_spaces` para los autorizados o trabaja sin `space` en la biblioteca personal. |
 | `space_not_supported` | Se pidió un espacio compartido a una herramienta `hebra_jd_*`. | Usa esa operación JD solo en `personal`. |
+| `organizations_unavailable` | `hebra_list_organizations` no puede leer el directorio; `reason` dice por qué (`not_available`, `rate_limited` con `retryAfterSeconds` si se conoce, `relay_unavailable`, `invalid_response`). | Dilo tal cual. Los espacios con concesión de `hebra_list_spaces` y la biblioteca personal siguen funcionando. |
 | `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado. En las de ficheros sueltos: el fichero no existe, no está disponible o el `id` no es de un fichero suelto (el de una nota o el `attachmentId` de un adjunto no valen) | Busca de nuevo (en la papelera, con `hebra_list_trash`; un fichero, con `hebra_list_files` y `trashed`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
 | `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, cursor ilegible, de otra herramienta o de un elemento que ya no existe, `offset`/`maxChars` fuera de rango, base64 mal formado, nombre de carpeta o de adjunto que no vale, renombrar la raíz, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200, nombres ≤ 255) y caracteres prohibidos. Los límites de parámetros los rechaza el esquema del cliente MCP. |

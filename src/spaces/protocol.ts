@@ -45,5 +45,54 @@ export type AgentSpaceGrant = z.infer<typeof grantSchema>;
 export type AgentSpaceAccess = z.infer<typeof accessSchema>;
 export type AgentPublicKey = z.infer<typeof publicKeySchema>;
 
+/** Nombre de una organización, un miembro o un espacio en el directorio. */
+const directoryName = z.string().max(1000);
+const directorySpaceSchema = z
+  .object({ spaceId: uuid, name: directoryName.nullable(), granted: z.boolean() })
+  .strict();
+/** `name` siempre viene, nullable, en el DTO de Lumbre; se tolera ausente hasta que la ruta
+ *  esté publicada. */
+const directoryMemberSchema = z
+  .object({
+    accountId: hex(32),
+    role: z.enum(['admin', 'manager', 'member']),
+    name: directoryName.nullable().optional()
+  })
+  .strict();
+const directoryOrganizationSchema = z
+  .object({
+    orgId: hex(32),
+    name: directoryName,
+    members: z.array(directoryMemberSchema),
+    spaces: z.array(directorySpaceSchema)
+  })
+  .strict();
+/** `GET /agent-directory` (D22). Cerrado como el catálogo, y sin tope de recuento: D22 no
+ *  admite que el tamaño de una organización deje a nadie sin su lista. Un espacio, una
+ *  organización o un miembro repetidos invalidan el directorio entero. */
+export const agentDirectorySchema = z
+  .object({
+    organizations: z.array(directoryOrganizationSchema),
+    spaces: z.array(directorySpaceSchema)
+  })
+  .strict()
+  .superRefine((directory, ctx) => {
+    const orgIds = directory.organizations.map((organization) => organization.orgId);
+    const spaceIds = [
+      ...directory.organizations.flatMap((organization) => organization.spaces),
+      ...directory.spaces
+    ].map((space) => space.spaceId);
+    const memberIds = directory.organizations.map((organization) =>
+      organization.members.map((member) => member.accountId)
+    );
+    for (const ids of [orgIds, spaceIds, ...memberIds]) {
+      if (new Set(ids).size !== ids.length) {
+        ctx.addIssue({ code: 'custom', message: 'duplicate-directory-entry' });
+        return;
+      }
+    }
+  });
+export type AgentDirectory = z.infer<typeof agentDirectorySchema>;
+
 /** Orden de propiedades acordado con el relé; no es el kid de la clave de cuenta. */
 export const deviceKeyId = agentDeviceKeyId;

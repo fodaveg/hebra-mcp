@@ -11,6 +11,8 @@ export type ToolErrorCode =
   | 'space_not_ready'
   | 'space_access_denied'
   | 'space_not_supported'
+  // El directorio del agente no está disponible (D22, `src/spaces/directory.ts`).
+  | 'organizations_unavailable'
   | 'not_found'
   | 'ambiguous_title'
   | 'privacy_config_unresolved'
