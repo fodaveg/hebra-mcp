@@ -3,7 +3,7 @@ import { createConnection, createServer } from 'node:net';
 import { join } from 'node:path';
 
 const CONTROL_DIR = 'control';
-const CONTROL_SOCKET = 'accounts.sock';
+export const CONTROL_SOCKET = 'accounts.sock';
 const MAX_REQUEST_BYTES = 4_096;
 const CONTROL_TIMEOUT_MS = 15_000;
 const SAFE_ERRORS = new Set(['account_not_found', 'account_inactive', 'multiuser_not_configured', 'account_writer_busy']);

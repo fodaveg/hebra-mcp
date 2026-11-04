@@ -35,6 +35,11 @@ export const SWEEP_ELEMENT_TIMEOUT_MS = 90_000;
 /** Lo que `stop()` espera al barrido en curso: el apagado tiene su propio presupuesto. */
 export const SWEEP_STOP_WAIT_MS = 5_000;
 export const PENDING_UPLOADS_FILE = 'pending-uploads-v1.json';
+/** El temporal con el que se publica la lista; un corte puede dejarlo en `control/`. */
+export const PENDING_UPLOADS_TEMPORARY = /^\.pending-uploads-v1\.json\..+\.tmp$/;
+export function pendingUploadsTemporaryName(): string {
+  return `.${PENDING_UPLOADS_FILE}.${randomUUID()}.tmp`;
+}
 
 const FILE_VERSION = 1;
 /** Como `RemotePairingJournalStore.list`: lo demás de ese directorio no es un diario. */
@@ -155,7 +160,7 @@ export class PendingUploadList {
   private async writeFile(): Promise<void> {
     const directory = dirname(this.path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const temporary = join(directory, `.${PENDING_UPLOADS_FILE}.${randomUUID()}.tmp`);
+    const temporary = join(directory, pendingUploadsTemporaryName());
     try {
       const handle = await open(temporary, 'w', 0o600);
       try {
