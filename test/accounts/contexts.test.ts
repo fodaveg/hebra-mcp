@@ -2,7 +2,8 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CapacityGate, ContextUnavailableError, readCapacityConfig, readMemoryUsage } from '../../src/accounts/capacity';
-import { AccountContexts, type AccountContextsOptions, type WriterLockOwner } from '../../src/accounts/contexts';
+import { AccountContexts, type AccountContextsOptions } from '../../src/accounts/contexts';
+import type { WriterLockOwner } from '../../src/lock';
 import type { Clock } from '../../src/accounts/lifecycle';
 import type { AccountRegistry } from '../../src/accounts/registry';
 import type { AuthorizedAccount } from '../../src/accounts/types';
@@ -118,6 +119,65 @@ describe('AccountContexts', () => {
     david1.release(); david2.release(); mikel.release();
     await contexts.close();
     expect(closed.sort()).toEqual(['legacy', 'mikel']);
+  });
+
+  describe('use: el barrido por la adquisición normal', () => {
+    function registryOf(current: { generation: number }): AccountRegistry {
+      return {
+        assertActive(ref: AuthorizedAccount) { if (ref.generation !== current.generation) throw new Error('account_inactive'); },
+        findById: (id: string) => ({ id, generation: current.generation, state: 'active' })
+      } as unknown as AccountRegistry;
+    }
+
+    it('la persona llama mientras el barrido drena su biblioteca: mismo contexto, respuesta normal y nada se cierra', async () => {
+      const current = { generation: 1 };
+      const { libraries, contexts } = harness({ registry: registryOf(current) });
+      const sweepEntered = deferred();
+      const sweepMayFinish = deferred();
+      const sweeping = contexts.use({ id: 'mikel', generation: 1 }, async (ctx) => {
+        sweepEntered.resolve();
+        await sweepMayFinish.promise;
+        return (ctx as unknown as { account: string }).account;
+      });
+      await sweepEntered.promise;
+
+      // La persona llega con el barrido en curso: no recibe account_inactive.
+      const person = await contexts.acquire(account('mikel'));
+      expect((person.ctx as unknown as { account: string }).account).toBe('mikel');
+      sweepMayFinish.resolve();
+      expect(await sweeping).toBe('mikel');
+      await settled();
+      // El barrido ha terminado, pero la persona lo sigue usando: ni se cierra ni se retira.
+      expect(libraries.opened).toEqual(['mikel']);
+      expect(libraries.closed).toEqual([]);
+      expect(person.ctx).toBeDefined();
+      person.release();
+      await contexts.closeIfIdle({ id: 'mikel', generation: 1 });
+      expect(libraries.closed).toEqual(['mikel']);
+    });
+
+    it('el barrido cuenta como uso: la persona que llega después espera a la misma apertura, sin dos instancias', async () => {
+      const { libraries, contexts } = harness({ registry: registryOf({ generation: 1 }) });
+      const opening = deferred();
+      libraries.beforeOpen = () => opening.promise;
+      const sweeping = contexts.use({ id: 'mikel', generation: 1 }, async () => 'ok');
+      await settled();
+      const person = contexts.acquire(account('mikel'));
+      opening.resolve();
+      expect(await sweeping).toBe('ok');
+      (await person).release();
+      expect(libraries.opened).toEqual(['mikel']);
+      expect(libraries.overlap).toBe(false);
+    });
+
+    it('al terminar cierra lo que abrió, y una generación vieja o una cuenta que no está da account_inactive', async () => {
+      const { libraries, contexts } = harness({ registry: registryOf({ generation: 2 }) });
+      await expect(contexts.use({ id: 'mikel', generation: 1 }, async () => 'no')).rejects.toThrow('account_inactive');
+      expect(libraries.opened).toEqual([]);
+      await contexts.use({ id: 'mikel', generation: 2 }, async () => 'ok');
+      await settled();
+      expect(libraries.closed).toEqual(['mikel']);
+    });
   });
 
   it('una retirada bloquea adquisiciones nuevas y espera el lease vivo', async () => {

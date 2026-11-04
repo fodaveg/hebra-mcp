@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AccountContexts } from '../../src/accounts/contexts';
+import { PendingSweep, PendingUploadList } from '../../src/accounts/pending-sweep';
 import { accountDataDir, AccountRegistry } from '../../src/accounts/registry';
 import { openRemotePairing, remotePairingAdapters, type RemotePairingAccountServices } from '../../src/accounts/remote-pairing';
 import { AccountRemovalService } from '../../src/accounts/removal';
@@ -20,6 +21,7 @@ import type { RemoteLinkRequest } from '../../src/pair/remote/link';
 import { RemotePairingService } from '../../src/pair/remote/service';
 import { MemorySecretStore, openFileSecretStore, readPairedSecrets, writePairedSecrets, type PairedSecrets } from '../../src/secrets';
 import { PairingRevocation } from '../../src/status/pairing-revocation';
+import type { ServerContext } from '../../src/server/context';
 
 const SUB = 'sumego|david';
 const ACCOUNT = '44'.repeat(32);
@@ -145,6 +147,52 @@ describe('renovación con estado real', () => {
     expect(await journals.read(started.id)).toBeNull();
     expect(revoke).not.toHaveBeenCalled();
     await expect(stat(join(root, 'accounts', started.id))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('tras renovar, el barrido vuelve a intentar lo bloqueado y lo que esperaba, sin esperar su turno', async () => {
+    const list = await PendingUploadList.open(join(root, 'control'));
+    await list.put(account, null, true);
+    await list.put(account, 'espacio', false);
+    // Mientras la credencial vieja siga, ni la personal ni la del espacio suben.
+    let renewed = false;
+    const statusOf = () => renewed
+      ? { pendingUpload: 0, errorsByCode: {}, revoked: false, lastSyncOutcome: 'ok' }
+      : { pendingUpload: 2, errorsByCode: {}, revoked: !!(attempts.current % 2), lastSyncOutcome: null };
+    const attempts = { current: 0 };
+    const target = (): ServerContext => ({
+      firstRound: async () => undefined,
+      status: { getStatus: async () => statusOf() } } as unknown as ServerContext);
+    const seen: Array<{ id: string; generation: number }> = [];
+    let now = 0;
+    const sweep = new PendingSweep({ list,
+      withAccountContext: async (ref, fn) => {
+        seen.push(ref);
+        attempts.current += 1;
+        const ctx = target();
+        return fn({ ...ctx, spaces: { resolve: async () => target(), list: async () => [] } } as unknown as ServerContext);
+      },
+      accountActive: (ref) => { const r = registry.findById(ref.id); return r?.state === 'active' && r.generation === ref.generation; },
+      currentRef: (id) => { const r = registry.findById(id); return r?.state === 'active' ? { id: r.id, generation: r.generation } : null; },
+      resumeRemovals: async () => undefined,
+      expireJournals: async () => ({ expired: 0, failed: 0 }),
+      now: () => now });
+    await sweep.runOnce();
+    expect(seen).toHaveLength(2);
+    // Sin renovar, los dos siguen: el espacio espera su turno y la personal ya se probó este arranque.
+    expect(await sweep.runOnce()).toMatchObject({ uploaded: 0, skipped: 2 });
+    expect(seen).toHaveLength(2);
+
+    const { service } = build();
+    const { started, form } = await toConfirmation(service);
+    await service.confirm(started.id, form);
+    const record = registry.findById(account.id)!;
+    expect(record.generation).toBeGreaterThan(account.generation);
+    renewed = true;
+
+    // Sin avanzar el reloj ni reiniciar: la siguiente pasada prueba las dos con la generación nueva.
+    expect(await sweep.runOnce()).toMatchObject({ uploaded: 2, kept: 0, dropped: 0 });
+    expect(seen.slice(2).map((ref) => ref.generation)).toEqual([record.generation, record.generation]);
+    expect(list.entries()).toEqual([]);
   });
 
   it('otra bóveda: retira la cuenta anterior por el camino normal y la nueva no mezcla datos', async () => {

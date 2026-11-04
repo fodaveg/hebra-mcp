@@ -7,7 +7,7 @@
  * La autenticación aquí es un bearer fijo de prueba (`staticBearerAuth`): el OAuth de
  * verdad (C3) tiene sus propios tests en `test/http/oauth.test.ts`.
  */
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { createConnection } from 'node:net';
@@ -16,8 +16,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import { classifyWriterLock } from '../../src/lock';
 import { MAX_MCP_BODY_BYTES } from '../../src/http/app';
 import { AccountRegistry, accountControlDir, accountDataDir, requestAccountRemoval } from '../../src/accounts';
+import { ContextUnavailableError } from '../../src/accounts/capacity';
+import type { RemotePairingOAuthHooks } from '../../src/oauth/provider';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { loadOAuthHttpAuth, type OAuthHttpAuth } from '../../src/oauth/http-auth';
 import { GrantSecrets } from '../../src/oauth/grants';
@@ -40,6 +43,12 @@ import {
   textOf,
   type TestHttpApp
 } from '../fixtures/http-app';
+
+// La función real, solo observada: lo que se comprueba es que `serve-http` se la pasa a los contextos.
+vi.mock('../../src/lock', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../../src/lock')>();
+  return { ...original, classifyWriterLock: vi.fn(original.classifyWriterLock) };
+});
 
 const TOKEN = 'token-de-prueba-c2';
 
@@ -620,5 +629,67 @@ describe('arranque de serve-http', () => {
     await closing;
     const replacement = await startServeHttp(options);
     handles.push(replacement);
+  });
+});
+
+describe('serve-http multiusuario: cableado de las piezas de D22', () => {
+  const GRANT = { active: true as const, credentialId: '70000000-0000-4000-8000-000000000001',
+    clientId: 'hebra-mcp-claude', resource: 'http://127.0.0.1/mcp', scope: 'hebra:mcp',
+    accountId: 'a'.repeat(64), pairedCredentialId: '80000000-0000-4000-8000-000000000001',
+    syncVaultId: 'b'.repeat(32), opaqueDeviceId: 'c'.repeat(32), expiresAt: '2026-12-01T00:00:00.000Z' };
+
+  /** Una cuenta con sus secretos en disco y el arranque real de `serve-http` sobre ella. */
+  async function startWithAccount(fetcher: (input: unknown) => Promise<Response>) {
+    const dataDir = mkdtempSync(join(tmpdir(), 'hebra-serve-http-d22-'));
+    dirs.push(dataDir);
+    const registry = await AccountRegistry.open(dataDir);
+    const account = await registry.commitAccount({ sub: 'mikel', grant: GRANT });
+    mkdirSync(accountDataDir(dataDir, account), { recursive: true });
+    await writePairedSecrets(openFileSecretStore(accountDataDir(dataDir, account)), {
+      connection: { credentialId: GRANT.pairedCredentialId, readToken: 'read', writeToken: 'write',
+        apiOrigin: 'https://app.lumbre.pro', connectedAt: new Date().toISOString() },
+      recoveryCode: await encodeRecoveryCode({ relayOrigin: 'https://app.lumbre.pro', syncVaultId: GRANT.syncVaultId,
+        keyEpoch: 1, vaultKey: randomBytes(32) }),
+      device: { opaqueDeviceId: GRANT.opaqueDeviceId, lumbreDeviceId: '90000000-0000-4000-8000-000000000001' }
+    });
+    const hooks: { current?: RemotePairingOAuthHooks } = {};
+    const provider = { attachRemotePairing(attached: RemotePairingOAuthHooks) { hooks.current = attached; },
+      invalidateAccount: async () => 0, invalidateFamiliesForRenewal: async () => 0, pairing: {} };
+    const auth = { ...staticBearerAuth(TOKEN), accounts: registry, provider,
+      lumbreOrigin: 'https://app.lumbre.pro' } as unknown as OAuthHttpAuth;
+    const handle = await startServeHttp({ dataDir, secrets: new MemorySecretStore(), multiuser: true,
+      config: httpConfigFor('http://127.0.0.1', 0), version: '0.0.0-test', authConfigured: () => true,
+      loadAuth: async () => auth, fetcher: fetcher as never });
+    handles.push(handle);
+    return { dataDir, registry, account, handle, hooks };
+  }
+
+  it('un writer.lock de otro proceso vivo llega como lock_held por el AccountContexts de serve-http', async () => {
+    vi.stubEnv('HEBRA_MCP_OPEN_WAIT_MS', '0');
+    try {
+      const { dataDir, account, handle } = await startWithAccount(async () => new Response('{}'));
+      // Otro proceso vivo que no es este servidor ni su arranque: una orden por `compose exec`.
+      writeFileSync(join(accountDataDir(dataDir, account), 'writer.lock'),
+        JSON.stringify({ pid: process.ppid, nonce: 'otra-orden', startedAt: new Date().toISOString() }));
+      await expect(handle.contexts!.acquire(account)).rejects.toMatchObject({
+        name: ContextUnavailableError.name, reason: 'lock_held' });
+      const classify = vi.mocked(classifyWriterLock);
+      expect(classify).toHaveBeenCalledWith(accountDataDir(dataDir, account));
+      expect(classify.mock.results.map((result) => result.value)).toContain('other-process');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('a una persona con la credencial rechazada se le ofrece renovar desde el conector', async () => {
+    const probes: string[] = [];
+    const { account, hooks } = await startWithAccount(async (input) => {
+      probes.push(String(input));
+      return new Response('{}', { status: 401 });
+    });
+    const renewal = hooks.current!.renewal!;
+    expect(renewal.ready()).toBe(true);
+    await expect(renewal.credentialRejected(account)).resolves.toBe(true);
+    expect(probes).toHaveLength(1);
   });
 });

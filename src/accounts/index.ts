@@ -1,7 +1,7 @@
 export { AccountContexts, type AccountContextLease } from './contexts';
 export { accountControlDir, openAccountControlServer, requestAccountRemoval,
   type AccountControlServer } from './control-ipc';
-export { AccountUploadLedger, expireRemotePairings, PendingSweep, PendingUploadList,
+export { AccountUploadLedger, PendingSweep, RetryBackoff, PendingUploadList,
   type PendingSweepOptions, type SweepReport, type WithAccountContext } from './pending-sweep';
 export { ControlSecretsError, migrateControlSecrets, openControlSecrets, openControlSecretStore, restoreControlSecrets,
   rollbackControlSecrets, type ControlSecretsErrorCode, type ControlSecretsMigration,

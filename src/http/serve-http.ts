@@ -11,16 +11,14 @@
 import { createServer, type Server } from 'node:http';
 import { mkdir } from 'node:fs/promises';
 import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
 import { logEvent } from '../log/logger';
-import { acquireServerLock, type ServerLock } from '../lock';
+import { acquireServerLock, classifyWriterLock, type ServerLock } from '../lock';
 import { openFileSecretStore, readPairedSecrets, type SecretStore } from '../secrets';
 import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir, openRemotePairing,
-  accountControlDir, expireRemotePairings, openAccountControlServer, PendingSweep, PendingUploadList,
-  REMOTE_PAIRING_JOURNAL_DIR, type AccountControlServer, type RemotePairingRuntime,
+  accountControlDir, openAccountControlServer, PendingSweep, PendingUploadList,
+  type AccountControlServer, type RemotePairingRuntime,
   type WithAccountContext } from '../accounts';
 import { readCapacityConfig } from '../accounts/capacity';
-import { RemotePairingJournalStore } from '../pair/remote/journal';
 import { revokeRemoteCredential } from '../pair/remote/revoke';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
@@ -251,7 +249,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         } };
         if (account.storage === 'legacy-root') serve = tracked;
         return tracked;
-      }, readCapacityConfig());
+      }, { ...readCapacityConfig(),
+        classifyLock: (account) => classifyWriterLock(accountDataDir(options.dataDir, account)) });
       const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
       if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');
       remotePairing = await openRemotePairing({ dataDir: options.dataDir, registry: activeRegistry, provider: oauth.provider,
@@ -267,33 +266,31 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           if (!paired) throw new Error('account_pairing_unavailable');
           await revokeRemoteCredential(paired.connection, options.fetcher);
         } });
+      // Sin esto, a una persona revocada no se le ofrece renovar desde el conector (D22).
+      remotePairing.attachAccountServices({ contexts, removal, legacySecrets: options.secrets! });
       await removal.resumePending();
       if (!options.maintenance) {
         controlServer = await openAccountControlServer(options.dataDir, removeById);
         const openContexts = contexts;
         const activeRemoval = removal;
         const activePairing = remotePairing;
-        const journals = new RemotePairingJournalStore(join(options.dataDir, REMOTE_PAIRING_JOURNAL_DIR));
-        // Punto de enganche del lote de ciclo de vida: abrir, usar y soltar. Hasta que los contextos
-        // se cierren solos, se cierra aquí mismo; el barrido no entra si ya estaba abierto.
-        const withAccountContext: WithAccountContext = async (ref, fn) => {
-          const account = activeRegistry.findById(ref.id);
-          if (!account || account.generation !== ref.generation) throw new Error('account_inactive');
-          const lease = await openContexts.acquire(account);
-          try {
-            return await fn(lease.ctx);
-          } finally {
-            lease.release();
-            await openContexts.drainAndClose(ref);
-          }
-        };
+        // El barrido usa el contexto como cualquier petición (`AccountContexts.use`): el mismo
+        // contexto que la persona si lo tiene abierto, y cuenta como uso.
+        const withAccountContext: WithAccountContext = (ref, fn) => openContexts.use(ref, fn);
         sweep = new PendingSweep({ list: pendingUploads, withAccountContext,
           accountActive: (ref) => {
             const account = activeRegistry.findById(ref.id);
             return account?.state === 'active' && account.generation === ref.generation;
           },
+          currentRef: (id) => {
+            const account = activeRegistry.findById(id);
+            return account?.state === 'active' ? { id: account.id, generation: account.generation } : null;
+          },
           resumeRemovals: () => activeRemoval.resumePending(),
-          expireJournals: () => expireRemotePairings(journals, activePairing.service, Date.now()) });
+          expireJournals: async (retry) => {
+            const { cleaned, pending } = await activePairing.service.recover({ retry });
+            return { expired: cleaned, failed: pending };
+          } });
       }
     } else {
       if (!serve) throw new ServeHttpError('auth_not_configured', 'El modo multiusuario requiere autenticación por cuenta.');
