@@ -550,10 +550,13 @@ describe('consentimiento y vínculo exacto', () => {
   });
 
   it('una IP no desplaza las solicitudes de otra y Origin:null ya no es excepción', async () => {
-    for (let index = 0; index < 4; index += 1) expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(302);
-    expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(429);
+    // D22: pasadas las 32 de una IP cae su solicitud más antigua, sin rechazar la nueva.
+    expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(302);
+    const oldest = requestId;
+    for (let index = 0; index < 32; index += 1) expect((await authorize(pkce().challenge, '10.0.0.1')).status).toBe(302);
     expect((await authorize(pkce().challenge, '10.0.0.2')).status).toBe(302);
-    expect(requestCount).toBe(5);
+    expect(requestCount).toBe(34);
+    expect((await callback('approved', oldest)).status).toBe(400);
     const oldForm = await fetch(`${app.origin}/oauth/consent`, { method: 'POST', headers: { origin: 'null' } });
     expect(oldForm.status).toBe(403);
     expect((await fetch(`${app.origin}/oauth/lumbre/callback?request=${requestId}&decision=approved`,

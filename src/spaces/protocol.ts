@@ -39,7 +39,13 @@ export const grantSchema = z.unknown().transform((value, ctx) => {
 export const accessSchema = z
   .object({ spaceId: uuid, syncVaultId: hex(16), grant: grantSchema })
   .strict();
-export const catalogueSchema = z.object({ spaces: z.array(accessSchema).max(1000) }).strict();
+/**
+ * Lo que se acepta del relé en una respuesta, también del catálogo de espacios: se limita por
+ * bytes, no por número de espacios (D22, SPEC.md §12.10). Cada espacio ocupa algo menos de 1 KiB,
+ * así que son unos 8 000; lo que acota es la memoria de este proceso, no a quién puede entrar.
+ */
+export const DEVICE_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+export const catalogueSchema = z.object({ spaces: z.array(accessSchema) }).strict();
 export type AgentRegistration = z.infer<typeof registrationSchema>;
 export type AgentSpaceGrant = z.infer<typeof grantSchema>;
 export type AgentSpaceAccess = z.infer<typeof accessSchema>;

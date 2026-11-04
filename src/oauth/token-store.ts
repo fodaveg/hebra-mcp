@@ -29,6 +29,9 @@
  *   Sumego con el que se autorizó, o `null` si se autorizó con el login de Lumbre. Un fichero
  *   v2 se carga con los dos a `null` y la escritura siguiente ya es v3. Esas familias solo se
  *   cortan con `oauth-revoke-all` o al revocarlas en Lumbre, nunca por back-channel logout.
+ * - Sin máximo de familias (D22, SPEC.md §12.10): cada una exige login y canje en Lumbre y caduca
+ *   con su concesión. Crear familias tiene un ritmo por persona (`FAMILY_RATE_LIMIT` por hora) que
+ *   solo la frena a ella. Vive en memoria: un reinicio lo pone a cero.
  */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { logEvent } from '../log/logger';
@@ -40,9 +43,9 @@ const MAX_ACCESS_PER_FAMILY = 4;
 /** Ventana tras una rotación en la que el refresh recién rotado da `invalid_grant` sin
  *  revocar la familia (hallazgo B3 de la auditoría). */
 export const REFRESH_REUSE_GRACE_MS = 30_000;
-/** Familias vivas a la vez: una por dispositivo de claude.ai que conecta; de sobra. */
-const MAX_FAMILIES = 32;
-const MAX_FAMILIES_PER_ACCOUNT = 8;
+/** Familias nuevas por persona en `FAMILY_RATE_WINDOW_MS`: un ritmo, no un máximo de familias. */
+export const FAMILY_RATE_LIMIT = 20;
+export const FAMILY_RATE_WINDOW_MS = 60 * 60_000;
 
 const ACCESS_PREFIX = 'hmcp_at_';
 const REFRESH_PREFIX = 'hmcp_rt_';
@@ -137,6 +140,23 @@ export type RefreshOutcome =
   | { ok: true; tokens: IssuedTokens }
   | { ok: false; reason: 'invalid' | 'expired' | 'client_mismatch' | 'replay' | 'recently_rotated' };
 
+/** Esa persona ya ha creado `FAMILY_RATE_LIMIT` familias en la última hora. */
+export class FamilyRateLimitedError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super('family_rate_limited');
+    this.name = 'FamilyRateLimitedError';
+  }
+}
+
+/**
+ * A quién cuenta el ritmo: el `sub` validado de Sumego. Sale de una identidad ya autenticada, así
+ * que nadie puede gastar el de otra persona. Con el login de Lumbre, que no da `sub`, la cuenta
+ * de la concesión.
+ */
+export function familyRateKey(identity: FamilyIdentity | null | undefined, accountId: string): string {
+  return identity ? `sub:${identity.sub}` : `account:${accountId}`;
+}
+
 function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
@@ -200,6 +220,8 @@ function isFamilyV2(value: unknown): value is Omit<Family, 'sub' | 'sid' | 'sume
 export class TokenStore {
   private queue: Promise<unknown> = Promise.resolve();
   private familiesRemoved: ((ids: readonly string[]) => () => Promise<void>) | null = null;
+  /** Cuándo creó familias cada persona en la última hora, de la más antigua a la más reciente. */
+  private readonly familyStarts = new Map<string, number[]>();
 
   private constructor(
     private readonly dataDir: string,
@@ -258,8 +280,44 @@ export class TokenStore {
     return family.createdAt > revokedBefore && family.expiresAt > now;
   }
 
-  /** Serializa una mutación y la persiste antes de resolver. */
-  private mutate<T>(operation: () => T | Promise<T>): Promise<T> {
+  /** Las de esta persona dentro de la ventana; las vencidas se olvidan. Un reloj que retrocede abre ventana nueva. */
+  private recentFamilyStarts(key: string, now: number): number[] {
+    const starts = (this.familyStarts.get(key) ?? []).filter((at) => at <= now && now - at < FAMILY_RATE_WINDOW_MS);
+    if (starts.length) this.familyStarts.set(key, starts); else this.familyStarts.delete(key);
+    return starts;
+  }
+
+  /**
+   * Segundos hasta que esta persona pueda crear otra familia, o `null` si ya puede. `inFlight`
+   * son sus canjes ya admitidos y sin terminar: si solo ellos llenan el ritmo, el hueco depende
+   * de cómo acaben y se reintenta enseguida.
+   */
+  familyRetryAfter(key: string, inFlight = 0): number | null {
+    const now = this.now();
+    const starts = this.recentFamilyStarts(key, now);
+    if (starts.length + inFlight < FAMILY_RATE_LIMIT) return null;
+    if (starts.length < FAMILY_RATE_LIMIT) return 1;
+    const freedAt = starts[starts.length - FAMILY_RATE_LIMIT]! + FAMILY_RATE_WINDOW_MS;
+    return Math.max(1, Math.ceil((freedAt - now) / 1000));
+  }
+
+  private countFamilyStart(key: string, now: number): void {
+    // Barrido al crear, que es poco frecuente: quien dejó de crear familias no ocupa memoria.
+    for (const known of [...this.familyStarts.keys()]) this.recentFamilyStarts(known, now);
+    this.familyStarts.set(key, [...(this.familyStarts.get(key) ?? []), now]);
+  }
+
+  private uncountFamilyStart(key: string, at: number): void {
+    const starts = this.familyStarts.get(key) ?? [];
+    const index = starts.lastIndexOf(at);
+    if (index >= 0) starts.splice(index, 1);
+  }
+
+  /**
+   * Serializa una mutación y la persiste antes de resolver. `rollback` deshace lo que la mutación
+   * haya apuntado fuera de `families` si al final no se pudo guardar.
+   */
+  private mutate<T>(operation: () => T | Promise<T>, rollback?: () => void): Promise<T> {
     const committed = this.queue.then(async () => {
       const before = structuredClone(this.families);
       let result: T;
@@ -272,7 +330,7 @@ export class TokenStore {
           version: 3,
           families: this.families
         } satisfies TokensFile);
-      } catch (error) { this.families = before; throw error; }
+      } catch (error) { this.families = before; rollback?.(); throw error; }
       const cleanup = removed.length ? this.familiesRemoved?.(removed) : undefined;
       return { result, cleanup };
     });
@@ -315,7 +373,9 @@ export class TokenStore {
   /**
    * Una familia nueva tras una autorización aprobada. `loggedOut`, si lo hay, se evalúa dentro
    * de la cola de mutaciones: un back-channel logout ya apuntado por el proveedor rechaza la
-   * identidad (`logged_out`) aunque llegue entre el canje del código y esta escritura.
+   * identidad (`logged_out`) aunque llegue entre el canje del código y esta escritura. El ritmo
+   * por persona también se comprueba aquí, en la cola: es lo que lo hace exacto. Lanza
+   * `FamilyRateLimitedError`; una escritura fallida no gasta ritmo.
    */
   issueFamily(
     input: { clientId: string; scope: string; resource: string; grant: ActiveGrant; authorizedAt: number;
@@ -324,16 +384,16 @@ export class TokenStore {
     revokedBefore: number,
     storeBearer: (familyId: string, liveIds: readonly string[]) => Promise<void>
   ): Promise<IssuedTokens> {
+    const rateKey = familyRateKey(input.identity, input.grant.accountId);
+    let countedAt: number | null = null;
     return this.mutate(async () => {
       const now = this.now();
       const priorIds = this.familyIds();
       this.prune(revokedBefore, now);
       if (input.authorizedAt <= revokedBefore) throw new Error('authorization_revoked');
       if (input.loggedOut?.()) throw new Error('logged_out');
-      if (this.families.length >= MAX_FAMILIES) throw new Error('too_many_families');
-      const accountFamilies = this.families.filter((family) => family.grant.accountId === input.grant.accountId &&
-        sameBinding(family.grant, input.grant) && family.sub === (input.identity?.sub ?? null));
-      if (accountFamilies.length >= MAX_FAMILIES_PER_ACCOUNT) throw new Error('too_many_account_families');
+      const retryAfter = this.familyRetryAfter(rateKey);
+      if (retryAfter !== null) throw new FamilyRateLimitedError(retryAfter);
       const family: Family = {
         id: randomBytes(16).toString('base64url'),
         clientId: input.clientId,
@@ -360,8 +420,10 @@ export class TokenStore {
       // Conservar bearers de familias podadas hasta que la eliminación sea durable;
       // el observador los revoca y retira después de persistir los tokens.
       await storeBearer(family.id, [...priorIds, family.id]);
+      this.countFamilyStart(rateKey, now);
+      countedAt = now;
       return this.issued(family, accessToken, refreshToken);
-    });
+    }, () => { if (countedAt !== null) this.uncountFamilyStart(rateKey, countedAt); });
   }
 
   /**
@@ -372,6 +434,12 @@ export class TokenStore {
    */
   rotateRefresh(refreshToken: string, clientId: string, revokedBefore: number, renewedExpiresAt?: string,
     sumego?: SumegoRefreshState, authorize?: () => void | Promise<void>): Promise<RefreshOutcome> {
+    // Sin familia no hay nada que guardar: un refresh inventado no gasta una escritura del
+    // fichero, que con muchas familias retrasaría las rotaciones de todas las demás personas.
+    const presented = REFRESH_PATTERN.exec(refreshToken);
+    if (!presented || !this.families.some((candidate) => candidate.id === presented[1])) {
+      return Promise.resolve({ ok: false, reason: 'invalid' });
+    }
     return this.mutate(async (): Promise<RefreshOutcome> => {
       const now = this.now();
       const match = REFRESH_PATTERN.exec(refreshToken);
@@ -425,7 +493,12 @@ export class TokenStore {
     return { sealedRefresh: family.sumegoRefresh, renewedAt: family.sumegoRenewedAt };
   }
 
-  /** El access token, si es válido ahora. Sin escribir nada. */
+  /**
+   * El access token, si es válido ahora. Sin escribir nada. Corre en cada petición a `/mcp` y
+   * recorre todas las familias, que ya no tienen máximo: compara las huellas como texto, sin
+   * reservar búferes (medido en `test/perf/oauth-tokens.perf.ts`). Comparar huellas SHA-256 de un
+   * token aleatorio de 256 bits no revela nada: quien llama no controla la huella.
+   */
   verifyAccess(accessToken: string, revokedBefore: number): VerifiedAccess | null {
     if (!ACCESS_PATTERN.test(accessToken)) return null;
     const hash = sha256(accessToken);
@@ -433,7 +506,7 @@ export class TokenStore {
     for (const family of this.families) {
       if (!this.alive(family, revokedBefore, now)) continue;
       for (const entry of family.access) {
-        if (entry.expiresAt > now && sameHash(hash, entry.hash)) {
+        if (entry.expiresAt > now && entry.hash === hash) {
           return {
             clientId: family.clientId,
             scope: family.scope,
@@ -493,31 +566,31 @@ export class TokenStore {
     });
   }
 
+  /** La familia a la que pertenece un token vigente de este cliente, refresh o access. */
+  private revocableFamily(token: string, clientId: string): Family | undefined {
+    const hash = sha256(token);
+    const refresh = REFRESH_PATTERN.exec(token);
+    if (refresh) {
+      const family = this.families.find((candidate) => candidate.id === refresh[1]);
+      return family && family.clientId === clientId && sameHash(hash, family.refreshHash) ? family : undefined;
+    }
+    if (!ACCESS_PATTERN.test(token)) return undefined;
+    return this.families.find((family) => family.clientId === clientId && family.access.some((entry) => sameHash(hash, entry.hash)));
+  }
+
   /**
    * RFC 7009: revocar cualquier token vigente corta la autorización completa y su
    * concesión upstream; una familia nunca queda parcialmente abierta en Lumbre.
-   * Un token desconocido, de otro cliente o ya revocado no hace nada.
+   * Un token desconocido, de otro cliente o ya revocado no hace nada, tampoco escribir: ese
+   * 200 es un acierto y no gasta cupo, así que no puede costar una escritura del fichero.
    */
   revoke(token: string, clientId: string): Promise<'access' | 'family' | 'none'> {
+    if (!this.revocableFamily(token, clientId)) return Promise.resolve('none');
     return this.mutate((): 'access' | 'family' | 'none' => {
-      const hash = sha256(token);
-      const refresh = REFRESH_PATTERN.exec(token);
-      if (refresh) {
-        const family = this.families.find((candidate) => candidate.id === refresh[1]);
-        if (!family || family.clientId !== clientId || !sameHash(hash, family.refreshHash)) return 'none';
-        this.families = this.families.filter((candidate) => candidate !== family);
-        return 'family';
-      }
-      if (!ACCESS_PATTERN.test(token)) return 'none';
-      for (const family of this.families) {
-        if (family.clientId !== clientId) continue;
-        const index = family.access.findIndex((entry) => sameHash(hash, entry.hash));
-        if (index >= 0) {
-          this.families = this.families.filter((candidate) => candidate !== family);
-          return 'family';
-        }
-      }
-      return 'none';
+      const family = this.revocableFamily(token, clientId);
+      if (!family) return 'none';
+      this.families = this.families.filter((candidate) => candidate !== family);
+      return 'family';
     });
   }
 }

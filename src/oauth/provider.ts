@@ -8,7 +8,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
-import { InvalidGrantError, InvalidRequestError, InvalidScopeError, InvalidTargetError, InvalidTokenError, ServerError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
+import { InvalidGrantError, InvalidRequestError, InvalidScopeError, InvalidTargetError, InvalidTokenError, ServerError, TooManyRequestsError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import type { AuthorizationParams, OAuthServerProvider } from '@modelcontextprotocol/sdk/server/auth/provider.js';
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { AccountRegistry, type AccountRecord, type AuthorizedAccount } from '../accounts';
@@ -18,30 +18,39 @@ import { logEvent } from '../log/logger';
 import { readPairedSecrets, type SecretStore } from '../secrets';
 import { PairingRevocation } from '../status/pairing-revocation';
 import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type Grant, sameBinding } from './backchannel';
+import { rateKey } from './backchannel-logout';
 import { ClaudeClientsStore, isAllowedRedirectUri } from './clients';
+import { sendTooManyRequests } from './failure-limit';
 import { GrantSecrets } from './grants';
 import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
 import { sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
 import { SumegoError, type SumegoOidc } from './sumego';
 import type { RefreshSealer } from './sumego-refresh';
-import { logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
+import { familyRateKey, FamilyRateLimitedError, logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
 
 export const OAUTH_SCOPE = 'hebra:mcp';
+const FAMILY_RATE_MESSAGE = 'Demasiadas conexiones nuevas en la última hora.';
 const PENDING_TTL_MS = 10 * 60_000;
 const CODE_TTL_MS = 60_000;
-const MAX_PENDING = 64;
-const MAX_PENDING_PER_IP = 4;
-const MAX_PENDING_PER_CLIENT = 16;
-const MAX_CODES = 64;
+/**
+ * Solicitudes anónimas, las que aún no han vuelto del login, que se conservan a la vez (D22,
+ * SPEC.md §12.10). Solo acotan memoria: pasado el tope cae la más antigua, nunca se rechaza la
+ * nueva. Una solicitud ocupa pocos KiB, así que el total son unos 10 MiB como mucho.
+ */
+export const MAX_PENDING = 4096;
+export const MAX_PENDING_PER_IP = 32;
 /**
  * Vigencia en memoria de una introspección POSITIVA, por familia. Revocar la concesión en
  * Lumbre puede tardar hasta este plazo en cortar `/mcp`; el emparejado local, el bearer de la
  * familia, `revokeToken` y `oauth-revoke-all` se comprueban en cada petición y cortan al momento.
  */
 export const INTROSPECTION_CACHE_MS = 30_000;
-/** Techo defensivo: las familias vivas son como mucho 32 y cada una tiene una sola entrada. */
-const MAX_INTROSPECTIONS = 64;
+/**
+ * Solo acota memoria: una entrada por familia en uso, de menos de 1 KiB y que vence a los 30 s.
+ * Expulsar una no niega nada: su siguiente petición repite la introspección en Lumbre.
+ */
+export const MAX_INTROSPECTIONS = 4096;
 const CHALLENGE = /^[A-Za-z0-9_-]{43}$/;
 const VERIFIER = /^[A-Za-z0-9._~-]{43,128}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -59,6 +68,7 @@ const DENIED_EXCHANGE_STATUS = new Set([400, 403, 404, 409]);
  */
 interface SumegoLogin {
   state: string;
+  stateHash: string;
   nonce: string;
   nonceHash: string;
   verifier: string;
@@ -153,6 +163,17 @@ function grantFingerprint(grant: ActiveGrant): string {
     grant.scope, grant.pairedCredentialId, grant.syncVaultId, grant.opaqueDeviceId]);
 }
 
+/**
+ * ¿Ha pasado ya por el login? Desde el callback de Sumego (o la aprobación de Lumbre), o con
+ * una alta remota en curso aunque esté repitiendo el login. Una solicitud así ya no es anónima
+ * y ninguna anónima la expulsa.
+ */
+function pastLogin(pending: PendingAuthorization): boolean {
+  const login = pending.sumego;
+  return pending.claimed || pending.pairingGrant !== undefined ||
+    (login !== undefined && (login.phase !== 'login' || login.remotePairingId !== undefined));
+}
+
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
 function s256(value: string): string { return createHash('sha256').update(value, 'ascii').digest('base64url'); }
 /**
@@ -233,6 +254,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private readonly now: () => number;
   private readonly pending = new Map<string, PendingAuthorization>();
   private readonly codes = new Map<string, AuthorizationCode>();
+  /** Canjes de código admitidos y sin terminar, por persona (`guardFamilyRate`). */
+  private readonly familyExchanges = new Map<string, number>();
   /** Una entrada por familia viva; solo en memoria, nunca se persiste ni se registra. */
   private readonly introspections = new Map<string, CachedIntrospection>();
   /** Sube con oauth-revoke-all: ninguna introspección anterior puede dar acceso ni reponer caché. */
@@ -383,7 +406,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       pending.expiresAt <= this.now()) throw new Error('remote_pairing_reauth_invalid');
     const random = () => randomBytes(32).toString('base64url');
     const nonce = random();
-    const login: SumegoLogin = { state: random(), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '',
+    const state = random();
+    const login: SumegoLogin = { state, stateHash: sha256(state), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '',
       phase: 'login', idToken: null, email: null, identity: null, idTokenIat: null, refreshToken: null,
       refreshedAt: null, consentDeadline: null, formTokenHash: null,
       remotePairingId: input.pairingSessionId, expectedSub: input.expectedSub };
@@ -416,7 +440,23 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       (idTokenIat === null || idTokenIat <= entry.iat));
   }
 
-  /** Reserva cupos antes de llamar al broker para evitar ráfagas concurrentes. */
+  /**
+   * Hace sitio a una solicitud nueva de `ip`, sin rechazarla (D22): si esa dirección o el total de
+   * anónimas está en el tope, cae la anónima más antigua de esa dirección o del total. El orden
+   * del Map es el de llegada. Las que ya pasaron el login ni cuentan ni caen: las acota su propia
+   * caducidad, porque cada una ha costado un login real.
+   */
+  private makeRoomForPending(ip: string): void {
+    const anonymous = [...this.pending].filter(([, entry]) => !pastLogin(entry));
+    const fromIp = anonymous.filter(([, entry]) => entry.ip === ip);
+    const evicted = fromIp.length >= MAX_PENDING_PER_IP ? fromIp[0]
+      : anonymous.length >= MAX_PENDING ? anonymous[0] : undefined;
+    if (!evicted) return;
+    this.discardPending(evicted[0], evicted[1]);
+    logEvent({ event: 'oauth.authorize', result: 'evicted', scope: evicted === fromIp[0] ? 'address' : 'total' });
+  }
+
+  /** La solicitud ocupa su sitio antes de llamar al broker. */
   async authorize(client: OAuthClientInformationFull, params: AuthorizationParams, res: Response): Promise<void> {
     // El SDK relaja puertos, pero ignora userinfo/hash: ningún error vuelve a una URI ajena.
     if (!isAllowedRedirectUri(client, params.redirectUri)) {
@@ -427,12 +467,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (!CHALLENGE.test(params.codeChallenge)) throw new InvalidRequestError('Se requiere PKCE S256.');
     if (params.state !== undefined && params.state.length > 1024) throw new InvalidRequestError('state demasiado largo.');
     this.prune();
-    const ip = res.req.ip ?? res.req.socket.remoteAddress ?? 'unknown';
-    const all = [...this.pending.values()];
-    if (all.length >= MAX_PENDING || all.filter((entry) => entry.ip === ip).length >= MAX_PENDING_PER_IP ||
-      all.filter((entry) => entry.clientId === client.client_id).length >= MAX_PENDING_PER_CLIENT) {
-      res.status(429).json({ error: 'rate_limited' }); return;
-    }
+    // Las IPv6 cuentan por /64: quien controla una red entera no multiplica su cupo.
+    const ip = rateKey(res.req.ip ?? res.req.socket.remoteAddress ?? 'unknown');
     const transactionId = randomBytes(32).toString('base64url');
     // En remoto solo el sub validado elige el vínculo: un legado aún sin reclamar
     // puede coexistir con cuentas activas. El modo fijo conserva su solicitud histórica.
@@ -445,11 +481,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (binding && this.pairing.isRevoked(binding.pairedCredentialId)) {
       sendPairingRevokedPage(res); return;
     }
-    const current = [...this.pending.values()];
-    if (current.length >= MAX_PENDING || current.filter((entry) => entry.ip === ip).length >= MAX_PENDING_PER_IP ||
-      current.filter((entry) => entry.clientId === client.client_id).length >= MAX_PENDING_PER_CLIENT) {
-      res.status(429).json({ error: 'rate_limited' }); return;
-    }
+    this.makeRoomForPending(ip);
     const clientName = (client.client_name || 'Claude').slice(0, 120);
     const pending: PendingAuthorization = {
       binding, requestId: null, transactionId, clientId: client.client_id, clientName,
@@ -497,7 +529,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const { transactionId } = pending;
     const random = () => randomBytes(32).toString('base64url');
     const nonce = random();
-    const login: SumegoLogin = { state: random(), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '', phase: 'login',
+    const state = random();
+    const login: SumegoLogin = { state, stateHash: sha256(state), nonce, nonceHash: s256(nonce), verifier: random(), cookieHash: '', phase: 'login',
       idToken: null, email: null, identity: null, idTokenIat: null, refreshToken: null, refreshedAt: null,
       consentDeadline: null, formTokenHash: null };
     const cookie = random();
@@ -533,13 +566,18 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (pending.expiresAt <= this.now()) throw new Error('authorization_expired');
   }
 
-  /** La solicitud del login con Sumego cuyo `state` es este, comparado en tiempo constante. */
+  /**
+   * La solicitud del login con Sumego cuyo `state` es este. Compara la huella guardada, sin
+   * recalcular una por solicitud: esta ruta es pública y no tiene cupo, y con miles de pendientes
+   * eso sería trabajo gratis para quien la golpee. Un `===` entre huellas SHA-256 de un valor
+   * aleatorio de 256 bits no revela nada aprovechable: quien llama no controla la huella.
+   */
   private pendingByState(state: string): [string, PendingAuthorization] | null {
-    let found: [string, PendingAuthorization] | null = null;
+    const wanted = sha256(state);
     for (const [key, value] of this.pending) {
-      if (value.sumego && equal(sha256(value.sumego.state), sha256(state))) found = [key, value];
+      if (value.sumego?.stateHash === wanted) return [key, value];
     }
-    return found;
+    return null;
   }
 
   /** La solicitud cuyo token de formulario es este (sha256, en tiempo constante). */
@@ -717,7 +755,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (this.loggedOut(authorization.identity, authorization.idTokenIat)) {
       this.pending.delete(key); logEvent({ event: 'oauth.consent', result: 'logged_out' }); sendDeniedPage(res); return;
     }
-    if (pending.claimed || this.codes.size >= MAX_CODES) { this.pending.delete(key); sendUnavailablePage(res); return; }
+    if (pending.claimed) { this.pending.delete(key); sendUnavailablePage(res); return; }
     pending.claimed = true;
     let grant: Grant;
     try {
@@ -949,7 +987,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       this.pending.delete(key); res.status(400).json({ error: 'invalid_grant' }); return;
     }
     if (decision === 'denied') { res.status(400).json({ error: 'authorization_unavailable' }); return; }
-    if (pending.claimed || this.codes.size >= MAX_CODES) { res.status(409).json({ error: 'authorization_unavailable' }); return; }
+    if (pending.claimed) { res.status(409).json({ error: 'authorization_unavailable' }); return; }
     pending.claimed = true;
     let grant: Grant | null = null;
     try {
@@ -1144,8 +1182,40 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     } catch (error) {
       await cleanup();
       if (error instanceof Error && error.message === 'logged_out') return fail();
+      if (error instanceof FamilyRateLimitedError) throw new TooManyRequestsError(FAMILY_RATE_MESSAGE);
       throw new ServerError('No se pudo guardar la autorización.');
     }
+  }
+
+  /**
+   * Ritmo de familias por persona (D22, SPEC.md §12.10), delante del `/token` del SDK, cuyo handler
+   * responde 400 a todo error de un proveedor y no deja poner cabeceras. Con 429 y `Retry-After`,
+   * sin quemar el código: a los 60 s caduca solo y `prune` revoca su concesión.
+   *
+   * Solo responde quien presenta un código vigente, que no se adivina: esto no dice nada de
+   * si una cuenta existe, y el `sub` sale de un login ya validado, así que nadie gasta el ritmo
+   * de otro. Los canjes admitidos y sin terminar cuentan, para que una ráfaga no pase de golpe
+   * esta comprobación y acabe en el error de `issueFamily`.
+   */
+  guardFamilyRate(req: Request, res: Response, next: () => void): void {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const entry = req.method === 'POST' && body.grant_type === 'authorization_code' && typeof body.code === 'string'
+      ? this.codes.get(sha256(body.code)) : undefined;
+    if (!entry || entry.expiresAt <= this.now()) { next(); return; }
+    const key = familyRateKey(entry.identity, entry.grant.accountId);
+    const inFlight = this.familyExchanges.get(key) ?? 0;
+    const retryAfter = this.tokens.familyRetryAfter(key, inFlight);
+    if (retryAfter !== null) {
+      logEvent({ event: 'oauth.rate_limited', scope: 'family' });
+      sendTooManyRequests(res, retryAfter, FAMILY_RATE_MESSAGE);
+      return;
+    }
+    this.familyExchanges.set(key, inFlight + 1);
+    res.once('close', () => {
+      const left = (this.familyExchanges.get(key) ?? 1) - 1;
+      if (left > 0) this.familyExchanges.set(key, left); else this.familyExchanges.delete(key);
+    });
+    next();
   }
 
   /** Un refresh que no es el vigente de una familia viva: replay, rotación reciente o caducada. Nunca renueva. */
