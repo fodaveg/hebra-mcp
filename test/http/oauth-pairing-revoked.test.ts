@@ -137,13 +137,78 @@ describe('emparejado revocado en /authorize', () => {
 describe('hebra_status', () => {
   it('con el emparejado revocado: revoked y el motivo; sin revocar, sin motivo', async () => {
     const pairing = new PairingRevocation();
-    const ctx = { ...context.ctx, status: new PairingStatusSource(context.ctx.status, pairing) };
+    const ctx = { ...context.ctx, status: new PairingStatusSource(context.ctx.status, pairing, () => PAIR_ID) };
     const before = await runStatus(ctx);
     expect(before).not.toHaveProperty('revokedReason');
     pairing.markRevoked(PAIR_ID);
     const after = await runStatus(ctx);
     expect(after.revoked).toBe(true);
     expect(after.revokedReason).toBe(PAIRING_REVOKED_REASON);
+  });
+});
+
+const OTHER_ID = '22222222-2222-4222-8222-222222222222';
+
+describe('PairingRevocation es por cuenta (D22)', () => {
+  it('el 410 de la cuenta A no cambia hebra_status ni /authorize de B; A sí lo ve', async () => {
+    const pairing = new PairingRevocation();
+    const statusOf = (credential: string) => new PairingStatusSource(context.ctx.status, pairing, async () => credential);
+    // B es la cuenta de este servidor (PAIR_ID); A (OTHER_ID) recibe el 410 antes.
+    pairing.markRevoked(OTHER_ID);
+    expect((await statusOf(OTHER_ID).getStatus()).revoked).toBe(true);
+    expect((await statusOf(PAIR_ID).getStatus()).revoked).toBeFalsy();
+    expect(pairing.isRevoked()).toBe(false);
+    requestsResponse = async () => {
+      const requestId = crypto.randomUUID();
+      return json({ requestId, authorizationUrl: `https://app.lumbre.pro/integrations/hebra-mcp?request=${requestId}`,
+        expiresAt: new Date(Date.now() + 600_000).toISOString() });
+    };
+    const { origin, config } = await start(pairing);
+    const res = await authorize(origin, config.resourceUrl);
+    expect(res.status).toBe(302);
+    expect(requestBodies).toHaveLength(1);
+    // El 410 de B la marca a ella y no desmarca a A.
+    requestsResponse = async () => json({ error: 'pairing_revoked' }, 410);
+    expect((await authorize(origin, config.resourceUrl)).status).toBe(503);
+    expect(pairing.isRevoked(PAIR_ID)).toBe(true);
+    expect(pairing.isRevoked(OTHER_ID)).toBe(true);
+    expect(pairing.isRevoked('99999999-9999-4999-8999-999999999999')).toBe(false);
+  });
+
+  it('la revocación sigue vista tras cerrar el contexto, y cerrar no retiene la instancia', () => {
+    const pairing = new PairingRevocation();
+    let revoked = false;
+    let calls = 0;
+    const detach = pairing.attachRelay(PAIR_ID, () => { calls += 1; return revoked; });
+    expect(pairing.isRevoked(PAIR_ID)).toBe(false);
+    revoked = true;
+    expect(pairing.isRevoked(PAIR_ID)).toBe(true);
+    expect(pairing.isRevoked(OTHER_ID)).toBe(false);
+    detach();
+    const before = calls;
+    expect(pairing.isRevoked(PAIR_ID)).toBe(true);
+    expect(calls).toBe(before); // La función de la instancia ya no se consulta.
+    // Un contexto sano que se cierra no deja un revocado falso.
+    const healthy = new PairingRevocation();
+    healthy.attachRelay(OTHER_ID, () => false)();
+    expect(healthy.isRevoked(OTHER_ID)).toBe(false);
+    // Una instancia que falla al leerse al cerrar no inventa una revocación.
+    const broken = new PairingRevocation();
+    broken.attachRelay(OTHER_ID, () => { throw new Error('cerrada'); })();
+    expect(broken.isRevoked(OTHER_ID)).toBe(false);
+  });
+
+  it('una marca de Lumbre sobrevive sin ningún contexto abierto', async () => {
+    const pairing = new PairingRevocation();
+    pairing.markRevoked(OTHER_ID);
+    expect(pairing.isRevoked(OTHER_ID)).toBe(true);
+    expect((await new PairingStatusSource(context.ctx.status, pairing, () => OTHER_ID).getStatus()).revoked).toBe(true);
+  });
+
+  it('la cuenta que reempareja (otra credencial) deja de estar revocada', () => {
+    const pairing = new PairingRevocation();
+    pairing.markRevoked(OTHER_ID);
+    expect(pairing.isRevoked('33333333-3333-4333-8333-333333333333')).toBe(false);
   });
 });
 

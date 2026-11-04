@@ -11,8 +11,9 @@
  *   había dicho ya.
  *
  * Un 400 de Lumbre NO es una revocación (cuerpo mal formado): sigue siendo «no disponible».
- * La marca de Lumbre va atada a la credencial con la que se vio: si después hay otro
- * emparejado (`hebra-mcp pair` en modo `credential_renewed`), deja de valer.
+ * La marca va atada a la credencial con la que se vio, y por tanto a una sola cuenta (D22):
+ * si después hay otro emparejado (`hebra-mcp pair` en modo `credential_renewed`), la
+ * credencial nueva no está marcada. No depende de que el contexto de la cuenta esté abierto.
  */
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from './status-source';
@@ -23,43 +24,64 @@ export const PAIRING_REVOKED_REASON =
   'Hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed`, que conserva la identidad y la clave de la biblioteca.';
 
 export class PairingRevocation {
-  /** Credencial que Lumbre dio por revocada; `null` si Lumbre no ha dicho nada. */
-  private revokedCredential: string | null = null;
+  /** Credenciales que Lumbre dio por revocadas (D22: por cuenta, la credencial es de una sola persona). */
+  private readonly revokedCredentials = new Set<string>();
+  /** Credenciales que el relé rechazó y ya no tienen un runner abierto que lo diga. */
+  private readonly relayLatched = new Set<string>();
+  /** Runners abiertos por credencial; se sueltan al cerrar el contexto (`attachRelay`). */
+  private readonly relayLive = new Map<string, () => boolean>();
 
-  /** `relayRevoked`: el `revoked` del runner de sync, si lo hay. */
+  /** `relayRevoked`: el `revoked` global del runner de sync en modo de una sola cuenta, si lo hay. */
   constructor(private readonly relayRevoked: () => boolean = () => false) {}
 
   /**
-   * ¿Está revocado el emparejado? Con `currentCredentialId`, una marca de Lumbre sobre otra
-   * credencial (ya reemparejado) se olvida.
+   * Registra el `revoked` del runner abierto de una credencial. El estado vive aquí, por
+   * credencial; al cerrar el contexto, el valor se fija y la función (y la instancia que
+   * captura) se suelta, así que cerrar no da un estado falso ni retiene la instancia.
+   * Devuelve la función que desacopla.
+   */
+  attachRelay(credentialId: string, revoked: () => boolean): () => void {
+    this.relayLatched.delete(credentialId);
+    this.relayLive.set(credentialId, revoked);
+    return () => {
+      if (this.relayLive.get(credentialId) !== revoked) return;
+      this.relayLive.delete(credentialId);
+      let value = false;
+      try { value = revoked(); } catch { /* instancia ya cerrada: sin dato nuevo */ }
+      if (value) this.relayLatched.add(credentialId);
+    };
+  }
+
+  /**
+   * ¿Está revocado el emparejado? Con `currentCredentialId`, solo cuenta lo de esa credencial:
+   * la revocación de otra cuenta no la toca. Sin credencial solo responde el `revoked` global
+   * del relé (modo de una sola cuenta).
    */
   isRevoked(currentCredentialId?: string | null): boolean {
     if (this.relayRevoked()) return true;
-    if (this.revokedCredential === null) return false;
-    if (currentCredentialId != null && currentCredentialId !== this.revokedCredential) {
-      this.revokedCredential = null;
-      return false;
-    }
-    return true;
+    if (currentCredentialId == null) return false;
+    if (this.revokedCredentials.has(currentCredentialId) || this.relayLatched.has(currentCredentialId)) return true;
+    return this.relayLive.get(currentCredentialId)?.() ?? false;
   }
 
   /** Lumbre dijo `pairing_revoked` para esta credencial. El evento sale una sola vez. */
   markRevoked(credentialId: string): void {
     const already = this.isRevoked(credentialId);
-    this.revokedCredential = credentialId;
+    this.revokedCredentials.add(credentialId);
     if (!already) logEvent({ event: 'pairing.revoked', source: 'lumbre' });
   }
 }
 
-/** `hebra_status` con la marca de Lumbre sumada al `revoked` del relé. */
+/** `hebra_status` con la marca de Lumbre sumada al `revoked` del relé, para la credencial de su cuenta. */
 export class PairingStatusSource implements StatusSource {
   constructor(
     private readonly inner: StatusSource,
-    private readonly pairing: PairingRevocation
+    private readonly pairing: PairingRevocation,
+    private readonly credentialId: () => string | null | Promise<string | null> = () => null
   ) {}
 
   async getStatus(): Promise<HebraStatus> {
     const status = await this.inner.getStatus();
-    return this.pairing.isRevoked() ? { ...status, revoked: true } : status;
+    return this.pairing.isRevoked(await this.credentialId()) ? { ...status, revoked: true } : status;
   }
 }
