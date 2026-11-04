@@ -100,10 +100,10 @@ services:
       - ALL
     security_opt:
       - no-new-privileges:true
-    # D21: hasta dos contextos personales abiertos. La instancia monousuario
-    # midió 130.6 MiB; el fixture de dos cuentas midió 219.5 MiB incluyendo
-    # Vitest (no equivale a carga real). El VPS tiene margen comprobado para
-    # este techo; el consumo con ambas bibliotecas reales se verifica en QA.
+    # Barrera de la máquina, no un cupo de personas (D22, SPEC §12.10). Valor
+    # heredado de D21: la instancia monousuario midió 130.6 MiB y el fixture de
+    # dos cuentas 219.5 MiB con Vitest (no equivale a carga real). Se fija con
+    # la medición de aceptación de D22, con bibliotecas de tamaño real.
     mem_limit: 512m
     pids_limit: 128
     healthcheck:

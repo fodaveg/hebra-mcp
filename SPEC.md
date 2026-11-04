@@ -19,7 +19,7 @@ comprobada, el 10 oct 2026).
 
 1. David vincula `hebra-mcp` a su biblioteca desde el flujo de aprobación de Hebra
    (Ajustes > Sincronización) y el proceso descarga la biblioteca completa.
-2. Desde Claude Code, las treinta y dos herramientas de §5 responden con el esquema de §5.
+2. Desde Claude Code, todas las herramientas de §5 responden con el esquema de §5.
 3. Una nota creada o ampliada desde Claude aparece en Hebra (Mac e iPhone) tras un ciclo de sync.
 4. Si Claude añade texto a una nota que David está editando a la vez, aparece una copia de
    conflicto visible en Hebra y ningún texto se pierde.
@@ -55,6 +55,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D19 | **Mover a un ID del JDex** (19 oct 2026, decidido por David: «deberia entrar el move, no?», tras D18; el contrato, cerrado con la sesión de jdex-manager; el diseño del lado de hebra-mcp, de la sesión principal). **Sustituye en parte el punto 5 de D2 y D9**, que dejaban mover carpetas fuera del MCP: 1) `hebra_jd_move` archiva una nota, un fichero suelto o una carpeta entera dentro de la carpeta de un ID del JDex (o de una subcarpeta suya, un nivel), creando la carpeta del ID y la subcarpeta si faltan, y con `as` otro nombre; mover carpetas solo es posible por aquí: **no hay un `hebra_move_folder` genérico**, borrar carpetas sigue fuera, y `hebra_move_note` y `hebra_move_file` no cambian. Una carpeta de primer nivel no se mueve (`source_not_found` del motor). 2) **Reparto**, como D18: la lógica (`planMoveIntoId`, `applyMovePlan`, `planUndoMove`, `applyUndoMovePlan` de `move-into-id.ts`) es del motor de jdex-manager; hebra-mcp pone el `LibraryMovePort` (`src/store/jd-move-port.ts`), la privacidad, el escritor único, la idempotencia y la herramienta. Ni `applyMovePlan` ni `applyUndoMovePlan` capturan excepciones: los `move*` del puerto devuelven `{ok: false}` si la pieza ya no está como se esperaba o el destino no existe o no se ve (`plan_stale` al aplicar; `skipped` con `refused` al deshacer) y lanzan los demás rechazos de Hebra. Al aplicar, `plan_stale` sale con cualquier cambio desde la simulación, de la configuración o del contenido: las precondiciones del motor (el JDex, la carpeta del ID, la pieza donde estaba, un homónimo nuevo) y la regla de configuración de una carpeta. 3) **Tres pasos**: `simulate` (no escribe nada; el plan, JSON plano, se guarda en el escritor), `apply` con `planId` y `operationId` (un turno del escritor; el reintento completa lo que falte) y `undo` con el `planId` aplicado y otro `operationId`, durante 7 días (el plan aplicado se guarda 7 días en `jd-plans.sqlite`, nunca en `library.sqlite`; el inverso lo calcula `planUndoMove` al pedirlo). 4) **Privacidad**, la de D18 más: lo que se mueve y el destino tienen que ser visibles (si no, como lo que no existe). **Revisión de seguridad del 19 oct 2026** (decisión de la sesión principal, con el precedente de D9): una CARPETA solo se rechaza por la configuración, con la regla de `planRenameFolder` y su mismo error, `folder_unavailable`: una ruta privada configurada por debajo de la suya, su ruta nueva o la de una descendiente en una ruta privada, o un homónimo oculto en el destino. Lo que tenga dentro no decide nada: el MCP mueve, junto con la carpeta, contenido oculto que no ve (notas por etiqueta privada, bloqueadas, ficheros ocultos por la regla (b) de D10, carpetas de la memoria de A3), que sigue oculto en su sitio nuevo, igual que ya hace `hebra_rename_folder` al cambiar su ruta. Antes se rechazaba con `folder_has_hidden` mirando el contenido, y simular era un oráculo de qué carpeta visible tenía algo oculto que además distinguía homónimas (deshacía M4 de D16): ese código ya no sale nunca. Lo oculto que depende de la RUTA (una carpeta a la que resuelve una ruta configurada; las notas vivas de A2 y las de la papelera y los ficheros que se juzgan subiendo por las lápidas hasta una carpeta de dentro) solo existe con una ruta privada configurada por debajo de la de la carpeta, y eso ya la rechaza. Una nota o un fichero cuyo destino no se puede usar por la privacidad (un nombre o unos bytes que lo dejarían oculto) responden UN error genérico, `destination_unavailable`, como `file_name_unavailable` (D17); crear la subcarpeta o la carpeta del ID, el `folder_unavailable` de `hebra_create_folder`. | Descartado: un `hebra_move_folder` genérico (abriría mover carpetas fuera del sistema JD, y sus errores revelarían carpetas privadas, la razón de la opción A de D2). Descartado: borrar las carpetas creadas al deshacer (el motor no las borra; borrar carpetas sigue fuera). Descartado: rechazar una carpeta por lo oculto que tenga dentro (el oráculo de arriba). Coste asumido, sin ningún bit nuevo sobre lo oculto: los ya declarados de D18 (`category_has_hidden` cuando hay que crear la carpeta del ID), de D9 (`folder_unavailable` confirma la configuración y, a quien adivine el nombre exacto, un homónimo oculto en el destino) y de D17 (`destination_unavailable`, a quien adivine el nombre o los bytes que enlaza una nota oculta); el contenido oculto de una carpeta se mueve con ella sin que el agente lo sepa; una nota bloqueada no se mueve (la guarda de `noteMoveIfUnchanged` del motor excluye las bloqueadas: `plan_stale`). |
 | D20 | **Login con Sumego** (21 oct 2026, decidido por David: «el mcp se tiene que conectar con sumego igual que el resto de apps», transmitido por la sesión de sumego; el diseño del lado de hebra-mcp, de la sesión principal, alineado con lumbre-mcp). **Revisa D7**: hebra-mcp conserva su OAuth público hacia Claude y Codex, pero identifica a la persona con su propio cliente OIDC de Sumego (`hebra-mcp`, confidencial) en vez de con el login y el consentimiento de Lumbre. Lumbre sigue emitiendo la concesión, ahora a partir del ID token de Sumego (§12.9). | Descartado: pasar por el BFF de Lumbre como `hebra-web` (hebra-mcp tiene servidor y secreto propio, como las demás apps). Descartado: que hebra-mcp autorice solo con el `sub` sin Lumbre (no sabe qué cuenta es dueña del emparejado y se perdería la revocación visible en Lumbre). |
 | D21 | **Conector remoto multiusuario** (3 nov 2026). David acepta que el servidor remoto guarde la clave de cada biblioteca conectada y fija este límite: cada persona solo puede acceder a su biblioteca personal y al contenido compartido para el que tenga membresía y permiso en sus espacios u organizaciones; pertenecer a un espacio u organización nunca abre la biblioteca personal de otro miembro. **Revisa D6, D7 y D20**: el `sub` validado de Sumego identifica a la persona, pero Lumbre tiene que confirmar además que esa persona es propietaria del vínculo exacto `pairedCredentialId`/`syncVaultId`/`opaqueDeviceId`. Cada cuenta tiene contexto, SQLite, blobs, secretos, configuración de privados, escritor, sync y espacios aislados. El emparejado de una cuenta nueva se inicia desde el conector, se aprueba en su Hebra y solo se persiste después de comprobar la propiedad y confirmar hasta tres títulos. El dispositivo actual de David se conserva sin reemparejar y solo se asocia mediante una prueba de propiedad; retirar una persona bloquea, drena y revoca antes de borrar exclusivamente sus datos. Contrato en §12.10. | Descartados: una biblioteca global para todas las sesiones; elegir por email, `clientId`, cabeceras o argumentos MCP; asignar la biblioteca heredada al primer login; ampliar CORS del relé para resolver el retorno del emparejado; alargar la validez del ID token para cubrir una aprobación lenta; y volver al binario monousuario como rollback después de aceptar cuentas nuevas si pudiera reasignarlas o resucitar una revocación. |
+| D22 | **Acceso sin tope por recuento** (4 nov 2026). David: "necesito que cada persona pueda acceder a su biblioteca, sus espacios compartidos y su organización sin depender de ningun tope" y "no quiero parches". Eligió la alternativa B del análisis de arquitectura (hebra://note/aa1f7f86-1f14-4ace-b027-b01c61791c3c). **Revisa D21 y el dimensionado de §12.10 con dos cuentas.** En `serve-http` estar conectado deja de equivaler a estar abierto: una biblioteca o un espacio solo existen en memoria mientras se usan, y sin llamadas no hay sync, memoria ni peticiones al relé por esa persona. Ningún recuento de cuentas, contextos, espacios, familias ni solicitudes niega el acceso a una persona admitida; la capacidad se regula por memoria real y por espera. Una persona con la credencial revocada vuelve desde el conector, sin operador. Claude Code conecta como cliente admitido. Un agente ve en solo lectura las organizaciones, sus miembros y los espacios que vería su persona ("Ve la lista, contenido por espacio", decisión de David en hebra://note/23bf2e3f-74f1-45f3-afb7-eb3959acaef3); el contenido sigue por `spaceId` y permiso espacio por espacio. El MCP no tiene contexto activo: cada llamada dice su destino y, sin indicarlo, va a `personal`. Detalle en §12.10, "Capacidad sin recuento". | Descartados: subir `mem_limit` y quitar `maxOpen` manteniendo las bibliotecas residentes, porque el tope pasa a ser un OOM que saca a todos; cerrar el contexto menos usado cuando llega otra cuenta, porque mantiene un número máximo y hace que la petición de una persona cierre el contexto de otra; un proceso por cuenta activa desde el principio, porque pesa al menos 112 MiB por persona activa y cuesta unos 10 días más sin evidencia de que haga falta. Se pasa a procesos si la carga de aceptación muestra que la primera descarga de una persona retrasa a las demás por encima de lo aceptable, o si aparece un OOM con uso normal. |
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
@@ -1688,7 +1689,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     responden `busy_other_instance`, como antes del reenvío.
 - **Ritmo de sync**:
   - Al arrancar: una ronda, y las lecturas esperan como mucho 10 s a que termine.
-  - Después, una ronda cada 30 s mientras el proceso vive.
+  - Después, una ronda cada 30 s mientras el proceso vive (`serve` por stdio). En `serve-http`, solo mientras el contexto esté abierto (D22, §12.10): sin llamadas no hay rondas.
   - Una ronda justo después de cada escritura. Excepción (§5): una escritura que no cambia nada (edición sin cambios, reintento con el mismo `operationId`, organización a un estado que la nota o el fichero suelto ya tiene) no pide ronda.
   - En reposo, cada ronda es 1 petición HTTP y 0 escrituras (A6 de Hebra).
 - **Adjuntos** (decisión 7 de D2 y D9): los bytes se bajan bajo demanda, al
@@ -1737,7 +1738,7 @@ Comando `hebra-mcp pair`, interactivo en terminal:
 | R12 | `hebra_grep` (D13): una expresión regular catastrófica cuelga el servidor, o el grep delata notas privadas por sus números o su tiempo. | La expresión corre en un hilo que se mata al agotarse el plazo (el bucle de eventos no se bloquea); solo se lee el cuerpo de las notas visibles, sin recuentos, y el plazo y el corte dependen solo de ellas (§5 y §6.3, con tests de cada caso). Lo único que toca todas las notas es la consulta del índice de subcadena, como en `hebra_search`. |
 | R13 | `hebra_replace_in_notes` (D14): una instrucción escondida en una nota pide un lote destructivo; un corte a mitad deja un lote a medias o duplica texto; una expresión catastrófica en la simulación. | Simulación obligatoria y aplicar SOLO lo simulado (el cuerpo guardado, sin volver a ejecutar la expresión), tope de 200 notas, instantánea forzada y cuerpo base guardado antes de escribir cada nota, `undo` del lote entero durante 7 días e informe nota a nota (§5, §6.5); el paso «ya estaba» y el plan en disco hacen repetible un `apply` cortado (`test/replace/apply-corte.node.test.ts`, con `kill -9` y su sabotaje); la simulación usa el hilo con plazo y el semáforo del grep. |
 | R7 | Lumbre no admite hoy devolver el código de emparejado a un CLI (P2). | L2a: redirección loopback con PKCE obligatorio, pedida a la sesión de Lumbre. L2 no empieza sin ella. |
-| R9 | Aprobar exige que el dispositivo que aprueba tenga `recoveryExported` (`identity-vault.ts:151`) (P7). | **Cerrado**: David confirmó el 26 sep 2026 que exportó el código de recuperación en el Mac. Es un dato dicho por él, no medido en el contenedor: si la aprobación falla en L4 con ese motivo, se revisa esto primero. |
+| R9 | Aprobar exige que el dispositivo que aprueba tenga `recoveryExported` (`identity-vault.ts:151`) (P7). | **Cerrado solo para David**: confirmó el 26 sep 2026 que exportó el código de recuperación en el Mac. Es un dato dicho por él, no medido en el contenedor: si la aprobación falla en L4 con ese motivo, se revisa esto primero. **Vigente para cada persona nueva** (D22): el alta lo avisa antes de empezar (§12.10). |
 | R8 | **Cerrado** (L5, 26 sep 2026): Hebra (`035db7e6`) añadió `agent` a `DEVICE_LINK_PLATFORMS` (`device-link.ts:54`) y el relé de Lumbre en producción ya lo acepta. hebra-mcp declara `agent` (`LINK_PLATFORM`, `device-link.ts:38`); Hebra lo muestra como «Claude», no como «Mac». | v1 usa `agent` con la etiqueta «Claude (hebra-mcp)», saneada por `sanitizeDeviceLabel`. Petición P3 cerrada. |
 
 ## 10. Lotes
@@ -1798,8 +1799,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   - Entorno, sin secretos: `HEBRA_MCP_HTTP_PORT` (8787), `HEBRA_MCP_HTTP_LISTEN` (`127.0.0.1`; en
     el contenedor, `0.0.0.0`) y `HEBRA_MCP_PUBLIC_URL` (`https://mcp.hebra.pro`, issuer y base del
     recurso `<origen>/mcp`).
-  - Si otro proceso vivo tiene `writer.lock`, `serve-http` no arranca (`writer_lock_held`) en vez de
-    servir como lector. Sigue escuchando en `writer.sock` como cualquier escritor.
+  - Anterior a D21 y D22: si otro proceso vivo tiene `writer.lock`, `serve-http` no arrancaba
+    (`writer_lock_held`). Desde D22 el servidor arranca sin abrir ninguna biblioteca y el bloqueo se
+    resuelve al abrir cada una (§12.10, "Capacidad sin recuento").
   - Apagado (A1 del audit de robustez, 10 oct 2026): con SIGTERM, primero las escrituras en
     curso dejan de esperar su ronda (`beginShutdown`) y responden ya (`sync: "pending"` donde lo
     llevan; una copia de conflicto que traiga esa ronda no llega a la respuesta ni al registro de
@@ -1855,6 +1857,13 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   normalice URL o redirija errores; el canje del código exige la URI exacta autorizada,
   incluido el puerto. CIMD se descarga sin redirecciones, con timeout de 5 s, límite de
   64 KiB y caché de 5 min/16 entradas. Identificar al cliente nunca concede acceso.
+- **Claude Code** (D22) admite exclusivamente el CIMD oficial
+  `https://claude.ai/oauth/claude-code-client-metadata` y sus callbacks publicados
+  `http://localhost/callback` y `http://127.0.0.1/callback`, con las mismas reglas que Codex:
+  puerto dinámico válido, sin credenciales, query ni fragmento, sin equiparar los dos hosts y con
+  el canje ligado a la URI exacta. Medido el 4 nov 2026: el servidor lo rechazaba con
+  `invalid_client` (`src/oauth/clients.ts:101`, `:236`), antes del login. Es lo que hacía fallar
+  `claude mcp add` a cualquier persona nueva.
 - **Mistral Vibe** (el CLI de Mistral, decidido el 27 oct 2026: «hazlo como está hecho
   Claude») entra solo por **DCR restringido**, sin CIMD: un registro cuyo `client_name`
   es exactamente `Mistral Vibe` (constante del CLI) y cuyos callbacks son todos nativos
@@ -1988,7 +1997,7 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 
 ### 12.7 Aceptación
 
-1. Desde claude.ai web, móvil y una sesión en la nube, las treinta y dos herramientas de §5
+1. Desde claude.ai web, móvil y una sesión en la nube, todas las herramientas de §5
    responden; lo creado, añadido, editado, organizado, mandado a la papelera o restaurado (notas y
    ficheros sueltos), el texto reemplazado de un fichero suelto, las carpetas creadas o renombradas y los adjuntos añadidos aparecen en Hebra.
 2. Las notas privadas no llegan por ninguna herramienta.
@@ -2021,6 +2030,8 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
 | **C9** Emparejado web | Alta por cuenta, retorno acotado de Lumbre, aprobación en Hebra, propiedad y confirmación de títulos. | Replays, navegador distinto, vencimiento, cambio de `sub`, doble alta, cancelación y fallos parciales quedan cerrados sin cuenta activa ni secretos cruzados. | C8 y retorno de Lumbre |
 | **C10** Migración y retirada | Vínculo heredado de David y retirada por persona de §12.10. | David conserva access/refresh; retirar A durante cualquier frontera no afecta a B y no se revierte tras reiniciar. | C8, C9 |
 | **C11** QA multiusuario | §12.7 con David y Mikel; personal, espacios y organizaciones se verifican por separado. | David conserva su acceso; Mikel empareja la suya y solo ve contenido compartido autorizado; revisión de seguridad y gate del mismo candidato. | C10, relé H-L7 y permisos reales |
+
+| **C12** Acceso sin tope | D22 y §12.10, "Capacidad sin recuento". | Pruebas de capacidad de §12.10 y aceptación real con tres cuentas. | C8, C9, C10 |
 
 C1 y C2 van en paralelo.
 
@@ -2220,11 +2231,12 @@ por `sid` no toca el emparejado. A cambio, hebra-mcp no se queda caído sin avis
   emite una vez el evento de log `pairing.revoked`. Un `400` de Lumbre es un cuerpo mal formado,
   no una revocación: sigue siendo «no disponible». Un fallo pasajero es `503` u otro 5xx.
 - Con el emparejado revocado, `/authorize` no responde un 503 JSON. Muestra una página HTML que
-  dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes y que hay que
-  reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7, `src/pair/pair.ts`), que
-  conserva la identidad y la clave.
+  dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes. En `serve` por
+  stdio hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7,
+  `src/pair/pair.ts`), que conserva la identidad y la clave. En `serve-http` se vuelve desde el
+  propio conector (§12.10, "Reconectar tras una revocación"), sin operador ni CLI (D22).
 - `hebra_status` devuelve ese mismo motivo, en `revokedReason`, junto a `revoked: true`.
-- `/healthz` sigue respondiendo 200, porque el proceso está sano.
+- `/healthz` sigue respondiendo 204, porque el proceso está sano.
 
 **Pruebas** (sintéticas, sin red): discovery y JWKS falsos con claves ES256 generadas en el
 test. Cubren:
@@ -2241,8 +2253,8 @@ test. Cubren:
 
 Esta sección sustituye para `serve-http` el contexto, el emparejado y el vínculo únicos de
 §§12.1, 12.4 y 12.9. `serve`, `pair`, `unpair` y los ficheros de trabajo locales conservan su
-contrato. La implementación no se considera terminada hasta superar la aceptación negativa con
-dos cuentas antes de admitir la segunda biblioteca en producción.
+contrato. La implementación no se considera terminada hasta superar la aceptación negativa entre
+cuentas y la de capacidad de este apartado. D22 sustituye el dimensionado con dos cuentas.
 
 #### Identidad, vínculo y selección de contexto
 
@@ -2263,21 +2275,134 @@ cliente. Bajo ella viven su SQLite, blobs, secretos, configuración de privados,
 operaciones y planes, escritor, bloqueo, sync, estado de revocación y `AgentSpaceManager`. No se
 cambia una variable global de directorio entre peticiones ni se comparte un `SecretStore` de
 biblioteca. La apertura y las escrituras de secretos se serializan por cuenta; publicar una
-identidad nueva es atómico. Hay límites configurados por cuenta y globales para familias, altas
-pendientes y contextos abiertos. Alcanzarlos rechaza una alta o apertura antes de reservar más
-estado; no expulsa un escritor con peticiones en curso. El apagado deja de adquirir contextos,
-drena todos los adquiridos y cierra cada escritor y sync.
+identidad nueva es atómico. Ningún recuento niega el acceso a una persona admitida (D22, "Capacidad
+sin recuento"). El apagado deja de adquirir contextos, drena todos los adquiridos, incluidos sus
+espacios, y cierra cada escritor y sync.
+
+Lo global no vive en los secretos de una persona: bearers de Lumbre de todas las cuentas, sus
+pendientes y la clave de refresh de Sumego salen del `secrets.json` de `legacy-root` a
+`control/secrets.json`, con una migración repetible que no toca sus valores. `PairingRevocation` es
+por cuenta: una credencial revocada de una persona no cambia el estado de otra.
+
+Una cuenta sin `config.json` no tiene carpetas ni etiquetas privadas. Las cuentas remotas no tienen
+aún una forma propia de fijarlas: es un límite declarado, no un permiso.
 
 La biblioteca personal de una cuenta nunca se obtiene por pertenecer a un espacio u organización.
-Los espacios y organizaciones se resuelven desde el contexto de esa cuenta y requieren, además de
-la membresía, la concesión del recurso y el permiso propio de su agente. Un permiso compartido no
-habilita otro espacio ni una biblioteca personal. El camino compartido conserva las dos
-comprobaciones por herramienta de §14; sin relé H-L7 o sin permiso, falla cerrado sin afectar a la
-biblioteca personal.
+Los espacios se resuelven desde esa cuenta y requieren, además de la membresía, la concesión del
+recurso y el permiso propio de su agente. Un permiso compartido no habilita otro espacio ni una
+biblioteca personal. El camino compartido conserva las dos comprobaciones por herramienta de §14;
+sin relé H-L7 o sin permiso, falla cerrado sin afectar a la biblioteca personal.
+
+#### Capacidad sin recuento (D22)
+
+**Regla.** Estar conectado no consume memoria, CPU ni relé. Una biblioteca o un espacio se abren
+porque llega una petición que los usa y se cierran porque su uso terminó, sin que otra persona
+intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
+
+**Ciclo de vida.** Cada cuenta y cada espacio tienen un solo estado a la vez: `cerrado`, `abriendo`,
+`abierto` o `cerrando`.
+
+- Una petición en `cerrado` lo pasa a `abriendo`; las demás peticiones de ese recurso esperan a la
+  misma apertura.
+- Una petición en `cerrando` espera a que termine el cierre y abre de nuevo. Nunca hay dos instancias
+  sobre el mismo directorio, tampoco en el mismo proceso. El bloqueo entre procesos no cubre este
+  caso, porque comparte PID: lo cubre esta máquina de estados.
+- `abierto` se cierra cuando lleva `HEBRA_MCP_CONTEXT_IDLE_MS` (120 s por defecto) sin peticiones en
+  curso. No se cierra un escritor con peticiones en curso.
+- Una cuenta revocada o retirada se cierra en cuanto termina lo que tenga en curso.
+- Un espacio se cierra por su propio uso, sin esperar a la cuenta. Un espacio denegado se cierra, sin
+  dejar su puerto abierto.
+
+**Sync.**
+
+- Al abrir: una ronda, y las lecturas esperan como mucho 10 s (§8), también en la biblioteca
+  personal, que hoy no espera. Si no termina a tiempo, responde lo local y lo dice en `hebra_status`.
+- Mientras está abierto: una ronda cada 30 s y una tras cada escritura (§8).
+- Al cerrar: si quedan subidas pendientes, se intenta una ronda. Si falla, la cuenta o el espacio
+  queda en una lista durable de subidas pendientes.
+- Un único barrido global, cada 60 s, reintenta esa lista, las retiradas pendientes y los diarios de
+  alta caducados. Sin nada pendiente, no hace ninguna petición.
+
+**Memoria real, no recuento.** Antes de abrir se mira la memoria en uso del contenedor frente a
+`HEBRA_MCP_MEMORY_HIGH_WATER` (80 % de su límite por defecto).
+
+- Por encima, se cierran antes los contextos sin peticiones en curso ni subidas pendientes, aunque no
+  hayan agotado su espera. Solo acorta esa espera: no afecta a quien tiene una petición en curso.
+- Si no basta, la apertura espera en orden de llegada hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por
+  defecto). Quien ya tiene su contexto abierto no espera.
+- Al agotar la espera: 503 con `Retry-After`, sin distinguir quién conectó antes.
+- `/mcp` registra el motivo de cada 503 (`capacity_wait_timeout`, `open_failed`, `lock_held`), sin
+  `sub`, email ni títulos.
+- `mem_limit` del contenedor sigue existiendo como barrera de la máquina compartida. Su valor sale de
+  la medición de aceptación. Para más capacidad se sube ese límite o se añade máquina; ningún cambio
+  de código cuenta personas.
+
+**Bloqueos tras una caída.** Al arrancar, `serve-http` toma `control/server.lock` y genera un
+identificador de arranque. Un `writer.lock` escrito por un arranque anterior del servidor está
+obsoleto aunque repita PID, y se limpia al abrir o retirar esa cuenta. Si lo tiene otro proceso vivo
+(una orden por `compose exec`), la apertura espera como en el punto anterior y responde `lock_held`.
+Una retirada interrumpida termina tras un reinicio aunque el PID sea el mismo.
+
+**OAuth.** Se retiran los rechazos por recuento:
+
+| Hoy | Desde D22 |
+|---|---|
+| 32 familias en total y 8 por cuenta, con rechazo | Sin máximo. Cada familia exige login y canje en Lumbre y caduca a los 30 días sin uso. Crear familias tiene un ritmo por `sub` (20 por hora): solo frena a esa persona, con 429 y `Retry-After` |
+| 64 solicitudes pendientes, 4 por IP y 16 por cliente, con 429 | Antes del callback de Sumego, si una IP pasa de 32 o el total de 4 096, cae la más antigua de esa IP o del total, en vez de rechazar la nueva. Desde el callback, una solicitud ya autenticada no la expulsa una anónima |
+| 64 códigos | Sin máximo: caducan a los 60 s y exigen persona autenticada |
+| Limitadores del SDK por IP en `/authorize`, `/token`, `/revoke`, `/register` | Cuentan solo los fallos. Un refresh o login correcto no gasta cupo, aunque varias personas salgan de la misma IP |
+| Catálogo de espacios con `.max(1000)` | Limitado por bytes de respuesta, no por número de espacios |
+
+**Fuera de este servidor** (decisiones de David en
+hebra://note/23bf2e3f-74f1-45f3-afb7-eb3959acaef3). Todas las cuentas salen a Lumbre desde una misma
+IP, así que un límite por IP puede negar acceso igual que uno propio:
+
+- Relé y `/exchange`: el límite por IP cuenta solo las credenciales fallidas; las válidas cuentan por
+  token y por cuenta. Lo implementa Lumbre. Es requisito para la aceptación de capacidad.
+- El tope propuesto de 8 espacios por persona y dispositivo en Hebra se quita.
+- Se mantienen las 5 organizaciones creadas por cuenta en Sumego: limita cuántas crea una persona, no
+  a cuáles pertenece ni a qué accede.
+- `PUT agent-access` admite como mucho 10 concesiones por petición, en un espacio
+  (`body.grants.length > 10` en Lumbre): limita a cuántos agentes concede una persona en ese espacio,
+  no cuántos espacios abre. No niega el acceso de una persona a sus espacios. David aún no ha decidido
+  si se mantiene.
+
+**Reconectar tras una revocación.** Una persona activa cuya credencial está revocada o rechazada no
+necesita operador. Tras el login de Sumego, `/authorize` empieza un alta de renovación para ese mismo
+`sub`, con las mismas garantías que un alta nueva: aprobación en Hebra, concesión de propiedad del
+vínculo y títulos. Con la misma bóveda conserva la raíz, la identidad y la clave
+(`credential_renewed`, §7), y publica vínculo y generación nueva de forma atómica. Si la bóveda es
+otra, la página lo dice y confirmar retira la cuenta anterior por el camino normal antes de dar de
+alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente apertura, sin reiniciar.
+
+**Alta sin atascos.**
+
+- Un código rechazado o un intento abandonado no bloquea los logins siguientes de ese `sub`.
+- El alta avisa antes de empezar de lo que necesita: Hebra instalada con esa cuenta y el código de
+  recuperación exportado en el dispositivo que aprueba (R9, que sigue vigente para cada persona nueva).
+- La cookie de Lumbre de otra cuenta en el mismo navegador se detecta antes de pedir la aprobación, no
+  después, y la página nombra la cuenta que va a conectar.
+- Con el legado sin reclamar, un `sub` nuevo empieza su propia alta en vez de probar el vínculo heredado.
+- Confirmar deja la cuenta lista, y la primera llamada abre su contexto (sustituye a "abre el
+  contexto" de "Alta y emparejado web").
+
+#### Organizaciones (D22)
+
+Definición de la suite: hebra://note/23bf2e3f-74f1-45f3-afb7-eb3959acaef3. Una organización no guarda
+contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `personal` por defecto.
+
+- `hebra_list_spaces` añade a cada espacio su organización (`orgId` derivado de Hebra o `null`, y su
+  nombre) y si este agente tiene permiso. Lista los que vería su persona. Un restringido del que no
+  es miembro no sale.
+- Una herramienta nueva de solo lectura lista las organizaciones de la persona con sus miembros.
+- Pasar a un `space` sin permiso sigue dando `space_access_denied`. Ser miembro de la organización no
+  concede contenido.
+- Depende de la ruta del relé para agentes que define Lumbre, hoy inexistente. Los campos exactos se
+  fijan cuando Lumbre publique su DTO; hasta entonces esta parte no se implementa.
 
 #### Alta y emparejado web
 
-`/authorize` valida primero cliente, callback, PKCE, recurso, scope y cupos. Inicia Sumego sin
+`/authorize` valida primero cliente, callback, PKCE, recurso y scope. Inicia Sumego sin
 exigir un vínculo previo. Después del callback valida el ID token y fija el `sub`. Si la cuenta no
 tiene biblioteca, crea una transacción de alta de un uso y empieza el protocolo de credencial de
 agente de Lumbre que usa `DeviceLinkRequester`; la persona aprueba el dispositivo en Hebra.
@@ -2406,13 +2531,28 @@ doble confirmación, cancelación, vencimiento y cambio de `sub`; refresh de A m
 revocación de A durante autorización, emisión, introspección, refresh, sync y escritura. A no puede
 ver ni alterar nada de B y B sigue funcionando al retirar A.
 
-La aceptación real comprueba por separado: biblioteca personal de David; biblioteca personal de
-Mikel; un espacio compartido autorizado; una organización autorizada; un espacio u organización
-sin permiso; y el caso en que David y Mikel comparten membresía pero Mikel intenta enumerar,
-buscar, leer y modificar la biblioteca personal de David. Todos esos intentos fallan sin revelar
-títulos, IDs, recuentos ni diferencias de error. Antes del despliegue se mide el consumo con dos
-bibliotecas y sus espacios bajo el límite vigente del contenedor; el límite solo se cambia con esa
-evidencia. El mismo candidato pasa revisión de seguridad, pruebas afectadas y el gate completo.
+Las pruebas de capacidad (D22) cubren:
+
+- Decenas de cuentas sintéticas conectadas por orden: ninguna recibe rechazo y cada una abre su
+  personal y sus espacios.
+- Sin llamadas, pasada la espera: 0 peticiones al relé, 0 bibliotecas abiertas y RSS de reposo.
+- Muchas familias, logins simultáneos desde una IP y refresh desde una IP pasan. Una inundación
+  anónima no impide un login real.
+- Cierre y apertura simultáneos, retirada durante una reapertura y reinicio a mitad: nunca dos escritores.
+- Cierre con subidas pendientes: no se pierden y el barrido las sube.
+- Revocación y vuelta desde el conector sin perder datos, sin cambiar el estado de otra cuenta.
+- Retirada tras un SIGKILL con el PID repetido.
+- Memoria por encima del umbral: espera en orden de llegada y 503 con `Retry-After`, sin distinguir
+  quién conectó antes.
+
+La aceptación real comprueba por separado, con David, Mikel y una tercera cuenta conectados a la vez:
+biblioteca personal de cada una; un espacio compartido autorizado; un espacio de organización
+autorizado y la lista de organizaciones, miembros y espacios; un espacio sin permiso; conexión desde
+claude.ai y desde Claude Code; y el caso en que comparten membresía pero una intenta enumerar, buscar,
+leer y modificar la biblioteca personal de otra. Todos esos intentos fallan sin revelar títulos, IDs,
+recuentos ni diferencias de error. Antes del despliegue se miden, con bibliotecas de tamaño real, RSS,
+latencia con varias personas activas, coste de reabrir, primera descarga y límites del relé; `mem_limit`
+sale de esa medición. El mismo candidato pasa revisión de seguridad, pruebas afectadas y el gate completo.
 
 ## 13. Ficheros de trabajo con vuelta (D12, 10 oct 2026)
 
