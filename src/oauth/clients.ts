@@ -10,7 +10,7 @@
  *    claude.ai (anuncia `client_id_metadata_document_supported` y NO anuncia
  *    `registration_endpoint`, `src/oauth.ts:808-822`), así que es el mecanismo medido. El
  *    documento se descarga sin redirecciones, con tope de tiempo y de tamaño, solo de
- *    `claude.ai` o la URL oficial exacta de Codex, y se cachea 5 minutos.
+ *    `claude.ai` (incluido el CIMD oficial de Claude Code, loopback como Codex) o la URL oficial exacta de Codex, y se cachea 5 minutos.
  * 2. **DCR** (registro dinámico, RFC 7591, el `/register` del SDK): por si un cliente no
  *    usa CIMD. Los registros se reducen a clientes fijos: Claude, los tres conjuntos
  *    de hosts loopback de Codex, Mistral Vibe y Le Chat (su `client_name` constante y su
@@ -32,6 +32,10 @@ export const CLAUDE_CALLBACK = 'https://claude.ai/api/mcp/auth_callback';
 /** `client_id` fijo de los clientes registrados por DCR. */
 export const DCR_CLIENT_ID = 'hebra-mcp-claude-ai';
 export const CODEX_CIMD_CLIENT_ID = 'https://chatgpt.com/oauth/codex/client.json';
+/** CIMD oficial de Claude Code (D22): único `client_id` de Claude con callbacks loopback. */
+export const CLAUDE_CODE_CIMD_CLIENT_ID = 'https://claude.ai/oauth/claude-code-client-metadata';
+/** Nombre que ve el usuario en el consentimiento de Claude Code. */
+export const CLAUDE_CODE_DISPLAY_NAME = 'Claude Code';
 const CODEX_CALLBACKS = ['http://127.0.0.1/callback', 'http://localhost/callback'];
 const CODEX_DCR_CLIENTS: Record<string, string[]> = {
   'hebra-mcp-codex-127': [CODEX_CALLBACKS[0]!],
@@ -98,7 +102,8 @@ export function isAllowedRedirectUri(client: OAuthClientInformationFull, uri: st
     return isVibeCallback(uri) && client.redirect_uris.some((registered) =>
       isVibeCallback(registered) && redirectUriMatches(uri, registered));
   }
-  if (client.client_id !== CODEX_CIMD_CLIENT_ID && !Object.hasOwn(CODEX_DCR_CLIENTS, client.client_id)) return false;
+  if (client.client_id !== CODEX_CIMD_CLIENT_ID && client.client_id !== CLAUDE_CODE_CIMD_CLIENT_ID &&
+      !Object.hasOwn(CODEX_DCR_CLIENTS, client.client_id)) return false;
   return isCodexCallback(uri) && client.redirect_uris.some((registered) =>
     isCodexCallback(registered) && redirectUriMatches(uri, registered));
 }
@@ -112,7 +117,7 @@ export function isAcceptableOAuthClientId(clientId: string): boolean {
 
 /** ¿Es un `client_id` CIMD aceptable? Claude con ruta o la URL exacta de Codex. */
 export function isAcceptableCimdClientId(clientId: string): boolean {
-  if (clientId === CODEX_CIMD_CLIENT_ID) return true;
+  if (clientId === CODEX_CIMD_CLIENT_ID || clientId === CLAUDE_CODE_CIMD_CLIENT_ID) return true;
   let url: URL;
   try {
     url = new URL(clientId);
@@ -226,7 +231,9 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
     const candidate = document as Record<string, unknown> | null;
     const redirects = candidate?.redirect_uris;
     const authMethod = candidate?.token_endpoint_auth_method;
-    const codex = clientId === CODEX_CIMD_CLIENT_ID;
+    // Codex y Claude Code (D22) son clientes nativos: solo callbacks loopback, mismas reglas.
+    const claudeCode = clientId === CLAUDE_CODE_CIMD_CLIENT_ID;
+    const codex = clientId === CODEX_CIMD_CLIENT_ID || claudeCode;
     if (
       !candidate ||
       typeof candidate !== 'object' ||
@@ -240,7 +247,8 @@ export class ClaudeClientsStore implements OAuthRegisteredClientsStore {
       return undefined;
     }
     logEvent({ event: 'oauth.cimd', result: 'ok' });
-    const name = typeof candidate.client_name === 'string' ? candidate.client_name.slice(0, 100) : codex ? 'Codex' : 'Claude';
+    const name = claudeCode ? CLAUDE_CODE_DISPLAY_NAME
+      : typeof candidate.client_name === 'string' ? candidate.client_name.slice(0, 100) : codex ? 'Codex' : 'Claude';
     // La metadata no puede ampliar el callback: conservamos solo sus hosts admitidos.
     return publicClient(clientId, name, codex
       ? CODEX_CALLBACKS.filter((callback) => redirects.some((uri) => redirectUriMatches(uri, callback)))
