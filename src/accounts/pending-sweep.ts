@@ -17,7 +17,7 @@
  * es quien sabe cuándo cerrarlo.
  */
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
+import { mkdir, open, readdir, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { logEvent } from '../log/logger';
 import type { RecoverRetry } from '../pair/remote/service';
@@ -39,6 +39,8 @@ export const SWEEP_STOP_WAIT_MS = 5_000;
 export const PENDING_UPLOADS_FILE = 'pending-uploads-v1.json';
 /** El temporal con el que se publica la lista; un corte puede dejarlo en `control/`. */
 export const PENDING_UPLOADS_TEMPORARY = /^\.pending-uploads-v1\.json\..+\.tmp$/;
+/** Temporales de escrituras en curso de este proceso: `open` no borra esos. */
+const writingTemporaries = new Set<string>();
 export function pendingUploadsTemporaryName(): string {
   return `.${PENDING_UPLOADS_FILE}.${randomUUID()}.tmp`;
 }
@@ -75,6 +77,9 @@ export class PendingUploadList {
   private queue: Promise<unknown> = Promise.resolve();
   /** Destinos con su escritor abierto en este proceso: su sync ya lo lleva su contexto. */
   private readonly openTargets = new Map<string, number>();
+  /** Cambios hechos en `rows` y cambios que ya están en el disco: si difieren, hay algo sin guardar. */
+  private version = 0;
+  private persistedVersion = 0;
 
   private constructor(
     private readonly path: string,
@@ -98,6 +103,16 @@ export class PendingUploadList {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         logEvent({ event: 'pending_uploads.read', result: 'invalid' });
       }
+    }
+    // Un corte entre crear el temporal y renombrarlo lo deja para siempre.
+    try {
+      for (const name of await readdir(controlDir)) {
+        if (PENDING_UPLOADS_TEMPORARY.test(name) && !writingTemporaries.has(name)) {
+          await unlink(join(controlDir, name)).catch(() => undefined);
+        }
+      }
+    } catch {
+      // Sin directorio todavía: nada que limpiar.
     }
     return new PendingUploadList(path, rows);
   }
@@ -133,26 +148,37 @@ export class PendingUploadList {
     else this.openTargets.delete(key);
   }
 
-  /** Apunta o actualiza. Sin cambios, no toca el disco. */
+  /** Apunta o actualiza. Sin cambios, no toca el disco, salvo que un cambio anterior no se guardara. */
   async put(account: AccountRef, space: string | null, blocked: boolean): Promise<void> {
     const entry: PendingUploadEntry = { account: account.id, generation: account.generation, space, blocked };
     const key = keyOf(entry);
     const current = this.rows.get(key);
     if (current && current.generation === entry.generation && current.blocked === blocked) {
-      await this.queue;
+      await this.flush();
       return;
     }
     this.rows.set(key, entry);
+    this.version += 1;
     await this.persist();
   }
 
   /** Borra si está. Sin ella, no toca el disco: en reposo este fichero ni se mira. */
   async remove(entry: { account: string; space: string | null }): Promise<void> {
     if (!this.rows.delete(keyOf(entry))) {
-      await this.queue;
+      await this.flush();
       return;
     }
+    this.version += 1;
     await this.persist();
+  }
+
+  /**
+   * Espera a las escrituras en curso y, si el último estado no llegó al disco (una escritura
+   * anterior falló), lo vuelve a intentar. Rechaza si el intento falla: quien llama se entera.
+   */
+  async flush(): Promise<void> {
+    await this.queue;
+    if (this.persistedVersion !== this.version) await this.persist();
   }
 
   private persist(): Promise<void> {
@@ -164,10 +190,14 @@ export class PendingUploadList {
   private async writeFile(): Promise<void> {
     const directory = dirname(this.path);
     await mkdir(directory, { recursive: true, mode: 0o700 });
-    const temporary = join(directory, pendingUploadsTemporaryName());
+    const name = pendingUploadsTemporaryName();
+    const temporary = join(directory, name);
+    let version = this.version;
+    writingTemporaries.add(name);
     try {
       const handle = await open(temporary, 'w', 0o600);
       try {
+        version = this.version;
         await handle.writeFile(JSON.stringify({ version: FILE_VERSION, entries: [...this.rows.values()] }));
         await handle.sync();
       } finally {
@@ -177,6 +207,8 @@ export class PendingUploadList {
     } catch (error) {
       await unlink(temporary).catch(() => undefined);
       throw error;
+    } finally {
+      writingTemporaries.delete(name);
     }
     const directoryHandle = await open(directory, 'r');
     try {
@@ -184,6 +216,7 @@ export class PendingUploadList {
     } finally {
       await directoryHandle.close();
     }
+    this.persistedVersion = Math.max(this.persistedVersion, version);
   }
 }
 
@@ -247,6 +280,17 @@ export class RetryBackoff {
   succeeded(key: string): void {
     this.state.delete(key);
   }
+
+  /** Olvida las claves del prefijo que `keep` no nombra: lo que ya no existe no deja memoria. */
+  retain(prefix: string, keep: ReadonlySet<string>): void {
+    for (const key of [...this.state.keys()]) {
+      if (key.startsWith(prefix) && !keep.has(key)) this.state.delete(key);
+    }
+  }
+
+  get size(): number {
+    return this.state.size;
+  }
 }
 
 /**
@@ -266,6 +310,12 @@ export interface PendingSweepOptions {
    * lo intente con la credencial nueva en vez de descartar unas subidas que siguen pendientes.
    */
   currentRef?(accountId: string): AccountRef | null;
+  /**
+   * La cuenta está a mitad de una renovación (`AccountRegistry.beginRenewal`): no se puede abrir
+   * hasta que se publique o se aborte. No es un fallo: la entrada se salta en esta pasada, sin
+   * espera añadida, y el barrido siguiente la sigue a la generación nueva.
+   */
+  accountRenewing?(accountId: string): boolean;
   /** `AccountRemovalService.resumePending`. */
   resumeRemovals(): Promise<void>;
   /** `RemotePairingService.recover`, con la espera por diario que lleva el barrido. */
@@ -277,7 +327,8 @@ export interface PendingSweepOptions {
   intervalMs?: number;
   elementTimeoutMs?: number;
   stopWaitMs?: number;
-  sleep?: (ms: number) => Promise<void>;
+  /** Con `signal`, abortarlo cancela la espera (y su temporizador). */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   schedule?: (tick: () => void, ms: number) => () => void;
 }
 
@@ -300,10 +351,12 @@ function errorCode(error: unknown): string {
   return error instanceof Error ? error.name : 'unknown';
 }
 
-function realSleep(ms: number): Promise<void> {
+function realSleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
+    // Cancelada, la espera no resuelve nunca: quien la cancela ya no la mira.
+    signal?.addEventListener('abort', () => clearTimeout(timer), { once: true });
   });
 }
 
@@ -324,15 +377,20 @@ export class PendingSweep {
   private readonly inFlight = new Set<string>();
   /** Bloqueadas ya reintentadas: una vez por arranque y generación, por si un binario nuevo lo resuelve. */
   private readonly triedBlocked = new Map<string, number>();
-  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly backoff: RetryBackoff;
   private readonly journalRetry: RecoverRetry;
+  /** Diarios que `expireJournals` ha mirado en la pasada en curso: el resto ya no existe. */
+  private journalsSeen = new Set<string>();
 
   constructor(private readonly options: PendingSweepOptions) {
     this.sleep = options.sleep ?? realSleep;
     this.backoff = new RetryBackoff(options.now, options.backoffBaseMs, options.backoffMaxMs);
     this.journalRetry = {
-      ready: (id) => this.backoff.ready(`journal:${id}`),
+      ready: (id) => {
+        this.journalsSeen.add(`journal:${id}`);
+        return this.backoff.ready(`journal:${id}`);
+      },
       failed: (id) => this.backoff.failed(`journal:${id}`),
       succeeded: (id) => this.backoff.succeeded(`journal:${id}`)
     };
@@ -393,9 +451,12 @@ export class PendingSweep {
 
   private async sweepJournals(report: SweepReport): Promise<void> {
     try {
+      this.journalsSeen = new Set();
       const done = await this.bounded('journals', () => this.options.expireJournals(this.journalRetry));
       if (done === TIMED_OUT) report.journalsFailed += 1;
       else if (done) {
+        // Un diario que desapareció sin pasar por `succeeded` no vuelve a preguntarse.
+        this.backoff.retain('journal:', this.journalsSeen);
         report.journalsExpired += done.expired;
         report.journalsFailed += done.failed;
       }
@@ -405,10 +466,33 @@ export class PendingSweep {
   }
 
   /** Una a una: abrir una biblioteca cuesta memoria, y el barrido no compite con nadie por ella. */
+  // `sweepUploads` es secuencial a propósito, por memoria (N cuentas pendientes x unos 20 s): no se paraleliza.
   private async sweepUploads(report: SweepReport): Promise<void> {
     const { list } = this.options;
+    // Un estado que no llegó al disco en una escritura anterior se reintenta aquí.
+    await list.flush().catch(() => logEvent({ event: 'pending_uploads.write', result: 'failed' }));
+    try {
+      await this.sweepEntries(list, report);
+    } finally {
+      this.pruneUploads(list);
+    }
+  }
+
+  /** La memoria por entrada se acota a lo que sigue en la lista, no a lo que alguna vez estuvo. */
+  private pruneUploads(list: PendingUploadList): void {
+    const entries = list.entries();
+    this.backoff.retain('upload:', new Set(entries.map((entry) => `upload:${keyOf(entry)}#${entry.generation}`)));
+    const live = new Set(entries.map((entry) => keyOf(entry)));
+    for (const key of [...this.triedBlocked.keys()]) if (!live.has(key)) this.triedBlocked.delete(key);
+  }
+
+  private async sweepEntries(list: PendingUploadList, report: SweepReport): Promise<void> {
     for (const listed of list.entries()) {
       if (this.stopped) return;
+      if (this.options.accountRenewing?.(listed.account)) {
+        report.skipped += 1;
+        continue;
+      }
       let entry = listed;
       try {
         entry = await this.followRenewal(listed);
@@ -432,7 +516,7 @@ export class PendingSweep {
         if (outcome === 'dropped') {
           report.dropped += 1;
           this.backoff.succeeded(retryKey);
-        } else if (outcome === null) report.skipped += 1;
+        } else if (outcome === null || outcome === 'busy') report.skipped += 1;
         else if (outcome === TIMED_OUT || list.has(entry)) {
           report.kept += 1;
           // Una bloqueada espera un cambio (renovación, binario nuevo), no un plazo.
@@ -471,16 +555,24 @@ export class PendingSweep {
   private async bounded<T>(name: string, task: () => Promise<T>): Promise<T | null | typeof TIMED_OUT> {
     if (this.inFlight.has(name)) return null;
     this.inFlight.add(name);
-    const work = task().finally(() => this.inFlight.delete(name));
+    // El plazo se cancela al terminar el elemento: sin temporizador vivo por elemento.
+    const cancel = new AbortController();
+    const work = task().finally(() => {
+      this.inFlight.delete(name);
+      cancel.abort();
+    });
     // Si el plazo gana, nadie espera ya a `work`: que su rechazo no quede sin atender.
     void work.catch(() => undefined);
-    const limit = this.sleep(this.options.elementTimeoutMs ?? SWEEP_ELEMENT_TIMEOUT_MS)
+    const limit = this.sleep(this.options.elementTimeoutMs ?? SWEEP_ELEMENT_TIMEOUT_MS, cancel.signal)
       .then((): typeof TIMED_OUT => TIMED_OUT);
     return Promise.race([work, limit]);
   }
 
-  /** `dropped` si la entrada ya no tiene sentido; `tried` si se intentó, sea cual sea el final. */
-  private async retryUpload(entry: PendingUploadEntry): Promise<'dropped' | 'tried'> {
+  /**
+   * `dropped` si la entrada ya no tiene sentido; `tried` si se intentó, sea cual sea el final;
+   * `busy` si no se pudo concluir sin pisar a otro (una persona la abrió, o hay una renovación).
+   */
+  private async retryUpload(entry: PendingUploadEntry): Promise<'dropped' | 'tried' | 'busy'> {
     const { list, withAccountContext, accountActive } = this.options;
     const ref: AccountRef = { id: entry.account, generation: entry.generation };
     if (!accountActive(ref)) {
@@ -499,6 +591,9 @@ export class PendingSweep {
       });
     } catch (error) {
       if (accountActive(ref)) throw error;
+      // Una renovación empezada a mitad del intento sube la generación: la cuenta sigue y sus
+      // subidas también. El barrido siguiente sigue la entrada a la generación nueva.
+      if (this.options.currentRef?.(entry.account)) return 'busy';
       await list.remove(entry);
       return 'dropped';
     }
@@ -506,6 +601,10 @@ export class PendingSweep {
       await list.remove(entry);
       return 'dropped';
     }
+    // Con la biblioteca abierta por alguien (una persona llegó mientras tanto), la lista es suya:
+    // su `settleUploads` la deja bien al cerrar, y tocarla aquí pisaría una anotación con
+    // subidas pendientes. La comprobación y el cambio de `list` van en el mismo turno, sin hueco.
+    if (list.isOpen(entry)) return 'busy';
     if (state === 'clear') await list.remove(entry);
     else if (state === 'blocked' && list.has(entry)) await list.put(ref, entry.space, true);
     return 'tried';
