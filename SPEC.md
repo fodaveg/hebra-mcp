@@ -2311,7 +2311,13 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
 - Ninguna espera de una apertura o un cierre en curso es ilimitada: a los `HEBRA_MCP_OPEN_WAIT_MS`
   más 5 s de margen (tope de seguridad; las esperas con plazo propio, memoria y `writer.lock`, acaban
   antes y dan su motivo), la petición recibe 503 `open_failed` con `Retry-After`. La apertura o el
-  cierre siguen en segundo plano y la persona vuelve a entrar en cuanto terminan, sin reiniciar.
+  cierre siguen en segundo plano y la persona vuelve a entrar en cuanto terminan, sin reiniciar. En
+  un espacio el plazo parte del valor por defecto (20 s), no de la variable.
+- Un cierre que falla no devuelve el recurso a `cerrado`: sin saber si soltó el directorio, abrir
+  otra instancia podría dejar dos. Queda en `cerrando` y se reintenta solo, con espera de 1 s que se
+  duplica hasta 30 s y sin límite de intentos. Mientras tanto, quien pide ese recurso recibe 503
+  `open_failed` con `Retry-After`, y entra en cuanto un intento cierra, sin reiniciar y sin afectar a
+  otras cuentas.
 - `abierto` se cierra cuando lleva `HEBRA_MCP_CONTEXT_IDLE_MS` (120 s por defecto) sin peticiones en
   curso. No se cierra un escritor con peticiones en curso.
 - Una cuenta revocada o retirada se cierra en cuanto termina lo que tenga en curso.
@@ -2328,6 +2334,25 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
 - Un único barrido global, cada 60 s, reintenta esa lista, las retiradas pendientes y los diarios de
   alta caducados. Sin nada pendiente, no hace ninguna petición.
 
+**Lista de subidas pendientes.** Vive en `control/pending-uploads-v1.json` (0600, publicada con un
+temporal y `rename`). Cada entrada guarda el id opaco de la cuenta, su generación, el `spaceId` del
+espacio (`null` si es la biblioteca personal) y `blocked`, que dice que reintentar no sirve hasta que
+cambie algo (cliente desfasado, credencial revocada). No guarda títulos, `sub`, email ni credenciales.
+Un fichero ilegible no impide arrancar: se trata como vacío y se registra; las escrituras siguen en
+cada SQLite y suben al volver a abrirla. Los temporales que deje un corte se borran al abrir la lista.
+
+- El barrido recorre las entradas de una en una, a propósito: abrir una biblioteca cuesta memoria y
+  el barrido no compite con las peticiones por ella. Cada elemento tiene 90 s; pasado el plazo se
+  sigue con el siguiente y ese no se repite hasta que termine.
+- Tras un fallo, cada entrada y cada diario de alta esperan 2 min, el doble con cada fallo seguido,
+  hasta 30 min. La espera vive en memoria: un reinicio reintenta todo de inmediato. Un relé caído
+  no abre una biblioteca por minuto.
+- Una entrada bloqueada se reintenta una vez por arranque y generación. Una entrada de una cuenta
+  retirada o de un espacio denegado se descarta sin abrir nada. Una renovación pasa la entrada a la
+  generación nueva, desbloqueada y sin espera.
+- Lo que no llegó a subirse se reintenta abriendo el contexto por la vía normal, y quien lo abre es
+  quien lo cierra. Lo que sube sale de la lista; lo que no, se conserva.
+
 **Memoria real, no recuento.** Antes de abrir se mira la memoria en uso del contenedor frente a
 `HEBRA_MCP_MEMORY_HIGH_WATER` (80 % de su límite por defecto).
 
@@ -2342,11 +2367,40 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
   la medición de aceptación. Para más capacidad se sube ese límite o se añade máquina; ningún cambio
   de código cuenta personas.
 
+**Eventos de log.** Ninguno lleva `sub`, email, títulos ni credenciales.
+
+| Evento | Cuándo |
+|---|---|
+| `pending_sweep.round` | Una pasada del barrido que hizo algo; lleva los recuentos (`uploaded`, `kept`, `dropped`, `skipped`, retiradas y diarios). En reposo no sale nada |
+| `pending_sweep.element` | Un elemento del barrido falló, con `code` |
+| `pending_uploads.read` | `pending-uploads-v1.json` es ilegible o inválido (`result: invalid`) y se trata como vacío |
+| `pending_uploads.write` | No se pudo guardar la lista (`result: failed`); se reintenta en el barrido siguiente |
+| `sync.close_round` | La ronda final al cerrar un contexto con subidas pendientes: `result` (`skipped`, `timeout` o el de la ronda) y `pending` |
+| `contexts.close_failed` | Falló un intento de cierre de una cuenta o un espacio (`resource`, `attempt`) |
+| `contexts.close_recovered` | Un reintento cerró lo que había fallado (`attempts`) |
+| `contexts.close_stuck` | El cierre sigue fallando en el intento 10 (unos 3 min) y cada 10 después. Es el que pide mirar al operador: se quita la causa (disco lleno o de solo lectura, directorio desmontado) y el siguiente reintento lo recoge |
+
+**Apagado.** Al recibir la señal, el servidor deja de adquirir contextos y drena las peticiones en curso
+hasta 12 s; cada contexto hace su ronda final de hasta 5 s; y el cierre del sync espera a la ronda en
+vuelo hasta 30 s. 12 + 5 + 30 = 47 s de los 50 s de `stop_grace_period` de `deploy/compose.yml`. Lo que
+no suba queda en su SQLite y en la lista de pendientes, y el barrido lo recoge al arrancar.
+
 **Bloqueos tras una caída.** Al arrancar, `serve-http` toma `control/server.lock` y genera un
-identificador de arranque. Un `writer.lock` escrito por un arranque anterior del servidor está
-obsoleto aunque repita PID, y se limpia al abrir o retirar esa cuenta. Si lo tiene otro proceso vivo
-(una orden por `compose exec`), la apertura espera como en el punto anterior y responde `lock_held`.
-Una retirada interrumpida termina tras un reinicio aunque el PID sea el mismo.
+identificador de arranque (`serverBootId`), que lleva cada `writer.lock` que se tome bajo la raíz.
+Un `PID` no sirve de prueba: en el contenedor el servidor es siempre el mismo PID, y otro servidor
+sobre el mismo volumen en un segundo contenedor también lo es en el suyo.
+
+- `server.lock` es una transacción `BEGIN EXCLUSIVE` de SQLite abierta sobre el fichero mientras el
+  proceso viva. La mantiene el kernel y la suelta con la muerte del proceso, sea cual sea (SIGKILL,
+  OOM), también si el otro servidor está en otro contenedor. Un segundo `serve-http` sobre la misma
+  raíz no arranca. No guarda datos: se queda en disco, vacío, y no se borra.
+- `control-secrets-rollback` toma el mismo bloqueo y se niega con `control_secrets_busy` si otro
+  proceso lo tiene.
+- `classifyWriterLock` decide por ese identificador: un `writer.lock` de un arranque anterior del
+  servidor está obsoleto aunque repita PID, y se limpia al abrir o retirar esa cuenta. Uno del arranque
+  actual es del ciclo de vida y no se le quita. Si lo tiene otro proceso vivo (una orden por
+  `compose exec`), la apertura espera como en el punto anterior y responde `lock_held`.
+- Una retirada interrumpida termina tras un reinicio aunque el PID sea el mismo.
 
 **OAuth.** Se retiran los rechazos por recuento:
 
@@ -2372,6 +2426,15 @@ IP, así que un límite por IP puede negar acceso igual que uno propio:
   no cuántos espacios abre. No niega el acceso de una persona a sus espacios. David aún no ha decidido
   si se mantiene.
 
+**Límites aceptados.**
+
+- `/authorize` anónimo guarda como mucho 4 096 solicitudes pendientes en memoria (32 por IP, con las
+  IPv6 contadas por /64), y al llenarse cae la más antigua. Quien rote entre redes IPv6 /64 puede
+  expulsar una solicitud legítima todavía en curso; la persona repite la conexión.
+- El ritmo de 20 familias por hora y `sub` vive en memoria: un reinicio lo pone a cero.
+- Un espacio cuyo acceso se revoca deja su marca `access-denied` y se cierra, pero su copia
+  descifrada sigue en el directorio de la cuenta hasta que se retire esa cuenta.
+
 **Reconectar tras una revocación.** Una persona activa cuya credencial está revocada o rechazada no
 necesita operador. Tras el login de Sumego, `/authorize` empieza un alta de renovación para ese mismo
 `sub`, con las mismas garantías que un alta nueva: aprobación en Hebra, concesión de propiedad del
@@ -2379,6 +2442,18 @@ vínculo y títulos. Con la misma bóveda conserva la raíz, la identidad y la c
 (`credential_renewed`, §7), y publica vínculo y generación nueva de forma atómica. Si la bóveda es
 otra, la página lo dice y confirmar retira la cuenta anterior por el camino normal antes de dar de
 alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente apertura, sin reiniciar.
+
+**Agente desactivado.** Lumbre responde 401 `credential_revoked` igual a una credencial revocada y a
+un agente desactivado, a propósito, y hebra-mcp no los distingue.
+
+- Un 404 de `PUT agent-device-key` no significa agente desactivado: es espacios apagados en Lumbre,
+  credencial no encontrada o una carrera con la desactivación. El alta sigue sin clave de agente y
+  los espacios la registran al usarse.
+- Si el 401 llega al registrar la clave de agente tras canjear una renovación, el canje ya rotó los tokens de la credencial que
+  sobrevive: se guardan los nuevos, sin revocarla ni borrar nada, y el login falla con
+  `agent_rejected`. Al reactivar el agente en Hebra, la cuenta vuelve sin otro login.
+- La marca de revocado de una credencial se limpia con una ronda de sync correcta de su runner o con
+  un GET de lectura correcto al hacer login. No hace falta renovar ni reiniciar.
 
 **Alta sin atascos.**
 
@@ -2390,6 +2465,18 @@ alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente 
 - Con el legado sin reclamar, un `sub` nuevo empieza su propia alta en vez de probar el vínculo heredado.
 - Confirmar deja la cuenta lista, y la primera llamada abre su contexto (sustituye a "abre el
   contexto" de "Alta y emparejado web").
+
+**Identidad del servidor hacia Lumbre.** Las peticiones de una cuenta a Lumbre (`/exchange`, relé,
+espacios y el resto de su API) llevan `X-Hebra-Mcp-Backchannel` (el secreto de
+`HEBRA_MCP_BACKCHANNEL_SECRET`) y `X-Hebra-Mcp-Subject` (el `sub` de esa cuenta en minúsculas), para que
+Lumbre reparta sus límites por persona y no por la IP única del conector. Solo las pone
+`src/oauth/lumbre-identity.ts`.
+
+- Solo al origen exacto de `LUMBRE_APP_ORIGIN`: a cualquier otro no viaja ninguna de las dos, y las que
+  traiga el llamador se descartan.
+- Con `redirect: 'error'`: ninguna redirección puede llevar el secreto a otro origen.
+- Sin `sub` conocido, sin secreto, o en `stdio`, no se envía nada.
+- Ni el secreto ni el `sub` entran en logs ni en mensajes de error.
 
 #### Organizaciones (D22)
 
@@ -2406,7 +2493,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   lectura, con `Cache-Control: private, no-store`. Devuelve
   `{organizations: [{orgId, name, members: [{accountId, role: "admin"|"manager"|"member", name}],
   spaces: [{spaceId, name, granted}]}], spaces: [{spaceId, name, granted}]}`; `orgId` es
-  `sha256("hebra-org:" + UUID)`, `accountId` es el mismo valor que `grant.accountId` del catálogo, y el
+  `sha256("hebra-org:" + UUID)`, `accountId` es el mismo valor que `grant.accountId` del catálogo
+  (`sha256hex("hebra-account:" + lowerCase(sub))`, contrato con Lumbre), y el
   `name` de un miembro o de un espacio puede ser `null` (el de un miembro se tolera ausente hasta que
   la ruta esté publicada). El `spaces` de primer nivel son los sueltos y aquellos donde su persona es
   invitada. Un campo de más, o una organización, un miembro o un espacio repetidos, invalidan la
@@ -2426,6 +2514,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   conoce, `relay_unavailable`, `invalid_response`).
 - Es un dato de permisos: cada llamada lo pide de nuevo, sin caché, y consultarlo no abre ninguna
   biblioteca ni consume un contexto de espacio. Los nombres no van a logs.
+- Privacidad: `hebra_list_organizations` entrega el nombre y el `accountId` de otros miembros al
+  proveedor de IA del cliente conectado, que los recibe como resultado de la herramienta.
 
 #### Alta y emparejado web
 
@@ -2433,6 +2523,11 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
 exigir un vínculo previo. Después del callback valida el ID token y fija el `sub`. Si la cuenta no
 tiene biblioteca, crea una transacción de alta de un uso y empieza el protocolo de credencial de
 agente de Lumbre que usa `DeviceLinkRequester`; la persona aprueba el dispositivo en Hebra.
+
+El callback de Sumego termina en `GET /lumbre/pairing/start`, con la cookie de transacción. Esa ruta
+enseña el aviso previo (la cuenta que va a conectar y si es una renovación) con el enlace que sale
+hacia Lumbre mientras espera el código, o la página de espera si ya pasó de esa fase; sin una transacción viva de ese navegador
+responde `invalid_session`.
 
 hebra-mcp entrega a Lumbre `webOrigin` con el origen exacto `https://mcp.hebra.pro`, sin barra final,
 ruta, query ni fragmento. Lumbre construye desde él el callback
@@ -2447,13 +2542,13 @@ La identidad del dispositivo se prepara en un diario de alta aislado, con direct
 ficheros 0600. El diario puede conservar los identificadores y secretos mínimos necesarios para
 revocar un efecto remoto y reanudar la limpieza después de una caída; lleva estado explícito, TTL y
 ninguna ruta que pueda resolver como cuenta activa. Al arrancar, hebra-mcp recupera los diarios no
-terminales: continúa una revocación pendiente o limpia uno caducado antes de admitir otra alta para
-esa cuenta. El TTL no autoriza a olvidar un efecto remoto sin intentar revocarlo ni a publicar una
+terminales: continúa una revocación pendiente o limpia uno caducado, y lo que no pueda resolver lo
+reintenta el barrido sin frenar otra alta de esa cuenta. El TTL no autoriza a olvidar un efecto remoto sin intentar revocarlo ni a publicar una
 cuenta incompleta. Un login nuevo y válido del mismo `sub` (ID token nuevo) sustituye al alta sin
 terminar de esa cuenta aunque no haya caducado (3 nov 2026, incidente de la segunda cuenta): el
 intento anterior pierde su sesión en memoria y se limpia con las mismas garantías (revoca su
-credencial, nunca una cuenta ya publicada, y si no puede resolver el efecto remoto el login falla
-sin olvidarlo). Cuando ese login falla, el log del callback lleva `reason` con la clase y el motivo
+credencial, nunca una cuenta ya publicada, y si no puede resolver el efecto remoto, el login sigue y el diario queda
+en disco, sin sesión, pendiente para el barrido, que no lo olvida hasta revocar). Cuando un login falla, el log del callback lleva `reason` con la clase y el motivo
 cerrado del error (p. ej. `RemotePairingError:unavailable:cleanup_revoke_failed`), nunca el mensaje,
 tokens, `sub` ni email.
 
@@ -2465,7 +2560,9 @@ conocer solo el código no sustituye a PKCE. El replay comprueba dispositivo, cu
 y los hashes vigentes de ambos tokens. Nunca recrea una credencial revocada ni sustituye una
 rotada. El recibo desaparece con la credencial; los códigos antiguos sin PKCE no adquieren esta
 capacidad. Los diarios nuevos del conector exigen S256. Un error HTTP genérico no demuestra que el
-canje no ocurrió: conserva la intención bloqueada para resolver su resultado y revocarlo.
+canje no ocurrió: conserva la intención bloqueada para resolver su resultado y revocarlo. Lo exceptúan
+el 400 de `/exchange` (un cuerpo que nunca llegó a la transacción) y su 401 (código inválido,
+caducado o credencial ya revocada), que sí son definitivos: no queda credencial viva de ese intento.
 
 El dispositivo Blob V2 se registra ligado a esa credencial antes de pedir la prueba de propiedad.
 La revocación de la credencial corta también el acceso de su dispositivo. La cancelación invalida
@@ -2538,6 +2635,10 @@ biblioteca y accesos compartidos. Retirar membresía o permiso de un espacio u o
 ese contenido compartido conforme a §14, sin borrar ni abrir bibliotecas personales.
 
 #### Despliegue, rollback y pruebas obligatorias
+
+Dependencias de Lumbre para el despliegue: para que los fallos de una persona no bloqueen a las
+demás hace falta su lote P14 (límites por `sub`, que usa la identidad del servidor), y para que las
+peticiones válidas no gasten el cupo por IP, su lote P9.
 
 Antes de migrar se hace una copia consistente y cifrada del volumen y se comprueba su restauración
 en un entorno aislado. El rollback conserva los directorios de cuentas nuevas y las generaciones de
