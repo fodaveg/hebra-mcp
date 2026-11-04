@@ -16,7 +16,7 @@ import {
 import { hebraAccountIdOf } from '../pair/remote/account-id';
 import type { Fetcher } from '../pair/lumbre';
 import { openFileSecretStore, readPairedSecrets, readStoredIdentity, writePairedSecrets, type SecretStore } from '../secrets';
-import { AgentKeyNotFoundError, prepareAgentDevice, savePreparedAgentDevice } from '../spaces/device';
+import { savePreparedAgentDevice } from '../spaces/device';
 import { accountDataDir, AccountRegistry } from './registry';
 import type { AccountRecord, AccountRef } from './types';
 
@@ -119,19 +119,19 @@ export function remotePairingAdapters(options: RemotePairingAdapterOptions): {
       try { return (JSON.parse(stored) as { privateKey?: JsonWebKey }).privateKey; }
       catch { return undefined; }
     },
-    async agentEnabled(renewal, fetcher) {
+    async keepRotatedTokens(renewal, connection) {
       const record = options.registry.findById(renewal.id);
       const attached = options.services();
-      if (!attached || !record) return true;
-      try {
-        const store = storeOf(record, attached);
-        const paired = await readPairedSecrets(store);
-        const stored = await store.get('agent-device-key');
-        const key = stored ? (JSON.parse(stored) as { privateKey?: JsonWebKey }).privateKey : undefined;
-        if (!paired || !key) return true;
-        await prepareAgentDevice(paired.connection, paired.device.lumbreDeviceId, fetcher, key);
-        return true;
-      } catch (error) { return !(error instanceof AgentKeyNotFoundError); }
+      if (!attached || !record) return false;
+      const store = storeOf(record, attached);
+      const paired = await readPairedSecrets(store);
+      if (!paired || paired.connection.credentialId !== connection.credentialId) return false;
+      // Solo los tokens: identidad, clave de agente y vínculo quedan como estaban. Un contexto
+      // abierto con los tokens viejos se cierra para que el siguiente use los nuevos.
+      await attached.contexts.drainAndClose(record);
+      await writePairedSecrets(store, { ...paired, connection: { ...paired.connection,
+        readToken: connection.readToken, writeToken: connection.writeToken } });
+      return true;
     },
     async publish(input) {
       const attached = options.services();
@@ -142,7 +142,7 @@ export function remotePairingAdapters(options: RemotePairingAdapterOptions): {
       await options.provider.invalidateFamiliesForRenewal(held, input.ownership.sub);
       await attached.contexts.drainAndClose(held);
       const store = storeOf(held, attached);
-      await savePreparedAgentDevice(store, input.paired, input.preparedAgent);
+      if (input.preparedAgent) await savePreparedAgentDevice(store, input.paired, input.preparedAgent);
       await writePairedSecrets(store, input.paired);
       const record = await options.registry.commitRenewal(held, input.journalId, input.ownership);
       // Misma bóveda: la credencial puede conservar su id, y la marca de revocación (Lumbre o relé)
@@ -205,6 +205,9 @@ export async function openRemotePairing(options: OpenRemotePairingOptions): Prom
             headers: { Authorization: `Bearer ${paired.connection.readToken}` }
           });
           await response.body?.cancel();
+          // Un GET de lectura correcto prueba que la credencial vale: si estaba marcada como
+          // revocada (agente desactivado y luego reactivado), la marca se levanta aquí.
+          if (response.ok) options.provider.pairing.clear(paired.connection.credentialId);
           return response.status === 401 || response.status === 403;
         } catch { return false; }
       }

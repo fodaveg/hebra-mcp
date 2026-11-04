@@ -102,14 +102,18 @@ export function sendCodeRejectedPage(res: Response, page: RemotePairingNoticePag
 }
 
 /**
- * El agente de la persona está desactivado en Hebra (Lumbre responde 404 al registrar su clave).
- * No se ha cambiado nada: la conexión guardada sigue ahí para cuando se active.
+ * Lumbre rechazó (401) el registro de la clave de agente. Con la credencial revocada y con el
+ * agente desactivado en Hebra responde igual, así que la página dice solo lo que se sabe.
+ * No se ha borrado nada. `tokensKept`: la renovación guardó los tokens nuevos de la credencial
+ * que sobrevive, así que al activar el agente no hace falta reconectar.
  */
-export function sendAgentDisabledPage(res: Response): void {
+export function sendAgentRejectedPage(res: Response, tokensKept: boolean): void {
   securityHeaders(res, BASE_CSP.replace("form-action 'self'; ", ''));
-  res.status(409).type('html').send(document('El agente está desactivado en Hebra',
-    '<p>Para renovar la conexión hace falta que el agente esté activado en tu cuenta de Hebra. No se ha cambiado nada y tu conexión anterior sigue guardada.</p>' +
-    '<p>Actívalo en Hebra y vuelve a abrir el conector desde tu aplicación. Si no vuelve a funcionar solo en la siguiente apertura, repite la conexión.</p>'));
+  res.status(409).type('html').send(document('Lumbre rechaza esta conexión',
+    '<p>Lumbre ha rechazado esta conexión. Comprueba en Hebra que el agente está activado.</p>' +
+    (tokensKept
+      ? '<p>Si lo activas, no hace falta que vuelvas a conectar: tu biblioteca volverá a funcionar sola. No se ha borrado nada.</p>'
+      : '<p>Si lo activas, vuelve a conectar Hebra desde tu aplicación. No se ha borrado nada.</p>')));
 }
 
 export function sendWaitingPage(res: Response, formToken: string, remainingMs?: number): void {

@@ -137,7 +137,8 @@ function trackInFlight(server: Server): { idle(timeoutMs: number): Promise<boole
  * la de otra. El desacople va ANTES de cerrar la instancia, con el runner aún vivo.
  */
 export function bindPairingRevocation(opened: ServeContext, pairing: PairingRevocation, credentialId: string): ServeContext {
-  const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false);
+  const detachRelay = pairing.attachRelay(credentialId, () => opened.instance.syncRunner?.revoked ?? false,
+    () => opened.instance.syncRunner?.lastRoundOk ?? false);
   opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
   return { ...opened, close: async () => {
     detachRelay();

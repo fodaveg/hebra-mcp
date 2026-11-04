@@ -354,6 +354,11 @@ export class SyncRunner implements SyncStatusSource {
     return this.revokedFlag;
   }
 
+  /** ¿La última ronda de ESTE runner terminó bien? Un runner nuevo no arrastra el valor anterior. */
+  get lastRoundOk(): boolean {
+    return this.lastRound?.result === 'ok';
+  }
+
   /** Formato incompatible visto por la última ronda: se puede bajar, nunca subir. */
   clientOutdated(): ReturnType<LibrarySyncEngine['clientOutdated']> {
     return this.engine.clientOutdated();
