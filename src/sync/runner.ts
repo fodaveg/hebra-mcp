@@ -6,8 +6,10 @@
  * Ritmo (§8):
  * - Una ronda al arrancar (`start`); las lecturas pueden esperarla con `whenReady`, que
  *   nunca tarda más de 10 s por defecto y nunca rechaza.
- * - Una ronda cada 30 s mientras el proceso vive.
+ * - Una ronda cada 30 s mientras el runner vive: el proceso en `serve`, y en `serve-http` lo
+ *   que dure abierto su contexto (D22, §12.10).
  * - Una ronda justo después de cada escritura (`requestRound`).
+ * - Al cerrar, una ronda más si quedan subidas pendientes (`finalRound`, D22).
  * Nunca hay dos rondas solapadas: si se pide una con otra en vuelo, se encadena UNA
  * detrás (todas las peticiones de mientras comparten esa), porque la que está en vuelo
  * puede haber subido ya y no llevarse la escritura recién hecha.
@@ -41,6 +43,48 @@ import type { SyncStorePort } from '../store/sync-port';
 
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
+/**
+ * Cuánto espera el cierre de un contexto a su ronda final (D22, §12.10). Lo que no suba en ese
+ * plazo ya está anotado en la lista durable (`src/accounts/pending-sweep.ts`) y lo reintenta el
+ * barrido. Corto porque va dentro del apagado del contenedor: `HTTP_DRAIN_TIMEOUT_MS` (12 s), este
+ * plazo y lo que le quede a una ronda en vuelo tienen que caber en sus 50 s de `stop_grace_period`.
+ * Con el relé colgado en el peor momento puede pasarse unos segundos; un SIGKILL ahí no pierde
+ * nada, porque la escritura ya está en la SQLite y la lista ya la nombra.
+ */
+export const CLOSE_ROUND_WAIT_MS = 10_000;
+
+/**
+ * Subidas que un reintento aún puede sacar adelante: las pendientes menos los registros que el
+ * motor ya apartó con su error (`record_too_large`…), que no cambian por repetir la ronda. Sin
+ * esto, un solo registro imposible haría que el barrido abriera esa cuenta cada minuto para
+ * siempre. `blob_too_large` no se resta: esos adjuntos ya no cuentan en `pendingUpload`.
+ */
+export function retryableUploads(status: {
+  pendingUpload: number | null;
+  errorsByCode: Record<string, number> | null;
+}): number {
+  let parked = 0;
+  for (const [code, count] of Object.entries(status.errorsByCode ?? {})) {
+    if (code !== 'blob_too_large') parked += count;
+  }
+  return Math.max(0, (status.pendingUpload ?? 0) - parked);
+}
+
+/**
+ * ¿Repetir la ronda no va a arreglar esto? Credencial revocada, o una bóveda que no es la de esta
+ * biblioteca: hace falta que alguien cambie algo. El barrido no abre esa cuenta cada minuto para
+ * oír lo mismo (`UploadLedgerState`). Lo demás (relé caído, 429, cuota) se reintenta.
+ */
+export function retryIsUseless(status: {
+  revoked: boolean | null;
+  lastSyncOutcome: string | null;
+}): boolean {
+  return (
+    status.revoked === true ||
+    status.lastSyncOutcome === 'library_binding_mismatch' ||
+    status.lastSyncOutcome === 'library_merge_refused'
+  );
+}
 
 /**
  * Descargas de adjuntos (`readBlob`) a la vez, como mucho; el resto espera en cola, por
@@ -179,6 +223,9 @@ export interface SyncRunnerOptions {
    * fallo aquí no para la ronda.
    */
   beforeRound?: () => Promise<void>;
+  /** Plazo de `whenReady` y `finalRound`. Por defecto, un `setTimeout`; los tests lo sustituyen
+   *  para comprobar la espera sin esperarla. */
+  waitTimer?: (ms: number) => Promise<void>;
 }
 
 function isRevocation(result: LibrarySyncResultCode): boolean {
@@ -330,12 +377,28 @@ export class SyncRunner implements SyncStatusSource {
    * Nunca rechaza: las lecturas sirven lo que haya en local si el relé no responde.
    */
   whenReady(maxWaitMs = STARTUP_READ_WAIT_MS): Promise<void> {
+    return this.bounded(this.firstRound, maxWaitMs).then(() => undefined);
+  }
+
+  /**
+   * La ronda de antes de cerrar (D22, §12.10): pide una y espera como mucho `maxWaitMs`.
+   * Resuelve con su resultado, `null` si el runner ya no hace rondas (parado o revocado) y
+   * `'timeout'` si se acabó el plazo; esa ronda la acaba `stop()`. Nunca rechaza.
+   */
+  finalRound(maxWaitMs = CLOSE_ROUND_WAIT_MS): Promise<SyncRoundResult | null | 'timeout'> {
+    return this.bounded(this.requestRound(), maxWaitMs);
+  }
+
+  /** `work` o, si tarda más de `maxWaitMs`, `'timeout'`. El plazo no mantiene vivo el proceso. */
+  private bounded<T>(work: Promise<T>, maxWaitMs: number): Promise<T | 'timeout'> {
     let timeout: ReturnType<typeof setTimeout> | null = null;
-    const limit = new Promise<void>((resolve) => {
-      timeout = setTimeout(resolve, maxWaitMs);
-      timeout.unref?.();
-    });
-    return Promise.race([this.firstRound, limit]).finally(() => {
+    const limit = this.options.waitTimer
+      ? this.options.waitTimer(maxWaitMs)
+      : new Promise<void>((resolve) => {
+          timeout = setTimeout(resolve, maxWaitMs);
+          timeout.unref?.();
+        });
+    return Promise.race([work, limit.then(() => 'timeout' as const)]).finally(() => {
       if (timeout) clearTimeout(timeout);
     });
   }

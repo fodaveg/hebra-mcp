@@ -4,7 +4,7 @@
  * This is not acceptance of David/Mikel's production accounts or their shared resources.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { cp, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -373,5 +373,36 @@ describe('acceptance multiusuario por HTTP, con bibliotecas reales y relé sint�
     const registry = await AccountRegistry.open(root);
     expect(registry.findById(records.david.id)).toMatchObject({ state: 'removed', generation: 2 });
     expect(registry.findById(records.mikel.id)).toMatchObject({ state: 'active', generation: 1 });
+  });
+
+  it('D22: una escritura con el relé caído sobrevive al cierre y al reinicio; el barrido la retoma y no insiste en lo bloqueado', async () => {
+    const created = await call('david', 'hebra_create_note', { body: '# PENDIENTE_D22\n\ncuerpo' });
+    expect(created.isError).toBe(false);
+    await clients.david.close(); await clients.mikel.close();
+    await handle!.close();
+    const file = join(root, 'control', 'pending-uploads-v1.json');
+    const saved = await readFile(file, 'utf8');
+    // La semilla de Mikel tampoco llegó a subir: con el relé caído, también queda apuntada.
+    const pending = JSON.parse(saved) as { entries: unknown[] };
+    expect(pending.entries).toEqual(expect.arrayContaining([
+      { account: records.david.id, generation: 1, space: null, blocked: false }
+    ]));
+    for (const leak of ['PENDIENTE_D22', 'david', 'mikel', connections.david.writeToken]) expect(saved).not.toContain(leak);
+
+    relayOnline = true;
+    handle = await startServeHttp(serveOptions);
+    relay!.requested.length = 0;
+    // Abre y cierra por la vía de producción. Esta semilla sintética nunca termina de subir (sus
+    // adjuntos no están en el relé falso), así que queda bloqueada; que una subida acabe y salga de
+    // la lista lo prueban `test/accounts/pending-sweep.test.ts` y `test/spaces/pending-uploads`.
+    expect(await handle.sweep!.runOnce()).toMatchObject({ kept: pending.entries.length, dropped: 0 });
+    expect(relay!.requested.some((url) => url.includes(records.david.binding.syncVaultId) && url.endsWith('/records'))).toBe(true);
+    expect(existsSync(join(accountDataDir(root, records.david), 'writer.lock'))).toBe(false);
+    expect(JSON.parse(await readFile(file, 'utf8')).entries).toEqual(
+      expect.arrayContaining([{ account: records.david.id, generation: 1, space: null, blocked: true }]));
+
+    relay!.requested.length = 0;
+    expect(await handle.sweep!.runOnce()).toMatchObject({ uploaded: 0, kept: 0, skipped: pending.entries.length });
+    expect(relay!.requested).toEqual([]);
   });
 });

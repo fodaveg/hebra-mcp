@@ -121,6 +121,8 @@ import {
   type NoteWriteTarget
 } from '../store/writes';
 import {
+  retryableUploads,
+  retryIsUseless,
   SyncRunner,
   STARTUP_READ_WAIT_MS,
   type SyncConflictCopy,
@@ -141,6 +143,29 @@ export type WriterRole = 'this' | 'other_instance';
 
 /** Lo que el runner necesita además del almacén: identidad, clave y transporte. */
 export type LibrarySyncConfig = Omit<SyncRunnerOptions, 'port'>;
+
+/**
+ * Qué se apunta de una biblioteca en la lista durable de subidas pendientes:
+ * - `retry`: hay subidas que el barrido debe reintentar.
+ * - `blocked`: las hay, pero reintentar no sirve hasta que cambie algo (credencial revocada,
+ *   cliente desactualizado). Siguen en la SQLite y las sube la siguiente apertura que pueda.
+ * - `clear`: no queda nada que reintentar.
+ */
+export type UploadLedgerState = 'retry' | 'blocked' | 'clear';
+
+/**
+ * Lo que `serve-http` da a cada biblioteca para que una escritura sobreviva a cerrar su contexto
+ * (D22, §12.10; lo implementa `src/accounts/pending-sweep.ts`). `space` es el id del espacio, o
+ * `null` en la biblioteca personal. Sin él (`serve` por stdio), cerrar no hace ninguna ronda: la
+ * biblioteca vive lo que el proceso y el siguiente arranque la sincroniza.
+ */
+export interface UploadLedger {
+  /** Esta instancia es el escritor: el barrido deja en paz este destino hasta `closed`. `settle`
+   *  es su `settleUploads`, para que el contexto pueda pedirlo antes de cerrar sus guardias. */
+  opened(space: string | null, settle: () => Promise<void>): void;
+  record(space: string | null, state: UploadLedgerState): Promise<void>;
+  closed(space: string | null): void;
+}
 
 export interface OpenLibraryInstanceOptions {
   /** Guardia local de la cuenta, conservada al abrir o tomar el relevo del escritor. */
@@ -175,6 +200,8 @@ export interface OpenLibraryInstanceOptions {
    * `SyncRunnerOptions.beforeRound`.
    */
   beforeSyncRound?: (port: HebraLibraryPort) => Promise<void>;
+  /** Ver `UploadLedger`. */
+  uploadLedger?: UploadLedger;
 }
 
 export interface InstanceStatus extends SyncStatusSnapshot {
@@ -195,6 +222,10 @@ export class LibraryInstance implements NoteWriteTarget {
   /** Fallos seguidos del relleno, y cuándo se puede reintentar (`retrySubstringFill`). */
   private substringFillFailures = 0;
   private substringFillRetryAt = 0;
+  /** `settleUploads` en curso o hecho: el cierre lo pide una sola vez. */
+  private settling: Promise<void> | null = null;
+  /** La lista durable ya nombra esta biblioteca por una escritura (`afterWrite`). */
+  private ledgerMarked = false;
   private markShuttingDown!: () => void;
   /** Resuelve al empezar el apagado (`beginShutdown`, o `close`). */
   private readonly shuttingDown = new Promise<void>((resolve) => {
@@ -213,9 +244,9 @@ export class LibraryInstance implements NoteWriteTarget {
     private readonly sqlitePath: string
   ) {
     this.port = stablePort(() => this.current);
-    this.writer = new NoteWriter(this, { onWritten: () => void this.runner?.requestRound() });
+    this.writer = new NoteWriter(this, { onWritten: () => this.afterWrite() });
     this.replaceBatch = new ReplaceBatch(this.port, this, {
-      onWritten: () => void this.runner?.requestRound()
+      onWritten: () => this.afterWrite()
     });
   }
 
@@ -329,6 +360,7 @@ export class LibraryInstance implements NoteWriteTarget {
         for (const listener of this.conflictListeners) listener(copy);
       });
       this.runner = runner;
+      this.options.uploadLedger?.opened(this.ledgerSpace, () => this.settleUploads());
       runner.start();
     }
     await this.openWriterSocket();
@@ -427,6 +459,90 @@ export class LibraryInstance implements NoteWriteTarget {
     const previous = this.current;
     this.current = await this.openPort('readOnly');
     await previous.closeWhenIdle();
+    this.options.uploadLedger?.closed(this.ledgerSpace);
+  }
+
+  private get ledgerSpace(): string | null {
+    return this.options.spaceAccess?.spaceId ?? null;
+  }
+
+  /**
+   * Tras cada escritura: la ronda de después (§8) y, la primera vez, la anotación en la lista
+   * durable. Con ella, si el proceso muere antes de subir, el barrido del arranque siguiente
+   * encuentra esta biblioteca aunque nadie vuelva a usarla. Una anotación de más se limpia sola:
+   * el barrido abre, ve que no queda nada y la quita.
+   */
+  private afterWrite(): void {
+    const ledger = this.options.uploadLedger;
+    if (ledger && !this.ledgerMarked) {
+      this.ledgerMarked = true;
+      void ledger.record(this.ledgerSpace, 'retry').catch(() => {
+        this.ledgerMarked = false;
+        logEvent({ event: 'pending_uploads.write', result: 'failed' });
+      });
+    }
+    void this.runner?.requestRound();
+  }
+
+  /** Subidas que un reintento aún puede sacar adelante; si no se pueden leer, se supone que sí. */
+  private async uploadsLeft(runner: SyncRunner): Promise<number> {
+    try {
+      return retryableUploads(await runner.syncStatus());
+    } catch {
+      return 1;
+    }
+  }
+
+  private stillActive(): boolean {
+    try {
+      this.options.assertActive?.();
+      this.options.spaceAccess?.assertActive();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Una escritura hecha no se pierde por cerrar el contexto (D22, §12.10): si quedan subidas
+   * pendientes se intenta una ronda, con plazo, y lo que no suba queda en la lista durable. Se
+   * anota ANTES de la ronda: si el proceso muere durante ella, la lista ya lo sabe. Con la cuenta
+   * retirada o el espacio denegado no hay ronda; la entrada la descarta el barrido cuando lo
+   * compruebe. Nunca rechaza.
+   */
+  settleUploads(): Promise<void> {
+    this.settling ??= this.runSettle();
+    return this.settling;
+  }
+
+  private async runSettle(): Promise<void> {
+    const ledger = this.options.uploadLedger;
+    const runner = this.runner;
+    if (!ledger || !runner) return;
+    const space = this.ledgerSpace;
+    try {
+      // Las escrituras ya en la cola cuentan como pendientes: se espera su turno.
+      await this.current.writeExclusive(async () => undefined).catch(() => undefined);
+      if ((await this.uploadsLeft(runner)) === 0) {
+        await ledger.record(space, 'clear');
+        return;
+      }
+      await ledger.record(space, 'retry');
+      const round = this.stillActive() ? await runner.finalRound() : null;
+      const left = await this.uploadsLeft(runner);
+      const blocked = runner.clientOutdated() !== null || retryIsUseless(await runner.syncStatus());
+      await ledger.record(space, left === 0 ? 'clear' : blocked ? 'blocked' : 'retry');
+      logEvent({
+        event: 'sync.close_round',
+        result: round === null ? 'skipped' : round === 'timeout' ? 'timeout' : round.result,
+        pending: left > 0
+      });
+    } catch {
+      // Sin lista no hay reintento, pero la escritura sigue en la SQLite y sube al volver a abrir.
+      logEvent({ event: 'pending_uploads.write', result: 'failed' });
+    } finally {
+      this.ledgerMarked = false;
+    }
   }
 
   /**
@@ -548,7 +664,7 @@ export class LibraryInstance implements NoteWriteTarget {
    *  (`hebra-mcp apply`/`undo`, SPEC.md §13; `../store/body-writes.ts`). Pide la ronda de
    *  después sin esperarla. */
   replaceBodyLocal(input: ReplaceBodyInput, hooks?: ReplaceBodyTestHooks): Promise<ReplaceBodyResult> {
-    return replaceBody(this, input, () => void this.runner?.requestRound(), hooks);
+    return replaceBody(this, input, () => this.afterWrite(), hooks);
   }
 
   /** `hebra_replace_in_notes` (D14, `../store/replace-batch.ts`): simular, una página del
@@ -561,7 +677,7 @@ export class LibraryInstance implements NoteWriteTarget {
 
   /** Mandar a la papelera las copias de conflicto de un lote que se deshace (SPEC.md §13). */
   trashConflictCopiesLocal(input: TrashConflictCopiesInput): Promise<TrashConflictCopiesResult> {
-    return trashConflictCopies(this, input, () => void this.runner?.requestRound());
+    return trashConflictCopies(this, input, () => this.afterWrite());
   }
 
   /** Trae al disco los bytes de un adjunto (`NoteWriter.fetchAttachment`) con el motor
@@ -588,7 +704,7 @@ export class LibraryInstance implements NoteWriteTarget {
       this,
       input,
       runner ? (sha256) => runner.readBlob(sha256) : null,
-      () => void this.runner?.requestRound()
+      () => this.afterWrite()
     );
   }
 
@@ -601,7 +717,7 @@ export class LibraryInstance implements NoteWriteTarget {
       this,
       input,
       runner ? (sha256) => runner.readBlob(sha256) : null,
-      () => void this.runner?.requestRound()
+      () => this.afterWrite()
     );
   }
 
@@ -610,14 +726,14 @@ export class LibraryInstance implements NoteWriteTarget {
    *  (la espera `WriteContext`) si creó algo. `hooks`, solo en tests. Rechaza con
    *  `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
   jdNewIdLocal(request: JdNewIdRequest, hooks?: JdTestHooks): Promise<LocalWrite<JdNewIdResult>> {
-    return runJdNewId(this, request, () => void this.runner?.requestRound(), hooks);
+    return runJdNewId(this, request, () => this.afterWrite(), hooks);
   }
 
   /** `hebra_jd_move` (D19, `../store/jd-move.ts`): simular, aplicar, deshacer o descartar un
    *  plan de mover a un ID en este escritor. Pide la ronda de después sin esperarla si cambió
    *  algo. `hooks`, solo en tests. Rechaza con `busy_other_instance` en un lector. */
   jdMoveLocal(request: JdMoveRequest, hooks?: JdMoveTestHooks): Promise<LocalWrite<JdMoveResult>> {
-    return runJdMove(this, request, () => void this.runner?.requestRound(), hooks);
+    return runJdMove(this, request, () => this.afterWrite(), hooks);
   }
 
   /** Estado para `hebra_status` sin `linked` (L2). En un lector, `pendingUpload` y
@@ -674,10 +790,12 @@ export class LibraryInstance implements NoteWriteTarget {
     if (this.timer) clearInterval(this.timer);
     await this.switching;
     await this.closeWriterSocket();
+    await this.settleUploads();
     await this.runner?.stop();
     this.runner = null;
     await this.current.closeWhenIdle();
     this.lock.release();
+    this.options.uploadLedger?.closed(this.ledgerSpace);
   }
 }
 
