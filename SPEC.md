@@ -1364,7 +1364,7 @@ El dispositivo acumula tres secretos:
     - **Etiquetas**: el cuerpo resultante no puede dejar la nota oculta (decisión 4 de D2). Un nombre
       no puede traerlas (`#` no vale en él), y se comprueba igual.
     - **Homónimo oculto**: nunca sale en `file_exists` ni cuenta para decidir qué notas se
-      reescriben, pero tiene dos efectos, declarados y sin arreglar (decisión de David del 5 nov 2026):
+      reescriben, pero tiene dos efectos, declarados y sin arreglar (los dejó la sesión de D23, no David):
       - **Oráculo**. Renombrar un fichero visible al nombre exacto de un fichero oculto vivo de la
         misma carpeta, con notas que arreglar, responde `not_found` sin escribir; con ese nombre
         libre, renombra. Se queda: el motor no renombra con ese homónimo al lado (`file_name_taken`),

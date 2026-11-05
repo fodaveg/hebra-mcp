@@ -31,7 +31,7 @@
  * no incrustan este y no se tocan. Si el nombre nuevo lo tiene otro fichero visible de otra
  * carpeta, reescribirlas podría apuntarlas a ese: `file_exists` con su id.
  *
- * Homónimo oculto, dos efectos declarados (SPEC.md §6.3, decisión de David del 5 nov 2026):
+ * Homónimo oculto, dos efectos declarados (SPEC.md §6.3, los dejó la sesión de D23, no David):
  * - Oráculo. Renombrar al nombre exacto de un fichero oculto vivo de la MISMA carpeta, con notas
  *   que arreglar, responde `not_found`; con ese nombre libre, renombra. Se queda: el motor no
  *   renombra con ese homónimo al lado (`file_name_taken`), y renombrar sin arreglar las notas
