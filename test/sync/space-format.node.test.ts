@@ -76,6 +76,30 @@ describe('formato de espacio en el consumidor MCP', () => {
     expect((await reopened.libraryOpen()).notesCount).toBe(1);
   });
 
+  it('D23: cada mutación nueva pasa por la guarda del espacio dentro del turno, también si se revoca a mitad', async () => {
+    const { port, spaceAccess } = await openSpace();
+    let revoked = false;
+    spaceAccess.assertActive = () => {
+      if (revoked) throw new Error('space_revoked');
+    };
+    await port.writeExclusive(async (store) => {
+      revoked = true;
+      const guarded = store as unknown as Record<string, (...args: unknown[]) => unknown>;
+      for (const name of [
+        'noteHide',
+        'noteUnhide',
+        'noteClearConflict',
+        'noteMoveIfUnchanged',
+        'noteTrashIfUnchanged',
+        'noteRestoreRowIfUnchanged',
+        'fileRenameAndRelink'
+      ]) {
+        expect(() => guarded[name]!('no-existe'), name).toThrow('space_revoked');
+      }
+      revoked = false;
+    });
+  });
+
   it('un espacio sin vínculo rechaza; el personal sigue permitiendo crear', async () => {
     const shared = await openSpace(true, false);
     await expect(shared.writer.createNote({ body: '# No debe existir', privacy: NO_PRIVATE }))
