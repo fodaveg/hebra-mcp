@@ -40,6 +40,10 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src
 // reconoce con él un 429 al bajar un adjunto y espera antes de reintentar.
 export { BlobRelayV2Error } from '../vendor/hebra/src/lib/vault/blob-v2/memory-transport';
 
+// D23: el Markdown de una nota con el `![[nombre]]` de un fichero renombrado, con el escáner
+// real de la app. El resto de ese módulo (dibujos) no se usa.
+export { renameFileEmbedInMarkdown } from '../vendor/hebra/src/lib/library-ui/drawing-file-rename';
+
 // H-L7: protocolo compartido de concesiones de dispositivo, sin copiar criptografía.
 // El nombre de un espacio vive cifrado en su registro de alta; se lee con la sonda de Hebra.
 export { readSpaceMeta } from '../vendor/hebra/src/lib/spaces/space-key-check';

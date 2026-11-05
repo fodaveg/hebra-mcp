@@ -83,6 +83,7 @@ import {
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { openJdPlansDatabase, sqliteJdPlanStore, type JdPlanStore } from './jd-plans';
 import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
+import { noteStateEngineOf } from './note-state-engine';
 import {
   ensurePrivacyEpochIndexes,
   noteStamps,
@@ -865,6 +866,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteSave: (input) => this.engine.noteSave(input),
         // D18: solo los títulos, sin el cuerpo (`./jd-port.ts`, `hasHidden`).
         noteTitles: (ids) => this.noteTitleRows(ids),
+        // D23: ocultar, quitar la marca de conflicto, guardas y renombrar con los enlaces.
+        ...noteStateEngineOf(this.engine, this.db),
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
@@ -921,7 +924,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
-          'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot']);
+          'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot',
+          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink']);
         const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious']);
         // Síncrona: no cambia el tipo de lo que devuelve cada método (los registros lo son).
         const guard = <T extends object>(target: T, all: boolean): T => new Proxy(target, { get: (object, property) => {

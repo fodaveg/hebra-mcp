@@ -113,6 +113,7 @@ export function localWriteContext(
     fetchFile: (input) => instance.fetchFile(input),
     replaceFileText: (input) => instance.replaceFileTextLocal(input),
     looseFileWrite: (input) => instance.looseFileWriteLocal(input),
+    noteState: (input) => instance.noteStateLocal(input),
     jdNewId: (request) => instance.jdNewIdLocal(request),
     jdMove: (request) => instance.jdMoveLocal(request),
     noteRead: (id) => instance.port.noteRead(id),

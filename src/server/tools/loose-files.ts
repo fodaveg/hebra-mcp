@@ -60,6 +60,9 @@ export type LooseFileOutput = {
   byteLength: number | null;
   mimeType: string | null;
   outcome: 'saved' | 'already';
+  /** Renombrar (D23): cuántas notas visibles se arreglaron. Nunca cuenta una oculta: con una
+   *  que lo enlace, el fichero ya es oculto y la respuesta es `not_found`. */
+  relinked?: number;
   replayed?: true;
 } & SyncFields;
 
@@ -143,6 +146,7 @@ function outputOf(ctx: ToolContext, event: string, result: LooseFileOutcome): Lo
     byteLength: result.byteLength,
     mimeType: result.mimeType,
     outcome: result.outcome,
+    ...(result.relinked !== undefined ? { relinked: result.relinked } : {}),
     ...(result.replayed === true ? { replayed: true as const } : {}),
     ...syncOf(result)
   };
@@ -183,7 +187,9 @@ export async function runCreateFile(
   return outputOf(ctx, 'file.create', result);
 }
 
-/** `hebra_rename_file`: otro nombre, con la misma extensión, en la misma carpeta. */
+/** `hebra_rename_file`: otro nombre, con la misma extensión, en la misma carpeta. Arregla las
+ *  notas que lo incrustan por su nombre (D23): el motor en el escritor, nunca aquí
+ *  (`../../store/file-relink.ts`). */
 export async function runRenameFile(
   ctx: ToolContext,
   input: { id: string; name: string; operationId: string }

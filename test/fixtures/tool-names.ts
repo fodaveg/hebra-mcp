@@ -62,7 +62,10 @@ export const TOOL_NAMES: readonly string[] = [
   // Mover a un ID (D19, 19 oct 2026): la única vía para mover carpetas.
   'hebra_jd_move',
   // Autores de una nota (D23, 5 nov 2026).
-  'hebra_note_authors'
+  'hebra_note_authors',
+  // Ocultar del listado general y quitar la marca de conflicto (D23, 5 nov 2026).
+  'hebra_set_hidden',
+  'hebra_clear_conflict'
 ].sort();
 
 /** Lo que el MCP nunca expone aunque tenga papelera: purgar y vaciar la papelera. */
