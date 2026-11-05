@@ -195,7 +195,7 @@ Reglas comunes:
 | `hebra_read_file` (D15) | `id` (fichero suelto visible y VIVO), `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000; se validan también con imágenes y PDF) | Un bloque `{id, name, folderPath, mimeType, byteLength, sha256, updatedAt}` y el contenido: imagen PNG, JPEG, GIF o WebP como `image` (base64 + `mimeType`); PDF como `resource` embebido (blob base64 + URI opaca `hebra-file:<sha256>`); texto (texto plano, Markdown, CSV, JSON y YAML: un `.base` de Obsidian Bases o un `.yaml` salen como `text/yaml`), con `totalChars`, `truncated` y `nextOffset` en el bloque y el tramo de texto detrás, como `hebra_read_attachment`. `sha256`: el de los bytes devueltos, la base de `hebra_replace_file_text`. `folderPath`, como en `hebra_list_files`. Errores: `not_found` (oculto, inexistente, lápida, en la papelera o un id que no es de un fichero suelto, todos igual), `file_too_large` (`byteLength`, `maxBytes`: más de 5 MiB; si el almacén ya sabe el tamaño, sin bajar nada), `file_type_not_allowed` (`mimeType?`), `file_unavailable` (los bytes no están y no se pudieron bajar), `invalid_input`. |
 | `hebra_replace_file_text` (D15) | `id`, `expectedSha256` (el `sha256` de `hebra_read_file`; acepta mayúsculas y el prefijo `sha256:`), `text` (el contenido ENTERO nuevo, UTF-8, hasta 1 000 000 bytes, sin NUL ni suplentes sueltos) **o** `undoOperationId` (el `operationId` de un reemplazo anterior de ESTE fichero, 7 días), exactamente uno; `operationId` (≤ 200) | `{id, outcome: "saved" \| "already", sha256, byteLength, mimeType, previousSha256, replayed?, sync, syncError?}`. `saved`: escrito; `sha256` y `byteLength`, leídos de lo guardado (el hash de la fila y los bytes de ese blob), valen como base del siguiente; `previousSha256`, el de antes. `already`: el fichero ya tenía ese contenido (no escribe, sea cual sea la base). Mismo id, nombre y carpeta. Si el fichero empieza por un BOM y `text` no empieza por U+FEFF, se le antepone (la lectura lo quita; revisión M2). Errores: `file_changed` (el contenido actual no es el de `expectedSha256` o, al deshacer, ya no es el que dejó el reemplazo que se deshace, revisión M1; nada escrito), `not_found` (como `hebra_read_file`, también si el contenido nuevo dejaría el fichero oculto, §6.3), `file_type_not_allowed` (el fichero no es de texto), `file_too_large` (`byteLength`, `maxBytes`: el texto o el fichero actual; si el almacén ya sabe el tamaño, sin bajar ni leer nada), `file_unavailable`, `operation_id_reused`, `invalid_input` (también un `undoOperationId` del que no queda copia: equivocado, de otro fichero, caducado a los 7 días o recortado por el tope de 200 entradas y 50 000 000 bytes; los cuatro responden igual a propósito, para no decir si ese `operationId` tocó otro fichero, quizá oculto, y quien lo pide solo puede decir «ya no se puede deshacer desde aquí»; o un texto que empezaría como la firma de una imagen o un PDF). |
 | `hebra_create_file` (D17) | `folder?` (ruta) **o** `folderId?` (id; `"root"` = raíz), como mucho uno; sin ninguno, la raíz; `name` (con extensión; 1–255 caracteres tras recortar; sin `/`, `\|`, `[`, `]`, `\`, `#`, saltos de línea, caracteres de control ni de formato invisibles), `text` (el contenido entero, UTF-8, hasta 1 000 000 bytes, sin NUL ni suplentes sueltos), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved", replayed?, sync, syncError?}`: el fichero nuevo, con `sha256` y `byteLength` leídos de lo guardado (valen como `expectedSha256` de `hebra_replace_file_text`) y el tipo de su extensión (`.base`, `.yaml`, `.yml`: `text/yaml`; `.json`: `application/json`, o `text/plain` si no se lee como JSON; `.csv`: `text/csv`; `.txt`: `text/plain`). Sin BOM añadido; no valida el YAML. Errores: `file_type_not_allowed` (extensión distinta de `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`, sin distinguir mayúsculas, o sin extensión; un `.md` también: es una nota, `hebra_create_note`), `file_too_large` (`byteLength`, `maxBytes`), `invalid_input` (nombre, texto u `operationId` inválidos; `folder` y `folderId` a la vez; un texto que empieza como la firma de una imagen o un PDF), `not_found` (carpeta oculta o inexistente, igual), `file_exists` (`id`: el fichero VIVO y VISIBLE de esa carpeta con ese nombre, sin distinguir mayúsculas), `file_name_unavailable` (el fichero quedaría oculto, §6.3; sin detalles), `operation_id_reused`. |
-| `hebra_rename_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `name` (las reglas de `hebra_create_file`, con la MISMA extensión, comparada sin distinguir mayúsculas), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved" \| "already", relinked?, replayed?, sync, syncError?}`. `already`: ya tenía exactamente ese nombre (no escribe, `relinked: 0`). `byteLength` y `mimeType` salen de la fila de `blobs` (sin leer los bytes; `null` si este dispositivo no la tiene; el tipo, por la extensión si la fila no dice nada útil, como `hebra_read_file`). `relinked` (D23): cuántas notas vivas y visibles que lo incrustaban como `![[nombre]]` quedaron con el nombre nuevo, en la misma escritura; ausente solo si no consta (un reintento recuperado del estado `started` o anotado antes de D23). Se quedan sin tocar un `[[nombre]]`, una ruta escrita a mano, las notas de la papelera y las bloqueadas: ver «Renombrar arregla las notas» abajo. Errores: `not_found` (origen oculto, inexistente, lápida o en la papelera, todos igual; también si el nombre nuevo lo dejaría oculto, §6.3), `invalid_input` (otra extensión, nombre inválido), `file_exists` (`id`: otro fichero VIVO y VISIBLE de la carpeta con ese nombre; con notas que arreglar, también de otra carpeta), `operation_id_reused`, `writer_outdated` (en un lector cuyo escritor es de una versión anterior; no se escribió nada). |
+| `hebra_rename_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `name` (las reglas de `hebra_create_file`, con la MISMA extensión, comparada sin distinguir mayúsculas), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved" \| "already", relinked?, replayed?, sync, syncError?}`. `already`: ya tenía exactamente ese nombre (no escribe, `relinked: 0`). `byteLength` y `mimeType` salen de la fila de `blobs` (sin leer los bytes; `null` si este dispositivo no la tiene; el tipo, por la extensión si la fila no dice nada útil, como `hebra_read_file`). `relinked` (D23): cuántas notas vivas y visibles que lo incrustaban como `![[nombre]]` quedaron con el nombre nuevo, en la misma escritura; juzgadas por la puerta final por su id (si alguna ya no se ve, `not_found`); ausente si no consta (un reintento recuperado del estado `started`, un registro sin esos ids, o más de 5 000 notas): nunca un recuento sin juzgar. Se quedan sin tocar un `[[nombre]]`, una ruta escrita a mano, las notas de la papelera y las bloqueadas: ver el apartado Renombrar arregla las notas, abajo. Errores: `not_found` (origen oculto, inexistente, lápida o en la papelera, todos igual; también si el nombre nuevo lo dejaría oculto, §6.3), `invalid_input` (otra extensión, nombre inválido), `file_exists` (`id`: otro fichero VIVO y VISIBLE de la carpeta con ese nombre; con notas que arreglar, también de otra carpeta), `operation_id_reused`, `writer_outdated` (en un lector cuyo escritor es de una versión anterior; no se escribió nada). |
 | `hebra_move_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `folder?` **o** `folderId?` (como en `hebra_create_file`; sin ninguno, la raíz), `operationId` (≤ 200) | Igual que `hebra_rename_file`, sin `relinked`; `already`: ya estaba en esa carpeta. Errores: `not_found` (origen como en `hebra_rename_file`; carpeta oculta o inexistente, igual que `hebra_move_note`), `file_exists` (en el destino ya hay uno VIVO y VISIBLE con ese nombre), `invalid_input`, `operation_id_reused`. |
 | `hebra_duplicate_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo, hasta 5 MiB), `name` (como en `hebra_rename_file`: la misma extensión que el original), `folder?` **o** `folderId?` (sin ninguno, la carpeta del original), `operationId` (≤ 200) | Igual que `hebra_create_file`: un fichero NUEVO (otro `id`) con los mismos bytes (mismo `sha256`) y el tipo de su contenido. Errores: los de `hebra_rename_file` (también `not_found` si el nombre nuevo lo dejaría oculto) y los de la carpeta de `hebra_move_file`, más `file_too_large` (`byteLength`, `maxBytes`) y `file_unavailable` (los bytes no están aquí y no se pudieron bajar). |
 | `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
@@ -798,7 +798,7 @@ Detalle de las escrituras (D2):
       incrustan este y no se tocan (`relinked: 0`). Si el nombre nuevo lo tiene otro fichero visible
       de otra carpeta y hay notas que arreglar, `file_exists` con su id: reescribirlas podría
       apuntarlas a ese. Sin notas que arreglar, como en D17, no choca.
-    - **Privacidad**: §6.3, «Renombrar arregla las notas».
+    - **Privacidad**: §6.3, apartado Renombrar arregla las notas.
     - **Fallar cerrado**: un lector lo reenvía por la op `renameFileRelinking`. Un escritor anterior
       la rechaza sin escribir (`writer_outdated`) en vez de renombrar sin arreglarlas.
   - **BOM** (revisión M2): la lectura devuelve el texto sin el BOM, pero el hash es el de los
@@ -827,7 +827,10 @@ Detalle de las escrituras (D2):
     `noteRestoreRowIfUnchanged`). Sin él, por `organize`, igual que siempre. Compara el SHA-256 del
     cuerpo, como `hebra_edit_note`: favorita, carpeta o papelera suben `local_seq` sin cambiar el
     texto y no cuentan como cambio. La guarda del motor se pide con la fila del turno, como
-    `src/store/jd-move-port.ts`. Orden: visibilidad (`not_found`); revisión ilegible o de otra nota
+    `src/store/jd-move-port.ts`. Orden: una de más de 1 024 caracteres (`invalid_input`, en la
+    herramienta y antes de mirar ninguna nota: en un lector, el socket la rechazaría y parecería un
+    `writer_outdated`; no va como `.max()` del esquema porque saldría como el error de validación del
+    SDK, no como `invalid_input`); visibilidad (`not_found`); revisión ilegible o de otra nota
     (`invalid_input`); ya en el estado pedido, sin escribir aunque la revisión sea vieja (un
     reintento tras un corte no es un conflicto); bloqueada (`note_locked`: el motor no las mueve con
     guarda; sin `expectedRevision` se siguen pudiendo organizar); otro cuerpo u otra biblioteca
@@ -1356,16 +1359,38 @@ El dispositivo acumula tres secretos:
       nombre anterior al desbloquearla.
     - **Nota que cruza a privada**: entre la herramienta y el escritor, el filtro del turno la ve y
       `not_found`. Dentro del turno no puede pasar: el filtro y la escritura van en el mismo turno de
-      la cola. Después de escribir, la nota enlaza ya el nombre nuevo, así que el fichero pasa a
-      oculto por la regla (b) y la puerta final responde `not_found`, sin `relinked`.
+      la cola. Después de escribir, la puerta final juzga cada nota reescrita por su id, aunque ya no
+      enlace el fichero: ver `relinked`, abajo.
     - **Etiquetas**: el cuerpo resultante no puede dejar la nota oculta (decisión 4 de D2). Un nombre
       no puede traerlas (`#` no vale en él), y se comprueba igual.
-    - **Homónimo oculto**: nunca cuenta para decidir qué notas se reescriben ni sale en `file_exists`.
-      Solo si tiene el nombre nuevo exacto en la misma carpeta y hay notas que arreglar, `not_found`
-      sin escribir: el motor no renombra con los enlaces a su lado, y es el mismo `not_found` de un
-      nombre nuevo que dejaría el fichero oculto (con el mismo coste asumido). Sin notas que arreglar
-      no cuenta, como en D17.
-    - **`relinked`** solo cuenta notas visibles, así que su valor no depende de ninguna oculta.
+    - **Homónimo oculto**: nunca sale en `file_exists` ni cuenta para decidir qué notas se
+      reescriben, pero tiene dos efectos, declarados y sin arreglar (decisión de David del 5 nov 2026):
+      - **Oráculo**. Renombrar un fichero visible al nombre exacto de un fichero oculto vivo de la
+        misma carpeta, con notas que arreglar, responde `not_found` sin escribir; con ese nombre
+        libre, renombra. Se queda: el motor no renombra con ese homónimo al lado (`file_name_taken`),
+        y renombrar sin arreglar las notas también lo delataría y dejaría enlaces rotos. NO es el
+        coste asumido de D17: D17 responde si alguna nota oculta enlaza ese nombre o esos bytes, y
+        esto responde si existe un fichero oculto con ese nombre en esa carpeta, aunque nada enlace
+        ese nombre. El agente puede provocar él mismo la condición creando una nota visible que
+        incruste el fichero que renombra. Límites reales: hay que adivinar el nombre y la extensión
+        exactos (se compara byte a byte, con mayúsculas); hace falta un fichero visible de esa
+        extensión en esa carpeta, porque renombrar no cambia ni la extensión ni la carpeta (y por eso
+        solo alcanza a un oculto de una carpeta visible, nunca a uno de una carpeta privada); cada
+        intento que falla no escribe; y cada intento que acierta un nombre libre sí escribe: renombra,
+        reescribe la nota, deja versión y sync. Sin notas que arreglar no cuenta, como en D17.
+      - **Integridad**. Si el fichero F se renombra a N y existe H con el nombre N en una carpeta
+        privada y con menor id, la nota visible pasa a incrustar N y `resolveLink` del motor la
+        resuelve a H: en la app esa nota enseñaría H a la persona dueña; por el MCP no sale nada. El
+        caso inverso es un H de menor id con el nombre ANTERIOR: la nota se reescribe igualmente, y
+        en la app pasa de enseñar H a enseñar F. Rechazar cualquiera de los dos sería otro oráculo.
+    - **`relinked`**: el escritor devuelve los ids de las notas que reescribió (`relinkedNotes`) y los
+      guarda en el registro de la operación. Viajan por `writer.sock`, validados y acotados
+      (`RELINKED_NOTES_MAX`), y nunca salen en la respuesta MCP. La herramienta los declara a la puerta
+      final tras la ronda, también en un reintento: si alguna ya no se ve (privada, aunque además le
+      hayan quitado el enlace, o purgada, que la puerta no distingue), `not_found`. Una enviada a la
+      papelera sin ser privada no cuenta como que ya no se ve (`noteInAnyState`). Sin ids (un registro
+      sin ellos, uno recuperado del estado `started`, o más notas que el tope), `relinked` no sale:
+      nunca un recuento sin juzgar.
     - **Versiones**: la causa de la versión anterior nombra el fichero, que se ve, y
       `hebra_list_versions` no la devuelve.
   - **Marca de conflicto** (D23): `hebra_clear_conflict` no cambia qué se ve. El filtro de D3 decide
@@ -1779,7 +1804,8 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     (D23: `looseFileWrite` con `renameFile` y nada más, que además arregla las notas; es la que manda
     un lector, para que un escritor anterior la rechace sin escribir, `writer_outdated`, en vez de
     renombrar sin arreglarlas; un lector anterior sigue mandando `looseFileWrite`, y este escritor
-    también las arregla), `noteState {action, id, …, privacy}` (D23: `moveNote {folderId,
+    también las arregla; un renombrado responde además `relinkedNotes`, los ids de las notas
+    arregladas, para la puerta final del lector), `noteState {action, id, …, privacy}` (D23: `moveNote {folderId,
     expectedRevision}`, `trashNote` y `restoreNote {expectedRevision}`, `setHidden {hidden}` o
     `clearConflict`, y ninguna otra; responde `OrganizeSaved` más `hidden`, `isConflictCopy` y
     `changed`, con la ronda ya esperada; una op propia y no acciones de `organize`, cuyo escritor
