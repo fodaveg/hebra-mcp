@@ -48,6 +48,7 @@ import {
 import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes';
 import { JD_MOVE_UNDO_RETENTION_MS, JD_PLAN_APPLY_TTL_MS, JD_STORED_PLANS_MAX } from '../store/jd-plans';
 import { LIMITS } from './pagination';
+import { LINKS_TO_MAX, PROPS_FILTERS_MAX } from './schemas';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_TEXT_MAX_CHARS } from './tools/attachments';
 import { GREP_RESPONSE_MAX_CHARS, GREP_TIME_BUDGET_MS } from './tools/grep';
 
@@ -71,6 +72,7 @@ export const CAPABILITY_TOOLS: readonly string[] = [
   'hebra_list_folders',
   'hebra_list_notes',
   'hebra_list_organizations',
+  'hebra_list_properties',
   'hebra_list_spaces',
   'hebra_list_tags',
   'hebra_list_trash',
@@ -78,6 +80,7 @@ export const CAPABILITY_TOOLS: readonly string[] = [
   'hebra_move_file',
   'hebra_move_note',
   'hebra_note_outline',
+  'hebra_query_properties',
   'hebra_read_attachment',
   'hebra_read_file',
   'hebra_read_note',
@@ -122,6 +125,11 @@ export interface Capabilities {
     listNotes: { default: number; max: number };
     links: { max: number };
     listTags: { max: number };
+    /** Propiedades del frontmatter (D23): por página, filtros de propiedad y claves pedidas por
+     *  llamada, y títulos de `linksTo` en `hebra_search`. */
+    listProperties: { default: number; max: number };
+    queryProperties: { default: number; max: number; filters: number; properties: number };
+    searchFilters: { props: number; linksTo: number };
     listFolders: { max: number };
     listTrash: { default: number; max: number };
     listFiles: { default: number; max: number };
@@ -210,6 +218,14 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
       listNotes: { default: LIMITS.listNotes.default, max: LIMITS.listNotes.max },
       links: { max: LIMITS.links.max },
       listTags: { max: LIMITS.listTags.max },
+      listProperties: { default: LIMITS.listProperties.default, max: LIMITS.listProperties.max },
+      queryProperties: {
+        default: LIMITS.queryProperties.default,
+        max: LIMITS.queryProperties.max,
+        filters: PROPS_FILTERS_MAX,
+        properties: PROPS_FILTERS_MAX
+      },
+      searchFilters: { props: PROPS_FILTERS_MAX, linksTo: LINKS_TO_MAX },
       listFolders: { max: LIMITS.listFolders.max },
       listTrash: { default: LIMITS.listTrash.default, max: LIMITS.listTrash.max },
       listFiles: { default: LIMITS.listFiles.default, max: LIMITS.listFiles.max },
@@ -282,6 +298,7 @@ export const SERVER_INSTRUCTIONS = [
   'Versiones anteriores de una nota (hebra_list_versions, hebra_read_version): solo las de este dispositivo; hebra_restore_version es una edición nueva y pide `expectedRevision` y un operationId nuevo.',
   'Las listas (hebra_search, hebra_grep, hebra_list_notes, hebra_links, hebra_list_tags, hebra_list_folders, hebra_list_trash, hebra_list_files, hebra_list_versions, hebra_list_attachments, hebra_note_outline, hebra_list_organizations) aceptan `limit` y `cursor`; pasa el `nextCursor` recibido para la página siguiente, que es null al final.',
   'hebra_search y hebra_list_notes aceptan `fields` para pedir solo algunos campos.',
+  'Propiedades del frontmatter: hebra_list_properties da las claves con su recuento y, con `key`, los valores de una; hebra_query_properties da las notas que cumplen filtros de propiedad y carpeta, con `sort` y los valores de `properties`; las dos aceptan `limit` y `cursor`, y la segunda `fields`. hebra_search filtra además por `props`, por `linksTo` (títulos enteros) y con `titleOnly`.',
   'Para editar: lee con hebra_read_note, usa su `revision` como expectedRevision en hebra_edit_note y un operationId nuevo por edición. hebra_add_attachment también pide un operationId nuevo por adjunto, y hebra_append_to_note acepta uno opcional: con él, reintentar no añade el texto dos veces.',
   'No permite purgar notas, vaciar la papelera ni borrar de forma irreversible, ni borrar carpetas ni moverlas salvo dentro de un ID del JDex con hebra_jd_move, ni cambiar o borrar adjuntos (se leen con hebra_list_attachments y hebra_read_attachment, y se añaden con hebra_add_attachment), ni purgar ficheros sueltos. Algunas notas, carpetas y ficheros pueden no estar disponibles por la configuración de privacidad del dueño; se comportan como si no existieran, un nombre de carpeta que no se puede usar responde folder_unavailable y uno de fichero, file_name_unavailable.',
   'Notas largas: hebra_note_outline da el esquema (apartados, niveles, tamaños); hebra_read_note con `heading` lee solo un apartado y hebra_append_to_note con `heading` añade al final de uno (si el título se repite, `headingOccurrence`) y hebra_add_attachment con `heading` deja la referencia al adjunto al final de uno. La respuesta de la escritura trae `revision`, `totalChars` y el final del texto guardado (`appended.tail`, `applied`): con eso se comprueba, sin releer la nota.',

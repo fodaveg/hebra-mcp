@@ -39,6 +39,8 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_read_note: READ,
   hebra_note_outline: READ,
   hebra_list_tags: READ,
+  hebra_list_properties: READ,
+  hebra_query_properties: READ,
   hebra_list_folders: READ,
   hebra_links: READ,
   hebra_status: READ,

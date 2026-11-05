@@ -64,6 +64,8 @@ import {
   listNotesInputShape,
   listOrganizationsInputShape,
   listTagsInputShape,
+  listPropertiesInputShape,
+  queryPropertiesInputShape,
   listTrashInputShape,
   listVersionsInputShape,
   moveNoteInputShape,
@@ -100,6 +102,8 @@ import { runGrep } from './tools/grep';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
+import { runListProperties } from './tools/list-properties';
+import { runQueryProperties } from './tools/query-properties';
 import { runListTags } from './tools/list-tags';
 import { runListTrash } from './tools/list-trash';
 import {
@@ -310,6 +314,8 @@ const GATE_POLICIES: Record<
   hebra_read_note: read(),
   hebra_note_outline: read(),
   hebra_list_tags: read(emptyList('tags')),
+  hebra_list_properties: (input) => read(emptyList(input.key === undefined ? 'keys' : 'values')),
+  hebra_query_properties: read(emptyList('notes')),
   hebra_list_folders: read(emptyList('folders')),
   hebra_links: read(),
   hebra_status: read(),
@@ -626,6 +632,28 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       annotations: READ_ONLY
     },
     gated('hebra_list_tags', (toolCtx, input) => runListTags(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_properties',
+    {
+      title: 'Listar propiedades',
+      description: 'Lista las propiedades del frontmatter de las notas. Sin `key`, las claves con su recuento de notas; con `key`, los valores de esa clave con su recuento. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: scoped(listPropertiesInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_list_properties', (toolCtx, input) => runListProperties(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_query_properties',
+    {
+      title: 'Consultar notas por propiedades',
+      description: 'Notas que cumplen filtros de propiedades del frontmatter y de carpeta, ordenadas por título o por una propiedad, con los valores de las propiedades pedidas. Para consultar como una base de datos; para buscar por texto, hebra_search (que también acepta `props`). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      inputSchema: scoped(queryPropertiesInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_query_properties', (toolCtx, input) => runQueryProperties(toolCtx, input))
   );
 
   server.registerTool(

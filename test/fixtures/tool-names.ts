@@ -15,6 +15,9 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_list_organizations',
   'hebra_list_spaces',
   'hebra_list_tags',
+  // Propiedades del frontmatter (D23, 5 nov 2026).
+  'hebra_list_properties',
+  'hebra_query_properties',
   'hebra_move_note',
   'hebra_read_note',
   'hebra_search',

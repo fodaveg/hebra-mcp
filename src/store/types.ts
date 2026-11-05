@@ -20,6 +20,7 @@ import type {
   NoteSaveResult,
   NotesPage,
   NotesScope,
+  PropsQueryFilters,
   SearchFilters,
   SearchPage,
   SqliteLibraryEngine,
@@ -27,6 +28,7 @@ import type {
   TitleCandidates
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
+import type { PropRow, PropsScan } from './props-sql';
 import type { PrivacyConfig } from '../privacy/config';
 
 /** `NoteVersionsList`/`NoteVersion` de Hebra (`library/types.ts`): `node.ts` no los
@@ -253,6 +255,15 @@ export interface HebraLibraryPort {
   /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
    *  de `notesByTitlePrefix`). */
   notesByExactTitle(title: string): Promise<TitleCandidates>;
+  /** Filas de `note_props` de las notas vivas no bloqueadas, de esas claves o de todas
+   *  (`hebra_list_properties`). Sin filtro de privados: lo aplica la herramienta. */
+  propRows(keys?: readonly string[]): Promise<PropRow[]>;
+  /** Las notas que cumplen los filtros y las filas de `keys`, en UN turno de la cola
+   *  (`hebra_query_properties`). Sin orden ni filtro de privados: los pone la herramienta. */
+  propsScan(filters: PropsQueryFilters, keys: readonly string[]): Promise<PropsScan>;
+  /** Ids de las notas vivas con ese título entero, sin mayúsculas ni acentos, como los destinos
+   *  de `SearchFilters.linksTo`. Sin filtro de privados: lo aplica quien llama. */
+  notesByFoldedTitle(title: string): Promise<string[]>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
    *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
    *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota
