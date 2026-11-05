@@ -61,6 +61,13 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_note_outline', arguments: { id: library.privateFolderNoteId } },
     { name: 'hebra_note_outline', arguments: { id: library.privateTagNoteId } },
     { name: 'hebra_note_outline', arguments: { title: 'Nota oculta de carpeta' } },
+    // Autores (D23): las notas ocultas, en la papelera o inexistentes responden `not_found`.
+    { name: 'hebra_note_authors', arguments: { id: library.privateFolderNoteId } },
+    { name: 'hebra_note_authors', arguments: { id: library.privateTagNoteId } },
+    { name: 'hebra_note_authors', arguments: { id: library.trashedNoteId } },
+    // Estado y archivadas (D23): las ocultas tampoco salen por `archived: true`.
+    { name: 'hebra_list_notes', arguments: { archived: true, limit: 100 } },
+    { name: 'hebra_list_trash', arguments: { kind: 'folders', limit: 100 } },
     {
       name: 'hebra_append_to_note',
       arguments: { id: library.privateFolderNoteId, text: BAIT_TAG, heading: BAIT_FOLDER }
@@ -78,6 +85,12 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       }
     },
     { name: 'hebra_list_tags', arguments: {} },
+    { name: 'hebra_list_properties', arguments: {} },
+    { name: 'hebra_list_properties', arguments: { key: BAIT_FOLDER } },
+    { name: 'hebra_query_properties', arguments: { filters: [{ key: BAIT_TAG, op: 'equals', value: BAIT_FOLDER }] } },
+    { name: 'hebra_query_properties', arguments: { folder: 'Diario', subfolders: true } },
+    { name: 'hebra_search', arguments: { query: BAIT_FOLDER, props: [{ key: BAIT_TAG, value: BAIT_FOLDER }] } },
+    { name: 'hebra_search', arguments: { query: 'oculta', linksTo: ['Nota oculta de carpeta'], titleOnly: true } },
     { name: 'hebra_list_folders', arguments: {} },
     { name: 'hebra_links', arguments: { id: library.publicNoteId } },
     { name: 'hebra_status', arguments: {} },
@@ -116,6 +129,8 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_move_note', arguments: { id: library.privateFolderNoteId, folderId: 'root' } },
     { name: 'hebra_set_favorite', arguments: { id: library.privateTagNoteId, favorite: true } },
     { name: 'hebra_set_archived', arguments: { id: library.privateFolderNoteId, archived: true } },
+    { name: 'hebra_set_hidden', arguments: { id: library.privateFolderNoteId, hidden: true } },
+    { name: 'hebra_clear_conflict', arguments: { id: library.privateFolderNoteId } },
     // Papelera y versiones (ampliación de D2, 30 sep 2026). La lista de la papelera tiene
     // cebos ocultos por carpeta, por etiqueta y por una carpeta privada ya borrada; mandar
     // o sacar notas ocultas es `not_found`; la versión con etiqueta privada de una nota

@@ -33,15 +33,18 @@ import { LibraryInstance } from '../../src/sync/library-instance';
 /**
  * `file[A-Z]…` sigue cerrado por defecto: cualquier método de recursos sueltos del motor,
  * de hoy o de mañana, está prohibido salvo los dos que D10 permite, `fileTrash` y
- * `fileRestore`, el que añade D15 (10 oct 2026), `fileReplace`, y los tres que añade D17
- * (12 oct 2026), `fileCreate`, `fileRename` y `fileMove`, nombrados uno a uno (`\b` para
- * que `fileTrashEmpty`, `fileRestoreAll`, `fileReplaceAll` o `fileMoveAll` NO pasen).
+ * `fileRestore`, el que añade D15 (10 oct 2026), `fileReplace`, los tres que añade D17
+ * (12 oct 2026), `fileCreate`, `fileRename` y `fileMove`, y el que añade D23 (5 nov 2026),
+ * `fileRenameAndRelink`, nombrados uno a uno (`\b` para que `fileTrashEmpty`, `fileRestoreAll`,
+ * `fileReplaceAll` o `fileMoveAll` NO pasen).
  * `filePurge` sigue prohibido. Que solo salgan del turno del escritor lo comprueban los
  * tres últimos tests.
+ *
+ * `noteClearConflict` salió de la lista con D23: su test, abajo, lo deja solo en el turno.
  */
-const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|Move\\b';
+const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|RenameAndRelink\\b|Move\\b';
 const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
-const FORBIDDEN = `notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
+const FORBIDDEN = `notePurge|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 
 /**
@@ -126,6 +129,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'fileReplaced',
       'fileCreateMany',
       'fileRenameAll',
+      'fileRenameAndRelinkAll',
       'fileMoveAll'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
@@ -137,12 +141,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'noteVersionsList',
       'noteVersionRead',
       'noteVersionSnapshot',
-      // D10, D15 y D17: los seis únicos `file*` que pasan.
+      // D10, D15, D17 y D23: los siete únicos `file*` que pasan.
       'fileTrash',
       'fileRestore',
       'fileReplace',
       'fileCreate',
       'fileRename',
+      'fileRenameAndRelink',
       'fileMove'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(false);
@@ -279,12 +284,14 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         'fileCreate',
         'fileMove',
         'fileRename',
+        // D23: renombrar con las notas que lo incrustan (test de abajo).
+        'fileRenameAndRelink',
         'fileReplace',
         'fileRestore',
         'fileTrash',
         'filesIndex',
         'folderCreate',
-        // D19: mover a un ID, con guarda (test de abajo).
+        // D19: mover a un ID, con guarda (test de abajo). D23 no añade ningún `folder*`.
         'folderMoveIfUnchanged',
         'folderRename',
         'folderRenameIfUnchanged'
@@ -358,6 +365,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         'fileCreate',
         'fileMove',
         'fileRename',
+        'fileRenameAndRelink',
         'fileReplace',
         'fileRestore',
         'fileTrash',
@@ -398,7 +406,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * oculto, dentro del turno. Ninguna otra fuente de `src` (herramientas incluidas).
    */
   it('crear, renombrar y mover un fichero suelto (D17): solo en el turno del escritor y en file-verbs.ts', () => {
-    // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno.
+    // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno. Renombrar con
+    // los enlaces (D23), con su propio test.
     const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts', 'src/store/jd-move-port.ts'];
     const verbCall = reachPattern('fileCreate|fileRename|fileMove');
     for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
@@ -423,7 +432,14 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * prohibido en todo `src` (lista de arriba), y fuera del turno nadie los tiene.
    */
   it('mover a un ID (D19): las mutaciones con guarda solo en el turno del escritor y en jd-move-port.ts', async () => {
-    const allowed = ['src/store/node-port.ts', 'src/store/jd-move-port.ts'];
+    // D23: `hebra_move_note` con `expectedRevision` usa la de notas (`note-state.ts`), nunca la de
+    // carpetas: mover carpetas sigue sin otra vía.
+    const allowed = ['src/store/node-port.ts', 'src/store/jd-move-port.ts', 'src/store/note-state.ts'];
+    expect(
+      reachPattern('folderMoveIfUnchanged|folderRenameIfUnchanged').test(
+        readFileSync(join(root, 'src/store/note-state.ts'), 'utf8')
+      )
+    ).toBe(false);
     const guarded = reachPattern('noteMoveIfUnchanged|folderMoveIfUnchanged|folderRenameIfUnchanged');
     for (const name of ['noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged']) {
       for (const form of reachForms(name)) expect(guarded.test(form), form).toBe(true);
@@ -447,6 +463,150 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
           expect(names, `${label}.${name}`).not.toContain(name);
         }
       }
+    } finally {
+      port.close();
+    }
+  });
+
+  /**
+   * Las escrituras de D23 (5 nov 2026), función por función: solo las tiene el turno de
+   * escritura, las pone ahí `src/store/note-state-engine.ts` y las llama quien aplica antes el
+   * filtro en el turno. `noteMoveIfUnchanged` ya estaba (D19), y desde D23 también la llama
+   * `note-state.ts`. Y todas pasan por la guarda de cada mutación de un espacio
+   * (`assertSpaceUserWrite`, la lista `mutations` de `node-port.ts`): una que faltara escribiría
+   * en un espacio tras revocarlo.
+   */
+  it('las escrituras de D23: solo en el turno del escritor y desde quien aplica el filtro', async () => {
+    const reach: Array<[string, string[]]> = [
+      ['noteHide', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteUnhide', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteClearConflict', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteTrashIfUnchanged', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteRestoreRowIfUnchanged', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['fileRenameAndRelink', ['src/store/note-state-engine.ts', 'src/store/file-verbs.ts']],
+      ['noteMoveIfUnchanged', ['src/store/node-port.ts', 'src/store/jd-move-port.ts', 'src/store/note-state.ts']]
+    ];
+    const sources = allSourceFiles().map((file) => [
+      relative(root, file).split(sep).join('/'),
+      readFileSync(file, 'utf8')
+    ] as const);
+    for (const [name, allowed] of reach) {
+      const pattern = reachPattern(name);
+      for (const form of reachForms(name)) expect(pattern.test(form), form).toBe(true);
+      const callers = sources.filter(([, text]) => pattern.test(text)).map(([path]) => path).sort();
+      expect(callers, name).toEqual([...allowed].sort());
+    }
+    // Ni `noteRestoreIfUnchanged` (otra forma de la misma guarda), ni otra vía sin filtro de
+    // reescribir notas en lote o de deshacer metadatos.
+    const closed = reachPattern('noteRestoreIfUnchanged|notesRewriteBatch|noteUndoMetadata');
+    for (const [path, text] of sources) expect(closed.exec(text)?.[0] ?? null, path).toBeNull();
+
+    const nodePort = readFileSync(join(root, 'src/store/node-port.ts'), 'utf8');
+    const mutations = /const mutations = new Set\(\[([\s\S]*?)\]\)/.exec(nodePort)?.[1] ?? '';
+    for (const [name] of reach) expect(mutations, name).toContain(`'${name}'`);
+
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['SyncStorePort', port.syncStorePort()]
+      ] as Array<[string, object]>) {
+        const names = methodNames(value);
+        for (const [name] of reach) expect(names, `${label}.${name}`).not.toContain(name);
+      }
+      const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      for (const [name] of reach) expect(storeKeys, name).toContain(name);
+      // Y lo que sigue fuera, también del turno.
+      for (const name of ['notePurge', 'trashEmpty', 'filePurge', 'tagRename', 'folderMove', 'folderTrash']) {
+        expect(storeKeys, name).not.toContain(name);
+      }
+    } finally {
+      port.close();
+    }
+  });
+});
+
+/**
+ * Lecturas de estado (D23, 5 nov 2026): `noteSummary`, `foldersTrashList` y `noteAuthors` del
+ * motor son LECTURAS y solo las alcanza `src/store/state-reads.ts`, que el puerto
+ * (`node-port.ts`) llama por métodos propios (`noteStates`, `foldersTrash`, `noteAuthors`).
+ * Ninguna herramienta ni otro módulo las toca; y siguen cerradas las que purgan una carpeta
+ * de la papelera o la restauran (`folderPurge`, `folderRestore`, `folderUndoTrash`).
+ */
+describe('lecturas de estado (D23)', () => {
+  /** Rutas (desde la raiz) de las fuentes de `src` que casan `reach`. */
+  function callersOf(reach: RegExp): string[] {
+    return allSourceFiles()
+      .filter((file) => reach.test(readFileSync(file, 'utf8')))
+      .map((file) => relative(root, file).split(sep).join('/'))
+      .sort();
+  }
+
+  it('el motor se alcanza solo desde state-reads.ts, sin exenciones', () => {
+    // `noteSummary`, `foldersTrashList` y `noteAuthorsMany` no tienen homonimo en el puerto: ni
+    // `node-port.ts` ni nadie mas puede llamarlos.
+    const reach = reachPattern('noteSummary|foldersTrashList|noteAuthorsMany');
+    for (const form of reachForms('foldersTrashList')) expect(reach.test(form), form).toBe(true);
+    for (const form of reachForms('noteSummary')) expect(reach.test(form), form).toBe(true);
+    expect(callersOf(reach)).toEqual(['src/store/state-reads.ts']);
+  });
+
+  it('noteAuthors: el motor solo desde state-reads.ts; el metodo del puerto, de tres sitios exactos', () => {
+    // El puerto tiene un metodo con el mismo nombre (`port.noteAuthors(id)`): lo llaman la
+    // herramienta y el envoltorio estable de `library-instance.ts`. `node-port.ts` lo DEFINE
+    // y delega en `noteAuthorsOf`, asi que tampoco llama a `.noteAuthors(`. Se mira quien recibe
+    // la llamada, no solo el fichero: en cada sitio, UNA forma exacta y ninguna otra, asi que
+    // `engine.noteAuthors` en la herramienta no pasa. `library-instance.ts` no necesita el motor.
+    const allowed: Record<string, string> = {
+      'src/server/tools/note-authors.ts': 'ctx.port.noteAuthors(',
+      'src/store/state-reads.ts': 'engine.noteAuthors(',
+      'src/sync/library-instance.ts': 'current().noteAuthors('
+    };
+    const reach = reachPattern('noteAuthors');
+    expect(callersOf(reach)).toEqual(Object.keys(allowed));
+    for (const [path, form] of Object.entries(allowed)) {
+      const text = readFileSync(join(root, path), 'utf8');
+      expect(text.split(form).length - 1, path).toBe(1);
+      expect(reach.exec(text.replace(form, ''))?.[0] ?? null, path).toBeNull();
+    }
+  });
+
+  it('notesRelinkingFile (ids sin filtrar) solo lo llama file-relink.ts', () => {
+    const reach = reachPattern('notesRelinkingFile');
+    for (const form of reachForms('notesRelinkingFile')) expect(reach.test(form), form).toBe(true);
+    expect(callersOf(reach)).toEqual(['src/store/file-relink.ts']);
+  });
+
+  it('purgar o restaurar una carpeta de la papelera sigue fuera', () => {
+    const reach = reachPattern('folderPurge|folderRestore|folderUndoTrash|folderTrashEmpty');
+    for (const file of allSourceFiles()) {
+      const path = relative(root, file).split(sep).join('/');
+      expect(reach.exec(readFileSync(file, 'utf8'))?.[0] ?? null, path).toBeNull();
+    }
+  });
+});
+
+/**
+ * Las propiedades del frontmatter (D23, 5 nov 2026) solo LEEN: `src/store/props-sql.ts` es SQL
+ * propio de `SELECT` y lo que toma del motor es `propsFilterSql`, que solo arma un `WHERE`. Ni
+ * renombrar una propiedad ni reescribir notas en lote están alcanzables desde el puerto.
+ */
+describe('propiedades del frontmatter (D23)', () => {
+  it('props-sql.ts no escribe', () => {
+    const text = readFileSync(join(root, 'src/store/props-sql.ts'), 'utf8');
+    const statements = [...text.matchAll(/prepare\(\s*[`'"](\s*\w+)/g)].map((match) => match[1]!.trim());
+    expect(statements.length).toBeGreaterThanOrEqual(6);
+    expect(new Set(statements)).toEqual(new Set(['SELECT']));
+    // Ni `exec` ni `run` (que no pasan por `prepare(`), ni una sentencia de escritura o de
+    // esquema en cualquier otro sitio del texto.
+    expect(/\.\s*(?:exec|run)\s*\(/.test(text)).toBe(false);
+    expect(/\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|PRAGMA|ATTACH|VACUUM)\b/i.test(text)).toBe(false);
+  });
+
+  it('el puerto no alcanza ninguna mutación de propiedades', async () => {
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      expect(methodNames(port).filter((name) => /^(propRename|prop_rename|notesRewriteBatch)$/.test(name))).toEqual([]);
     } finally {
       port.close();
     }

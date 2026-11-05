@@ -56,6 +56,8 @@ export type ToolErrorCode =
   // `src/store/file-verbs.ts`).
   | 'file_exists'
   | 'file_name_unavailable'
+  // Renombrar con más notas que arreglar de las que juzga la puerta final (D23).
+  | 'too_many_linked_notes'
   // Mover a un ID (D19): el destino no se puede usar así (privacidad); un solo código.
   | 'destination_unavailable'
   // Un ID nuevo del JDex (D18, 19 oct 2026; `src/store/jd-new-id.ts`): los del motor JD.

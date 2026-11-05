@@ -75,6 +75,7 @@ import {
 import { headingRejected, operationReused, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
+import type { NoteStateEngine } from './note-state-engine';
 import type { ReplacePlanStore } from './replace-plans';
 import type { JdPlanStore } from './jd-plans';
 import { privacyFingerprint } from './replace';
@@ -112,8 +113,9 @@ export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
  *  carpeta. */
 export type { NoteMutationGuard, FolderMutationGuard } from '../hebra';
 
-/** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). */
-export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRead' | 'noteSave'> {
+/** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). D23, en
+ *  `NoteStateEngine`. */
+export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRead' | 'noteSave'>, NoteStateEngine {
   /** Solo el título de unas notas (no lápidas), sin leer su cuerpo: lo que `hasHidden` de un
    *  ID nuevo del JDex (D18, `./jd-port.ts`) mira de las ocultas. */
   noteTitles(ids: readonly string[]): Map<string, string>;

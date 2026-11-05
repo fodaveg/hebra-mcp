@@ -25,6 +25,7 @@ import { NoteWriter } from '../../src/store/writes';
 import { ReplaceBatch } from '../../src/store/replace-batch';
 import { fetchFileBytes, replaceFileText } from '../../src/store/file-writes';
 import { writeLooseFile } from '../../src/store/file-verbs';
+import { writeNoteState } from '../../src/store/note-state';
 import { runJdNewId } from '../../src/store/jd-new-id';
 import { runJdMove } from '../../src/store/jd-move';
 import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
@@ -73,6 +74,8 @@ export function testWriteContext(port: NodeLibraryPort): WriteContext {
     replaceFileText: (input) => replaceFileText(port, input, null, () => {}),
     // Crear, renombrar, mover y duplicar (D17): igual, sin relé del que bajar bytes.
     looseFileWrite: (input) => writeLooseFile(port, input, null, () => {}),
+    // D23: cambios de estado de una nota.
+    noteState: (input) => writeNoteState(port, input, () => {}),
     // Un ID nuevo del JDex (D18): simular y aplicar sobre el mismo puerto.
     jdNewId: (request) => runJdNewId(port, request, () => {}),
     // Mover a un ID (D19): igual, sobre el mismo puerto.

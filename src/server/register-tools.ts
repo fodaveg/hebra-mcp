@@ -1,5 +1,5 @@
 /**
- * Registro de las 41 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 43 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
@@ -63,7 +63,10 @@ import {
   listFoldersInputShape,
   listNotesInputShape,
   listOrganizationsInputShape,
+  noteAuthorsInputShape,
   listTagsInputShape,
+  listPropertiesInputShape,
+  queryPropertiesInputShape,
   listTrashInputShape,
   listVersionsInputShape,
   moveNoteInputShape,
@@ -80,6 +83,8 @@ import {
   searchInputShape,
   setArchivedInputShape,
   setFavoriteInputShape,
+  setHiddenInputShape,
+  clearConflictInputShape,
   trashFileInputShape,
   trashNoteInputShape
 } from './schemas';
@@ -100,6 +105,8 @@ import { runGrep } from './tools/grep';
 import { runLinks } from './tools/links';
 import { runListFolders } from './tools/list-folders';
 import { runListNotes } from './tools/list-notes';
+import { runListProperties } from './tools/list-properties';
+import { runQueryProperties } from './tools/query-properties';
 import { runListTags } from './tools/list-tags';
 import { runListTrash } from './tools/list-trash';
 import {
@@ -109,6 +116,8 @@ import {
   runSetFavorite,
   runTrashNote
 } from './tools/organize';
+import { runNoteAuthors } from './tools/note-authors';
+import { runClearConflict, runSetHidden } from './tools/note-state-writes';
 import { runNoteOutline } from './tools/note-outline';
 import { runReadFile } from './tools/read-file';
 import { runReadNote } from './tools/read-note';
@@ -310,6 +319,8 @@ const GATE_POLICIES: Record<
   hebra_read_note: read(),
   hebra_note_outline: read(),
   hebra_list_tags: read(emptyList('tags')),
+  hebra_list_properties: (input) => read(emptyList(input.key === undefined ? 'keys' : 'values')),
+  hebra_query_properties: read(emptyList('notes')),
   hebra_list_folders: read(emptyList('folders')),
   hebra_links: read(),
   hebra_status: read(),
@@ -321,9 +332,12 @@ const GATE_POLICIES: Record<
   hebra_move_note: WRITE,
   hebra_set_favorite: WRITE,
   hebra_set_archived: WRITE,
+  hebra_set_hidden: WRITE,
+  hebra_clear_conflict: WRITE,
   hebra_trash_note: WRITE,
   hebra_restore_note: WRITE,
-  hebra_list_trash: read(emptyList('notes')),
+  hebra_list_trash: (input) => read(emptyList(input.kind === 'folders' ? 'folders' : 'notes')),
+  hebra_note_authors: read(),
   hebra_list_files: read(emptyList('files')),
   hebra_trash_file: WRITE,
   hebra_restore_file: WRITE,
@@ -506,7 +520,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
   /** El manejador de una herramienta, por la puerta final con su política. */
   function gated<Input>(
     name: string,
-    run: (toolCtx: ToolContext, input: Input) => Promise<unknown>
+    run: (toolCtx: ToolContext, input: Input, server: ServerContext) => Promise<unknown>
   ): (input: Input) => Promise<ReturnType<typeof toOkResult>> {
     const policy = GATE_POLICIES[name];
     if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
@@ -525,7 +539,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
         }
         const result = await runTool(selected, name,
           typeof policy === 'function' ? policy(fields, selected) : policy,
-          (toolCtx) => run(toolCtx, fields as Input));
+          (toolCtx) => run(toolCtx, fields as Input, selected));
         // Origen explícito también para imágenes/recursos y errores ligados al contenido.
         if (selected.spaceId) return { ...result, content: [
           { type: 'text' as const, text: JSON.stringify({ spaceId: selected.spaceId, name: selected.spaceName?.() ?? null }) }, ...result.content
@@ -586,7 +600,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_list_notes',
     {
       title: 'Listar notas',
-      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Cada nota lleva `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general, por su marca o por su carpeta). Sin `archived` NO salen las archivadas (con carpeta, etiqueta o sin filtro) y SÍ las ocultas del listado general, con `generalHidden: true`. Con `archived: true` salen solo las archivadas, la última archivada primero; no se combina con `folder` ni `tag` (invalid_input). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
       inputSchema: scoped(listNotesInputShape),
       annotations: READ_ONLY
     },
@@ -598,7 +612,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer una nota',
       description:
-        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla. Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; con `lines: {from, to}`, solo esas líneas (las de hebra_grep), con `totalLines`. `revision` sigue siendo la de la nota entera. `heading` y `lines` no van juntos.',
+        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla, y su estado: `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general). Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; con `lines: {from, to}`, solo esas líneas (las de hebra_grep), con `totalLines`. `revision` sigue siendo la de la nota entera. `heading` y `lines` no van juntos.',
       inputSchema: scoped(readNoteInputShape),
       annotations: READ_ONLY
     },
@@ -626,6 +640,28 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       annotations: READ_ONLY
     },
     gated('hebra_list_tags', (toolCtx, input) => runListTags(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_list_properties',
+    {
+      title: 'Listar propiedades',
+      description: 'Lista las propiedades del frontmatter de las notas. Sin `key`, las claves con su recuento de notas; con `key`, los valores de esa clave con su recuento. Paginada (`limit`, `cursor`, `nextCursor`).',
+      inputSchema: scoped(listPropertiesInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_list_properties', (toolCtx, input) => runListProperties(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_query_properties',
+    {
+      title: 'Consultar notas por propiedades',
+      description: 'Notas que cumplen filtros de propiedades del frontmatter y de carpeta, ordenadas por título o por una propiedad, con los valores de las propiedades pedidas. Para consultar como una base de datos; para buscar por texto, hebra_search (que también acepta `props`). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      inputSchema: scoped(queryPropertiesInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_query_properties', (toolCtx, input) => runQueryProperties(toolCtx, input))
   );
 
   server.registerTool(
@@ -702,7 +738,8 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_move_note',
     {
       title: 'Mover una nota',
-      description: 'Mueve una nota a otra carpeta, por ids ("root" es la raíz).',
+      description:
+        'Mueve una nota a otra carpeta, por ids ("root" es la raíz). Con `expectedRevision`, si el texto cambió desde esa lectura responde revision_conflict sin mover (favorita, carpeta y papelera no cuentan como cambio; una nota bloqueada, note_locked).',
       inputSchema: scoped(moveNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
@@ -732,11 +769,35 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
   );
 
   server.registerTool(
+    'hebra_set_hidden',
+    {
+      title: 'Ocultar una nota del listado general',
+      description:
+        'Oculta (true) o vuelve a mostrar (false) una nota en el listado general de Hebra: «Notas», «Hoy», «Sin etiquetar» y «Tareas nuevas». Es una preferencia de vista, NO privacidad: la nota sigue en su carpeta, sus etiquetas, la búsqueda, los enlaces y este servidor. Viaja por sync a los demás dispositivos y, en un espacio compartido, vale para todos sus miembros. Mostrar solo quita la marca de la nota: si la oculta su carpeta, sigue fuera. Idempotente; no la borra ni la archiva.',
+      inputSchema: scoped(setHiddenInputShape),
+      annotations: WRITE_IDEMPOTENT
+    },
+    gated('hebra_set_hidden', (toolCtx, input) => runSetHidden(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_clear_conflict',
+    {
+      title: 'Quitar la marca de copia de conflicto',
+      description:
+        'Marca como resuelta una copia de conflicto (`isConflictCopy: true`): deja de serlo y sale de «Conflictos», como «resuelta» en Hebra. No cambia su texto, ni toca la nota original, ni las fusiona, y quién puede verla sigue igual. Sobre una nota que no es copia responde `cleared: false` sin escribir. Después de leer las dos versiones y llevar lo que haga falta a la original con hebra_edit_note.',
+      inputSchema: scoped(clearConflictInputShape),
+      annotations: WRITE_IDEMPOTENT
+    },
+    gated('hebra_clear_conflict', (toolCtx, input) => runClearConflict(toolCtx, input))
+  );
+
+  server.registerTool(
     'hebra_trash_note',
     {
       title: 'Mandar una nota a la papelera',
       description:
-        'Manda una nota a la papelera de Hebra. Se puede sacar con hebra_restore_note o desde Hebra: no la borra.',
+        'Manda una nota a la papelera de Hebra. Se puede sacar con hebra_restore_note o desde Hebra: no la borra. Con `expectedRevision`, si el texto cambió desde esa lectura responde revision_conflict sin mandarla.',
       inputSchema: scoped(trashNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
@@ -748,7 +809,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Sacar una nota de la papelera',
       description:
-        'Saca una nota de la papelera, a su carpeta si sigue existiendo o, si no, a la raíz.',
+        'Saca una nota de la papelera, a su carpeta si sigue existiendo o, si no, a la raíz. Con `expectedRevision`, si el texto cambió responde revision_conflict sin sacarla. Una nota de la papelera no se puede leer y hebra_list_trash no da revisión: solo vale la que leíste antes de mandarla a la papelera; sin ella, se saca sin esa comprobación.',
       inputSchema: scoped(restoreNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
@@ -760,11 +821,25 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Listar la papelera',
       description:
-        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas. Paginada (`limit`, `cursor`, `nextCursor`).',
+        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas. Con `kind: "folders"` lista en cambio las carpetas de la papelera ({id, name, path, trashedAt}); sin `kind`, o con `"notes"`, las notas. Una carpeta privada, o dentro de una privada, no sale. Paginada (`limit`, `cursor`, `nextCursor`).',
       inputSchema: scoped(listTrashInputShape),
       annotations: READ_ONLY
     },
     gated('hebra_list_trash', (toolCtx, input) => runListTrash(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_note_authors',
+    {
+      title: 'Autores de una nota',
+      description:
+        'Quién escribió una nota, por `id`: `lastEditor` ({accountId, name, role, isSelf, actorKind?}, la cuenta que selló el relé en la última revisión confirmada), `declaredAuthorId` (la que dijo el sobre), `mismatch` (si no coinciden) y `namesResolved`. Las cuentas son las de `hebra_list_organizations`: `name` e `isSelf` salen de ese directorio (`name` de cualquier organización de la persona) y `role` solo de la organización dueña del espacio (`null` si la cuenta no es miembro de ella o no se sabe cuál es); son `null` si no se conocen o no hay directorio; no se inventa ninguno. Solo hay autores en un espacio compartido (`space`): en la biblioteca personal, y en una nota sin subir o una copia de conflicto, `lastEditor` es null. Una nota oculta, en la papelera o inexistente responde not_found.',
+      inputSchema: scoped(noteAuthorsInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_note_authors', (toolCtx, input, selected) =>
+      runNoteAuthors(toolCtx, input, ctx.directory, selected.spaceId)
+    )
   );
 
   server.registerTool(
@@ -848,7 +923,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Renombrar un fichero suelto',
       description:
-        'Cambia el nombre de un fichero suelto (id de hebra_list_files; cualquier tipo), en la misma carpeta. La extensión no puede cambiar (invalid_input). Si en la carpeta ya hay otro con ese nombre (sin distinguir mayúsculas), file_exists con su `id`. Las notas que lo incrustaban por el nombre anterior dejan de encontrarlo. El mismo nombre que ya tiene responde `outcome: "already"` sin escribir.',
+        'Cambia el nombre de un fichero suelto (id de hebra_list_files; cualquier tipo), en la misma carpeta. La extensión no puede cambiar (invalid_input). Si en la carpeta ya hay otro con ese nombre (sin distinguir mayúsculas), file_exists con su `id`. Arregla en la misma escritura las notas vivas que lo incrustan como `![[nombre]]` y dice cuántas en `relinked`; cada una guarda su versión anterior. Se quedan sin tocar un enlace `[[nombre]]`, una ruta escrita a mano, las notas de la papelera y las bloqueadas (su texto va cifrado). Si otro fichero visible de otra carpeta ya tiene el nombre nuevo y hay notas que arreglar, file_exists con su `id`. Con más de 5000 notas que arreglar, too_many_linked_notes sin escribir nada. El mismo nombre que ya tiene responde `outcome: "already"` sin escribir.',
       inputSchema: scoped(renameFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },

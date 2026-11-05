@@ -60,6 +60,9 @@ export type LooseFileOutput = {
   byteLength: number | null;
   mimeType: string | null;
   outcome: 'saved' | 'already';
+  /** Renombrar (D23): cuántas notas se arreglaron. Solo sale con sus ids, que la puerta final
+   *  juzga: si alguna ya no se ve, `not_found`. Sin ids, no consta y no sale. */
+  relinked?: number;
   replayed?: true;
 } & SyncFields;
 
@@ -135,6 +138,9 @@ function outputOf(ctx: ToolContext, event: string, result: LooseFileOutcome): Lo
   const used = usageOf(ctx);
   used.file(result.id);
   used.folder(result.folderId, folderPath);
+  // El recuento depende de estas notas, así que se juzgan como lo demás que nombra la respuesta.
+  // Vivas o de la papelera: una enviada a la papelera sin ser privada no vuelve error el renombrado.
+  for (const noteId of result.relinkedNotes ?? []) used.noteInAnyState(noteId);
   return {
     id: result.id,
     name: result.name,
@@ -143,6 +149,7 @@ function outputOf(ctx: ToolContext, event: string, result: LooseFileOutcome): Lo
     byteLength: result.byteLength,
     mimeType: result.mimeType,
     outcome: result.outcome,
+    ...(result.relinkedNotes !== undefined ? { relinked: result.relinkedNotes.length } : {}),
     ...(result.replayed === true ? { replayed: true as const } : {}),
     ...syncOf(result)
   };
@@ -183,7 +190,9 @@ export async function runCreateFile(
   return outputOf(ctx, 'file.create', result);
 }
 
-/** `hebra_rename_file`: otro nombre, con la misma extensión, en la misma carpeta. */
+/** `hebra_rename_file`: otro nombre, con la misma extensión, en la misma carpeta. Arregla las
+ *  notas que lo incrustan por su nombre (D23): el motor en el escritor, nunca aquí
+ *  (`../../store/file-relink.ts`). */
 export async function runRenameFile(
   ctx: ToolContext,
   input: { id: string; name: string; operationId: string }

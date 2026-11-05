@@ -56,6 +56,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D20 | **Login con Sumego** (21 oct 2026, decidido por David: «el mcp se tiene que conectar con sumego igual que el resto de apps», transmitido por la sesión de sumego; el diseño del lado de hebra-mcp, de la sesión principal, alineado con lumbre-mcp). **Revisa D7**: hebra-mcp conserva su OAuth público hacia Claude y Codex, pero identifica a la persona con su propio cliente OIDC de Sumego (`hebra-mcp`, confidencial) en vez de con el login y el consentimiento de Lumbre. Lumbre sigue emitiendo la concesión, ahora a partir del ID token de Sumego (§12.9). | Descartado: pasar por el BFF de Lumbre como `hebra-web` (hebra-mcp tiene servidor y secreto propio, como las demás apps). Descartado: que hebra-mcp autorice solo con el `sub` sin Lumbre (no sabe qué cuenta es dueña del emparejado y se perdería la revocación visible en Lumbre). |
 | D21 | **Conector remoto multiusuario** (3 nov 2026). David acepta que el servidor remoto guarde la clave de cada biblioteca conectada y fija este límite: cada persona solo puede acceder a su biblioteca personal y al contenido compartido para el que tenga membresía y permiso en sus espacios u organizaciones; pertenecer a un espacio u organización nunca abre la biblioteca personal de otro miembro. **Revisa D6, D7 y D20**: el `sub` validado de Sumego identifica a la persona, pero Lumbre tiene que confirmar además que esa persona es propietaria del vínculo exacto `pairedCredentialId`/`syncVaultId`/`opaqueDeviceId`. Cada cuenta tiene contexto, SQLite, blobs, secretos, configuración de privados, escritor, sync y espacios aislados. El emparejado de una cuenta nueva se inicia desde el conector, se aprueba en su Hebra y solo se persiste después de comprobar la propiedad y confirmar hasta tres títulos. El dispositivo actual de David se conserva sin reemparejar y solo se asocia mediante una prueba de propiedad; retirar una persona bloquea, drena y revoca antes de borrar exclusivamente sus datos. Contrato en §12.10. | Descartados: una biblioteca global para todas las sesiones; elegir por email, `clientId`, cabeceras o argumentos MCP; asignar la biblioteca heredada al primer login; ampliar CORS del relé para resolver el retorno del emparejado; alargar la validez del ID token para cubrir una aprobación lenta; y volver al binario monousuario como rollback después de aceptar cuentas nuevas si pudiera reasignarlas o resucitar una revocación. |
 | D22 | **Acceso sin tope por recuento** (4 nov 2026). David: "necesito que cada persona pueda acceder a su biblioteca, sus espacios compartidos y su organización sin depender de ningun tope" y "no quiero parches". Eligió la alternativa B del análisis de arquitectura (hebra://note/aa1f7f86-1f14-4ace-b027-b01c61791c3c). **Revisa D21 y el dimensionado de §12.10 con dos cuentas.** En `serve-http` estar conectado deja de equivaler a estar abierto: una biblioteca o un espacio solo existen en memoria mientras se usan, y sin llamadas no hay sync, memoria ni peticiones al relé por esa persona. Ningún recuento de cuentas, contextos, espacios, familias ni solicitudes niega el acceso a una persona admitida; la capacidad se regula por memoria real y por espera. Una persona con la credencial revocada vuelve desde el conector, sin operador. Claude Code conecta como cliente admitido. Un agente ve en solo lectura las organizaciones, sus miembros y los espacios que vería su persona ("Ve la lista, contenido por espacio", decisión de David en hebra://note/23bf2e3f-74f1-45f3-afb7-eb3959acaef3); el contenido sigue por `spaceId` y permiso espacio por espacio. El MCP no tiene contexto activo: cada llamada dice su destino y, sin indicarlo, va a `personal`. Detalle en §12.10, "Capacidad sin recuento". | Descartados: subir `mem_limit` y quitar `maxOpen` manteniendo las bibliotecas residentes, porque el tope pasa a ser un OOM que saca a todos; cerrar el contexto menos usado cuando llega otra cuenta, porque mantiene un número máximo y hace que la petición de una persona cierre el contexto de otra; un proceso por cuenta activa desde el principio, porque pesa al menos 112 MiB por persona activa y cuesta unos 10 días más sin evidencia de que haga falta. Se pasa a procesos si la carga de aceptación muestra que la primera descarga de una persona retrasa a las demás por encima de lo aceptable, o si aparece un OOM con uso normal. |
+| D23 | **Huecos frente a la app: lecturas y escrituras acotadas** (5 nov 2026, decidido por David sobre el audit `hebra://note/c36a9f4e-2973-492d-a703-afaaae610fa4`: "puedes hacer los 2 lotes"). 1) Lecturas: `favorite`, `archivedAt` y `generalHidden` en `hebra_list_notes` y `hebra_read_note`, `archived: true` en `hebra_list_notes`, `kind: "folders"` en `hebra_list_trash`, `hebra_note_authors`, `hebra_list_properties`, `hebra_query_properties` y los filtros `props`, `linksTo` y `titleOnly` de `hebra_search`. 2) Escrituras, la decisión nueva que pide §10: `hebra_rename_file` arregla las notas que incrustan el fichero (el cuerpo lo calcula el motor en el escritor; el agente sigue sin mandar un cuerpo entero), `hebra_set_hidden`, `hebra_clear_conflict` y `expectedRevision` opcional en `hebra_move_note`, `hebra_trash_note` y `hebra_restore_note`. 3) D3 se aplica a todo: lo oculto no cuenta en recuentos, orden, cursores ni errores (§6.3). 4) Vincular una tarea con una nota va en `lumbre-mcp`, no aquí. | Descartados: texto de PDF en `hebra_search` (el índice lo llena la app y extraerlo en el servidor es caro), administrar espacios, invitaciones y acceso de agentes, exportar, importar, dibujos, anotar PDF, y los atajos del audit (tareas, grafo, prefijo de título, entre espacios). `tagRename` y las purgas siguen fuera. |
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
@@ -81,7 +82,7 @@ incrustado»).
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 41 herramientas + filtro de privados
+                                        ├─ servidor MCP: 43 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -151,7 +152,7 @@ submódulo; el motor es de la sesión de jdex-manager y aquí solo se lee.
 
 Reglas comunes:
 - Las notas en la papelera nunca se devuelven, salvo por las herramientas de la papelera
-  (`hebra_list_trash`, `hebra_trash_note`, `hebra_restore_note`), con su propio filtro (§6.3).
+  (`hebra_list_trash`, `hebra_trash_note`, `hebra_restore_note`), con su propio filtro (§6.3). `hebra_rename_file` (D23) reescribe además las notas vivas y visibles que incrustan el fichero: no las nombra, solo dice cuántas.
 - Los ficheros sueltos (D10) solo salen por sus herramientas (`hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, desde D15, `hebra_read_file` y
   `hebra_replace_file_text`, y desde D17, `hebra_create_file`, `hebra_rename_file`,
@@ -165,32 +166,37 @@ Reglas comunes:
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `props?` (D23; hasta 32, todas a la vez: `[{key, value}]`, `value` el valor entero sin distinguir mayúsculas ni tildes, `null` para pedir que tenga la clave, también definida sin valor; con valor se comprueba nota a nota sobre los aciertos de texto, §6.3: si casan pocas, tarda más), `linksTo?` (D23; hasta 8 títulos ENTEROS, no ids, sin distinguir mayúsculas ni tildes, todos a la vez: notas con un enlace, por id o por título, a una nota VISIBLE con ese título; §6.3), `titleOnly?` (D23; `query` solo en el título; def. `false`), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
 | `hebra_grep` (D13) | `pattern` (1-1 000 caracteres, sin saltos de línea), `regex?` (def. `false`: literal; con `true`, expresión regular de JavaScript con la bandera `u`), `caseSensitive?` (def. `false`; las tildes cuentan siempre), `folder?`, `subfolders?`, `tag?` (como en `hebra_search`), `contextLines?` (0-5, def. 0), `limit` (1-100, def. 20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, textStart?, lineChars?, before?, after?, heading, headingOccurrence}], nextCursor, cutoff}`. Una entrada por línea que casa (la primera coincidencia de la línea), en orden de id de nota y de línea. `line` y `column`, 1-based (la columna en unidades UTF-16); `line` es la de `hebra_read_note` con `lines`. `text`: la línea sin su terminador; si pasa de 300 caracteres, un trozo de 300 alrededor de la coincidencia, con `textStart` (columna donde empieza) y `lineChars` (longitud de la línea). `before`/`after`, solo con `contextLines`: las líneas de alrededor dentro de la nota, cortadas a 300 caracteres con `…`. `heading`: el apartado más interno que contiene la línea (D11), o `null` antes del primer encabezado; `headingOccurrence`: cuál de los encabezados con ese título es (1-based, como `occurrence` de `hebra_note_outline`, `null` con `heading` `null`), para pasar los dos tal cual a `hebra_read_note` aunque el título se repita. `cutoff`: `time` (se agotó el plazo de recorrido, 2 s, o se interrumpió el hilo de la expresión regular) o `size` (la respuesta llegó a 100 000 caracteres), con `nextCursor` para seguir justo ahí; `null` si no. `skipped?: {id, fromLine}`: solo si la página se saltó una nota en la que la expresión regular se interrumpió dos veces seguidas sin avanzar (§5, «Búsqueda línea a línea»). Errores: `invalid_input` (patrón vacío, largo, con un salto de línea o con la sintaxis mal; `contextLines` o `cursor` que no valen), `pattern_too_slow` (una expresión regular que no termina ni una nota en el plazo; lleva `nextCursor`, que la reintenta una vez y, si vuelve a fallar, la salta). |
-| `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
-| `hebra_read_note` | `id` o `title` (exactamente uno), `heading?` (título de un apartado, D11), `headingOccurrence?` (entero ≥ 1; solo con `heading`, si no `invalid_input`), `lines?: {from, to?}` (D13: enteros ≥ 1, `to` ≥ `from`; no con `heading`) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`, como mucho 50 y solo visibles. **Con `heading`**: `body` es SOLO el apartado (desde su línea de encabezado, incluida, hasta su final, subapartados incluidos) y se añaden `section: {heading, level, line, occurrence}` y `totalChars` (tamaño del cuerpo entero); `revision` sigue siendo la de la NOTA entera. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates: [{heading, level, line, occurrence}]`, como mucho 50) y, en una nota bloqueada, `note_locked`. **Con `lines`** (D13): `body` es SOLO ese tramo, tal como está (desde el principio de la línea `from` hasta el de la siguiente a `to`, terminadores incluidos), y se añaden `lines: {from, to}` (el tramo devuelto: `to` recortado a la última línea y a 2 000 líneas por lectura; sin `to`, hasta ese tope), `totalLines` y `totalChars`; `revision` sigue siendo la de la nota entera. Líneas como en D11 (`\n` y `\r\n`; un salto final no abre una línea vacía de más), las mismas de `hebra_grep` y de `line` de `hebra_note_outline`. `from` más allá de la última línea (una nota vacía no tiene ninguna), `to` < `from` o `lines` con `heading`: `invalid_input`. Nota bloqueada: `note_locked`. |
+| `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `archived?` (D23: `true` lista las archivadas, la última archivada primero; con `folder` o `tag`, `invalid_input`, porque el ámbito `archive` del motor no los admite), `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`, `favorite`, `archivedAt`, `generalHidden`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy, favorite, archivedAt, generalHidden}], nextCursor}`. D23: `archivedAt` ISO o `null`; `generalHidden`: oculta del listado general por su marca o por su carpeta (o una antecesora). Sin `archived`, el motor NO lista las archivadas (`{kind: 'all'}`, `folder` y `tag` exigen `archived_at IS NULL`) y SÍ las ocultas del listado general (salen con `generalHidden: true`). |
+| `hebra_read_note` | `id` o `title` (exactamente uno), `heading?` (título de un apartado, D11), `headingOccurrence?` (entero ≥ 1; solo con `heading`, si no `invalid_input`), `lines?: {from, to?}` (D13: enteros ≥ 1, `to` ≥ `from`; no con `heading`) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). D23: la salida lleva también `favorite`, `archivedAt` (ISO o `null`) y `generalHidden`, siempre (también con `heading` y `lines`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`, como mucho 50 y solo visibles. **Con `heading`**: `body` es SOLO el apartado (desde su línea de encabezado, incluida, hasta su final, subapartados incluidos) y se añaden `section: {heading, level, line, occurrence}` y `totalChars` (tamaño del cuerpo entero); `revision` sigue siendo la de la NOTA entera. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates: [{heading, level, line, occurrence}]`, como mucho 50) y, en una nota bloqueada, `note_locked`. **Con `lines`** (D13): `body` es SOLO ese tramo, tal como está (desde el principio de la línea `from` hasta el de la siguiente a `to`, terminadores incluidos), y se añaden `lines: {from, to}` (el tramo devuelto: `to` recortado a la última línea y a 2 000 líneas por lectura; sin `to`, hasta ese tope), `totalLines` y `totalChars`; `revision` sigue siendo la de la nota entera. Líneas como en D11 (`\n` y `\r\n`; un salto final no abre una línea vacía de más), las mismas de `hebra_grep` y de `line` de `hebra_note_outline`. `from` más allá de la última línea (una nota vacía no tiene ninguna), `to` < `from` o `lines` con `heading`: `invalid_input`. Nota bloqueada: `note_locked`. |
 | `hebra_note_outline` | `id` o `title` (exactamente uno, con la misma resolución y los mismos errores que `hebra_read_note`), `maxLevel?` (1-6: solo encabezados de ese nivel o menor), `limit?` (1-500, def. 200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`. `chars`: el tamaño del apartado tal como lo devuelve `hebra_read_note` con ese `heading` (subapartados incluidos). `occurrence` solo sale en los encabezados cuyo título se repite en la nota, y es el valor para `headingOccurrence` (se cuenta sobre TODOS los encabezados, no sobre los filtrados por `maxLevel` ni sobre la página). Sin cuerpo. Errores: `not_found` (oculta, en la papelera o inexistente), `note_locked`, `invalid_input` (también un `cursor` de otra revisión: la nota cambió entre páginas). |
 | `hebra_list_tags` | `limit?` (1-500; sin él, todas), `cursor?` | `{tags: [{tag, count}], nextCursor}` (anidadas como `a/b`) |
+| `hebra_list_properties` (D23) | `key?`, `limit?` (1-500, def. 100), `cursor?` | Sin `key`: `{keys: [{key, count}], nextCursor}`, las claves del frontmatter con su recuento de notas (una clave definida sin valor cuenta). Con `key`: `{values: [{value, count}], nextCursor}`, sus valores no vacíos con su recuento (`null` y `~` de YAML salen como texto, como en el motor). Las claves se guardan en minúsculas y `key` se pasa a minúsculas. En orden binario. Solo notas visibles (§6.3). La página se corta antes de 100 000 caracteres, con `nextCursor` (abajo). |
+| `hebra_query_properties` (D23) | `filters?` (hasta 32, todos a la vez: `[{key, op, value?}]`), `folder?`, `subfolders?`, `sort?: {key?, direction?, empty?}`, `properties?` (hasta 32 claves), `limit` (1-100, def. 50), `cursor?`, `fields?` (subconjunto de `title`, `folderPath`, `properties`; `id` siempre) | `{notes: [{id, title, folderPath, properties: {clave: [valores]}}], nextCursor}`. `op`, los de `PropsFilterOp` del motor: `equals`, `not-equals`, `contains`, `not-contains`, `greater-than`, `greater-or-equal`, `less-than`, `less-or-equal` (con `value`; sin él, `invalid_input`), `exists` y `missing` (sin `value`). `equals` y `contains` no distinguen mayúsculas ASCII; las comparaciones son numéricas si los dos lados son números y por texto si no, así que valen para fechas ISO; `not-equals` y `not-contains` exigen que la nota tenga la propiedad; `null`, `~` y el valor vacío cuentan como sin valor. La clave `note.title` filtra por el título. `sort.key` ausente o `null`: por título; con clave, por su valor (`direction`, def. `ascending`; con varios valores, el menor o el mayor), y las notas sin ella, por título, al final o al principio (`empty`, def. `last`). `properties`: las claves cuyos valores devolver; ausente, las de `filters` y `sort`. Una clave sin valor sale `[]`. Sin `filters`, todas las notas. La página se corta antes de 100 000 caracteres, con `nextCursor`, y un cursor deja de valer si cambia el modo del orden de la clave (abajo). |
 | `hebra_list_folders` | `limit?` (1-500; sin él, todas), `cursor?` | `{folders: [{id, path, count}], nextCursor}` |
 | `hebra_links` | `id`, `limit?` (1-200; sin él, todo), `cursor?` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}], nextCursor}` |
 | `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra; si existe, el `title:` del frontmatter manda sobre el H1), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?` y `headingOccurrence?` (D11: con `heading`, el texto va al FINAL de ese apartado, subapartados incluidos; sin él, al final de la nota, como siempre), `operationId?` (≤ 200; opcional, 10 oct 2026, ampliación de D2 y D11) | `{id, outcome: "saved" \| "conflict_copy", copyId?, revision?, totalChars?, appended?: {chars, tail, line, heading?}, replayed?}`. Con `saved`, prueba de lo guardado leída del cuerpo guardado: `revision` (la nueva, válida como `expectedRevision`), `totalChars` (tamaño del cuerpo guardado) y `appended`: `chars` (tamaño del texto insertado), `tail` (sus últimos 200 caracteres como quedaron en la nota), `line` (línea, 1-based, donde empieza) y `heading` (el título del apartado, solo si se pidió). Con `conflict_copy` no hay prueba: el texto fue a la copia. Con `operationId`, un reintento con la misma petición (mismo `id`, `text`, `heading` y `headingOccurrence`) devuelve lo anotado en el registro con `replayed: true` y sin volver a escribir ni esperar ronda (una copia de conflicto de la ronda, también anotada); recuperado del estado `started`, sin `appended`. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates`), `operation_id_reused` (mismo `operationId` con otra petición o de otra herramienta), y los de siempre (`not_found`, `note_locked`; `invalid_input` con un `operationId` vacío o de más de 200). |
 | `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; `find` no vacío; `find` + `replace` de todas ≤ 100 000 caracteres), `expectedRevision`, `operationId` (≤ 200) | `{id, outcome: "saved" \| "conflict_copy", revision?, totalChars?, applied?: [{chars, tail?, moved?}], copyId?, replayed?, sync, syncError?}`. Con `saved` (D11), prueba de lo guardado: `totalChars` (tamaño del cuerpo guardado) y `applied`, una entrada por sustitución en el orden de `edits`: `chars` (tamaño de su `replace`) y `tail` (sus últimos 200 caracteres leídos del cuerpo guardado); `moved: true` en lugar de `tail` si el reordenado de tareas desplazó la línea y el `replace` ya no está donde le tocaba. Un `replace` vacío da `{chars: 0, tail: ""}`. Con `conflict_copy`, sin prueba. Un reintento (`replayed`) devuelve lo que se guardó en el registro; una entrada anterior a D11 o recuperada del estado `started` no trae `applied`. Errores: `revision_conflict`, `no_match` / `ambiguous_match` / `overlapping_edits` (con `edit`: índice), `note_locked`, `operation_id_reused`, `not_found`. |
 | `hebra_replace_in_notes` (D14) | `mode` y los campos de ese modo (cualquier otro, o uno que falte, `invalid_input`). `simulate`: `pattern` y `regex?`/`caseSensitive?` (como `hebra_grep`), `replacement` (≤ 10 000; con `regex`, `$1`…`$99`, `$<nombre>`, `$&` y `$$`), ámbito `folder?`/`subfolders?`/`tag?` (como `hebra_grep`) e `ids?` (≤ 200), `maxNotes?` (1-200, def. 200), `limit?` (1-200, def. 50), `after?` (`continueAfter` de otra simulación). `preview`: `planId`, `cursor`, `limit?`. `apply`: `planId`, `operationId` (≤ 200). `undo`: `planId` | `simulate`/`preview`: `{mode, planId, expiresAt, notes: [{id, title, isConflictCopy, matches, changes: [{line, column, before, after}]}], nextCursor}` y, solo en `simulate`, `planNotes`, `planMatches` (de todo el plan), `cutoff` (`maxNotes`, `time`, `size` o `null`), `continueAfter` (o `null`) y `skipped?: [{id, title, reason: "too_large" \| "too_slow"}]`. `planId` `null` si no cambiaría ninguna nota. `changes`: las 3 primeras líneas que cambian, con la línea del cuerpo base, la columna de la primera diferencia y el texto antes y después (300 caracteres alrededor de esa columna). `apply`: `{mode, planId, complete, replayed?, undone?, notes: [{id, title, outcome: "applied" \| "already" \| "conflict_copy" \| "locked" \| "pending", revision?, totalChars?, bodySha256?, copyId?}], sync, syncError?}`; `complete` no cuenta lo pendiente que ya no es visible, y con `undone` (deshecho) es `true`. `undo`: `{mode, planId, complete, notes: [{id, title, outcome?: "restored" \| "already" \| "changed" \| "locked" \| "pending", revision?, totalChars?, bodySha256?, copyId?, copyOutcome?: "trashed" \| "already" \| "changed"}], sync, syncError?}`. Títulos cortados a 200 caracteres. Errores: `invalid_input`, `plan_not_found` (no existe, otra biblioteca u, en `preview` y `apply`, otra configuración de privados), `plan_expired` (la hora para aplicar o reanudar, o los 7 días para deshacer), `plan_already_applied` (otro `operationId`), `operation_id_reused` (el de otra escritura), `privacy_config_unresolved`. |
-| `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | `{id, folderPath, favorite, archived, sync, syncError?}` |
+| `hebra_move_note` | `id`, `folderId` (`"root"` = raíz), `expectedRevision?` (D23) | `{id, folderPath, favorite, archived, sync, syncError?}`. Con `expectedRevision` (la `revision` de `hebra_read_note` o de una edición), si el texto cambió desde entonces, `revision_conflict` sin mover; ver «Cambios de estado de una nota» abajo. |
 | `hebra_set_favorite` | `id`, `favorite` | igual que `hebra_move_note` |
 | `hebra_set_archived` | `id`, `archived` | igual que `hebra_move_note` |
-| `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. |
-| `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. |
-| `hebra_list_trash` | `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. |
+| `hebra_set_hidden` (D23) | `id`, `hidden` | igual que `hebra_move_note`, más `hidden` (la marca propia de la nota). Oculta o muestra la nota en el listado general de Hebra: una preferencia de vista, no privacidad (§13.7). Idempotente. Errores: `not_found` (oculta por privacidad, en la papelera o inexistente, igual). |
+| `hebra_clear_conflict` (D23) | `id` | igual que `hebra_move_note`, más `cleared`. `cleared: true`: la copia de conflicto deja de serlo. `cleared: false`: no era copia (o ya estaba resuelta), sin escribir. El cuerpo no cambia y la salida no nombra la nota original. Errores: `not_found`, como `hebra_set_hidden`. |
+| `hebra_trash_note` | `id` (nota visible, o ya en la papelera y visible allí), `expectedRevision?` (D23) | `{id, trashed: true, sync, syncError?}`. Idempotente. Reversible con `hebra_restore_note` o desde Hebra. Con `expectedRevision`, como `hebra_move_note`. |
+| `hebra_restore_note` | `id` (nota de la papelera visible, o viva y visible), `expectedRevision?` (D23) | igual que `hebra_move_note`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente. Con `expectedRevision`, como `hebra_move_note`; solo sirve la revisión leída ANTES de mandarla a la papelera (`hebra_list_trash` no da revisión y `hebra_read_note` no lee una nota de la papelera): sin ella, se saca sin esa comprobación. |
+| `hebra_list_trash` | `kind?` (D23: `notes`, def., o `folders`), `cursor?`, `limit` (1-100, def. 50); orden: la última en entrar primero | `{notes: [{id, title, folderPath, tags, excerpt, trashedAt, updatedAt, isConflictCopy}], nextCursor}`. `folderPath`: donde quedará al restaurarla. Sin recuento. Con `kind: "folders"` (`foldersTrashList` del motor): `{folders: [{id, name, path, trashedAt}], nextCursor}`; `path`, la ruta que tenía al borrarla (desde la carpeta viva más cercana; un antecesor purgado no consta). Se filtra con `TrashFilter.restoreFolderOf`: una carpeta privada, o dentro de una privada (viva o también en la papelera), no sale ni cuenta; se pagina aquí, sin `nextCursor` si solo quedan ocultas. |
+| `hebra_note_authors` (D23) | `id`, `space?` | `{id, lastEditor: {accountId, name, role, isSelf, actorKind?} \| null, declaredAuthorId, mismatch, namesResolved}`. `noteAuthors` del motor devuelve IDs de CUENTA (`relay_author_id`, el que sella el relé, y `author_id`, el del sobre), no de dispositivo; se cruzan con el directorio de `hebra_list_organizations` (`name` de cualquier organización de la persona; `role` SOLO el de la organización dueña del espacio de la nota, `null` si la cuenta no es miembro de ella o no se sabe cuál es; `isSelf`; `null` si no se conocen o no hay directorio, sin inventar). En la biblioteca personal, una nota sin subir o una copia de conflicto, `lastEditor: null`. Nota oculta, en la papelera o inexistente: `not_found` igual, sin pedir el directorio. |
 | `hebra_list_files` | `folder?` (ruta, como en `hebra_list_notes`), `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `name?` (subcadena del nombre, sin distinguir mayúsculas, 1–255 caracteres), `trashed?` (`true` lista los de la papelera; def. `false`, los vivos), `limit` (1-100, def. 50), `cursor?`; orden: los vivos por nombre normalizado (NFC y en minúsculas, comparado por unidades de código) y después por id; los de la papelera, el último en entrar primero y, a igual fecha, por id descendente (como el motor de Hebra y `hebra_list_trash`). La lista se recalcula en cada página: un fichero que se renombra en Hebra entre dos páginas puede salir dos veces o no salir | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. `folderPath`: donde está o, en la papelera, donde volverá al restaurarlo; `mimeType` y `byteLength`: `null` si el almacén no los sabe; `trashedAt`: `null` en los vivos. Sin recuento, sin SHA-256 y sin contenido. Errores: `invalid_input` (el `name` o el `cursor`). |
 | `hebra_trash_file` | `id` (fichero suelto visible, vivo o ya en la papelera) | `{id, trashed: true, sync, syncError?}`. Idempotente: uno que ya está en la papelera se queda como está, sin escribir. Reversible con `hebra_restore_file` o desde Hebra. Errores: `not_found` (oculto, inexistente o un id que no es de un fichero suelto, todos igual). |
 | `hebra_restore_file` | `id` (fichero suelto visible, de la papelera o vivo) | `{id, folderPath, sync, syncError?}`: a su carpeta si sigue viva; si no, a la raíz (como Hebra). Idempotente: uno vivo se queda como está, sin escribir. Errores: `not_found`, igual que `hebra_trash_file`. |
 | `hebra_read_file` (D15) | `id` (fichero suelto visible y VIVO), `offset?` (carácter por el que empezar, def. 0), `maxChars?` (1–100 000, def. 100 000; se validan también con imágenes y PDF) | Un bloque `{id, name, folderPath, mimeType, byteLength, sha256, updatedAt}` y el contenido: imagen PNG, JPEG, GIF o WebP como `image` (base64 + `mimeType`); PDF como `resource` embebido (blob base64 + URI opaca `hebra-file:<sha256>`); texto (texto plano, Markdown, CSV, JSON y YAML: un `.base` de Obsidian Bases o un `.yaml` salen como `text/yaml`), con `totalChars`, `truncated` y `nextOffset` en el bloque y el tramo de texto detrás, como `hebra_read_attachment`. `sha256`: el de los bytes devueltos, la base de `hebra_replace_file_text`. `folderPath`, como en `hebra_list_files`. Errores: `not_found` (oculto, inexistente, lápida, en la papelera o un id que no es de un fichero suelto, todos igual), `file_too_large` (`byteLength`, `maxBytes`: más de 5 MiB; si el almacén ya sabe el tamaño, sin bajar nada), `file_type_not_allowed` (`mimeType?`), `file_unavailable` (los bytes no están y no se pudieron bajar), `invalid_input`. |
 | `hebra_replace_file_text` (D15) | `id`, `expectedSha256` (el `sha256` de `hebra_read_file`; acepta mayúsculas y el prefijo `sha256:`), `text` (el contenido ENTERO nuevo, UTF-8, hasta 1 000 000 bytes, sin NUL ni suplentes sueltos) **o** `undoOperationId` (el `operationId` de un reemplazo anterior de ESTE fichero, 7 días), exactamente uno; `operationId` (≤ 200) | `{id, outcome: "saved" \| "already", sha256, byteLength, mimeType, previousSha256, replayed?, sync, syncError?}`. `saved`: escrito; `sha256` y `byteLength`, leídos de lo guardado (el hash de la fila y los bytes de ese blob), valen como base del siguiente; `previousSha256`, el de antes. `already`: el fichero ya tenía ese contenido (no escribe, sea cual sea la base). Mismo id, nombre y carpeta. Si el fichero empieza por un BOM y `text` no empieza por U+FEFF, se le antepone (la lectura lo quita; revisión M2). Errores: `file_changed` (el contenido actual no es el de `expectedSha256` o, al deshacer, ya no es el que dejó el reemplazo que se deshace, revisión M1; nada escrito), `not_found` (como `hebra_read_file`, también si el contenido nuevo dejaría el fichero oculto, §6.3), `file_type_not_allowed` (el fichero no es de texto), `file_too_large` (`byteLength`, `maxBytes`: el texto o el fichero actual; si el almacén ya sabe el tamaño, sin bajar ni leer nada), `file_unavailable`, `operation_id_reused`, `invalid_input` (también un `undoOperationId` del que no queda copia: equivocado, de otro fichero, caducado a los 7 días o recortado por el tope de 200 entradas y 50 000 000 bytes; los cuatro responden igual a propósito, para no decir si ese `operationId` tocó otro fichero, quizá oculto, y quien lo pide solo puede decir «ya no se puede deshacer desde aquí»; o un texto que empezaría como la firma de una imagen o un PDF). |
 | `hebra_create_file` (D17) | `folder?` (ruta) **o** `folderId?` (id; `"root"` = raíz), como mucho uno; sin ninguno, la raíz; `name` (con extensión; 1–255 caracteres tras recortar; sin `/`, `\|`, `[`, `]`, `\`, `#`, saltos de línea, caracteres de control ni de formato invisibles), `text` (el contenido entero, UTF-8, hasta 1 000 000 bytes, sin NUL ni suplentes sueltos), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved", replayed?, sync, syncError?}`: el fichero nuevo, con `sha256` y `byteLength` leídos de lo guardado (valen como `expectedSha256` de `hebra_replace_file_text`) y el tipo de su extensión (`.base`, `.yaml`, `.yml`: `text/yaml`; `.json`: `application/json`, o `text/plain` si no se lee como JSON; `.csv`: `text/csv`; `.txt`: `text/plain`). Sin BOM añadido; no valida el YAML. Errores: `file_type_not_allowed` (extensión distinta de `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`, sin distinguir mayúsculas, o sin extensión; un `.md` también: es una nota, `hebra_create_note`), `file_too_large` (`byteLength`, `maxBytes`), `invalid_input` (nombre, texto u `operationId` inválidos; `folder` y `folderId` a la vez; un texto que empieza como la firma de una imagen o un PDF), `not_found` (carpeta oculta o inexistente, igual), `file_exists` (`id`: el fichero VIVO y VISIBLE de esa carpeta con ese nombre, sin distinguir mayúsculas), `file_name_unavailable` (el fichero quedaría oculto, §6.3; sin detalles), `operation_id_reused`. |
-| `hebra_rename_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `name` (las reglas de `hebra_create_file`, con la MISMA extensión, comparada sin distinguir mayúsculas), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved" \| "already", replayed?, sync, syncError?}`. `already`: ya tenía exactamente ese nombre (no escribe). `byteLength` y `mimeType` salen de la fila de `blobs` (sin leer los bytes; `null` si este dispositivo no la tiene; el tipo, por la extensión si la fila no dice nada útil, como `hebra_read_file`). Errores: `not_found` (origen oculto, inexistente, lápida o en la papelera, todos igual; también si el nombre nuevo lo dejaría oculto, §6.3), `invalid_input` (otra extensión, nombre inválido), `file_exists` (`id`: otro fichero VIVO y VISIBLE de la carpeta con ese nombre), `operation_id_reused`. Las notas que lo incrustaban por el nombre anterior dejan de encontrarlo. |
-| `hebra_move_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `folder?` **o** `folderId?` (como en `hebra_create_file`; sin ninguno, la raíz), `operationId` (≤ 200) | Igual que `hebra_rename_file`; `already`: ya estaba en esa carpeta. Errores: `not_found` (origen como en `hebra_rename_file`; carpeta oculta o inexistente, igual que `hebra_move_note`), `file_exists` (en el destino ya hay uno VIVO y VISIBLE con ese nombre), `invalid_input`, `operation_id_reused`. |
+| `hebra_rename_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `name` (las reglas de `hebra_create_file`, con la MISMA extensión, comparada sin distinguir mayúsculas), `operationId` (≤ 200) | `{id, name, folderPath, sha256, byteLength, mimeType, outcome: "saved" \| "already", relinked?, replayed?, sync, syncError?}`. `already`: ya tenía exactamente ese nombre (no escribe, `relinked: 0`). `byteLength` y `mimeType` salen de la fila de `blobs` (sin leer los bytes; `null` si este dispositivo no la tiene; el tipo, por la extensión si la fila no dice nada útil, como `hebra_read_file`). `relinked` (D23): cuántas notas vivas y visibles que lo incrustaban como `![[nombre]]` quedaron con el nombre nuevo, en la misma escritura; juzgadas por la puerta final por su id (si alguna ya no se ve, `not_found`); ausente si no consta (un reintento recuperado del estado `started` o un registro antiguo sin esos ids): nunca un recuento sin juzgar. Se quedan sin tocar un `[[nombre]]`, una ruta escrita a mano, las notas de la papelera y las bloqueadas: ver el apartado Renombrar arregla las notas, abajo. Errores: `not_found` (origen oculto, inexistente, lápida o en la papelera, todos igual; también si el nombre nuevo lo dejaría oculto, §6.3), `invalid_input` (otra extensión, nombre inválido), `file_exists` (`id`: otro fichero VIVO y VISIBLE de la carpeta con ese nombre; con notas que arreglar, también de otra carpeta), `operation_id_reused`, `too_many_linked_notes` (D23: tendría que reescribir más de 5 000 notas; no se escribió nada), `writer_outdated` (en un lector cuyo escritor es de una versión anterior; no se escribió nada). |
+| `hebra_move_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo), `folder?` **o** `folderId?` (como en `hebra_create_file`; sin ninguno, la raíz), `operationId` (≤ 200) | Igual que `hebra_rename_file`, sin `relinked`; `already`: ya estaba en esa carpeta. Errores: `not_found` (origen como en `hebra_rename_file`; carpeta oculta o inexistente, igual que `hebra_move_note`), `file_exists` (en el destino ya hay uno VIVO y VISIBLE con ese nombre), `invalid_input`, `operation_id_reused`. |
 | `hebra_duplicate_file` (D17) | `id` (fichero suelto visible y VIVO, cualquier tipo, hasta 5 MiB), `name` (como en `hebra_rename_file`: la misma extensión que el original), `folder?` **o** `folderId?` (sin ninguno, la carpeta del original), `operationId` (≤ 200) | Igual que `hebra_create_file`: un fichero NUEVO (otro `id`) con los mismos bytes (mismo `sha256`) y el tipo de su contenido. Errores: los de `hebra_rename_file` (también `not_found` si el nombre nuevo lo dejaría oculto) y los de la carpeta de `hebra_move_file`, más `file_too_large` (`byteLength`, `maxBytes`) y `file_unavailable` (los bytes no están aquí y no se pudieron bajar). |
 | `hebra_list_versions` | `id`, `limit?` (1-200, def. 50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero, sin cuerpo ni `cause`. Un `cursor` cuya versión ya no existe: `invalid_input`. |
 | `hebra_read_version` | `id`, `versionId` | `{id, versionId, createdAt, byteLength, body}`. |
@@ -207,10 +213,10 @@ Reglas comunes:
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, revokedReason?, capabilities}`. `revokedReason` solo aparece con `revoked: true` (§12.9). Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9; 9 oct 2026, D10; 10 oct 2026, D15; 12 oct 2026, D17; 19 oct 2026, D18):
-- Las 41 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_read_file` (D15), `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`, `hebra_jd_audit` (D18), `hebra_list_spaces`, `hebra_list_organizations` (D22).
+- Las 46 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_properties` (D23), `hebra_query_properties` (D23), `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_note_authors` (D23), `hebra_list_files`, `hebra_read_file` (D15), `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`, `hebra_jd_audit` (D18), `hebra_list_spaces`, `hebra_list_organizations` (D22).
 - **Un ID nuevo del JDex** (D18): `hebra_jd_new_id`, escritura no destructiva e idempotente (`destructiveHint: false`, `idempotentHint: true`): simular no escribe nada, aplicar con el mismo `operationId` completa lo que falte sin duplicar, y solo crea (una nota y una carpeta nuevas).
 - **Mover a un ID** (D19): `hebra_jd_move`, igual (`destructiveHint: false`, `idempotentHint: true`): simular no escribe nada, aplicar y deshacer con el mismo `operationId` no repiten nada, y mover no destruye contenido (se deshace con `undo`).
-- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`); `hebra_replace_in_notes` (D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada y deshacer otra vez no cambia nada más); `hebra_create_file`, `hebra_rename_file`, `hebra_move_file` y `hebra_duplicate_file` (D17, `idempotentHint: true` por su `operationId`; renombrar al nombre que tiene o mover a la carpeta donde está no escribe, y ninguna destruye contenido: renombrar y mover se deshacen con otra llamada, y crear o duplicar dejan un fichero nuevo que se manda a la papelera con `hebra_trash_file`).
+- **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_set_hidden` y `hebra_clear_conflict` (D23, idempotentes: repetirlas no vuelve a escribir), `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`); `hebra_replace_in_notes` (D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada y deshacer otra vez no cambia nada más); `hebra_create_file`, `hebra_rename_file`, `hebra_move_file` y `hebra_duplicate_file` (D17, `idempotentHint: true` por su `operationId`; renombrar al nombre que tiene o mover a la carpeta donde está no escribe, y ninguna destruye contenido: renombrar y mover se deshacen con otra llamada, y crear o duplicar dejan un fichero nuevo que se manda a la papelera con `hebra_trash_file`).
 - **Escritura destructiva** (`destructiveHint: true`, `idempotentHint: true`; revisión de D15, decisión de la sesión principal): `hebra_replace_file_text` sobrescribe un fichero entero que Hebra no versiona, y la vuelta atrás solo vive 7 días en una tabla local de este dispositivo; repetirla con el mismo `operationId` no vuelve a escribir, y un contenido que el fichero ya tiene responde `already`. Es la única destructiva.
 - **Escritura con consecuencias** (`destructiveHint: false`, `idempotentHint: false`): `hebra_create_note` y `hebra_append_to_note` (las escrituras iniciales, no idempotentes sin `operationId`; `hebra_append_to_note` lo admite opcional desde el 10 oct 2026, así que la anotación sigue siendo la del caso sin él).
 - Todas `openWorldHint: false`.
@@ -228,6 +234,24 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   `mode: "preview"` (con un cursor de otro plan, `invalid_input`), y `continueAfter` (`rc1`,
   `[id, desde]`) sigue el ámbito en OTRA simulación (`after`), siempre desde el id de una nota
   visible ya mirada.
+- **Cursores de las propiedades** (D23): `hebra_list_properties` e `hebra_query_properties` también
+  paginan con `limit`, `cursor` y `nextCursor` (propiedades 100 por defecto, consulta 50). El de
+  `hebra_list_properties` (`pk1` de las claves, `pv1` de los valores) es la posición en la lista ya
+  filtrada: un valor puede ser más largo que el tope de un cursor. El de `hebra_query_properties`
+  (`pq1`) es la clave de orden de la última nota devuelta, con los primeros 128 puntos de código de
+  su valor o su título y su id, y la página siguiente empieza en la primera que va después: listar
+  por `estado: pendiente`, cambiar el estado de la última y pedir la siguiente funciona. Dos valores
+  con esos 128 primeros iguales ordenan por id. Un cursor de un orden con clave no vale en uno por
+  título, ni al revés (`invalid_input`). Tampoco vale si la clave ordenaba como número y ahora como
+  texto, o al revés, porque un valor visible nuevo o cambiado cambió el modo entre dos páginas
+  (`invalid_input`, hay que volver a empezar): seguir perdería filas. El modo sale solo de valores
+  visibles, así que nada oculto puede provocar ese error.
+- **Tope de una respuesta de propiedades** (D23): `hebra_list_properties` y `hebra_query_properties`
+  cortan la página antes de 100 000 caracteres (`limits.listProperties.responseChars`,
+  `limits.queryProperties.responseChars`), con `nextCursor`, y siempre llevan un elemento. Cuenta el
+  tamaño serializado del elemento entero: en la consulta, el id, el título, la carpeta, las claves y
+  los valores (solo los campos que pide `fields`). Un elemento más largo que el tope sale solo. Por
+  eso una página puede traer menos que `limit` y seguir teniendo `nextCursor`.
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
   los vivos, los primeros 200 caracteres de su nombre en NFC y en minúsculas, y su id; para la papelera, la
   fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
@@ -247,11 +271,11 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
 - **Filtros comunes**: `folder` (ruta), `subfolders` y `tag` se llaman y se comportan igual en
   `hebra_search`, `hebra_grep` (D13) y `hebra_list_notes` (`subfolders` es nuevo en la búsqueda). Una carpeta o etiqueta
   privada o inexistente da lista vacía en ambas. No hubo renombrados, así que no hay alias.
-- **`fields?`** (`hebra_search`, `hebra_list_notes`): cada elemento lleva `id` y solo los campos pedidos,
+- **`fields?`** (`hebra_search`, `hebra_list_notes`, `hebra_query_properties`): cada elemento lleva `id` y solo los campos pedidos,
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listProperties`, `queryProperties` con sus topes de filtros y claves, `searchFilters` con los de `props` y `linksTo`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
   papelera, borrar carpetas, `folder_delete`, y moverlas salvo con `hebra_jd_move`,
   `folder_move_outside_jd_move`, ambos desde D19, antes `folder_move_or_delete`; cambiar o
   borrar adjuntos, y purgar un fichero suelto:
@@ -759,6 +783,36 @@ Detalle de las escrituras (D2):
     el sufijo).
   - Logs: `file.create`, `file.rename`, `file.move` y `file.duplicate` con el id (opaco), el
     resultado y el estado de sync. Nunca el nombre, la ruta, el texto ni los hashes.
+  - **Renombrar arregla las notas** (D23, 5 nov 2026; `src/store/file-relink.ts`):
+    `hebra_rename_file` usa `fileRenameAndRelink` del motor, que en una sola transacción cambia el
+    nombre y reescribe las notas que lo incrustan. El cuerpo nuevo lo calcula el motor en el
+    escritor (`renameFileEmbedInMarkdown`, el mismo escáner que deriva los enlaces), nunca lo manda
+    el agente: la regla de D2 de que el agente no manda un cuerpo entero sigue en pie, como en D14.
+    - **Qué reescribe**: solo el nombre de un `![[nombre]]` con ese nombre exacto (el alias o el
+      tamaño de detrás del `|` se quedan), en las notas VIVAS que lo enlazan. Cada nota reescrita
+      guarda antes su versión anterior en este dispositivo y queda sucia para el sync; `updated_at`
+      no cambia, así que la lista no se reordena. Lo que no se toca: un `[[nombre]]`, una ruta
+      escrita a mano (`![[carpeta/nombre]]`) y `![[sha256:…]]`, como en Hebra; las notas de la
+      papelera, que el motor no mira y al sacarlas conservan el nombre anterior; y las bloqueadas,
+      porque su cuerpo va cifrado.
+    - **Concurrencia**: el motor exige la revisión de TODAS las notas que enlazan el fichero, las
+      que se reescriben y las que no, y `file_stale` si alguna cambió: dentro del turno no puede
+      pasar (la ronda de sync espera su turno), y si pasara, `file_changed` sin escribir. Si otro
+      dispositivo editó a la vez una de esas notas, la ronda deja una copia de conflicto, como con
+      cualquier edición (`sync.conflict_copy`), y la respuesta no lo dice. `sync` habla de la fila
+      del fichero; la misma ronda sube las notas.
+    - **Sin notas que arreglar**: `fileRename` a secas, como antes de D23.
+    - **Homónimos**: un enlace por nombre resuelve al fichero vivo de menor id, en cualquier carpeta
+      (`resolveLink` del motor). Si el nombre anterior resuelve a OTRO fichero visible, esas notas no
+      incrustan este y no se tocan (`relinked: 0`). Si el nombre nuevo lo tiene otro fichero visible
+      de otra carpeta y hay notas que arreglar, `file_exists` con su id: reescribirlas podría
+      apuntarlas a ese. Sin notas que arreglar, como en D17, no choca.
+    - **Tope**: como mucho `RELINKED_NOTES_MAX` (5 000) notas reescritas, porque sus ids acompañan a
+      la respuesta para que la puerta final los juzgue. Con más, el escritor rechaza dentro del turno,
+      sin escribir ni anotar nada en el registro (`too_many_linked_notes`).
+    - **Privacidad**: §6.3, apartado Renombrar arregla las notas.
+    - **Fallar cerrado**: un lector lo reenvía por la op `renameFileRelinking`. Un escritor anterior
+      la rechaza sin escribir (`writer_outdated`) en vez de renombrar sin arreglarlas.
   - **BOM** (revisión M2): la lectura devuelve el texto sin el BOM, pero el hash es el de los
     bytes con él. Si el fichero empieza por EF BB BF y `text` no empieza por U+FEFF, el
     escritor le antepone el BOM antes de calcular el hash: devolver el texto leído deja los
@@ -766,6 +820,39 @@ Detalle de las escrituras (D2):
     quitar el BOM a propósito no hay vía desde el MCP (se hace en Hebra).
   - Logs: `file.replace` con el id (opaco), `outcome`, el estado de sync y `replayed`. Nunca el
     nombre, el texto ni los hashes. La lectura solo deja el `tool.call` de siempre.
+- **Cambios de estado de una nota** (D23, 5 nov 2026; `src/store/note-state.ts` y
+  `src/server/tools/note-state.ts`), por la op `noteState` de `writer.sock`, en un turno del
+  escritor, con el filtro de quien pide dentro del turno y la puerta final tras la ronda. Ninguno
+  lleva `operationId`, como `hebra_set_archived`: son idempotentes por estado. Nada de esto purga.
+  - **`hebra_set_hidden`**: `noteHide`/`noteUnhide` del motor. `hidden_at` viaja por sync como un
+    metadato más (si cambia en los dos lados, gana mostrarla) y una copia de conflicto nace sin
+    él. Se aplica también en un espacio compartido, donde vale para todos sus miembros: el motor y
+    la app lo tratan como una escritura de contenido más, no como una preferencia personal. No es
+    privacidad: la nota sigue en su carpeta, sus etiquetas, la búsqueda, los enlaces y el MCP
+    (`hebra_list_notes` no la saca, §13.7), y `not_found` solo responde a la que oculta el filtro
+    de D3. Mostrar solo quita la marca propia: si la oculta su carpeta, en la app sigue fuera.
+  - **`hebra_clear_conflict`**: `noteClearConflict` del motor, que escribe sea o no una copia, así
+    que el escritor corta antes: sobre otra nota, `cleared: false` sin escribir. Quitar la marca no
+    cambia qué se ve (§6.3): el filtro no la mira.
+  - **`expectedRevision`** en `hebra_move_note`, `hebra_trash_note` y `hebra_restore_note`: las
+    versiones con guarda del motor (`noteMoveIfUnchanged`, `noteTrashIfUnchanged`,
+    `noteRestoreRowIfUnchanged`). Sin él, por `organize`, igual que siempre. Compara el SHA-256 del
+    cuerpo, como `hebra_edit_note`: favorita, carpeta o papelera suben `local_seq` sin cambiar el
+    texto y no cuentan como cambio. La guarda del motor se pide con la fila del turno, como
+    `src/store/jd-move-port.ts`. Orden: una de más de 1 024 caracteres (`invalid_input`, en la
+    herramienta y antes de mirar ninguna nota: en un lector, el socket la rechazaría y parecería un
+    `writer_outdated`; no va como `.max()` del esquema porque saldría como el error de validación del
+    SDK, no como `invalid_input`); visibilidad (`not_found`); revisión ilegible o de otra nota
+    (`invalid_input`); ya en el estado pedido, sin escribir aunque la revisión sea vieja (un
+    reintento tras un corte no es un conflicto); bloqueada (`note_locked`: el motor no las mueve con
+    guarda; sin `expectedRevision` se siguen pudiendo organizar); otro cuerpo u otra biblioteca
+    (`revision_conflict`).
+  - **Límite de `hebra_restore_note`**: una nota de la papelera no tiene de dónde sacar una revisión
+    (`hebra_list_trash` no la da y `hebra_read_note` responde `not_found`). Sirve la que se leyó antes
+    de mandarla a la papelera; sin ella, se saca sin comprobar.
+  - **Fallar cerrado**: `noteState` es una op propia porque un escritor anterior, en `organize`,
+    ignoraría `expectedRevision` y movería la nota sin guarda. Lo rechaza sin escribir
+    (`writer_outdated`).
 - **Versiones anteriores** (`hebra_list_versions`, `hebra_read_version`, `hebra_restore_version`;
   decisión 6 de D2): son las instantáneas **locales** del almacén de hebra-mcp (`note_versions` de
   Hebra: el cuerpo que sustituyó un guardado o un cambio bajado por el sync, una cada 5 minutos
@@ -981,8 +1068,9 @@ El dispositivo acumula tres secretos:
      se cierra como oculto. Se comprueban también las carpetas con la ruta que se enseñó (en crear y renombrar, también sus
      hermanas visibles, con las que se mira el choque de nombres), los ficheros sueltos, los
      bytes de los adjuntos cuyo tamaño, tipo o contenido salen, las etiquetas que se enseñan, y
-     todas las notas visibles cuando la respuesta es un recuento (`hebra_list_tags`,
-     `hebra_list_folders`). Cada cosa tiene que seguir visible y, la que se enseña, ser la MISMA
+     todas las notas visibles cuando la respuesta es un recuento o sale de todas ellas
+     (`hebra_list_tags`, `hebra_list_folders`, `hebra_list_properties`,
+     `hebra_query_properties`). Cada cosa tiene que seguir visible y, la que se enseña, ser la MISMA
      fila: el sello es `local_seq` (sube con cada guardado, también los del sync, mover,
      bloquear o mandar a la papelera), el de la fila con la que el filtro de la llamada la juzgó
      visible y, si se leyó aparte, el de la fila leída, y los dos tienen que coincidir entre sí y
@@ -1092,7 +1180,8 @@ El dispositivo acumula tres secretos:
   - Búsqueda: la paginación rellena hasta `limit` con notas visibles.
   - Listados, lectura (una nota oculta responde `not_found`, igual que una inexistente).
   - Recuentos de `hebra_list_tags` y `hebra_list_folders`: las carpetas privadas no aparecen, y las
-    etiquetas privadas o solo presentes en notas ocultas tampoco.
+    etiquetas privadas o solo presentes en notas ocultas tampoco. Lo mismo las claves y los valores
+    de `hebra_list_properties` (abajo, Propiedades del frontmatter).
   - `outgoing` de `hebra_links`: un enlace a una nota oculta sale como `ref` sin resolver. Un
     enlace por título se resuelve SOLO entre las notas visibles con ese título exacto, y la ruta
     escrita en el enlace solo desempata entre ellas (M1 de D16): antes resolvía el motor, que
@@ -1266,6 +1355,66 @@ El dispositivo acumula tres secretos:
       fichero que choca; tras la ronda, si alguno ya no se ve, la respuesta de algo que no
       existe (`not_found`; al crear, un choque que ya no se puede confirmar es
       `file_name_unavailable`, salvo que lo oculto sea la carpeta de destino).
+  - **Renombrar arregla las notas** (D23, 5 nov 2026; ninguna regla nueva de qué se oculta): el
+    motor reescribiría, sin filtro, las notas vivas con un enlace `file` con ese nombre o `blob` con
+    esos bytes. Son las mismas de la regla (b), así que un fichero que se ve no tiene ninguna oculta,
+    y lo que sigue cubre el resto, en el escritor y no solo en la herramienta
+    (`src/store/file-relink.ts`):
+    - **Nota oculta**: el fichero ya es oculto, `not_found`, igual que uno inexistente. Se comprueba
+      otra vez nota a nota, cerrado ante la duda: una oculta en el conjunto rechaza toda la operación
+      sin escribir nada, tampoco en las visibles, y sin decir cuál ni cuántas.
+    - **Bloqueada oculta**: su cuerpo no se puede leer, pero mientras exista una, los ficheros que se
+      pueden incrustar por nombre ya son ocultos (variante de A1): `not_found` sin escribir. Los que
+      no se pueden incrustar por nombre no los puede enlazar por nombre.
+    - **Bloqueada visible** (sin etiquetas privadas configuradas): se queda sin tocar sin decir por
+      qué, como una que no lo incrusta, y `relinked` no la cuenta. Lo que tenga dentro sigue con el
+      nombre anterior al desbloquearla.
+    - **Nota que cruza a privada**: entre la herramienta y el escritor, el filtro del turno la ve y
+      `not_found`. Dentro del turno no puede pasar: el filtro y la escritura van en el mismo turno de
+      la cola. Después de escribir, la puerta final juzga cada nota reescrita por su id, aunque ya no
+      enlace el fichero: ver `relinked`, abajo.
+    - **Etiquetas**: el cuerpo resultante no puede dejar la nota oculta (decisión 4 de D2). Un nombre
+      no puede traerlas (`#` no vale en él), y se comprueba igual.
+    - **Homónimo oculto**: nunca sale en `file_exists` ni cuenta para decidir qué notas se
+      reescriben, pero tiene dos efectos, declarados y sin arreglar (5 nov 2026; David delegó la decisión, "decide tu lo del fichero", y la sesión de D23 los dejó así):
+      - **Oráculo**. Renombrar un fichero visible al nombre exacto de un fichero oculto vivo de la
+        misma carpeta, con notas que arreglar, responde `not_found` sin escribir; con ese nombre
+        libre, renombra. Se queda: el motor no renombra con ese homónimo al lado (`file_name_taken`),
+        y renombrar sin arreglar las notas también lo delataría y dejaría enlaces rotos. NO es el
+        coste asumido de D17: D17 responde si alguna nota oculta enlaza ese nombre o esos bytes, y
+        esto responde si existe un fichero oculto con ese nombre en esa carpeta, aunque nada enlace
+        ese nombre. El agente puede provocar él mismo la condición creando una nota visible que
+        incruste el fichero que renombra. Límites reales: hay que adivinar el nombre y la extensión
+        exactos (se compara byte a byte, con mayúsculas); hace falta un fichero visible de esa
+        extensión en esa carpeta, porque renombrar no cambia ni la extensión ni la carpeta (y por eso
+        solo alcanza a un oculto de una carpeta visible, nunca a uno de una carpeta privada); cada
+        intento que falla no escribe; y cada intento que acierta un nombre libre sí escribe: renombra,
+        reescribe la nota, deja versión y sync. Sin notas que arreglar no cuenta, como en D17.
+      - **Integridad**. Si el fichero F se renombra a N y existe H con el nombre N en una carpeta
+        privada y con menor id, la nota visible pasa a incrustar N y `resolveLink` del motor la
+        resuelve a H: en la app esa nota enseñaría H a la persona dueña; por el MCP no sale nada. El
+        caso inverso es un H de menor id con el nombre ANTERIOR: la nota se reescribe igualmente, y
+        en la app pasa de enseñar H a enseñar F. Rechazar cualquiera de los dos sería otro oráculo.
+    - **`relinked`**: el escritor devuelve los ids de las notas que reescribió (`relinkedNotes`) y los
+      guarda en el registro de la operación. Viajan por `writer.sock`, validados y acotados
+      (`RELINKED_NOTES_MAX`), y nunca salen en la respuesta MCP. La herramienta los declara a la puerta
+      final tras la ronda, también en un reintento: si alguna ya no se ve (privada, aunque además le
+      hayan quitado el enlace, o purgada, que la puerta no distingue), `not_found`. Una enviada a la
+      papelera sin ser privada no cuenta como que ya no se ve (`noteInAnyState`). Sin ids (un registro
+      antiguo sin ellos o uno recuperado del estado `started`), `relinked` no sale: nunca un recuento
+      sin juzgar.
+    - **Tope** (`too_many_linked_notes`): con más de `RELINKED_NOTES_MAX` notas que reescribir, el
+      escritor rechaza sin escribir, dentro del turno: una respuesta nunca es correcta sin juzgar esos
+      ids. Solo depende de notas visibles: una oculta que enlace el fichero ya da `not_found` antes, así
+      que el rechazo no dice nada de lo oculto. Cuenta las notas que se reescribirían, no las que solo
+      enlazan los bytes.
+    - **Versiones**: la causa de la versión anterior nombra el fichero, que se ve, y
+      `hebra_list_versions` no la devuelve.
+  - **Marca de conflicto** (D23): `hebra_clear_conflict` no cambia qué se ve. El filtro de D3 decide
+    por la carpeta y las etiquetas de cada nota, no por `conflict_of`: una copia hereda las de la
+    original al nacer y después se juzga por las suyas, con marca o sin ella. Una copia oculta
+    responde `not_found`, y una visible de una original oculta se resuelve sin nombrar la original
+    (M3 de D16).
 - **Adjuntos** (decisión 7 de D2, 30 sep 2026): solo los de una nota visible (viva; oculta, en la
   papelera o inexistente, `not_found`), y solo los que ESA nota adjunta: un adjunto de una nota
   oculta pedido a través de otra nota que no lo adjunta, o un `attachmentId` que no es un SHA-256,
@@ -1396,6 +1545,120 @@ El dispositivo acumula tres secretos:
   `test/replace/replace-privacy.node.test.ts` con la biblioteca doble del grep: simulación,
   páginas, cortes e informes de aplicar y deshacer idénticos con y sin las siete ocultas,
   y una nota que pasa a oculta entre simular y aplicar, que no se toca ni se nombra.
+- **Propiedades del frontmatter** (D23, 5 nov 2026; ninguna regla nueva de qué se oculta):
+  `hebra_list_properties`, `hebra_query_properties` y `props`, `linksTo` y `titleOnly` de
+  `hebra_search`.
+  - **D3 no llega a las propiedades**: la configuración de privados son carpetas y etiquetas, y una
+    nota con ellas queda oculta entera, con sus propiedades. No hay claves ni valores privados: un
+    `categoria: secreto` en una nota visible no es privado aunque `secreto` sea una etiqueta privada
+    (no es una etiqueta de la nota), y sale como el resto de un frontmatter que `hebra_read_note` ya
+    enseña. Un `tags: secreto` sí deriva la etiqueta, y oculta la nota. Basta filtrar por nota.
+  - **Lo oculto no existe**: una clave o un valor que solo tienen notas ocultas no sale, y los
+    recuentos cuentan solo notas visibles. Filtrar u ordenar por ellos responde lo mismo que por una
+    clave que no existe. Lo comprueba `test/privacy/properties-oracles.test.ts` con el método de
+    `hebra_grep`: la biblioteca con nueve notas ocultas (una de cada caso, más una homónima de una
+    visible y un título que solo tienen ellas) y sin ellas da respuestas idénticas, página a página y
+    con los cursores.
+  - **Qué no se puede usar del motor**, y el coste: `propsKeysList` y `propsValues` agrupan sobre
+    todas las notas vivas, con lo que el recuento bruto ya lleva las ocultas y no se puede corregir
+    sin saber qué notas lo forman (el tipo de la clave, tampoco, y por eso no sale); `propsValues`
+    además corta a 50, y unos valores ocultos dejarían fuera los visibles. `propsQuery` decide si una
+    clave ordena como número mirando todos sus valores de la biblioteca (`allPropValuesNumericPrefixed`):
+    un valor no numérico en una nota oculta, o en la papelera, pasaba `9, 10` a `10, 9`, y eso la
+    delataba; y su cursor solo existe al final de una página del almacén. Del motor se usa el filtro
+    (`propsFilterSql`, que solo mira la fila de cada nota); las filas salen de SQL propio
+    (`src/store/props-sql.ts`), con el orden en `src/server/tools/props-order.ts`, sobre lo visible.
+    Sin notas ocultas, el orden coincide con el del motor (`test/tools/properties.test.ts`).
+  - **Sin traer las filas a JS** (revisión de D23, 5 nov 2026): el frontmatter no tiene tope de claves
+    ni de valores (75 notas de 89 000 caracteres son 750 000 filas), y leerlas todas agotaba la memoria
+    del proceso en la primera llamada, para todas las cuentas de `serve-http`. Los recuentos de
+    `hebra_list_properties` se agrupan, ordenan y paginan en SQLite (`GROUP BY`, orden binario de la
+    columna, `LIMIT` y `OFFSET`), recorriendo el índice de la clave y parando en cuanto está la página.
+    Las notas que cuentan entran en la consulta como una lista de ids de las VISIBLES (no de las
+    ocultas: una que el filtro de la llamada no conoce no cuenta), y un grupo que solo tienen ocultas
+    no llega a existir, así que tampoco ocupa posición. Una posición lejana recorre lo anterior, en
+    SQLite. `hebra_query_properties` lee las notas que cumplen los filtros (una fila por nota),
+    recorre los valores de la clave de orden uno a uno guardando solo el mejor de cada nota, y lee los
+    valores de cada nota solo para las de la página y hasta el tope de la respuesta (§5). Lo comprueba
+    `test/privacy/properties-bounds.test.ts` contando las filas que llegan a JS y mirando el plan de la
+    consulta. Coste asumido: el recorrido pasa también por las filas de las notas ocultas (clave, valor
+    e id, que no salen de ahí) y cada página de una consulta vuelve a leer las notas que cumplen los
+    filtros. **Medido** (5 nov 2026, este Mac, Node 24; `test/perf/properties-latency.perf.ts`, 3 000
+    notas con 6 propiedades, 50 llamadas por el camino entero tras 10 en caliente): las claves, mediana
+    22 ms; los valores de una clave, 13 ms; una consulta sin filtros, 17 ms; filtrada, 17 ms; ordenada
+    por un número, 22 ms. Los p95, de 14 a 28 ms.
+  - **Cursores** (§5): los de `hebra_list_properties` son posiciones en la lista ya filtrada; el de
+    `hebra_query_properties` lleva la clave de orden de la última nota devuelta, nunca de una oculta,
+    y solo existe si detrás queda otra visible. Uno escrito a mano con el id de una oculta responde lo
+    mismo que con un id que no existe. Si el modo del orden de la clave cambió, `invalid_input`, por
+    un valor visible y nunca por uno oculto.
+  - **`linksTo`**: el motor resuelve el título contra todas las notas vivas. Un `[[Título]]` de una
+    nota visible casaba aunque la única nota con ese título fuera oculta, así que la pregunta de si
+    hay alguna con este título se contestaba distinto con una oculta y sin ella. Y con una homónima
+    oculta de una visible salían de más la nota que enlaza a la oculta por `[[id:…]]` y la propia
+    visible si se enlaza a sí misma por título. Por eso los destinos se resuelven solo entre las
+    visibles, con el mismo plegado de título, y un resultado vale si enlaza a alguno de ellos con la
+    regla de `backlinks` del motor (por id o por título, sin la propia nota), en una sola consulta; el
+    filtro del motor queda de prefiltro. Una privada y una inexistente responden la misma lista vacía.
+    Espera un título entero: un id se trata como un título que nadie tiene, así que tampoco sirve para
+    sondear ids.
+  - **Con algo privado configurado**, `hebra_search` usa la búsqueda segura (M6), cuya rama de
+    subcadenas aplica estos filtros igual: `titleOnly` en sus consultas, y `linksTo` y las claves de
+    `props` como condiciones de su SQL, con las reglas de `searchKeyed` del motor
+    (`src/store/search-safe.ts`), que no las expone sueltas. Un par de clave y valor o un título
+    repetidos se pasan una vez. Sin ninguno de estos parámetros, la búsqueda no cambia ni hace ninguna
+    consulta de más.
+  - **Los pares de `props` con valor no llegan nunca al motor** (3.ª revisión de D23, 5 nov 2026), con
+    algo privado o sin nada privado. Con uno, el motor lee todos los valores no ASCII de esa clave en
+    toda la biblioteca, también los de notas ocultas, y mete como parámetro SQL los que pliegan igual:
+    la respuesta dependía de lo oculto (32 767 variantes de un valor en una oculta daban `invalid_input`,
+    por `too many SQL variables`) y la memoria también (con 750 000 valores distintos, el proceso abortaba
+    con 256 MiB ya con un solo par). Y elegir el camino según cuántos valores tenía la clave, o armar el
+    SQL con los que casaban, seguía mirando valores de otras notas, y lo oculto se notaba en resultados,
+    en `nextCursor` y en un cursor inválido. Ahora hay un solo camino (`searchCheckingValues`): cada par
+    con valor llega a la búsqueda interna como un par solo de clave, una vez por clave, de filtro previo.
+    Un bucle pide páginas de 200 a la búsqueda interna (la del motor sin nada privado, la segura con
+    algo privado) y comprueba los pares sobre cada página, nota a nota, mirando solo las filas de esa
+    nota (plegando en JS con la regla del motor, el valor ENTERO sin mayúsculas ni acentos, y parando
+    en cuanto los ha visto todos), hasta llenar `limit` o agotar la búsqueda interna. Ninguna consulta
+    mira valores de otra nota, así que la respuesta es idéntica, byte a byte, con y sin filas ocultas
+    (`test/privacy/properties-bounds.test.ts`), y sale en el mismo orden y con el mismo cursor que el
+    motor con los pares (`test/store/search-safe-filters.node.test.ts`, también con la consulta vacía y
+    solo con espacios). El cursor lo decodifica siempre la búsqueda interna: uno inválido da siempre el
+    mismo error. Cada página, y cada 20 000 valores o 500 000 caracteres de valores de una misma página,
+    van en su propio turno de la cola y sueltan el hilo, así que un recorrido largo tarda más sin parar
+    a las demás cuentas; los valores se leen de uno en uno, y uno gigante se pliega entero. El relevo
+    entre lector y escritor (`closeWhenIdle`) espera a que acaben los recorridos en curso, también si
+    uno falla, sin ocupar la cola mientras espera. Con un `close()` forzado a mitad, el puerto rechaza
+    la búsqueda con `busy_other_instance`, y como la puerta final tampoco puede leer, la herramienta
+    responde un error sin resultados. **Qué no entra en esa garantía**: el bucle de un término negativo
+    por subcadena de la búsqueda segura (`while (excluded && ...)` en `safeTextSearch`), anterior a D23,
+    recorre páginas del motor sin ceder (10 001 notas, `garbanzos -anzos`, `limit: 1`: 51 consultas y
+    663 ms); y una sola página de 200 de la búsqueda interna no se parte, así que con cuerpos muy largos
+    su fragmento de texto para el hilo lo que tarde (199 notas de 100 000 caracteres: 1,2 s por palabra
+    y 2,2 s por subcadena). Coste asumido: una búsqueda con un par con valor pide páginas de 200 aunque
+    `limit` sea menor, y si casan pocas notas recorre todos los aciertos de texto que tienen la clave;
+    también lee los valores de las notas ocultas que están entre esos aciertos, sin que salga nada de
+    ahí. El máximo de 32 `props` por llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, por el camino entero, con algo privado
+    y sin nada privado; hueco máximo del bucle de eventos): 75 notas con 10 000 valores distintos no
+    ASCII cada una, 1 o 32 pares, con heap de 256 MiB, unos 0,5 s en total y 83 a 150 ms de hueco; cuatro
+    claves con 750 000 variantes de un valor en una sola nota, 1 a 9 ms con un texto que no existe, y
+    1,4 s y 284 a 296 ms con los valores que no casan; 32 pares con 20 000 notas que casan por texto y
+    tienen la clave pero no el valor, de 6 a 10 s en total y 159 a 450 ms (el mayor, en la primera llamada
+    del proceso). Ninguna aborta. En una biblioteca normal (20 000 notas, 1 par): con un valor abundante,
+    de 123 a 228 ms, como antes; con un valor que tiene una sola nota o ninguna, de 3,2 a 5,3 s en total
+    (antes, unos 150 ms), con 98 a 186 ms de hueco.
+  - **Notas bloqueadas**: las mismas reglas que el resto. Con etiquetas privadas configuradas, ocultas
+    (A1). Sin ellas, visibles: salen en `hebra_query_properties` con su título, como en
+    `hebra_list_notes`, sin propiedades, porque no derivan ninguna. Una fila de `note_props` anterior
+    al bloqueo no cuenta en ningún sitio: la nota se juzga como una sin propiedades, con la misma
+    respuesta con el valor acertado y con otro (`missing` y los filtros de título la encuentran, los
+    demás no), no entra en los recuentos ni en el modo del orden, y `props` de `hebra_search` no la
+    hace casar por ningún camino (lo quita la herramienta).
+  - **La puerta final** juzga todas las visibles (de ellas sale el orden, los recuentos y si hay
+    cursor) y, con su sello, cada nota devuelta y su carpeta; si algo cambia a mitad, repite la llamada
+    (`hebra_query_properties`, `notes: []`; `hebra_list_properties`, `keys: []` o `values: []`, en el
+    estado fresco).
 - **Cerrado ante la duda**: si una carpeta de `privateFolders` no existe (renombrada o borrada), el
   servidor responde a toda herramienta con `privacy_config_unresolved` hasta que se corrija la
   configuración. Lo mismo si `config.json` cambió con el proceso en marcha y ya no se puede leer o
@@ -1612,13 +1875,22 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     privacy}` (D17: `createFile {folderId, name, text}`, `renameFile {id, name}`, `moveFile {id,
     folderId}` o `duplicateFile {id, name, folderId?}`, y ninguna otra acción, tampoco de purga;
     responde el resultado de la herramienta sin la ruta, con la ronda ya esperada; un
-    `file_exists` vuelve con el id del fichero que choca en `existing`), `fetchAttachment {noteId,
+    `file_exists` vuelve con el id del fichero que choca en `existing`), `renameFileRelinking`
+    (D23: `looseFileWrite` con `renameFile` y nada más, que además arregla las notas; es la que manda
+    un lector, para que un escritor anterior la rechace sin escribir, `writer_outdated`, en vez de
+    renombrar sin arreglarlas; un lector anterior sigue mandando `looseFileWrite`, y este escritor
+    también las arregla; un renombrado responde además `relinkedNotes`, los ids de las notas
+    arregladas, para la puerta final del lector), `noteState {action, id, …, privacy}` (D23: `moveNote {folderId,
+    expectedRevision}`, `trashNote` y `restoreNote {expectedRevision}`, `setHidden {hidden}` o
+    `clearConflict`, y ninguna otra; responde `OrganizeSaved` más `hidden`, `isConflictCopy` y
+    `changed`, con la ronda ya esperada; una op propia y no acciones de `organize`, cuyo escritor
+    anterior ignoraría `expectedRevision`), `fetchAttachment {noteId,
     sha256, privacy}` (baja al disco compartido los bytes de
     un adjunto de una nota visible y responde `{available}`, nunca los bytes; decisión 7 de D2),
     `fetchFile {id, privacy}` (D15: lo mismo con un fichero suelto visible y vivo; el escritor
     decide qué bytes con su filtro, el lector solo manda el id) y
     `status` (el estado de sync del escritor). `privacy` es la configuración de privados del
-    lector y es obligatoria en las doce escrituras, en `fetchAttachment` y en `fetchFile`: sin
+    lector y es obligatoria en todas las escrituras, en `fetchAttachment` y en `fetchFile`: sin
     ella, `invalid_request`. Un escritor sin `replaceFileText`, `fetchFile` o `looseFileWrite`
     (de una versión anterior) responde `invalid_request`. Los ficheros de trabajo (D12, §13.6) añaden `replaceBody`,
     `trashConflictCopies` y `syncRound`, que ninguna herramienta MCP usa; un escritor sin
@@ -1641,8 +1913,8 @@ Comando `hebra-mcp pair`, interactivo en terminal:
     `hebra_add_attachment`, las dos de ficheros sueltos (`hebra_trash_file`,
     `hebra_restore_file`), `hebra_replace_in_notes` en todos sus modos (D14: también la
     simulación, porque los planes viven en la base del escritor), `hebra_replace_file_text`
-    (D15) y las cuatro de D17 (`hebra_create_file`, `hebra_rename_file`, `hebra_move_file`,
-    `hebra_duplicate_file`) al escritor (las
+    (D15), las cuatro de D17 (`hebra_create_file`, `hebra_rename_file`, `hebra_move_file`,
+    `hebra_duplicate_file`) y las dos de D23 (`hebra_set_hidden`, `hebra_clear_conflict`) al escritor (las
     lecturas de la papelera, de las versiones y de los ficheros sueltos las sirve él mismo), y le pide que baje los bytes de
     un adjunto o de un fichero suelto que no esté en el disco (`hebra_read_attachment`,
     `hebra_read_file`), que después lee él. El filtro de privados y los
@@ -2512,7 +2784,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   `sha256("hebra-org:" + UUID)`, `accountId` es el mismo valor que `grant.accountId` del catálogo
   (`sha256hex("hebra-account:" + lowerCase(sub))`, contrato con Lumbre), y el
   `name` de un miembro o de un espacio puede ser `null` (el de un miembro se tolera ausente hasta que
-  la ruta esté publicada). El `spaces` de primer nivel son los sueltos y aquellos donde su persona es
+  la ruta esté publicada). Un `role` de texto desconocido se enseña como `member`, como en Lumbre: el
+  rol no concede nada y un rol nuevo de Sumego no debe dejar sin directorio a la organización. El `spaces` de primer nivel son los sueltos y aquellos donde su persona es
   invitada. Un campo de más, o una organización, un miembro o un espacio repetidos, invalidan la
   respuesta entera. No hay tope por recuento. Errores: 401 `credential_revoked`, 429 `rate_limited` con
   `Retry-After`, 503 `relay_unavailable`; una credencial de app o el emparejado legado reciben 404.

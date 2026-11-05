@@ -67,6 +67,7 @@ import {
   type LooseFileSaved,
   type LooseFileWriteInput
 } from '../store/file-verbs';
+import { writeNoteState, type NoteStateInput, type NoteStateSaved } from '../store/note-state';
 import {
   runJdNewId,
   type JdNewIdRequest,
@@ -769,6 +770,13 @@ export class LibraryInstance implements NoteWriteTarget {
     );
   }
 
+  /** Cambios de estado de una nota de D23 (`../store/note-state.ts`): ocultar del listado
+   *  general, quitar la marca de conflicto, y mover, mandar a la papelera o sacar con guarda.
+   *  Pide la ronda de después sin esperarla. */
+  noteStateLocal(input: NoteStateInput): Promise<LocalWrite<NoteStateSaved>> {
+    return writeNoteState(this, input, () => this.afterWrite());
+  }
+
   /** `hebra_jd_new_id` (D18, `../store/jd-new-id.ts`): simular, aplicar o descartar un plan
    *  de ID nuevo del JDex en este escritor. Aplicar pide la ronda de después sin esperarla
    *  (la espera `WriteContext`) si creó algo. `hooks`, solo en tests. Rechaza con
@@ -896,6 +904,12 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       current().notesByTitlePrefix(prefix, limit),
     notesByExactTitle: (title: string): Promise<TitleCandidates> =>
       current().notesByExactTitle(title),
+    propCounts: (request) => current().propCounts(request),
+    propsMatches: (filters) => current().propsMatches(filters),
+    visitPropValues: (key, visit) => current().visitPropValues(key, visit),
+    propValuesOfNotes: (notes, keys, maxChars) => current().propValuesOfNotes(notes, keys, maxChars),
+    notesByFoldedTitle: (title) => current().notesByFoldedTitle(title),
+    linkSources: (noteIds) => current().linkSources(noteIds),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     privacyRecheck: (request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> =>
       current().privacyRecheck(request),
@@ -924,6 +938,10 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     blobUploaded: (sha256: string): Promise<boolean | null> => current().blobUploaded(sha256),
     looseFileDirty: (id: string): Promise<boolean | null> => current().looseFileDirty(id),
+    // D23 (`src/store/state-reads.ts`): estado de notas, carpetas de la papelera y autores.
+    noteStates: (ids: readonly string[]) => current().noteStates(ids),
+    foldersTrash: () => current().foldersTrash(),
+    noteAuthors: (id: string) => current().noteAuthors(id),
     grepNotes: (): Promise<GrepNoteRow[]> => current().grepNotes(),
     grepCandidates: (match: string, rowids: readonly number[]): Promise<Set<number> | null> =>
       current().grepCandidates(match, rowids),

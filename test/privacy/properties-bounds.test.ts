@@ -1,0 +1,890 @@
+/**
+ * Arreglos de la revisión de D23 en propiedades y búsqueda (SPEC.md §5, §6.3): lo que cuesta una
+ * llamada y lo que puede delatar un resto o un cambio entre páginas. Sin medir tiempos: cuentan
+ * filas que llegan a JS, consultas y caracteres. Las medidas en ms están en SPEC.md §6.3.
+ */
+import { StatementSync } from 'node:sqlite';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PrivacyConfig } from '../../src/privacy';
+import { PROPERTIES_RESPONSE_MAX_CHARS } from '../../src/store/props-limits';
+import { auditHarness, createNote, lockedBody, saveBody } from './audit-harness';
+
+const NO_TAGS: PrivacyConfig = { privateFolders: [['diario']], privateTags: [] };
+const OPEN: PrivacyConfig = { privateFolders: [], privateTags: [] };
+
+/** Cuenta las filas de `note_props` que llegan a JS por cualquiera de las dos vías de `node:sqlite`. */
+function countPropRows(): { rows: () => number; plans: () => string[]; restore: () => void } {
+  let rows = 0;
+  const statements = new Set<string>();
+  const onNoteProps = (statement: StatementSync): boolean => statement.sourceSQL.includes('note_props');
+  type Bound = (...args: unknown[]) => unknown;
+  const originalAll = StatementSync.prototype.all as unknown as Bound;
+  const originalIterate = StatementSync.prototype.iterate as unknown as Bound;
+  const all = vi.spyOn(StatementSync.prototype, 'all').mockImplementation(function (this: StatementSync, ...args: unknown[]) {
+    const result = originalAll.apply(this, args) as unknown[];
+    if (onNoteProps(this)) {
+      rows += result.length;
+      statements.add(this.sourceSQL);
+    }
+    return result;
+  } as never);
+  const iterate = vi.spyOn(StatementSync.prototype, 'iterate').mockImplementation(function (this: StatementSync, ...args: unknown[]) {
+    const inner = originalIterate.apply(this, args) as Iterator<unknown>;
+    if (!onNoteProps(this)) return inner;
+    statements.add(this.sourceSQL);
+    return {
+      next() {
+        const step = inner.next();
+        if (!step.done) rows += 1;
+        return step;
+      },
+      return() {
+        return inner.return?.() ?? { done: true, value: undefined };
+      },
+      [Symbol.iterator]() {
+        return this;
+      }
+    };
+  } as never);
+  return {
+    rows: () => rows,
+    plans: () => [...statements],
+    restore: () => {
+      all.mockRestore();
+      iterate.mockRestore();
+    }
+  };
+}
+
+describe('hebra_list_properties no trae las filas a JS', () => {
+  it('una página de 2 claves lee 3 filas agrupadas, sin ordenar aparte, con 300 claves en 3 notas', async () => {
+    const frontmatter = Array.from({ length: 300 }, (_, index) => `clave${String(index).padStart(3, '0')}: v`).join('\n');
+    const h = await auditHarness(async (engine) => {
+      for (const title of ['Una', 'Dos', 'Tres']) await createNote(engine, null, `---\n${frontmatter}\n---\n# ${title}\n`);
+    });
+    const counter = countPropRows();
+    try {
+      const first = await h.call('hebra_list_properties', { limit: 2 });
+      expect(first.json.keys).toEqual([{ key: 'clave000', count: 3 }, { key: 'clave001', count: 3 }]);
+      expect(counter.rows()).toBe(3);
+      const second = await h.call('hebra_list_properties', { limit: 2, cursor: first.json.nextCursor });
+      expect(second.json.keys.map((entry: { key: string }) => entry.key)).toEqual(['clave002', 'clave003']);
+      expect(counter.rows()).toBe(6);
+      const db = (h.port as unknown as { db: { prepare(sql: string): StatementSync } }).db;
+      counter.restore();
+      for (const sql of counter.plans().filter((text) => text.includes('GROUP BY'))) {
+        const explain = db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('[]', 1, 0) as Array<{ detail: string }>;
+        const plan = explain.map((row) => row.detail).join('\n');
+        expect(plan).toContain('note_props_by_key_value');
+        expect(plan).not.toContain('TEMP B-TREE FOR GROUP BY');
+        expect(plan).not.toContain('TEMP B-TREE FOR ORDER BY');
+      }
+    } finally {
+      counter.restore();
+      await h.close();
+    }
+  });
+
+  it('los valores de una clave se agrupan igual: 3 filas para una página de 2 entre 200 valores', async () => {
+    const list = Array.from({ length: 200 }, (_, index) => `  - v${String(index).padStart(3, '0')}`).join('\n');
+    const h = await auditHarness(async (engine) => {
+      await createNote(engine, null, `---\nmuchos:\n${list}\n---\n# Una\n`);
+    });
+    const counter = countPropRows();
+    try {
+      const first = await h.call('hebra_list_properties', { key: 'muchos', limit: 2 });
+      expect(first.json.values).toEqual([{ value: 'v000', count: 1 }, { value: 'v001', count: 1 }]);
+      expect(counter.rows()).toBe(3);
+    } finally {
+      counter.restore();
+      await h.close();
+    }
+  });
+
+  it('el tope de caracteres corta la página con `nextCursor`, sin perder ni repetir nada', async () => {
+    const values = Array.from({ length: 30 }, (_, index) => `${String(index).padStart(2, '0')}${'x'.repeat(8_000)}`);
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Larga\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      for (const value of values) insert.run(note.id, 'larga', value);
+    });
+    try {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await h.call('hebra_list_properties', { key: 'larga', limit: 500, ...(cursor ? { cursor } : {}) });
+        expect(page.json.values.length).toBeGreaterThan(0);
+        expect(page.raw.length).toBeLessThanOrEqual(PROPERTIES_RESPONSE_MAX_CHARS + 200);
+        seen.push(...page.json.values.map((entry: { value: string }) => entry.value));
+        cursor = page.json.nextCursor ?? undefined;
+        pages += 1;
+      } while (cursor);
+      expect(pages).toBe(3);
+      expect(seen).toEqual(values);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('un elemento más largo que el tope sale solo, y la página no se queda vacía', async () => {
+    const big = `a${'x'.repeat(PROPERTIES_RESPONSE_MAX_CHARS + 500)}`;
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Larga\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      insert.run(note.id, 'larga', big);
+      insert.run(note.id, 'larga', 'b');
+    });
+    try {
+      const first = await h.call('hebra_list_properties', { key: 'larga' });
+      expect(first.json.values).toEqual([{ value: big, count: 1 }]);
+      expect(first.json.nextCursor).not.toBeNull();
+      const second = await h.call('hebra_list_properties', { key: 'larga', cursor: first.json.nextCursor });
+      expect(second.json).toEqual({ values: [{ value: 'b', count: 1 }], nextCursor: null });
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('hebra_query_properties no guarda los valores de todas las notas', () => {
+  it('ordenar por una clave de muchos valores no trae más que una página de valores en memoria', async () => {
+    const list = Array.from({ length: 500 }, (_, index) => `  - v${String(index).padStart(3, '0')}`).join('\n');
+    const h = await auditHarness(async (engine) => {
+      await createNote(engine, null, `---\nmuchos:\n${list}\n---\n# Una\n`);
+      await createNote(engine, null, `---\nmuchos:\n${list}\n---\n# Dos\n`);
+    });
+    const allSpy = vi.spyOn(StatementSync.prototype, 'all');
+    try {
+      const page = await h.call('hebra_query_properties', { sort: { key: 'muchos' }, limit: 1, fields: ['title'] });
+      expect(page.json.notes).toHaveLength(1);
+      const onProps = allSpy.mock.contexts.filter((statement) => (statement as StatementSync).sourceSQL.includes('FROM note_props'));
+      expect(onProps).toEqual([]);
+    } finally {
+      allSpy.mockRestore();
+      await h.close();
+    }
+  });
+
+  it('el tope de caracteres corta la página entre notas, con `nextCursor`', async () => {
+    const h = await auditHarness(async (engine, _library, db) => {
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      for (const title of ['Una', 'Dos', 'Tres']) {
+        const note = await createNote(engine, null, `---\nmarca: si\n---\n# ${title}\n`);
+        for (let index = 0; index < 8; index += 1) insert.run(note.id, 'larga', `${index}${'x'.repeat(8_000)}`);
+      }
+    });
+    try {
+      const args = { filters: [{ key: 'marca', op: 'exists' }], properties: ['larga'], limit: 100 };
+      const first = await h.call('hebra_query_properties', args);
+      expect(first.json.notes.length).toBeLessThan(3);
+      expect(first.json.notes.length).toBeGreaterThan(0);
+      expect(first.json.nextCursor).not.toBeNull();
+      for (const note of first.json.notes) expect(note.properties.larga).toHaveLength(8);
+      const titles = first.json.notes.map((note: { title: string }) => note.title);
+      let cursor = first.json.nextCursor;
+      while (cursor) {
+        const page = await h.call('hebra_query_properties', { ...args, cursor });
+        titles.push(...page.json.notes.map((note: { title: string }) => note.title));
+        cursor = page.json.nextCursor;
+      }
+      expect(titles).toEqual(['Dos', 'Tres', 'Una']);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('el tope cuenta cada nota entera', () => {
+  it('21 notas con 32 claves pedidas de 256 caracteres: se corta con `nextCursor` y sale todo', async () => {
+    const h = await auditHarness(async (engine) => {
+      for (let index = 0; index < 21; index += 1) {
+        await createNote(engine, null, `---\nmarca: si\n---\n# Nota ${String(index).padStart(2, '0')}\n`);
+      }
+    });
+    try {
+      const properties = Array.from({ length: 32 }, (_, index) => `${String(index).padStart(2, '0')}${'k'.repeat(254 + (index % 2))}`);
+      const args = { filters: [{ key: 'marca', op: 'exists' }], properties, limit: 100 };
+      const titles: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await h.call('hebra_query_properties', { ...args, ...(cursor ? { cursor } : {}) });
+        expect(page.json.notes.length).toBeGreaterThan(0);
+        // El sobre y el cursor van aparte: unas decenas de caracteres.
+        expect(page.raw.length).toBeLessThanOrEqual(PROPERTIES_RESPONSE_MAX_CHARS + 500);
+        titles.push(...page.json.notes.map((note: { title: string }) => note.title));
+        cursor = page.json.nextCursor ?? undefined;
+        pages += 1;
+      } while (cursor);
+      expect(pages).toBe(2);
+      expect(titles).toEqual(Array.from({ length: 21 }, (_, index) => `Nota ${String(index).padStart(2, '0')}`));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('con `fields` cuenta solo lo que sale, sin leer valores, y una nota sola nunca se queda fuera', async () => {
+    const longKey = 'k'.repeat(200_000);
+    const h = await auditHarness(async (engine) => {
+      await createNote(engine, null, '---\nmarca: si\n---\n# Una\n');
+      await createNote(engine, null, '---\nmarca: si\n---\n# Dos\n');
+    });
+    try {
+      const filters = [{ key: 'marca', op: 'exists' }];
+      const small = await h.call('hebra_query_properties', { filters, properties: [longKey], fields: ['title'], limit: 100 });
+      expect(small.json.notes).toHaveLength(2);
+      expect(small.json.nextCursor).toBeNull();
+      const big = await h.call('hebra_query_properties', { filters, properties: [longKey], limit: 100 });
+      expect(big.json.notes).toHaveLength(1);
+      expect(big.json.nextCursor).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('hebra_list_properties ya cuenta el elemento entero con claves largas', async () => {
+    const keys = Array.from({ length: 40 }, (_, index) => `${String(index).padStart(2, '0')}${'k'.repeat(5_000)}`);
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Claves largas\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      for (const key of keys) insert.run(note.id, key, 'v');
+    });
+    try {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await h.call('hebra_list_properties', { limit: 500, ...(cursor ? { cursor } : {}) });
+        expect(page.raw.length).toBeLessThanOrEqual(PROPERTIES_RESPONSE_MAX_CHARS + 200);
+        seen.push(...page.json.keys.map((entry: { key: string }) => entry.key));
+        cursor = page.json.nextCursor ?? undefined;
+      } while (cursor);
+      expect(seen.filter((key) => key.endsWith('k'))).toEqual(keys);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('las variantes plegadas de un valor en notas ocultas', () => {
+  /** La variante número `index` de quince letras, con `á` donde el bit está puesto. */
+  const variant = (index: number): string =>
+    Array.from({ length: 15 }, (_, bit) => ((index >> bit) & 1 ? 'á' : 'a')).join('');
+
+  async function library(rows: (noteId: string, insert: (key: string, value: string) => void) => void, config?: PrivacyConfig) {
+    return auditHarness(async (engine, _library, db) => {
+      const visible = await createNote(engine, null, `---\nclave: ${'a'.repeat(15)}\notra: ${'a'.repeat(15)}\n---\n# Visible\ngarbanzos\n`);
+      const twin = await createNote(engine, null, `---\nclave: ${'a'.repeat(15)}\n---\n# Visible dos\ngarbanzos\n`);
+      const hidden = await createNote(engine, null, '# Oculta\n#secreto\ngarbanzos\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      rows(hidden.id, (key, value) => insert.run(hidden.id, key, value));
+      db.exec('COMMIT');
+      return { visible: visible.id, twin: twin.id };
+    }, config);
+  }
+
+  type Harness = Awaited<ReturnType<typeof library>>;
+
+  /** Todas las páginas de una búsqueda, tal cual salen: el texto de cada respuesta. */
+  async function walk(h: Harness, args: Record<string, unknown>): Promise<string[]> {
+    const raws: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await h.call('hebra_search', { ...args, ...(cursor ? { cursor } : {}) });
+      raws.push(page.raw);
+      cursor = page.json?.nextCursor ?? undefined;
+    } while (cursor);
+    return raws;
+  }
+
+  /** Mete las filas por SQL en la nota oculta, con el puerto ya abierto, sin tocar ninguna nota. */
+  async function loadHidden(h: Harness, keys: readonly string[], count: number): Promise<void> {
+    await h.mutate(async (_engine, _library, db) => {
+      const hidden = db.prepare("SELECT id FROM notes WHERE title = 'Oculta'").get() as { id: string };
+      const insert = db.prepare('INSERT OR IGNORE INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      for (const key of keys) for (let index = 1; index <= count; index += 1) insert.run(String(hidden.id), key, variant(index));
+      db.exec('COMMIT');
+    });
+  }
+
+  const FIFTEEN = 'a'.repeat(15);
+
+  it.each([
+    ['solo espacios', ' '],
+    ['por subcadena', 'arbanz'],
+    ['por palabra', 'garbanzos']
+  ])('20 001 valores no ASCII en una oculta: respuesta idéntica byte a byte, %s, también al continuar', async (_name, query) => {
+    const h = await library(() => {});
+    try {
+      const args = { query, props: [{ key: 'clave', value: FIFTEEN }], limit: 1 };
+      const before = await walk(h, args);
+      expect(before).toHaveLength(2);
+      expect(JSON.parse(before[0]!).results).toHaveLength(1);
+      expect(JSON.parse(before[0]!).nextCursor).not.toBeNull();
+      await loadHidden(h, ['clave'], 20_001);
+      expect(await walk(h, args)).toEqual(before);
+      // Y una página que se pidió antes de que llegaran las filas sigue igual después.
+      const resumed = await h.call('hebra_search', { ...args, cursor: JSON.parse(before[0]!).nextCursor });
+      expect(resumed.raw).toBe(before[1]);
+      expect(before.join('')).not.toContain('Oculta');
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('dos claves de 16 999 variantes en una oculta: respuesta idéntica byte a byte', async () => {
+    const h = await library(() => {});
+    try {
+      const args = { props: [{ key: 'clave', value: FIFTEEN }, { key: 'otra', value: FIFTEEN }], limit: 5 };
+      const before = await Promise.all([' ', 'arbanz', 'garbanzos'].map((query) => walk(h, { ...args, query })));
+      expect(JSON.parse(before[2]![0]!).results.map((hit: { title: string }) => hit.title)).toEqual(['Visible']);
+      await loadHidden(h, ['clave', 'otra'], 16_999);
+      const after = await Promise.all([' ', 'arbanz', 'garbanzos'].map((query) => walk(h, { ...args, query })));
+      expect(after).toEqual(before);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('32 767 variantes en una oculta: lo que hacía saltar `too many SQL variables` responde igual', async () => {
+    const h = await library(() => {});
+    try {
+      const args = { query: 'arbanz', props: [{ key: 'clave', value: FIFTEEN }], limit: 1 };
+      const before = await walk(h, args);
+      await loadHidden(h, ['clave'], 2 ** 15 - 1);
+      expect(await walk(h, args)).toEqual(before);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('un cursor inválido da el mismo error, con un valor que no existe y con o sin las filas ocultas', async () => {
+    const h = await library(() => {});
+    try {
+      const garbage = `s1.${Buffer.from('garbage').toString('base64url')}`;
+      const calls = [' ', 'arbanz', 'garbanzos'].map((query) => ({
+        query,
+        cursor: garbage,
+        props: [{ key: 'clave', value: 'no-existe' }]
+      }));
+      const before = await Promise.all(calls.map((args) => h.call('hebra_search', args)));
+      for (const call of before) {
+        expect(call.isError).toBe(true);
+        expect(call.json).toEqual({ error: 'invalid_input' });
+      }
+      await loadHidden(h, ['clave'], 20_001);
+      const after = await Promise.all(calls.map((args) => h.call('hebra_search', args)));
+      expect(after.map((call) => call.raw)).toEqual(before.map((call) => call.raw));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it.each([['con algo privado', undefined], ['sin nada privado', OPEN]])(
+    'el motor nunca recibe un par con valor, %s',
+    async (_name, config) => {
+      const h = await library(() => {}, config);
+      try {
+        const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+        const spy = vi.spyOn(engine, 'search');
+        try {
+          const props = [
+            { key: 'CLAVE', value: FIFTEEN },
+            { key: 'clave', value: 'otro' },
+            { key: 'otra', value: FIFTEEN },
+            { key: 'tercera', value: null }
+          ];
+          for (const query of [' ', 'arbanz', 'garbanzos']) await h.call('hebra_search', { query, props, cursor: undefined });
+          expect(spy).toHaveBeenCalled();
+          for (const call of spy.mock.calls) {
+            const sent = (call[3] as { props?: Array<{ key: string; value: string | null }> }).props;
+            expect(sent).toEqual([
+              { key: 'clave', value: null },
+              { key: 'otra', value: null },
+              { key: 'tercera', value: null }
+            ]);
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      } finally {
+        await h.close();
+      }
+    }
+  );
+
+  it('sin pares con valor, los dos caminos van directos: una sola consulta y sin ceder el hilo', async () => {
+    const h = await library(() => {}, OPEN);
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search');
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        await h.port.search('garbanzos', null, 7, { props: [{ key: 'clave', value: null }] }, null, { embedded: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0]![2]).toBe(7);
+        expect(immediate).not.toHaveBeenCalled();
+      } finally {
+        immediate.mockRestore();
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('una página de 200 por turno, cediendo el hilo entre páginas, y nunca guarda más que `want`', async () => {
+    const h = await auditHarness(async (engine) => {
+      for (let index = 0; index < 450; index += 1) {
+        await createNote(engine, null, `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`);
+      }
+    }, OPEN);
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search');
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'si' }] }, null, { embedded: true });
+        expect(page.items.map((item) => item.title)).toEqual(['Nota 0']);
+        expect(page.nextCursor).toBeNull();
+        expect(spy.mock.calls.map((call) => call[2])).toEqual([200, 200, 200]);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+        // Con `want` lleno, no sigue pidiendo.
+        spy.mockClear();
+        const full = await h.port.search('garbanzos', null, 1, { props: [{ key: 'clave', value: 'no' }] }, null, { embedded: true });
+        expect(full.items).toHaveLength(1);
+        expect(full.nextCursor).not.toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        immediate.mockRestore();
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('una sola nota con muchos valores en la clave también cede el hilo', async () => {
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Muchos\ngarbanzos\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      for (let index = 0; index < 50_000; index += 1) insert.run(note.id, 'clave', `v${index}`);
+      db.exec('COMMIT');
+    }, OPEN);
+    try {
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'no-existe' }] }, null, { embedded: true });
+        expect(page.items).toEqual([]);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        immediate.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  describe('el presupuesto de cada turno cuenta también caracteres', () => {
+    const LONG = 'é'.repeat(100_000);
+
+    async function longValues(notes: number) {
+      return auditHarness(async (engine, _library, db) => {
+        const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+        for (let index = 0; index < notes; index += 1) {
+          const note = await createNote(engine, null, `# Nota ${index}\ngarbanzos\n`);
+          insert.run(note.id, 'clave', LONG);
+        }
+      }, OPEN);
+    }
+
+    it('30 notas con un valor de 100 000 caracteres ceden cada 5, sin esperar a 20 000 filas', async () => {
+      const h = await longValues(30);
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'otro' }] }, null, { embedded: true });
+        expect(page.items).toEqual([]);
+        // 3 millones de caracteres en tramos de 500 000.
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(6);
+      } finally {
+        immediate.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('cede dentro de una misma nota, antes de plegar el valor largo siguiente, y sigue donde iba', async () => {
+      const h = await auditHarness(async (engine, _library, db) => {
+        const note = await createNote(engine, null, '# Larga\ngarbanzos\n');
+        const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+        for (let index = 0; index < 12; index += 1) insert.run(note.id, 'clave', `${String(index).padStart(2, '0')}${LONG}`);
+        insert.run(note.id, 'clave', 'zzz');
+      }, OPEN);
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        // Solo el último valor casa: tiene que seguir detrás de cada corte sin saltarse nada.
+        const page = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'ZZZ' }] }, null, { embedded: true });
+        expect(page.items.map((item) => item.title)).toEqual(['Larga']);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        immediate.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un valor gigante se pliega entero, sin partirlo', async () => {
+      const h = await auditHarness(async (engine, _library, db) => {
+        const note = await createNote(engine, null, '# Gigante\ngarbanzos\n');
+        db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)').run(note.id, 'clave', 'é'.repeat(700_000));
+      }, OPEN);
+      try {
+        const found = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'e'.repeat(700_000) }] }, null, { embedded: true });
+        expect(found.items.map((item) => item.title)).toEqual(['Gigante']);
+        const other = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'e'.repeat(699_999) }] }, null, { embedded: true });
+        expect(other.items).toEqual([]);
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('no lee las filas de golpe: ninguna consulta de valores usa `.all`', async () => {
+      const h = await longValues(3);
+      const allSpy = vi.spyOn(StatementSync.prototype, 'all');
+      try {
+        await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'otro' }] }, null, { embedded: true });
+        const onValues = allSpy.mock.contexts.filter((statement) =>
+          (statement as StatementSync).sourceSQL.startsWith('SELECT value FROM note_props WHERE note_id'));
+        expect(onValues).toEqual([]);
+      } finally {
+        allSpy.mockRestore();
+        await h.close();
+      }
+    });
+  });
+
+  describe('cerrar la conexión con un recorrido en curso', () => {
+    type Engine = { search: (...args: unknown[]) => unknown };
+
+    /** 450 notas con la clave y un solo valor que casa: tres páginas. `onPage` corre al pedir cada una. */
+    async function walkLibrary() {
+      return auditHarness(async (engine) => {
+        for (let index = 0; index < 450; index += 1) {
+          await createNote(engine, null, `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`);
+        }
+      }, OPEN);
+    }
+
+    function onSecondPage(h: Awaited<ReturnType<typeof walkLibrary>>, run: () => void) {
+      const engine = (h.port as unknown as { engine: Engine }).engine;
+      const real = engine.search.bind(engine);
+      let calls = 0;
+      return vi.spyOn(engine, 'search').mockImplementation((...args: unknown[]) => {
+        calls += 1;
+        const result = real(...args);
+        if (calls === 1) run();
+        return result;
+      });
+    }
+
+    const search = (h: Awaited<ReturnType<typeof walkLibrary>>) =>
+      h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'si' }] }, null, { embedded: true });
+
+    it('closeWhenIdle entre dos páginas: la búsqueda termina bien y el cierre llega después', async () => {
+      const h = await walkLibrary();
+      const order: string[] = [];
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle().then(() => {
+          order.push('cerrado');
+        });
+      });
+      try {
+        const page = await search(h);
+        order.push('búsqueda');
+        expect(page.items.map((item) => item.title)).toEqual(['Nota 0']);
+        expect(spy).toHaveBeenCalledTimes(3);
+        await closing;
+        expect(order).toEqual(['búsqueda', 'cerrado']);
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un error dentro del bucle libera el recorrido: el cierre no se queda esperando', async () => {
+      const h = await walkLibrary();
+      const engine = (h.port as unknown as { engine: Engine }).engine;
+      const real = engine.search.bind(engine);
+      let calls = 0;
+      let closing: Promise<void> | undefined;
+      const spy = vi.spyOn(engine, 'search').mockImplementation((...args: unknown[]) => {
+        calls += 1;
+        if (calls === 1) {
+          closing = h.port.closeWhenIdle();
+          return real(...args);
+        }
+        throw new Error('disk I/O error');
+      });
+      try {
+        await expect(search(h)).rejects.toThrow('disk I/O error');
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('sin bloqueo mutuo: lo que entra en la cola mientras el cierre espera se atiende', async () => {
+      const h = await walkLibrary();
+      let queued: Promise<unknown> | undefined;
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle();
+        queued = h.port.tagsList();
+      });
+      try {
+        const page = await search(h);
+        expect(page.items).toHaveLength(1);
+        await expect(queued).resolves.toBeDefined();
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('dos recorridos a la vez: el cierre espera a los dos', async () => {
+      const h = await walkLibrary();
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle();
+      });
+      try {
+        const [one, two] = await Promise.all([search(h), search(h)]);
+        expect(one.items).toHaveLength(1);
+        expect(two.items).toHaveLength(1);
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un `close()` forzado a mitad: la búsqueda rechaza con `busy_other_instance`, no con una consulta rota', async () => {
+      const h = await walkLibrary();
+      const spy = onSecondPage(h, () => {
+        // Después de este turno: `close()` dentro de la consulta del motor la dejaría a medias.
+        setImmediate(() => h.port.close());
+      });
+      try {
+        await expect(search(h)).rejects.toMatchObject({ message: 'busy_other_instance' });
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('y por el camino del servidor responde un error, sin resultados: la puerta final tampoco puede leer', async () => {
+      const h = await walkLibrary();
+      const spy = onSecondPage(h, () => {
+        setImmediate(() => h.port.close());
+      });
+      try {
+        const page = await h.call('hebra_search', { query: 'garbanzos', limit: 5, props: [{ key: 'clave', value: 'si' }] });
+        expect(page.isError, page.raw).toBe(true);
+        expect(page.json).toBeNull();
+        expect(page.raw).not.toContain('Nota');
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+  });
+
+  it('otro error del motor no se traga: sale como siempre', async () => {
+    const h = await library(() => {});
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search').mockImplementation(() => {
+        throw new Error('disk I/O error');
+      });
+      try {
+        const page = await h.call('hebra_search', { query: 'garbanzos', props: [{ key: 'clave', value: 'x' }] });
+        expect(page.isError).toBe(true);
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('el modo del orden cambia entre dos páginas', () => {
+  const values = (notes: Array<{ properties: { rank: string[] } }>): string[] => notes.flatMap((note) => note.properties.rank);
+  const query = { filters: [{ key: 'marca', op: 'exists' }], sort: { key: 'rank' }, properties: ['rank'], limit: 1 };
+
+  async function numericLibrary() {
+    return auditHarness(async (engine) => {
+      for (const rank of ['2', '10', '20']) await createNote(engine, null, `---\nmarca: si\nrank: ${rank}\n---\n# Rango ${rank}\n`);
+    });
+  }
+
+  it('de número a texto, por un valor visible de una nota ajena al filtro: invalid_input, no se pierde el 10', async () => {
+    const h = await numericLibrary();
+    try {
+      const first = await h.call('hebra_query_properties', query);
+      expect(values(first.json.notes)).toEqual(['2']);
+      await h.mutate(async (engine) => createNote(engine, null, '---\nrank: texto\n---\n# Ajena\n'));
+      const next = await h.call('hebra_query_properties', { ...query, cursor: first.json.nextCursor });
+      expect(next.isError).toBe(true);
+      expect(next.json).toMatchObject({ error: 'invalid_input' });
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('de texto a número, al desaparecer el único valor de texto: invalid_input', async () => {
+    const h = await auditHarness(async (engine) => {
+      for (const rank of ['10', '9']) await createNote(engine, null, `---\nmarca: si\nrank: ${rank}\n---\n# Rango ${rank}\n`);
+      return (await createNote(engine, null, '---\nrank: texto\n---\n# Ajena\n')).id;
+    });
+    try {
+      const first = await h.call('hebra_query_properties', query);
+      expect(values(first.json.notes)).toEqual(['10']);
+      await h.mutate(async (engine) => saveBody(engine, h.extra, '---\nrank: 30\n---\n# Ajena\n'));
+      const next = await h.call('hebra_query_properties', { ...query, cursor: first.json.nextCursor });
+      expect(next.isError).toBe(true);
+      expect(next.json).toMatchObject({ error: 'invalid_input' });
+      // Volviendo a empezar, el orden nuevo sale entero.
+      const again = await h.call('hebra_query_properties', { ...query, limit: 10 });
+      expect(values(again.json.notes)).toEqual(['9', '10']);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('un valor en una nota oculta no cambia el modo ni da error: la página siguiente sigue en su sitio', async () => {
+    const h = await numericLibrary();
+    try {
+      const first = await h.call('hebra_query_properties', query);
+      await h.mutate(async (engine) => createNote(engine, null, '---\nrank: texto\n---\n# Oculta\n#secreto\n'));
+      const second = await h.call('hebra_query_properties', { ...query, cursor: first.json.nextCursor });
+      expect(second.isError).toBe(false);
+      expect(values(second.json.notes)).toEqual(['10']);
+      const third = await h.call('hebra_query_properties', { ...query, cursor: second.json.nextCursor });
+      expect(values(third.json.notes)).toEqual(['20']);
+      expect(third.json.nextCursor).toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('un cursor de la parte sin valor no depende del modo', async () => {
+    const h = await auditHarness(async (engine) => {
+      await createNote(engine, null, '---\nmarca: si\nrank: 1\n---\n# Con rango\n');
+      await createNote(engine, null, '---\nmarca: si\n---\n# Sin rango A\n');
+      await createNote(engine, null, '---\nmarca: si\n---\n# Sin rango B\n');
+    });
+    try {
+      const first = await h.call('hebra_query_properties', query);
+      const second = await h.call('hebra_query_properties', { ...query, cursor: first.json.nextCursor });
+      expect(second.json.notes[0].title).toBe('Sin rango A');
+      await h.mutate(async (engine) => createNote(engine, null, '---\nrank: texto\n---\n# Ajena\n'));
+      const third = await h.call('hebra_query_properties', { ...query, cursor: second.json.nextCursor });
+      expect(third.json.notes[0].title).toBe('Sin rango B');
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('una fila de `note_props` de una nota bloqueada no cuenta', () => {
+  const LOCKED_TITLE = 'Bloqueada con resto';
+  let h: Awaited<ReturnType<typeof scenario>>;
+
+  async function scenario(config: PrivacyConfig) {
+    return auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, lockedBody(LOCKED_TITLE, []));
+      db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)').run(note.id, 'resto', 'cebo_resto');
+      return note.id;
+    }, config);
+  }
+
+  beforeEach(async () => {
+    h = await scenario(NO_TAGS);
+  });
+  afterEach(async () => {
+    await h.close();
+  });
+
+  const ids = (notes: Array<{ id: string }>): string[] => notes.map((note) => note.id);
+
+  it('hebra_query_properties: el mismo resultado con el valor acertado y con otro', async () => {
+    for (const filter of [
+      { key: 'resto', op: 'equals', value: 'cebo_resto' },
+      { key: 'resto', op: 'equals', value: 'otro' },
+      { key: 'resto', op: 'contains', value: 'cebo' },
+      { key: 'resto', op: 'exists' },
+      { key: 'resto', op: 'not-equals', value: 'otro' }
+    ]) {
+      const found = await h.call('hebra_query_properties', { filters: [filter], limit: 100 });
+      expect(found.json.notes, JSON.stringify(filter)).toEqual([]);
+    }
+  });
+
+  it('sigue saliendo como una nota sin propiedades: sin filtros, con `missing` y por título', async () => {
+    const all = await h.call('hebra_query_properties', { limit: 100, properties: ['resto'] });
+    const mine = all.json.notes.find((note: { id: string }) => note.id === h.extra);
+    expect(mine).toMatchObject({ title: LOCKED_TITLE, properties: { resto: [] } });
+    expect(all.raw).not.toContain('cebo_resto');
+    const missing = await h.call('hebra_query_properties', { filters: [{ key: 'resto', op: 'missing' }], limit: 100 });
+    expect(ids(missing.json.notes)).toContain(h.extra);
+    const byTitle = await h.call('hebra_query_properties', { filters: [{ key: 'note.title', op: 'equals', value: LOCKED_TITLE }] });
+    expect(ids(byTitle.json.notes)).toEqual([h.extra]);
+    const byTitleAndValue = await h.call('hebra_query_properties', {
+      filters: [{ key: 'note.title', op: 'equals', value: LOCKED_TITLE }, { key: 'resto', op: 'exists' }]
+    });
+    expect(byTitleAndValue.json.notes).toEqual([]);
+  });
+
+  it('ordenar por esa clave no la pone entre las que tienen valor ni cambia el modo', async () => {
+    const sorted = await h.call('hebra_query_properties', {
+      filters: [{ key: 'note.title', op: 'equals', value: LOCKED_TITLE }],
+      sort: { key: 'resto' }
+    });
+    expect(ids(sorted.json.notes)).toEqual([h.extra]);
+    expect(sorted.raw).not.toContain('cebo_resto');
+  });
+
+  it('hebra_list_properties no la cuenta', async () => {
+    expect((await h.call('hebra_list_properties')).raw).not.toContain('resto');
+    expect((await h.call('hebra_list_properties', { key: 'resto' })).json.values).toEqual([]);
+  });
+
+  it.each([
+    ['con algo privado, por palabra', NO_TAGS, 'Bloqueada'],
+    ['con algo privado, por subcadena', NO_TAGS, 'loquead'],
+    ['sin nada privado, por palabra', OPEN, 'Bloqueada'],
+    ['sin nada privado, por subcadena', OPEN, 'loquead']
+  ])('hebra_search con `props`, %s: el resto no la hace casar', async (_name, config, query) => {
+    const local = await scenario(config);
+    try {
+      const plain = await local.call('hebra_search', { query, limit: 50 });
+      expect(ids(plain.json.results), 'sin `props` sí la encuentra por su título').toContain(local.extra);
+      for (const props of [[{ key: 'resto', value: 'cebo_resto' }], [{ key: 'resto', value: null }], [{ key: 'resto', value: 'otro' }]]) {
+        const found = await local.call('hebra_search', { query, props, limit: 50 });
+        expect(found.json.results, JSON.stringify(props)).toEqual([]);
+      }
+    } finally {
+      await local.close();
+    }
+  });
+});

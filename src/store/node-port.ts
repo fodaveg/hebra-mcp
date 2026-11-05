@@ -43,11 +43,13 @@ import {
   type FoldersList,
   type LibraryOpenInfo,
   type LinkResolution,
+  type NoteAuthors,
   type NoteRow,
   type NoteSaveInput,
   type NoteSaveResult,
   type NotesPage,
   type NotesScope,
+  type PropsQueryFilters,
   type SearchFilters,
   type SearchPage,
   type SqliteConn,
@@ -55,7 +57,20 @@ import {
   type TitleCandidates
 } from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
-import { safeTextSearch } from './search-safe';
+import {
+  readFoldedTitleTargets,
+  readLinkSources,
+  readPropCounts,
+  readPropsMatches,
+  readPropValuesOfNotes,
+  visitPropValues,
+  type NotePropValues,
+  type NoteValuesRequest,
+  type PropCountsPage,
+  type PropCountsRequest,
+  type PropsMatch
+} from './props-sql';
+import { hasValuedProps, safeTextSearch, searchCheckingValues } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
   grepNoteRows,
@@ -80,6 +95,7 @@ import {
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
 import { openJdPlansDatabase, sqliteJdPlanStore, type JdPlanStore } from './jd-plans';
 import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
+import { noteStateEngineOf } from './note-state-engine';
 import {
   ensurePrivacyEpochIndexes,
   noteStamps,
@@ -89,6 +105,13 @@ import {
 } from './privacy-sql';
 import { ensurePrivateFoldersTable, readPrivateFolders, writePrivateFolders } from './private-folders';
 import { SerialQueue } from './serial-queue';
+import {
+  foldersTrashOf,
+  noteAuthorsOf,
+  noteStatesOf,
+  type FolderTrashEntry,
+  type NoteStateRow
+} from './state-reads';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
   BlobNoteRef,
@@ -286,6 +309,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** Vaciados de la biblioteca (`libraryReset`) hechos por esta conexión: parte de la época
    *  de privacidad (`epochRow`). */
   private resets = 0;
+  /** Recorridos de varios turnos en curso (`walking`), y quien espera a que acaben. */
+  private walks = 0;
+  private readonly walksDone: Array<() => void> = [];
 
   constructor(
     private readonly engine: SqliteLibraryEngine,
@@ -416,12 +442,43 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     scope?: NotesScope | null,
     options?: PortSearchOptions
   ): Promise<SearchPage> {
-    if (options?.embedded === true) {
-      return this.read(() => cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null, scope ?? null)));
+    const page = (from: string | null, size: number | undefined, used: SearchFilters | null): SearchPage => cleanSearchPage(
+      options?.embedded === true
+        ? this.engine.search(q, from, size, used, scope ?? null)
+        : safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable)
+    );
+    if (filters && hasValuedProps(filters)) {
+      return this.walking(() => searchCheckingValues({
+        db: this.db,
+        cursor,
+        limit,
+        filters,
+        page: (from, used) => page(from, 200, used),
+        turn: (operation) => this.read(() => {
+          // Con un `close()` forzado a mitad, un error con código, no una consulta sobre una
+          // conexión cerrada. `closeWhenIdle` espera a que termine: ahí no pasa.
+          if (this.closed) throw busyOtherInstance();
+          return operation();
+        })
+      }));
     }
-    return this.read(() => cleanSearchPage(
-      safeTextSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null, this.conn, this.writable)
-    ));
+    return this.read(() => page(cursor, limit, filters ?? null));
+  }
+
+  /**
+   * Un recorrido de varios turnos de la cola: entre dos no hay nada encolado, así que
+   * `closeWhenIdle` no lo vería. Cuenta hasta que termina, también si lanza un error.
+   */
+  private async walking<T>(run: () => Promise<T>): Promise<T> {
+    this.walks += 1;
+    try {
+      return await run();
+    } finally {
+      this.walks -= 1;
+      if (this.walks === 0) {
+        for (const resolve of this.walksDone.splice(0)) resolve();
+      }
+    }
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
@@ -454,6 +511,34 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         }))
       };
     });
+  }
+
+  /** Propiedades del frontmatter, sin filtro de privados salvo lo que se pase: SQL propio en
+   *  `./props-sql.ts`. */
+  async propCounts(request: PropCountsRequest): Promise<PropCountsPage> {
+    return this.read(() => readPropCounts(this.db, request));
+  }
+
+  async propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]> {
+    const conn = this.conn;
+    if (!conn) throw new Error('propsMatches: puerto sin conexión del motor');
+    return this.read(() => readPropsMatches(this.db, conn, filters));
+  }
+
+  async visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void> {
+    return this.read(() => visitPropValues(this.db, key, visit));
+  }
+
+  async propValuesOfNotes(notes: readonly NoteValuesRequest[], keys: readonly string[], maxChars: number): Promise<NotePropValues> {
+    return this.read(() => readPropValuesOfNotes(this.db, notes, keys, maxChars));
+  }
+
+  async notesByFoldedTitle(title: string): Promise<string[]> {
+    return this.read(() => readFoldedTitleTargets(this.db, title).map((target) => target.id));
+  }
+
+  async linkSources(noteIds: readonly string[]): Promise<string[]> {
+    return this.read(() => readLinkSources(this.db, noteIds));
   }
 
   /**
@@ -662,6 +747,19 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     };
   }
 
+  /** D23: ver `./state-reads.ts`. */
+  async noteStates(ids: readonly string[]): Promise<NoteStateRow[]> {
+    return this.read(() => noteStatesOf(this.engine, ids));
+  }
+
+  async foldersTrash(): Promise<FolderTrashEntry[]> {
+    return this.read(() => foldersTrashOf(this.engine));
+  }
+
+  async noteAuthors(id: string): Promise<NoteAuthors> {
+    return this.read(() => noteAuthorsOf(this.engine, id));
+  }
+
   async noteVersionsList(noteId: string): Promise<NoteVersionsList> {
     return this.read(() => this.engine.noteVersionsList(noteId));
   }
@@ -824,6 +922,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteSave: (input) => this.engine.noteSave(input),
         // D18: solo los títulos, sin el cuerpo (`./jd-port.ts`, `hasHidden`).
         noteTitles: (ids) => this.noteTitleRows(ids),
+        // D23: ocultar, quitar la marca de conflicto, guardas y renombrar con los enlaces.
+        ...noteStateEngineOf(this.engine, this.db),
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
@@ -880,7 +980,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
-          'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot']);
+          'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot',
+          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink']);
         const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious']);
         // Síncrona: no cambia el tipo de lo que devuelve cada método (los registros lo son).
         const guard = <T extends object>(target: T, all: boolean): T => new Proxy(target, { get: (object, property) => {
@@ -960,10 +1061,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.syncView;
   }
 
-  /** Espera a que termine lo que haya en cola y cierra la conexión. */
+  /** Espera a que terminen los recorridos en curso y lo que haya en cola, y cierra la conexión. No
+   *  ocupa la cola mientras espera: un turno de un recorrido sigue pudiendo entrar. */
   async closeWhenIdle(): Promise<void> {
     if (this.closed) return;
-    await this.queue.whenIdle();
+    do {
+      if (this.walks > 0) await new Promise<void>((resolve) => this.walksDone.push(resolve));
+      await this.queue.whenIdle();
+    } while (this.walks > 0);
     this.close();
   }
 

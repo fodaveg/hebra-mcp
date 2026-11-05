@@ -27,14 +27,20 @@
  *    carpeta, se responde `not_found` en vez de enseñar una ruta privada.
  *
  * La salida lleva el estado de sync (`../write-context.ts`, `SyncFields`).
+ *
+ * D23 (5 nov 2026): mover, mandar a la papelera y sacar aceptan `expectedRevision`. Con él van
+ * por `noteState` (`../../store/note-state.ts`) y, si el texto cambió, `revision_conflict`; sin
+ * él, igual que siempre. Ocultar del listado general y quitar la marca de conflicto, también de
+ * D23, en `./note-state.ts`.
  */
 import { logEvent } from '../../log/logger';
 import { TrashFilter } from '../../privacy/trash-filter';
+import type { NoteStateAction, NoteStateActionName } from '../../store/note-state';
 import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
-import { syncOf, type OrganizeOutcome, type SyncFields } from '../write-context';
-import { requireVisibleNote } from './guards';
+import { syncOf, type NoteStateOutcome, type OrganizeOutcome, type SyncFields } from '../write-context';
+import { requireValidRevision, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export type NoteOrganizeOutput = {
@@ -66,13 +72,23 @@ async function organize(ctx: ToolContext, action: OrganizeAction): Promise<Organ
   }
 }
 
+/** Por `noteState` (D23), que el escritor vuelve a comprobar todo dentro de su turno. */
+export async function noteState(ctx: ToolContext, action: NoteStateAction): Promise<NoteStateOutcome> {
+  if (!ctx.write?.noteState) throw new ToolError('invalid_input');
+  try {
+    return await ctx.write.noteState({ ...action, privacy: ctx.privacyConfig });
+  } catch (error) {
+    throw mapWriteError(error);
+  }
+}
+
 /** La salida con la ruta de la carpeta en la que quedó la nota. Que la nota y esa carpeta se
  *  sigan viendo después de escribir (y de la ronda) lo decide la puerta final
  *  (`../privacy-gate.ts`, paso 3 de la cabecera), con todo de una transacción: si no,
  *  `not_found`. */
-function noteOutput(
+export function noteOutput(
   ctx: ToolContext,
-  action: OrganizeAction['action'],
+  action: OrganizeAction['action'] | NoteStateActionName,
   outcome: OrganizeOutcome
 ): NoteOrganizeOutput {
   logEvent({ event: 'note.organize', id: outcome.id, action, sync: outcome.sync });
@@ -92,12 +108,17 @@ function noteOutput(
 /** `hebra_move_note`: a otra carpeta visible que ya exista (`"root"` es la raíz). */
 export async function runMoveNote(
   ctx: ToolContext,
-  input: { id: string; folderId: string }
+  input: { id: string; folderId: string; expectedRevision?: string }
 ): Promise<NoteOrganizeOutput> {
+  requireValidRevision(input.expectedRevision);
   requireVisibleNote(ctx, input.id);
   requireVisibleFolder(ctx, input.folderId);
   const action = { action: 'moveNote', id: input.id, folderId: input.folderId } as const;
-  return noteOutput(ctx, action.action, await organize(ctx, action));
+  const outcome =
+    input.expectedRevision === undefined
+      ? await organize(ctx, action)
+      : await noteState(ctx, { ...action, expectedRevision: input.expectedRevision });
+  return noteOutput(ctx, action.action, outcome);
 }
 
 /** `hebra_set_favorite`: marca o desmarca. Idempotente. */
@@ -127,10 +148,15 @@ export type NoteTrashOutput = { id: string; trashed: true } & SyncFields;
  *  es visible allí se queda como está. La salida no lleva ruta ni título. */
 export async function runTrashNote(
   ctx: ToolContext,
-  input: { id: string }
+  input: { id: string; expectedRevision?: string }
 ): Promise<NoteTrashOutput> {
+  requireValidRevision(input.expectedRevision);
   await requireVisibleLiveOrTrashed(ctx, input.id);
-  const outcome = await organize(ctx, { action: 'trashNote', id: input.id });
+  const action = { action: 'trashNote', id: input.id } as const;
+  const outcome =
+    input.expectedRevision === undefined
+      ? await organize(ctx, action)
+      : await noteState(ctx, { ...action, expectedRevision: input.expectedRevision });
   logEvent({ event: 'note.organize', id: outcome.id, action: 'trashNote', sync: outcome.sync });
   // Tras la ronda, la puerta final mira que se siga viendo (en la papelera, o viva si otro
   // dispositivo la sacó).
@@ -143,9 +169,14 @@ export async function runTrashNote(
  *  de la salida sale del filtro de DESPUÉS de escribir, como mover. */
 export async function runRestoreNote(
   ctx: ToolContext,
-  input: { id: string }
+  input: { id: string; expectedRevision?: string }
 ): Promise<NoteOrganizeOutput> {
+  requireValidRevision(input.expectedRevision);
   await requireVisibleLiveOrTrashed(ctx, input.id);
   const action = { action: 'restoreNote', id: input.id } as const;
-  return noteOutput(ctx, action.action, await organize(ctx, action));
+  const outcome =
+    input.expectedRevision === undefined
+      ? await organize(ctx, action)
+      : await noteState(ctx, { ...action, expectedRevision: input.expectedRevision });
+  return noteOutput(ctx, action.action, outcome);
 }

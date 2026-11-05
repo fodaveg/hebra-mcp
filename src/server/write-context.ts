@@ -47,6 +47,7 @@ import type {
   ReplaceFileTextSaved
 } from '../store/file-writes';
 import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
+import type { NoteStateInput, NoteStateSaved } from '../store/note-state';
 import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
 import type { JdMoveApplyReport, JdMoveRequest, JdMoveResult, JdMoveUndoReport } from '../store/jd-move';
 import type { SyncConflictCopy } from '../sync/runner';
@@ -88,6 +89,9 @@ export interface WriteContextSources {
    *  `LibraryInstance.looseFileWriteLocal`), sin esperar ronda. Opcional, como
    *  `replaceFileText`: sin él, las cuatro herramientas responden `invalid_input`. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>>;
+  /** Cambios de estado de una nota de D23 en local (`LibraryInstance.noteStateLocal`), sin
+   *  esperar ronda. Opcional: sin él, esas llamadas responden `invalid_input`. */
+  noteState?(input: NoteStateInput): Promise<LocalWrite<NoteStateSaved>>;
   /** `hebra_jd_new_id` en local (D18, `LibraryInstance.jdNewIdLocal`): simular, aplicar o
    *  descartar un plan, sin esperar ronda. Opcional: sin él, la herramienta responde
    *  `invalid_input`. */
@@ -177,6 +181,9 @@ export type ReplaceFileTextOutcome = ReplaceFileTextSaved & SyncFields;
  *  limpia y, al crear o duplicar, el blob ya subido). */
 export type LooseFileOutcome = LooseFileSaved & SyncFields;
 
+/** Cambios de estado de una nota de D23, antes de poner la ruta. */
+export type NoteStateOutcome = NoteStateSaved & SyncFields;
+
 /** `hebra_add_attachment` (D9): el guardado de la nota como una edición, el adjunto y el
  *  estado de sync (`uploaded` exige además el blob ya subido). */
 export type AddAttachmentOutcome = EditNoteOutcome & {
@@ -254,6 +261,10 @@ export interface WriteContext {
    *  devuelve el estado de sync; sin escritura («ya estaba», reintento), sin ronda. En un
    *  lector, todo ocurre en el escritor (`./forward.ts`). Opcional. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
+  /** Cambios de estado de una nota de D23, como `organize`: escribe, espera la ronda y
+   *  devuelve el estado de sync; sin escritura, sin ronda. En un lector, todo ocurre en el
+   *  escritor (`./forward.ts`). Opcional. */
+  noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
   /** Un ID nuevo del JDex (D18): simular o descartar, tal cual; aplicar escribe, espera la
    *  ronda si creó algo y devuelve el estado de sync. En un lector, todo ocurre en el
    *  escritor (`./forward.ts`). Opcional. */
@@ -565,6 +576,19 @@ export function buildWriteContext(
 
   const looseFile = sources.looseFileWrite?.bind(sources);
 
+  /** Cambios de estado de una nota (D23): como `organize`. */
+  async function noteStateWrite(
+    run: NonNullable<WriteContextSources['noteState']>,
+    input: NoteStateInput
+  ): Promise<NoteStateOutcome> {
+    const { result: saved, wrote } = await run(input);
+    if (!wrote) return { ...saved, ...(await syncFieldsWithoutRound(saved.id)) };
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...saved, ...syncFieldsOf(wait, await dirtyOf(saved.id)) };
+  }
+
+  const noteState = sources.noteState?.bind(sources);
+
   /** `hebra_jd_new_id` (D18): la simulación tal cual; aplicar, con UNA ronda si creó algo y
    *  el estado de sync de la nota y la carpeta que nombra el informe. */
   async function jdWrite(
@@ -631,6 +655,7 @@ export function buildWriteContext(
     ...(looseFile
       ? { looseFileWrite: (input: LooseFileWriteInput) => looseFileWrite(looseFile, input) }
       : {}),
+    ...(noteState ? { noteState: (input: NoteStateInput) => noteStateWrite(noteState, input) } : {}),
     ...(replace ? { replaceInNotes: (request: ReplaceRequest) => replaceWrite(replace, request) } : {}),
     ...(replaceFile
       ? { replaceFileText: (input: ReplaceFileTextInput) => replaceFileWrite(replaceFile, input) }

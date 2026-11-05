@@ -28,12 +28,18 @@
  *    (como D15 con el contenido) y `file_name_unavailable` al crear.
  * 7. La escritura del motor (`blobPut` + `fileCreate`, `fileRename`, `fileMove`) y la
  *    prueba de lo guardado, leída del almacén: `sha256` de la fila, y los bytes de ese blob
- *    o lo que su fila de `blobs` sabe.
+ *    o lo que su fila de `blobs` sabe. Renombrar (D23, 5 nov 2026) arregla además, en la misma
+ *    transacción (`fileRenameAndRelink`), las notas que incrustan el fichero por su nombre,
+ *    y devuelve sus ids (`relinkedNotes`), que también anota el registro: la herramienta los
+ *    declara a la puerta final y solo enseña cuántas son (`relinked`). Qué notas y por qué
+ *    ninguna oculta, en `./file-relink.ts`.
+ *    Sin ninguna que arreglar, `fileRename` a secas.
  *
  * Registro: renombrar y mover lo empiezan (`started`) antes de escribir, con el id del
  * fichero; si el proceso muere entre la escritura y `finish`, el reintento ve el fichero
- * ya con el nombre o la carpeta pedidos y lo da por guardado. Crear y duplicar no saben el
- * id antes de `fileCreate` (lo pone el motor): anotan `started` y `done` justo después, en
+ * ya con el nombre o la carpeta pedidos y lo da por guardado (sin `relinkedNotes`: las notas
+ * van en la misma transacción que el nombre, pero cuáles no consta). Crear y duplicar no saben
+ * el id antes de `fileCreate` (lo pone el motor): anotan `started` y `done` justo después, en
  * el mismo turno. Si el proceso muere entre medias, el reintento no duplica: el fichero ya
  * existe en esa carpeta con ese nombre y responde `file_exists` con su id.
  */
@@ -52,7 +58,9 @@ import {
   looseFileMime,
   validFileName
 } from './file-content';
+import { planRelink, relinkedNotesOf } from './file-relink';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
+import type { FilesIndex } from './types';
 import {
   hiddenOperationTarget,
   priorOperation,
@@ -95,6 +103,10 @@ export interface LooseFileSaved {
   mimeType: string | null;
   /** `saved`: escrito ahora; `already`: ya tenía ese nombre o estaba en esa carpeta. */
   outcome: 'saved' | 'already';
+  /** Renombrar (D23): los ids de las notas que se arreglaron, para la puerta final. Nunca salen
+   *  en la respuesta MCP. Ausente en las otras acciones y si no consta (un registro sin ids o
+   *  recuperado del estado `started`): entonces la herramienta no da `relinked`. */
+  relinkedNotes?: string[];
   replayed?: true;
 }
 
@@ -126,7 +138,9 @@ export function isLooseFileSaved(value: unknown): value is LooseFileSaved {
     SHA256_HEX.test(record.sha256) &&
     (record.byteLength === null || typeof record.byteLength === 'number') &&
     (record.mimeType === null || typeof record.mimeType === 'string') &&
-    (record.outcome === 'saved' || record.outcome === 'already')
+    (record.outcome === 'saved' || record.outcome === 'already') &&
+    (record.relinkedNotes === undefined ||
+      (Array.isArray(record.relinkedNotes) && record.relinkedNotes.every((id) => typeof id === 'string')))
   );
 }
 
@@ -203,17 +217,23 @@ function fingerprintOf(input: LooseFileWriteInput, prepared: Prepared): string {
   return textSha256(JSON.stringify(parts));
 }
 
-/** Los errores del motor que crear, renombrar o mover pueden dar dentro del turno. */
+/** Los errores del motor que crear, renombrar o mover pueden dar dentro del turno. Los dos
+ *  últimos, de `fileRenameAndRelink`, no deberían llegar (`./file-relink.ts` los mira antes,
+ *  en este mismo turno), y su transacción no deja nada escrito: un homónimo que no se ve no
+ *  se nombra, y lo demás es que algo cambió. */
 function verbRejection(error: unknown): unknown {
   if (!(error instanceof LibraryError)) return error;
   switch (error.code) {
     case 'file_not_found':
     case 'folder_not_found':
+    case 'file_name_taken':
       return writeRejected('not_found');
     case 'invalid_name':
       return writeRejected('invalid_input');
     case 'blob_missing':
       return writeRejected('file_unavailable');
+    case 'file_stale':
+      return writeRejected('file_changed');
     default:
       return error;
   }
@@ -224,6 +244,8 @@ interface Turn {
   store: NoteWriteStore;
   files: FileFilter;
   live: ReturnType<typeof privacyInTurn>;
+  /** Las filas tal como están guardadas, de las que sale `files`. */
+  index: FilesIndex;
 }
 
 /** La carpeta de destino, viva y visible; si no, `not_found` (como `hebra_move_note`: una
@@ -236,7 +258,7 @@ function requireVisibleFolder(turn: Turn, folderId: string): void {
 
 /** El fichero de origen, visible y vivo; si no, `not_found` (oculto, inexistente, lápida o
  *  en la papelera, todo igual). */
-function requireVisibleLiveFile(turn: Turn, id: string) {
+function requireVisibleLiveFile(turn: Pick<Turn, 'files'>, id: string) {
   const content = turn.files.contentOf(id);
   if (!content || content.file.trashedAt !== null) throw writeRejected('not_found');
   return content;
@@ -329,7 +351,7 @@ export async function writeLooseFile(
       try {
         const live = privacyInTurn(store, input.privacy);
         const files = FileFilter.fromSnapshot(live, store.filesIndex(), input.privacy);
-        const content = requireVisibleLiveFile({ store, files, live }, input.id);
+        const content = requireVisibleLiveFile({ files }, input.id);
         const known = content.file.byteLength;
         if (known !== null && known > FILE_DUPLICATE_MAX_BYTES) return null;
         return (await store.blobRead(content.sha256)) === null ? content.sha256 : null;
@@ -351,8 +373,9 @@ export async function writeLooseFile(
       now,
       hiddenOperationTarget(store, live, input.privacy)
     );
-    const files = FileFilter.fromSnapshot(live, store.filesIndex(), input.privacy);
-    const turn: Turn = { store, files, live };
+    const index = store.filesIndex();
+    const files = FileFilter.fromSnapshot(live, index, input.privacy);
+    const turn: Turn = { store, files, live, index };
 
     if (previous?.state === 'done' && isLooseFileSaved(previous.result)) {
       // Lo que nombra (el fichero y la carpeta anotada) tiene que seguir viéndose: si no,
@@ -430,10 +453,19 @@ export async function writeLooseFile(
               log.finish(input.operationId, saved);
               return { result: { ...saved, replayed: true }, wrote: false };
             }
-            return { result: record(done), wrote: false };
+            return { result: record({ ...done, relinkedNotes: [] }), wrote: false };
           }
           rejectVisibleHomonym(turn, source.file.folderId, name, input.id);
           if (wouldHide(turn, name, source.sha256)) throw writeRejected('not_found');
+          // La fila guardada: la carpeta visible de un fichero puede ser la raíz si la suya se
+          // borró, y el motor compara con la guardada. Sin fila, oculto o recién ido.
+          const stored = index.files.find((file) => file.id === input.id);
+          if (!stored) throw writeRejected('not_found');
+          const plan = await planRelink(
+            turn,
+            { id: stored.id, name: stored.name, sha256: source.sha256, folderId: stored.folderId },
+            name
+          );
           log.begin({
             operationId: input.operationId,
             fingerprint,
@@ -441,8 +473,25 @@ export async function writeLooseFile(
             targetBodySha256: source.sha256,
             now
           });
-          const row = await store.fileRename(input.id, name);
-          const saved = rowProof(row, source.file.byteLength, source.file.mime, 'saved');
+          const row =
+            plan.entries.length === 0
+              ? await store.fileRename(input.id, name)
+              : await store.fileRenameAndRelink({
+                  fileId: input.id,
+                  oldName: stored.name,
+                  expectedSha256: source.sha256,
+                  expectedFolderId: stored.folderId,
+                  name,
+                  noteRevisions: plan.noteRevisions,
+                  entries: plan.entries,
+                  // La causa de la versión anterior de cada nota: `hebra_list_versions` no
+                  // la enseña, y solo nombra un fichero que se ve.
+                  cause: `Antes de renombrar «${stored.name}» → «${name}»`
+                });
+          const saved = {
+            ...rowProof(row, source.file.byteLength, source.file.mime, 'saved'),
+            relinkedNotes: relinkedNotesOf(plan)
+          };
           log.finish(input.operationId, saved);
           return { result: saved, wrote: true };
         }

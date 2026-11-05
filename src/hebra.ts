@@ -21,9 +21,15 @@ export {
   flushSubstringPending,
   sqliteResultCode,
   SUBSTRING_INDEX_READY_SQL,
+  substringColumn,
   substringResidualSql,
   substringSnippet
 } from '../vendor/hebra/src/lib/library/substring-search';
+// Las consultas de propiedades: el filtro de `props_query` sin su orden, que mira toda la
+// biblioteca, y el plegado de títulos de `linksto:` (`src/store/props-sql.ts`).
+export { propsFilterSql } from '../vendor/hebra/src/lib/library/props-store';
+export { foldFileName } from '../vendor/hebra/src/lib/library/file-name-hits';
+export type { PropsFilterOp, PropsQueryFilter, PropsQueryFilters } from '../vendor/hebra/src/lib/library/types';
 // Si el cuerpo indexado de una fila es su `search_body` (TRA-18: el cuerpo sin los
 // comentarios de Obsidian): la condición del prefiltro de `hebra_grep` que mira el cuerpo
 // en bruto de las notas con comentarios (`src/store/grep-sql.ts`).
@@ -33,6 +39,10 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../vendor/hebra/src
 // El error del relé de Blob V2 (lo lanza `HttpBlobRelayV2`, ya empaquetado): `SyncRunner`
 // reconoce con él un 429 al bajar un adjunto y espera antes de reintentar.
 export { BlobRelayV2Error } from '../vendor/hebra/src/lib/vault/blob-v2/memory-transport';
+
+// D23: el Markdown de una nota con el `![[nombre]]` de un fichero renombrado, con el escáner
+// real de la app. El resto de ese módulo (dibujos) no se usa.
+export { renameFileEmbedInMarkdown } from '../vendor/hebra/src/lib/library-ui/drawing-file-rename';
 
 // H-L7: protocolo compartido de concesiones de dispositivo, sin copiar criptografía.
 // El nombre de un espacio vive cifrado en su registro de alta; se lee con la sonda de Hebra.

@@ -1,6 +1,6 @@
 /**
- * `annotations` MCP de las 41 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026): cada una
+ * `annotations` MCP de las 46 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026; D23 del 5 nov 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -38,7 +38,11 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_list_organizations: READ,
   hebra_read_note: READ,
   hebra_note_outline: READ,
+  // D23: quién escribió una nota.
+  hebra_note_authors: READ,
   hebra_list_tags: READ,
+  hebra_list_properties: READ,
+  hebra_query_properties: READ,
   hebra_list_folders: READ,
   hebra_links: READ,
   hebra_status: READ,
@@ -50,6 +54,8 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_read_attachment: READ,
   hebra_move_note: WRITE_IDEMPOTENT,
   hebra_set_favorite: WRITE_IDEMPOTENT,
+  hebra_set_hidden: WRITE_IDEMPOTENT,
+  hebra_clear_conflict: WRITE_IDEMPOTENT,
   hebra_set_archived: WRITE_IDEMPOTENT,
   hebra_trash_note: WRITE_IDEMPOTENT,
   hebra_restore_note: WRITE_IDEMPOTENT,

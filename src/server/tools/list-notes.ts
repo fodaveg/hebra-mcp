@@ -17,6 +17,14 @@
  * filtro de privados no cambia por esto: sigue mirando nota a nota
  * (`ctx.privacy.visibleMeta`), así que una subcarpeta privada dentro de un ámbito
  * público sigue sin salir. Ausente o `false`: solo las notas directas, como siempre.
+ *
+ * Estado (D23, 5 nov 2026): cada nota lleva `favorite`, `archivedAt` y `generalHidden`
+ * (`./note-state.ts`). Los ámbitos `all`, `folder` y `tag` del motor NO listan las
+ * archivadas (`archived_at IS NULL`) y SÍ las ocultas del listado general (el motor solo las
+ * quita con `excludeHidden`, que aquí no se pide): salen con `generalHidden: true`.
+ * `archived: true` cambia al ámbito `{kind: 'archive'}`, de la última archivada a la
+ * primera; el motor no lo combina con carpeta ni etiqueta, así que con `folder` o `tag` es
+ * `invalid_input` (y `subfolders` no tiene efecto sin `folder`).
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
@@ -29,7 +37,10 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
+import type { NoteStateRow } from '../../store/state-reads';
+import { ToolError } from '../errors';
 import type { LIST_NOTES_FIELDS } from '../schemas';
+import { fieldsNeedNoteState, loadNoteStates, stateFields } from './note-state';
 
 export interface ListedNote {
   id: string;
@@ -39,6 +50,9 @@ export interface ListedNote {
   excerpt: string;
   updatedAt: string;
   isConflictCopy: boolean;
+  favorite: boolean;
+  archivedAt: string | null;
+  generalHidden: boolean;
 }
 
 type ListNotesField = (typeof LIST_NOTES_FIELDS)[number];
@@ -47,6 +61,7 @@ interface ListNotesInputBase {
   folder?: string;
   subfolders?: boolean;
   tag?: string;
+  archived?: boolean;
   cursor?: string;
   limit?: number;
 }
@@ -76,6 +91,10 @@ export async function runListNotes(
         ? unwrapCursor('n1', input.cursor)
         : input.cursor;
   const empty = { notes: [], nextCursor: null };
+  // El ámbito `archive` del motor no admite carpeta ni etiqueta.
+  if (input.archived === true && (input.folder !== undefined || input.tag !== undefined)) {
+    throw new ToolError('invalid_input');
+  }
 
   let tagFilter: string | undefined;
   if (input.tag !== undefined) {
@@ -92,7 +111,9 @@ export async function runListNotes(
   }
 
   const scope: NotesScope =
-    folderId !== undefined
+    input.archived === true
+      ? { kind: 'archive' }
+      : folderId !== undefined
       ? input.subfolders
         ? { kind: 'folder', folderId, subfolders: true }
         : { kind: 'folder', folderId }
@@ -101,6 +122,11 @@ export async function runListNotes(
         : { kind: 'all' };
   // Ámbito ya consumido por `scope`: el otro filtro, si lo hay, se aplica en JS.
   const extraTagFilter = scope.kind === 'folder' ? tagFilter : undefined;
+  // D23: el estado (`noteSummary`) de las notas de cada página del almacén; el cursor del
+  // ámbito `archive` lo necesita siempre (su clave es la fecha de archivo).
+  const archive = scope.kind === 'archive';
+  const needsState = archive || fieldsNeedNoteState(input.fields);
+  const states = new Map<string, NoteStateRow>();
 
   // Cada fila que sale, con su carpeta, para la puerta final (`../privacy-gate.ts`): antes de
   // responder la vuelve a juzgar con el filtro de ahora y el sello de la fila con la que se
@@ -110,10 +136,22 @@ export async function runListNotes(
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor, want) => ctx.port.notesPage(cursor, storePageSize(want), scope),
+    fetch: async (cursor, want) => {
+      const stored = await ctx.port.notesPage(cursor, storePageSize(want), scope);
+      if (needsState) {
+        const visible = stored.items.filter((item) => ctx.privacy.visibleMeta(item.id));
+        for (const [id, row] of await loadNoteStates(ctx.port, visible.map((item) => item.id))) {
+          states.set(id, row);
+        }
+      }
+      return stored;
+    },
     accept: (item) => {
       const meta = ctx.privacy.visibleMeta(item.id);
       if (!meta) return undefined;
+      const state = states.get(item.id);
+      // Purgada entre la página y su estado, o (en `archive`) desarchivada entre medias.
+      if (needsState && (!state || (archive && state.archivedAt === null))) return undefined;
       if (extraTagFilter !== undefined && !ctx.privacy.hasTag(item.id, extraTagFilter)) {
         return undefined;
       }
@@ -128,13 +166,19 @@ export async function runListNotes(
         tags: meta.tags,
         excerpt: item.excerpt,
         updatedAt: new Date(item.updatedAt).toISOString(),
-        isConflictCopy: item.conflict
+        isConflictCopy: item.conflict,
+        favorite: item.favorite,
+        archivedAt: state ? stateFields(state).archivedAt : null,
+        generalHidden: state?.generalHidden ?? false
       };
       return pickFields(note, input.fields);
     },
-    // La banda es «anclada aquí» (`pinned`, §26.3), no `favorite`: una nota anclada solo en otro
+    // La banda es "anclada aquí" (`pinned`, §26.3), no `favorite`: una nota anclada solo en otro
     // sitio no sube en esta lista y su cursor llevaría una banda que el motor no usa.
-    cursorAfter: (item) => encodeCursor([item.pinned === true ? 1 : 0, item.updatedAt], item.id)
+    cursorAfter: (item) =>
+      archive
+        ? encodeCursor([states.get(item.id)!.archivedAt!], item.id)
+        : encodeCursor([item.pinned === true ? 1 : 0, item.updatedAt], item.id)
   });
   return {
     notes: page.items,

@@ -40,10 +40,10 @@ import {
 } from '../../src/server/forward';
 import { localWriteContext } from '../../src/server/serve';
 import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
-import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
+import { isBusyOtherInstance, StoreError, writeRejected } from '../../src/store/errors';
 import { mapWriteError } from '../../src/server/tools/write-errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
-import { FILE_TEXT_REPLACE_MAX_BYTES } from '../../src/store/file-content';
+import { FILE_TEXT_REPLACE_MAX_BYTES, RELINKED_NOTES_MAX } from '../../src/store/file-content';
 import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import {
@@ -1775,6 +1775,134 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     expect(written).toBe(0);
     expect(instance.checkWriter).not.toHaveBeenCalled();
     expect(stderrText()).not.toContain('"n1"');
+  });
+
+  it('D23: un escritor anterior no renombra sin arreglar las notas ni ignora expectedRevision: writer_outdated, sin escribir', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const ops: string[] = [];
+    const old = createServer((socket) => {
+      socket.once('data', (chunk) => {
+        ops.push((JSON.parse(String(chunk)) as { op: string }).op);
+        socket.end(`${JSON.stringify({ id: null, ok: false, error: 'invalid_request' })}\n`);
+      });
+    });
+    servers.push(old);
+    await new Promise<void>((resolve) => old.listen(path, resolve));
+    let written = 0;
+    const count = async (): Promise<never> => {
+      written += 1;
+      throw new Error('no debería escribir aquí');
+    };
+    const instance = fakeInstance(path, 'other_instance');
+    const write = buildRoutedWriteContext(instance, localSpy({ looseFileWrite: count, noteState: count }));
+    const outdated = { code: 'writer_outdated' };
+    await expect(
+      write.looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-old', privacy: OPEN })
+    ).rejects.toMatchObject(outdated);
+    await expect(
+      write.noteState!({ action: 'moveNote', id: 'n1', folderId: 'root', expectedRevision: 'r1.x', privacy: OPEN })
+    ).rejects.toMatchObject(outdated);
+    await expect(
+      write.noteState!({ action: 'setHidden', id: 'n1', hidden: true, privacy: OPEN })
+    ).rejects.toMatchObject(outdated);
+    expect(ops).toEqual(['renameFileRelinking', 'noteState', 'noteState']);
+    expect(written).toBe(0);
+    expect(instance.checkWriter).not.toHaveBeenCalled();
+  });
+
+  it('D23: las ops del socket validan su entrada, exigen privacidad y dan lo mismo por el lector', async () => {
+    const dataDir = tempDataDir();
+    const path = join(dataDir, WRITER_SOCKET_FILE);
+    const privacy = OPEN;
+    const saved = {
+      folderId: 'root',
+      favorite: false,
+      archived: false,
+      trashed: false,
+      hidden: true,
+      isConflictCopy: false,
+      changed: true
+    };
+    const seen: unknown[] = [];
+    let relinkedFromWriter: unknown = ['n1', 'n2'];
+    const server = await WriterSocketServer.listen({
+      path,
+      handlers: {
+        ...writerSocketHandlers(localSpy(), fakeInstance(path, 'this')),
+        noteState: async (input) => {
+          seen.push(input);
+          return { id: input.id, ...saved, sync: 'not_linked' };
+        },
+        looseFileWrite: async (input) => {
+          if (input.action === 'renameFile' && input.name === 'muchas.base') throw writeRejected('too_many_linked_notes');
+          seen.push(input.action);
+          return {
+            id: 'action' in input && input.action === 'renameFile' ? input.id : 'x',
+            name: 'x.base',
+            folderId: 'root',
+            sha256: 'a'.repeat(64),
+            byteLength: null,
+            mimeType: null,
+            outcome: 'saved',
+            relinkedNotes: relinkedFromWriter as string[],
+            sync: 'not_linked'
+          };
+        }
+      }
+    });
+    servers.push(server);
+    const invalid = { code: 'invalid_request' };
+    for (const params of [
+      // Sin privacidad, sin revisión, una de más, o una acción que no existe.
+      { action: 'setHidden', id: 'n1', hidden: true },
+      { action: 'setHidden', id: 'n1', hidden: 'si', privacy },
+      { action: 'moveNote', id: 'n1', folderId: 'root', privacy },
+      { action: 'trashNote', id: 'n1', privacy },
+      { action: 'restoreNote', id: 'n1', expectedRevision: 'x'.repeat(2_000), privacy },
+      { action: 'purgeNote', id: 'n1', privacy },
+      { action: 'setFavorite', id: 'n1', favorite: true, privacy },
+      { action: 'clearConflict', privacy }
+    ]) {
+      await expect(requestWriter(path, 'noteState', params, 2_000), JSON.stringify(params)).rejects.toMatchObject(invalid);
+    }
+    // `renameFileRelinking` solo renombra: ni crear, ni mover, ni duplicar por ella.
+    await expect(
+      requestWriter(path, 'renameFileRelinking', { action: 'moveFile', id: 'f1', folderId: 'root', operationId: 'op', privacy }, 2_000)
+    ).rejects.toMatchObject(invalid);
+    // `organize` sigue sin saber de ellas: un `expectedRevision` allí se ignoraba, por eso no van.
+    await expect(
+      requestWriter(path, 'organize', { action: 'setHidden', id: 'n1', hidden: true, privacy }, 2_000)
+    ).rejects.toMatchObject(invalid);
+    expect(seen).toEqual([]);
+
+    const never = async (): Promise<never> => {
+      throw new Error('el lector no escribe aquí: lo hace el escritor');
+    };
+    const write = buildRoutedWriteContext(
+      fakeInstance(path, 'other_instance'),
+      localSpy({ looseFileWrite: never, noteState: never })
+    );
+    expect(
+      await write.noteState!({ action: 'moveNote', id: 'n1', folderId: 'root', expectedRevision: 'r1.x', privacy })
+    ).toMatchObject({ id: 'n1', hidden: true, changed: true });
+    expect(seen[0]).toMatchObject({ action: 'moveNote', expectedRevision: 'r1.x', privacy });
+    const renamed = await write.looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-r', privacy });
+    expect(renamed).toMatchObject({ id: 'f1', relinkedNotes: ['n1', 'n2'] });
+    expect(stderrText()).toContain('"op":"renameFileRelinking","outcome":"forwarded"');
+    // El rechazo por el tope cruza el socket con su código, sin parecer un escritor anterior.
+    const tooMany = await write
+      .looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'muchas.base', operationId: 'op-tope', privacy })
+      .catch((error: unknown) => error);
+    expect(mapWriteError(tooMany).code).toBe('too_many_linked_notes');
+    // Los ids del escritor se validan y se acotan: otra forma o de más, `writer_protocol`.
+    for (const bad of ['n1', [1], [''], ['x'.repeat(201)], Array.from({ length: RELINKED_NOTES_MAX + 1 }, () => 'n')]) {
+      relinkedFromWriter = bad;
+      const rejected = await write
+        .looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-mala', privacy })
+        .catch((error: unknown) => error);
+      expect(rejected, JSON.stringify(bad).slice(0, 40)).toMatchObject({ message: 'writer_protocol' });
+    }
   });
 
   it('adjunto sin heading sigue por addAttachment; con heading, por addAttachmentInSection', async () => {

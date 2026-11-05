@@ -15,11 +15,13 @@ import type {
   FoldersList,
   LibraryOpenInfo,
   LinkResolution,
+  NoteAuthors,
   NoteRow,
   NoteSaveInput,
   NoteSaveResult,
   NotesPage,
   NotesScope,
+  PropsQueryFilters,
   SearchFilters,
   SearchPage,
   SqliteLibraryEngine,
@@ -27,7 +29,9 @@ import type {
   TitleCandidates
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
+import type { NotePropValues, NoteValuesRequest, PropCountsPage, PropCountsRequest, PropsMatch } from './props-sql';
 import type { PrivacyConfig } from '../privacy/config';
+import type { FolderTrashEntry, NoteStateRow } from './state-reads';
 
 /** `NoteVersionsList`/`NoteVersion` de Hebra (`library/types.ts`): `node.ts` no los
  *  reexporta, así que salen de la firma del motor en vez de importarlos por `$lib`. */
@@ -253,6 +257,25 @@ export interface HebraLibraryPort {
   /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
    *  de `notesByTitlePrefix`). */
   notesByExactTitle(title: string): Promise<TitleCandidates>;
+  /** Una página de claves o valores con su recuento sobre `noteIds`, agrupada en SQLite
+   *  (`hebra_list_properties`). Lo oculto queda fuera porque no está en `noteIds`. */
+  propCounts(request: PropCountsRequest): Promise<PropCountsPage>;
+  /** Las notas que cumplen los filtros (`hebra_query_properties`), una bloqueada como una nota
+   *  sin propiedades. Sin orden ni filtro de privados: los pone la herramienta. */
+  propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]>;
+  /** Cada valor no vacío de una clave, de uno en uno y sin guardarlos, en un turno de la cola.
+   *  `visit` no puede esperar a nada. Sin filtro de privados: lo aplica `visit`. */
+  visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void>;
+  /** Los valores de esas claves en esas notas, nota a nota hasta `maxChars` contando cada nota
+   *  entera: una que no cabe y las de detrás no salen, salvo la primera. Quien llama pasa solo
+   *  notas visibles. */
+  propValuesOfNotes(notes: readonly NoteValuesRequest[], keys: readonly string[], maxChars: number): Promise<NotePropValues>;
+  /** Ids de las notas vivas con ese título entero, sin mayúsculas ni acentos, como los destinos
+   *  de `SearchFilters.linksTo`. Sin filtro de privados: lo aplica quien llama. */
+  notesByFoldedTitle(title: string): Promise<string[]>;
+  /** Las notas que enlazan a alguna de esas, con la regla de `backlinks`, en una consulta. Sin
+   *  filtro de privados: lo aplica quien llama. */
+  linkSources(noteIds: readonly string[]): Promise<string[]>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
    *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
    *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota
@@ -336,6 +359,15 @@ export interface HebraLibraryPort {
     privacy: PrivacyConfig,
     session: GrepBodiesSession | null
   ): Promise<GrepBodiesResult>;
+  /** D23: favorita, archivada y oculta del listado general de `ids` (`noteSummary` del
+   *  motor); una nota purgada o inexistente falta. Sin filtro: lo aplica la herramienta. */
+  noteStates(ids: readonly string[]): Promise<NoteStateRow[]>;
+  /** D23: las carpetas de la papelera (`foldersTrashList`), la última en entrar primero.
+   *  Sin filtro: lo aplica la herramienta con `TrashFilter`. */
+  foldersTrash(): Promise<FolderTrashEntry[]>;
+  /** D23: las columnas de autor de una nota (`noteAuthors`); `null` y `null` en la
+   *  biblioteca personal. Sin filtro: lo aplica la herramienta. */
+  noteAuthors(id: string): Promise<NoteAuthors>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }
