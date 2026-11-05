@@ -3,17 +3,23 @@
  * recuento de notas: `{keys:[{key,count}],nextCursor}`. Con `key`, los valores de esa clave con su
  * recuento: `{values:[{value,count}],nextCursor}`.
  *
- * El patrón de `hebra_list_tags`: los recuentos se calculan aquí, solo sobre notas VISIBLES, a
- * partir de las filas de `note_props` (`src/store/props-sql.ts` explica por qué no sirven los
- * recuentos del motor). Una clave o un valor que solo tienen notas ocultas se queda en 0 y no sale,
- * sin más filtro. Una clave definida sin valor (`clave:`) cuenta para la clave y no da ningún
- * valor. El tipo de la clave no sale: el del motor se calcula con las ocultas.
+ * El patrón de `hebra_list_tags`, con los recuentos solo sobre notas VISIBLES, pero agrupados en
+ * SQLite: el frontmatter no tiene tope de claves y traer todas las filas a JS agotaba la memoria
+ * (`src/store/props-sql.ts` explica también por qué no sirven los recuentos del motor). Las notas
+ * que cuentan entran en la consulta como una lista: una clave o un valor que solo tienen notas
+ * ocultas no llega a formar grupo. Una clave definida sin valor (`clave:`) cuenta para la clave y
+ * no da ningún valor. El tipo de la clave no sale: el del motor se calcula con las ocultas.
  *
  * Orden binario (estable, sin depender de los recuentos). El cursor es la posición en esa lista ya
- * filtrada: no lleva ningún valor, que puede ser más largo que el tope de un cursor.
+ * filtrada: no lleva ningún valor, que puede ser más largo que el tope de un cursor. La página se
+ * corta antes de `PROPERTIES_RESPONSE_MAX_CHARS`, con `nextCursor`, y siempre lleva un elemento.
  */
+import { PROPERTIES_RESPONSE_MAX_CHARS } from '../../store/props-limits';
 import { usageOf, type ToolContext } from '../context';
-import { LIMITS, effectiveLimit, slicePage } from '../pagination';
+import { ToolError } from '../errors';
+import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
+
+export { PROPERTIES_RESPONSE_MAX_CHARS };
 
 export interface PropertyKeyCount {
   key: string;
@@ -25,8 +31,12 @@ export interface PropertyValueCount {
   count: number;
 }
 
-function byBytes(left: string, right: string): number {
-  return Buffer.compare(Buffer.from(left), Buffer.from(right));
+/** La posición de un cursor de esta lista. Ilegible o de la otra lista, `invalid_input`. */
+function positionOf(kind: 'pk1' | 'pv1', cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const position = Number(unwrapCursor(kind, cursor));
+  if (!Number.isSafeInteger(position) || position < 0) throw new ToolError('invalid_input');
+  return position;
 }
 
 export async function runListProperties(
@@ -36,36 +46,22 @@ export async function runListProperties(
   const limit = effectiveLimit(input.limit, LIMITS.listProperties);
   // Las claves se guardan en minúsculas, como pasa `hebra_search` con `props`.
   const key = input.key?.toLowerCase();
-  const rows = await ctx.port.propRows(key === undefined ? undefined : [key]);
+  const kind = key === undefined ? 'pk1' : 'pv1';
+  const offset = positionOf(kind, input.cursor);
   const visible = ctx.privacy.visibleNotes();
   // Los recuentos salen de todas las visibles: la puerta final las vuelve a juzgar, y si una ya
   // no se ve (la única de un valor), repite la llamada. Como `hebra_list_tags`.
   usageOf(ctx).visibleNotes(visible.keys());
-
+  const page = await ctx.port.propCounts({
+    ...(key === undefined ? {} : { key }),
+    noteIds: [...visible.keys()].filter((id) => !ctx.privacy.isLockedNote(id)),
+    offset,
+    limit,
+    maxChars: PROPERTIES_RESPONSE_MAX_CHARS
+  });
+  const nextCursor = page.more ? wrapCursor(kind, String(offset + page.items.length)) : null;
   if (key === undefined) {
-    const notesByKey = new Map<string, Set<string>>();
-    for (const row of rows) {
-      if (!visible.has(row.noteId)) continue;
-      let notes = notesByKey.get(row.key);
-      if (!notes) notesByKey.set(row.key, (notes = new Set()));
-      notes.add(row.noteId);
-    }
-    const keys = [...notesByKey]
-      .map(([name, notes]) => ({ key: name, count: notes.size }))
-      .sort((left, right) => byBytes(left.key, right.key));
-    const page = slicePage(keys, 'pk1', { limit, cursor: input.cursor });
-    return { keys: page.items, nextCursor: page.nextCursor };
+    return { keys: page.items.map(({ name, count }) => ({ key: name, count })), nextCursor };
   }
-
-  // `note_props` no repite un par (nota, clave, valor): cada fila es una nota más.
-  const counts = new Map<string, number>();
-  for (const row of rows) {
-    if (row.value === '' || !visible.has(row.noteId)) continue;
-    counts.set(row.value, (counts.get(row.value) ?? 0) + 1);
-  }
-  const values = [...counts]
-    .map(([value, count]) => ({ value, count }))
-    .sort((left, right) => byBytes(left.value, right.value));
-  const page = slicePage(values, 'pv1', { limit, cursor: input.cursor });
-  return { values: page.items, nextCursor: page.nextCursor };
+  return { values: page.items.map(({ name, count }) => ({ value: name, count })), nextCursor };
 }

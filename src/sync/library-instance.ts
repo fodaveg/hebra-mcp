@@ -904,9 +904,12 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       current().notesByTitlePrefix(prefix, limit),
     notesByExactTitle: (title: string): Promise<TitleCandidates> =>
       current().notesByExactTitle(title),
-    propRows: (keys) => current().propRows(keys),
-    propsScan: (filters, keys) => current().propsScan(filters, keys),
+    propCounts: (request) => current().propCounts(request),
+    propsMatches: (filters) => current().propsMatches(filters),
+    visitPropValues: (key, visit) => current().visitPropValues(key, visit),
+    propValuesOfNotes: (noteIds, keys, maxChars) => current().propValuesOfNotes(noteIds, keys, maxChars),
     notesByFoldedTitle: (title) => current().notesByFoldedTitle(title),
+    linkSources: (noteIds) => current().linkSources(noteIds),
     notesVisibilityIndex: (): Promise<NoteVisibilityEntry[]> => current().notesVisibilityIndex(),
     privacyRecheck: (request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> =>
       current().privacyRecheck(request),

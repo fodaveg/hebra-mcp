@@ -251,10 +251,10 @@ describe('una nota que pasa a oculta durante la llamada', () => {
   it('hebra_list_properties repite la llamada y no la cuenta', async () => {
     const h = await auditHarness(async (engine) => (await createNote(engine, null, publicNote())).id);
     try {
-      const read = h.port.propRows.bind(h.port);
-      const spy = vi.spyOn(h.port, 'propRows').mockImplementationOnce(async (keys) => {
+      const read = h.port.propCounts.bind(h.port);
+      const spy = vi.spyOn(h.port, 'propCounts').mockImplementationOnce(async (request) => {
         await h.mutate(async (engine) => saveBody(engine, h.extra, privateNote()));
-        return read(keys);
+        return read(request);
       });
       const raced = await h.call('hebra_list_properties');
       spy.mockRestore();
@@ -268,11 +268,11 @@ describe('una nota que pasa a oculta durante la llamada', () => {
   it('hebra_query_properties no la devuelve', async () => {
     const h = await auditHarness(async (engine) => (await createNote(engine, null, publicNote())).id);
     try {
-      const read = h.port.propsScan.bind(h.port);
-      const spy = vi.spyOn(h.port, 'propsScan').mockImplementationOnce(async (filters, keys) => {
-        const scan = await read(filters, keys);
+      const read = h.port.propsMatches.bind(h.port);
+      const spy = vi.spyOn(h.port, 'propsMatches').mockImplementationOnce(async (filters) => {
+        const matches = await read(filters);
         await h.mutate(async (engine) => saveBody(engine, h.extra, privateNote()));
-        return scan;
+        return matches;
       });
       const raced = await h.call('hebra_query_properties', { filters: [{ key: KEY, op: 'exists' }] });
       spy.mockRestore();

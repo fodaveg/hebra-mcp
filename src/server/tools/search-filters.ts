@@ -4,20 +4,22 @@
  * oculto lo quita `accept` como siempre. `linksTo` necesita más, porque el motor resuelve el título
  * contra TODAS las notas vivas:
  * - Un enlace `[[Título]]` de una nota visible casa aunque esa nota con ese título sea oculta: con
- *   el motor solo, «¿hay alguna nota con este título?» se contesta distinto si hay una oculta.
+ *   el motor solo, si hay alguna nota con este título se contesta distinto con una oculta.
  * - Una homónima oculta de una visible cambia el resultado: `[[id:…]]` hacia la oculta casa, y
  *   la visible que se enlaza a sí misma por título también (solo se descuenta el enlace a sí
  *   misma respecto de CADA destino, y la oculta es otro destino).
  *
  * Por eso los destinos se resuelven aquí, solo entre las visibles, y lo que vale es lo que los
- * enlaza según `backlinks` del motor (la misma regla: por id o por título, sin la propia nota),
- * nota a nota. El filtro del motor se sigue pasando como prefiltro para no recorrer todos los
+ * enlaza con la regla de `backlinks` del motor (por id o por título, sin la propia nota), en una
+ * sola consulta. El filtro del motor se sigue pasando como prefiltro para no recorrer todos los
  * aciertos del texto. Sin destino visible, lista vacía, igual con una privada que con una que no
  * existe y sin consultar nada más.
+ *
+ * Filtros repetidos: el mismo par de clave y valor (con el plegado del motor) o el mismo título no
+ * cambian el resultado y sí multiplicarían las subconsultas, así que se pasan una vez.
  */
-import type { SearchFilters } from '../../hebra';
+import { foldFileName, type SearchFilters } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
-import { STORE_PAGE_MAX } from '../pagination';
 
 export interface SearchExtraInput {
   props?: ReadonlyArray<{ key: string; value: string | null }>;
@@ -37,18 +39,29 @@ async function sourcesOfTitle(ctx: ToolContext, title: string): Promise<Set<stri
     (id) => ctx.privacy.visibleMeta(id) !== undefined
   );
   if (targets.length === 0) return null;
-  const sources = new Set<string>();
-  for (const target of targets) {
-    // Decide el resultado por estar visible, sin enseñar nada de su fila.
-    usageOf(ctx).noteVisible(target);
-    let cursor: string | null = null;
-    do {
-      const page: Awaited<ReturnType<typeof ctx.port.backlinks>> = await ctx.port.backlinks(target, cursor, STORE_PAGE_MAX);
-      for (const item of page.items) sources.add(item.id);
-      cursor = page.nextCursor;
-    } while (cursor);
+  // Deciden el resultado por estar visibles, sin enseñar nada de su fila.
+  for (const target of targets) usageOf(ctx).noteVisible(target);
+  return new Set(await ctx.port.linkSources(targets));
+}
+
+/** Los pares distintos, sin distinguir lo que el motor no distingue. */
+function distinctProps(props: NonNullable<SearchExtraInput['props']>): Array<{ key: string; value: string | null }> {
+  const seen = new Map<string, { key: string; value: string | null }>();
+  for (const prop of props) {
+    const id = JSON.stringify([prop.key.toLowerCase(), prop.value === null ? null : foldFileName(prop.value)]);
+    if (!seen.has(id)) seen.set(id, { ...prop });
   }
-  return sources;
+  return [...seen.values()];
+}
+
+/** Los títulos distintos, con el mismo plegado. */
+function distinctTitles(titles: readonly string[]): string[] {
+  const seen = new Map<string, string>();
+  for (const title of titles) {
+    const id = foldFileName(title);
+    if (!seen.has(id)) seen.set(id, title);
+  }
+  return [...seen.values()];
 }
 
 /** Los filtros para el motor; `null` si `linksTo` deja la búsqueda vacía. Sin ninguno de estos
@@ -57,15 +70,16 @@ export async function resolveSearchExtra(
   ctx: ToolContext,
   input: SearchExtraInput
 ): Promise<SearchExtra | null> {
+  const titles = input.linksTo?.length ? distinctTitles(input.linksTo) : [];
   const filters: SearchExtra['filters'] = {
-    ...(input.props?.length ? { props: input.props.map((prop) => ({ ...prop })) } : {}),
-    ...(input.linksTo?.length ? { linksTo: [...input.linksTo] } : {}),
+    ...(input.props?.length ? { props: distinctProps(input.props) } : {}),
+    ...(titles.length > 0 ? { linksTo: titles } : {}),
     ...(input.titleOnly ? { titleOnly: true } : {})
   };
-  if (!input.linksTo?.length) return { filters, linkSources: null };
+  if (titles.length === 0) return { filters, linkSources: null };
   // Varios títulos se combinan con Y, como en el motor.
   const perTitle: Array<Set<string>> = [];
-  for (const title of input.linksTo) {
+  for (const title of titles) {
     const sources = await sourcesOfTitle(ctx, title);
     if (!sources) return null;
     perTitle.push(sources);

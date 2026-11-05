@@ -49,6 +49,7 @@ import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes'
 import { JD_MOVE_UNDO_RETENTION_MS, JD_PLAN_APPLY_TTL_MS, JD_STORED_PLANS_MAX } from '../store/jd-plans';
 import { LIMITS } from './pagination';
 import { LINKS_TO_MAX, PROPS_FILTERS_MAX } from './schemas';
+import { PROPERTIES_RESPONSE_MAX_CHARS } from '../store/props-limits';
 import { ATTACHMENT_MAX_BYTES, ATTACHMENT_TEXT_MAX_CHARS } from './tools/attachments';
 import { GREP_RESPONSE_MAX_CHARS, GREP_TIME_BUDGET_MS } from './tools/grep';
 
@@ -129,9 +130,9 @@ export interface Capabilities {
     links: { max: number };
     listTags: { max: number };
     /** Propiedades del frontmatter (D23): por página, filtros de propiedad y claves pedidas por
-     *  llamada, y títulos de `linksTo` en `hebra_search`. */
-    listProperties: { default: number; max: number };
-    queryProperties: { default: number; max: number; filters: number; properties: number };
+     *  llamada, tamaño de una página y títulos de `linksTo` en `hebra_search`. */
+    listProperties: { default: number; max: number; responseChars: number };
+    queryProperties: { default: number; max: number; filters: number; properties: number; responseChars: number };
     searchFilters: { props: number; linksTo: number };
     listFolders: { max: number };
     listTrash: { default: number; max: number };
@@ -221,12 +222,17 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
       listNotes: { default: LIMITS.listNotes.default, max: LIMITS.listNotes.max },
       links: { max: LIMITS.links.max },
       listTags: { max: LIMITS.listTags.max },
-      listProperties: { default: LIMITS.listProperties.default, max: LIMITS.listProperties.max },
+      listProperties: {
+        default: LIMITS.listProperties.default,
+        max: LIMITS.listProperties.max,
+        responseChars: PROPERTIES_RESPONSE_MAX_CHARS
+      },
       queryProperties: {
         default: LIMITS.queryProperties.default,
         max: LIMITS.queryProperties.max,
         filters: PROPS_FILTERS_MAX,
-        properties: PROPS_FILTERS_MAX
+        properties: PROPS_FILTERS_MAX,
+        responseChars: PROPERTIES_RESPONSE_MAX_CHARS
       },
       searchFilters: { props: PROPS_FILTERS_MAX, linksTo: LINKS_TO_MAX },
       listFolders: { max: LIMITS.listFolders.max },

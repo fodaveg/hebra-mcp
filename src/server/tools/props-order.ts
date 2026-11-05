@@ -19,11 +19,19 @@
  * texto se corta a `SORT_TEXT_MAX_CHARS` puntos de código, también al comparar, para que el cursor
  * quepa en su tope con cualquier valor: dos valores con esos mismos primeros caracteres ordenan
  * por id. Como `hebra_list_files` con los nombres.
+ *
+ * El cursor recuerda el modo con el que se ordenó (número o texto). Si entre dos páginas un valor
+ * visible cambia el modo de la clave, el orden ya es otro y seguir perdería filas: `invalid_input`
+ * (`assertCursorMode`). El modo sale solo de lo visible, así que nada oculto puede provocarlo.
+ *
+ * Los valores llegan de uno en uno (`SortKeysCollector`) y por cada nota solo se guarda el mejor
+ * de cada modo: una nota con miles de valores en la clave no ocupa más que una con uno.
  */
+import { SORT_TEXT_SQL_CHARS } from '../../store/props-limits';
 import { ToolError } from '../errors';
 
 /** Puntos de código de un valor o un título que entran en la clave de orden y en el cursor. */
-export const SORT_TEXT_MAX_CHARS = 128;
+export const SORT_TEXT_MAX_CHARS = SORT_TEXT_SQL_CHARS;
 
 export interface PropsSort {
   /** Ya en minúsculas, como las guarda `note_props`. `null`: por título. */
@@ -46,7 +54,8 @@ export interface SortKey {
 
 function clip(text: string): string {
   if (text.length <= SORT_TEXT_MAX_CHARS) return text;
-  return Array.from(text).slice(0, SORT_TEXT_MAX_CHARS).join('');
+  // Un punto de código ocupa como mucho dos unidades: no hace falta partir el valor entero.
+  return Array.from(text.slice(0, SORT_TEXT_MAX_CHARS * 2)).slice(0, SORT_TEXT_MAX_CHARS).join('');
 }
 
 function makeKey(phase: Phase, number: number | null, text: string, id: string): SortKey {
@@ -58,24 +67,29 @@ function makeKey(phase: Phase, number: number | null, text: string, id: string):
 
 /** ¿Cuenta como valor? `null` y `~` de YAML llegan como texto, y `''` es una clave sin valor. */
 export function isPresentValue(value: string): boolean {
+  if (value.length > 4) return true;
   const lowered = value.toLowerCase();
   return lowered !== '' && lowered !== 'null' && lowered !== '~';
 }
 
-/** El valor sin las comillas de los extremos que Obsidian añade a un número (`'31.11'`). */
-function unquoted(value: string): string {
-  return value.replace(/^['"]+|['"]+$/g, '');
+/** El valor sin las comillas del principio que Obsidian añade a un número (`'31.11'`): para el
+ *  prefijo numérico no importan las del final. Un bucle y no una expresión regular: un valor
+ *  largo lleno de comillas no puede dejar el hilo parado. */
+function withoutLeadingQuotes(value: string): string {
+  let start = 0;
+  while (start < value.length && (value[start] === "'" || value[start] === '"')) start += 1;
+  return value.slice(start);
 }
 
 /** ¿Empieza por un número, sin ser una fecha ISO (que como número sería solo su año)? */
 function hasNumericPrefix(value: string): boolean {
-  const text = unquoted(value);
+  const text = withoutLeadingQuotes(value);
   return /^[+-]?[0-9]/.test(text) && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}/.test(text);
 }
 
 /** El número del principio del valor; acotado, porque el cursor es JSON y no lleva infinitos. */
 function numericPrefix(value: string): number {
-  const number = Number.parseFloat(unquoted(value));
+  const number = Number.parseFloat(withoutLeadingQuotes(value));
   return Math.min(Math.max(number, -Number.MAX_VALUE), Number.MAX_VALUE);
 }
 
@@ -98,38 +112,74 @@ export function compareSortKeys(sort: PropsSort, left: SortKey, right: SortKey):
   return sign * result;
 }
 
+/** El mejor valor de una nota en cada modo: el modo no se sabe hasta ver todos los de la clave. */
+interface NoteBest {
+  text: SortKey;
+  number: number | null;
+  numberText: string;
+}
+
 /**
- * Cómo se saca la clave de orden de cada nota. `visibleValues`: los valores, por nota, de la
- * clave de orden en TODAS las notas visibles (no solo las que cumplen los filtros: el modo no
- * depende del filtro, como en el motor), y solo en ellas.
+ * Recoge los valores de la clave de orden en TODAS las notas visibles (no solo las que cumplen los
+ * filtros: el modo no depende del filtro, como en el motor), y solo en ellas. `wanted`: las notas
+ * de las que hace falta su clave de orden.
  */
-export function buildSortKeys(
-  sort: PropsSort,
-  visibleValues: ReadonlyMap<string, readonly string[]>
-): (note: { id: string; titleNorm: string }) => SortKey {
-  if (sort.key === null) return (note) => makeKey('t', null, note.titleNorm, note.id);
-  const present = new Map<string, string[]>();
-  let numeric = true;
-  for (const [noteId, values] of visibleValues) {
-    const usable = values.filter(isPresentValue);
-    if (usable.length === 0) continue;
-    present.set(noteId, usable);
-    numeric &&= usable.every(hasNumericPrefix);
+export class SortKeysCollector {
+  private readonly best = new Map<string, NoteBest>();
+  private numeric = true;
+  private anyValue = false;
+
+  constructor(
+    private readonly sort: PropsSort,
+    private readonly wanted: ReadonlySet<string>
+  ) {}
+
+  add(noteId: string, value: string): void {
+    if (!isPresentValue(value)) return;
+    this.anyValue = true;
+    const prefixed = hasNumericPrefix(value);
+    this.numeric &&= prefixed;
+    if (!this.wanted.has(noteId)) return;
+    const descending = this.sort.direction === 'descending';
+    const text = makeKey('v', null, value, noteId);
+    const number = prefixed ? numericPrefix(value) : null;
+    const current = this.best.get(noteId);
+    if (!current) {
+      this.best.set(noteId, { text, number, numberText: value });
+      return;
+    }
+    const byText = Buffer.compare(text.bytes, current.text.bytes);
+    if (descending ? byText > 0 : byText < 0) current.text = text;
+    if (number !== null && (current.number === null || (descending ? number > current.number : number < current.number))) {
+      current.number = number;
+      current.numberText = clip(value);
+    }
   }
-  const descending = sort.direction === 'descending';
-  return (note) => {
-    const values = present.get(note.id);
-    if (!values) return makeKey('m', null, note.titleNorm, note.id);
-    const keys = values.map((value) =>
-      makeKey('v', numeric ? numericPrefix(value) : null, value, note.id)
-    );
-    return keys.reduce((best, key) => {
-      const order = key.number !== null && best.number !== null
-        ? key.number - best.number
-        : Buffer.compare(key.bytes, best.bytes);
-      return (descending ? order > 0 : order < 0) ? key : best;
-    });
-  };
+
+  /** `number` o `text`, con lo visto hasta ahora; `null` sin ningún valor visible. */
+  get mode(): 'number' | 'text' | null {
+    if (!this.anyValue) return null;
+    return this.numeric ? 'number' : 'text';
+  }
+
+  keyOf(note: { id: string; titleNorm: string }): SortKey {
+    if (this.sort.key === null) return makeKey('t', null, note.titleNorm, note.id);
+    const best = this.best.get(note.id);
+    if (!best) return makeKey('m', null, note.titleNorm, note.id);
+    return this.numeric && best.number !== null
+      ? makeKey('v', best.number, best.numberText, note.id)
+      : best.text;
+  }
+}
+
+/**
+ * Un cursor de la fase `v` se hizo con un modo: si la clave ya ordena con el otro, seguir saltaría
+ * filas, en los dos sentidos. Sin ningún valor visible no hay modo, ni nada que saltar. Las fases
+ * `m` y `t` ordenan por título, sin modo.
+ */
+export function assertCursorMode(after: SortKey, mode: 'number' | 'text' | null): void {
+  if (after.phase !== 'v' || mode === null) return;
+  if ((after.number !== null) !== (mode === 'number')) throw new ToolError('invalid_input');
 }
 
 export function encodeSortKey(key: SortKey): string {

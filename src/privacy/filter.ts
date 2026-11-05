@@ -297,6 +297,12 @@ export class PrivacyFilter implements LiveFolders {
     return { folderId: entry.folderId, tags: this.visibleTagsOf(id) };
   }
 
+  /** ¿Está bloqueada? Sin decir si se ve: una bloqueada visible no tiene propiedades, aunque
+   *  quede una fila de antes de bloquearla (D23). */
+  isLockedNote(id: string): boolean {
+    return this.library.get(id)?.locked === true;
+  }
+
   /** Notas visibles con su carpeta y etiquetas, para recalcular recuentos (SPEC.md §6.3:
    *  «Recuentos de `hebra_list_tags` y `hebra_list_folders`… las etiquetas privadas o
    *  solo presentes en notas ocultas tampoco» — y por la aceptación #5, una nota oculta
