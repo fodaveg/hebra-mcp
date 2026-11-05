@@ -63,6 +63,7 @@ import {
   listFoldersInputShape,
   listNotesInputShape,
   listOrganizationsInputShape,
+  noteAuthorsInputShape,
   listTagsInputShape,
   listTrashInputShape,
   listVersionsInputShape,
@@ -109,6 +110,7 @@ import {
   runSetFavorite,
   runTrashNote
 } from './tools/organize';
+import { runNoteAuthors } from './tools/note-authors';
 import { runNoteOutline } from './tools/note-outline';
 import { runReadFile } from './tools/read-file';
 import { runReadNote } from './tools/read-note';
@@ -323,7 +325,8 @@ const GATE_POLICIES: Record<
   hebra_set_archived: WRITE,
   hebra_trash_note: WRITE,
   hebra_restore_note: WRITE,
-  hebra_list_trash: read(emptyList('notes')),
+  hebra_list_trash: (input) => read(emptyList(input.kind === 'folders' ? 'folders' : 'notes')),
+  hebra_note_authors: read(),
   hebra_list_files: read(emptyList('files')),
   hebra_trash_file: WRITE,
   hebra_restore_file: WRITE,
@@ -586,7 +589,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     'hebra_list_notes',
     {
       title: 'Listar notas',
-      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Cada nota lleva `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general, por su marca o por su carpeta). Sin `archived` NO salen las archivadas (con carpeta, etiqueta o sin filtro) y SÍ las ocultas del listado general, con `generalHidden: true`. Con `archived: true` salen solo las archivadas, la última archivada primero; no se combina con `folder` ni `tag` (invalid_input). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
       inputSchema: scoped(listNotesInputShape),
       annotations: READ_ONLY
     },
@@ -598,7 +601,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Leer una nota',
       description:
-        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla. Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; con `lines: {from, to}`, solo esas líneas (las de hebra_grep), con `totalLines`. `revision` sigue siendo la de la nota entera. `heading` y `lines` no van juntos.',
+        'Lee una nota completa por id o por título exacto. Devuelve `revision`, la que pide hebra_edit_note para editarla, y su estado: `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general). Con `heading` (y `headingOccurrence` si el título se repite) lee solo ese apartado, subapartados incluidos; con `lines: {from, to}`, solo esas líneas (las de hebra_grep), con `totalLines`. `revision` sigue siendo la de la nota entera. `heading` y `lines` no van juntos.',
       inputSchema: scoped(readNoteInputShape),
       annotations: READ_ONLY
     },
@@ -760,11 +763,23 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Listar la papelera',
       description:
-        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas. Paginada (`limit`, `cursor`, `nextCursor`).',
+        'Lista las notas de la papelera, la última en entrar primero, con la carpeta a la que volverían al restaurarlas. Con `kind: "folders"` lista en cambio las carpetas de la papelera ({id, name, path, trashedAt}); sin `kind`, o con `"notes"`, las notas. Una carpeta privada, o dentro de una privada, no sale. Paginada (`limit`, `cursor`, `nextCursor`).',
       inputSchema: scoped(listTrashInputShape),
       annotations: READ_ONLY
     },
     gated('hebra_list_trash', (toolCtx, input) => runListTrash(toolCtx, input))
+  );
+
+  server.registerTool(
+    'hebra_note_authors',
+    {
+      title: 'Autores de una nota',
+      description:
+        'Quién escribió una nota, por `id`: `lastEditor` ({accountId, name, role, isSelf, actorKind?}, la cuenta que selló el relé en la última revisión confirmada), `declaredAuthorId` (la que dijo el sobre), `mismatch` (si no coinciden) y `namesResolved`. Las cuentas son las de `hebra_list_organizations`: `name`, `role` e `isSelf` salen de ese directorio (en todas las organizaciones de la persona) y son `null` si no se conocen o no hay directorio; no se inventa ninguno. Solo hay autores en un espacio compartido (`space`): en la biblioteca personal, y en una nota sin subir o una copia de conflicto, `lastEditor` es null. Una nota oculta, en la papelera o inexistente responde not_found.',
+      inputSchema: scoped(noteAuthorsInputShape),
+      annotations: READ_ONLY
+    },
+    gated('hebra_note_authors', (toolCtx, input) => runNoteAuthors(toolCtx, input, ctx.directory))
   );
 
   server.registerTool(

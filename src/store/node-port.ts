@@ -43,6 +43,7 @@ import {
   type FoldersList,
   type LibraryOpenInfo,
   type LinkResolution,
+  type NoteAuthors,
   type NoteRow,
   type NoteSaveInput,
   type NoteSaveResult,
@@ -89,6 +90,13 @@ import {
 } from './privacy-sql';
 import { ensurePrivateFoldersTable, readPrivateFolders, writePrivateFolders } from './private-folders';
 import { SerialQueue } from './serial-queue';
+import {
+  foldersTrashOf,
+  noteAuthorsOf,
+  noteStatesOf,
+  type FolderTrashEntry,
+  type NoteStateRow
+} from './state-reads';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
 import type {
   BlobNoteRef,
@@ -660,6 +668,19 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       })),
       trash: trashIndexRows(this.db)
     };
+  }
+
+  /** D23: ver `./state-reads.ts`. */
+  async noteStates(ids: readonly string[]): Promise<NoteStateRow[]> {
+    return this.read(() => noteStatesOf(this.engine, ids));
+  }
+
+  async foldersTrash(): Promise<FolderTrashEntry[]> {
+    return this.read(() => foldersTrashOf(this.engine));
+  }
+
+  async noteAuthors(id: string): Promise<NoteAuthors> {
+    return this.read(() => noteAuthorsOf(this.engine, id));
   }
 
   async noteVersionsList(noteId: string): Promise<NoteVersionsList> {

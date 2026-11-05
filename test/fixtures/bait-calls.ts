@@ -61,6 +61,13 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_note_outline', arguments: { id: library.privateFolderNoteId } },
     { name: 'hebra_note_outline', arguments: { id: library.privateTagNoteId } },
     { name: 'hebra_note_outline', arguments: { title: 'Nota oculta de carpeta' } },
+    // Autores (D23): las notas ocultas, en la papelera o inexistentes responden `not_found`.
+    { name: 'hebra_note_authors', arguments: { id: library.privateFolderNoteId } },
+    { name: 'hebra_note_authors', arguments: { id: library.privateTagNoteId } },
+    { name: 'hebra_note_authors', arguments: { id: library.trashedNoteId } },
+    // Estado y archivadas (D23): las ocultas tampoco salen por `archived: true`.
+    { name: 'hebra_list_notes', arguments: { archived: true, limit: 100 } },
+    { name: 'hebra_list_trash', arguments: { kind: 'folders', limit: 100 } },
     {
       name: 'hebra_append_to_note',
       arguments: { id: library.privateFolderNoteId, text: BAIT_TAG, heading: BAIT_FOLDER }

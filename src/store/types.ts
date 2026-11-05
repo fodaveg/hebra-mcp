@@ -15,6 +15,7 @@ import type {
   FoldersList,
   LibraryOpenInfo,
   LinkResolution,
+  NoteAuthors,
   NoteRow,
   NoteSaveInput,
   NoteSaveResult,
@@ -28,6 +29,7 @@ import type {
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
 import type { PrivacyConfig } from '../privacy/config';
+import type { FolderTrashEntry, NoteStateRow } from './state-reads';
 
 /** `NoteVersionsList`/`NoteVersion` de Hebra (`library/types.ts`): `node.ts` no los
  *  reexporta, así que salen de la firma del motor en vez de importarlos por `$lib`. */
@@ -336,6 +338,15 @@ export interface HebraLibraryPort {
     privacy: PrivacyConfig,
     session: GrepBodiesSession | null
   ): Promise<GrepBodiesResult>;
+  /** D23: favorita, archivada y oculta del listado general de `ids` (`noteSummary` del
+   *  motor); una nota purgada o inexistente falta. Sin filtro: lo aplica la herramienta. */
+  noteStates(ids: readonly string[]): Promise<NoteStateRow[]>;
+  /** D23: las carpetas de la papelera (`foldersTrashList`), la última en entrar primero.
+   *  Sin filtro: lo aplica la herramienta con `TrashFilter`. */
+  foldersTrash(): Promise<FolderTrashEntry[]>;
+  /** D23: las columnas de autor de una nota (`noteAuthors`); `null` y `null` en la
+   *  biblioteca personal. Sin filtro: lo aplica la herramienta. */
+  noteAuthors(id: string): Promise<NoteAuthors>;
   /** Cierra la conexión SQLite subyacente. */
   close(): void;
 }

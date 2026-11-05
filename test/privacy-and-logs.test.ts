@@ -41,6 +41,7 @@ const TOOL_NAMES = [
   'hebra_trash_file',
   'hebra_restore_file',
   'hebra_note_outline',
+  'hebra_note_authors',
   'hebra_replace_in_notes',
   'hebra_read_file',
   'hebra_replace_file_text'
@@ -74,6 +75,8 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
   hebra_restore_file: { id: 'lo-que-sea' },
   // Apartados (D11).
   hebra_note_outline: { id: 'lo-que-sea' },
+  // Autores de una nota (D23).
+  hebra_note_authors: { id: 'lo-que-sea' },
   // Sustitución en lote (D14).
   hebra_replace_in_notes: { mode: 'simulate', pattern: 'lo que sea', replacement: 'x' },
   // Leer y reemplazar ficheros sueltos (D15).

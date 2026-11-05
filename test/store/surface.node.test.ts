@@ -453,6 +453,38 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
   });
 });
 
+/**
+ * Lecturas de estado (D23, 5 nov 2026): `noteSummary`, `foldersTrashList` y `noteAuthors` del
+ * motor son LECTURAS y solo las alcanza `src/store/state-reads.ts`, que el puerto
+ * (`node-port.ts`) llama por métodos propios (`noteStates`, `foldersTrash`, `noteAuthors`).
+ * Ninguna herramienta ni otro módulo las toca; y siguen cerradas las que purgan una carpeta
+ * de la papelera o la restauran (`folderPurge`, `folderRestore`, `folderUndoTrash`).
+ */
+describe('lecturas de estado (D23)', () => {
+  it('el motor se alcanza solo desde state-reads.ts', () => {
+    const reach = reachPattern('noteSummary|foldersTrashList|noteAuthors(?:Many)?');
+    for (const form of reachForms('foldersTrashList')) expect(reach.test(form), form).toBe(true);
+    const callers: string[] = [];
+    for (const file of allSourceFiles()) {
+      if (reach.test(readFileSync(file, 'utf8'))) callers.push(relative(root, file).split(sep).join('/'));
+    }
+    // `node-port.ts` y `library-instance.ts` llaman a `port.noteAuthors(id)` (el método del
+    // puerto, no el del motor); `noteAuthors(` en las herramientas es también el del puerto.
+    const engineCallers = callers.filter(
+      (path) => !['src/store/node-port.ts', 'src/sync/library-instance.ts', 'src/server/tools/note-authors.ts'].includes(path)
+    );
+    expect(engineCallers).toEqual(['src/store/state-reads.ts']);
+  });
+
+  it('purgar o restaurar una carpeta de la papelera sigue fuera', () => {
+    const reach = reachPattern('folderPurge|folderRestore|folderUndoTrash|folderTrashEmpty');
+    for (const file of allSourceFiles()) {
+      const path = relative(root, file).split(sep).join('/');
+      expect(reach.exec(readFileSync(file, 'utf8'))?.[0] ?? null, path).toBeNull();
+    }
+  });
+});
+
 /** Todas las fuentes de `src`, recorriendo sus carpetas. */
 function allSourceFiles(dir = join(root, 'src')): string[] {
   const out: string[] = [];
