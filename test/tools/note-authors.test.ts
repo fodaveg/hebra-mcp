@@ -179,7 +179,7 @@ describe('hebra_note_authors', () => {
 describe('hebra_note_authors: el rol es el de la organizacion dueña del espacio', () => {
   const SPACE = 'e'.repeat(32);
   const OTHER_SPACE = 'f'.repeat(32);
-  const org = (orgId: string, role: string, spaceId: string) => ({
+  const org = (orgId: string, role: 'admin' | 'manager' | 'member', spaceId: string) => ({
     orgId,
     name: orgId,
     members: [{ accountId: ANA, role, name: 'Ana' }],
