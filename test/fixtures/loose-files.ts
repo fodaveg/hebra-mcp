@@ -40,6 +40,8 @@ export interface LooseFilesHarness {
   call(name: string, args: Record<string, unknown>): Promise<{ isError: boolean; value: Record<string, unknown> }>;
   /** La llamada tal cual (para `hebra_read_file`, que trae dos bloques). */
   callRaw(name: string, args: Record<string, unknown>): Promise<CallToolResult>;
+  /** Lo que devuelve `tools/list`. */
+  listTools(): Promise<Awaited<ReturnType<Client['listTools']>>['tools']>;
   /** Todas las filas de `files`, ordenadas por id. */
   rawFiles(): RawFile[];
   /** El motor de Hebra por otra conexión: lo que haría la app. */
@@ -81,6 +83,7 @@ export async function startLooseFiles(
   return {
     test,
     callRaw,
+    listTools: async () => (await client.listTools()).tools,
     async call(name, args) {
       const result = await callRaw(name, args);
       const block = result.content[0] as { type: string; text: string };

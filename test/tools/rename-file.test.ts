@@ -36,6 +36,8 @@ describe('hebra_rename_file (D17)', () => {
         byteLength: Buffer.byteLength(INVENTARIO_YAML),
         mimeType: 'text/yaml',
         outcome: 'saved',
+        // D23: las notas que lo incrustan, ninguna aquí (`./rename-file-relink.test.ts`).
+        relinked: 0,
         sync: 'not_linked'
       }
     });
