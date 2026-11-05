@@ -7,7 +7,7 @@
  * Se usa su rama `bodyOnly` para FTS y se añade aquí la rama de subcadenas del MISMO
  * índice de Hebra, sin consultar ningún índice de contenido incrustado.
  */
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import {
   decodeCursor,
   encodeCursor,
@@ -62,42 +62,16 @@ function folderClause(engine: SqliteLibraryEngine, scope: NotesScope | null, bin
  * sin texto, de 200 en 200, con todas sus subconsultas en cada página), lo que paraba el hilo varios
  * segundos con una biblioteca grande. Son las reglas de `searchKeyed` del motor, que no las expone
  * sueltas, y `test/store/search-safe-filters.node.test.ts` las compara con él, caso a caso:
- * - La clave, en minúsculas. Sin valor, que la nota tenga la clave. Con valor, el valor ENTERO sin
- *   mayúsculas ni acentos. Los valores de una clave se pliegan aquí de uno en uno, una sola pasada
- *   por clave aunque haya varios pares sobre ella, sin guardar más que los que casan, y entran como
- *   lista: así la condición usa el índice en vez de comparar cada fila una vez por par.
+ * - `props`: aquí solo llegan pares de clave en minúsculas (`searchCheckingValues` comprueba los
+ *   valores aparte), que piden que la nota tenga la clave.
  * - `linksTo`: las notas con un enlace a alguna nota de ese título, por id o por título, sin contar
  *   el enlace de una nota a sí misma. Sin destinos, nada.
  */
 function filterConditions(db: DatabaseSync, filters: SearchFilters, bind: Array<string | number>): string {
   let conditions = '';
-  const wanted = new Map<string, Map<string, string[]>>();
   for (const prop of filters.props ?? []) {
-    if (prop.value === null) continue;
-    const key = prop.key.toLowerCase();
-    let needles = wanted.get(key);
-    if (!needles) wanted.set(key, (needles = new Map()));
-    needles.set(foldFileName(prop.value), []);
-  }
-  const distinctValues = db.prepare('SELECT DISTINCT value FROM note_props WHERE key = ?');
-  for (const [key, needles] of wanted) {
-    for (const row of distinctValues.iterate(key) as Iterable<{ value: string }>) {
-      const value = String(row.value);
-      needles.get(foldFileName(value))?.push(value);
-    }
-  }
-  for (const prop of filters.props ?? []) {
-    const key = prop.key.toLowerCase();
-    if (prop.value === null) {
-      conditions += ' AND n.id IN (SELECT p.note_id FROM note_props p WHERE p.key = ?)';
-      bind.push(key);
-      continue;
-    }
-    const values = wanted.get(key)!.get(foldFileName(prop.value))!;
-    if (values.length === 0) return ' AND 0';
-    conditions += ` AND n.id IN (SELECT p.note_id FROM note_props p WHERE p.key = ?
-      AND p.value IN (SELECT value FROM json_each(?)))`;
-    bind.push(key, JSON.stringify(values));
+    conditions += ' AND n.id IN (SELECT p.note_id FROM note_props p WHERE p.key = ?)';
+    bind.push(prop.key.toLowerCase());
   }
   for (const title of filters.linksTo ?? []) {
     const targets = readFoldedTitleTargets(db, title).map((target) => [target.id, target.titleNorm]);
@@ -116,97 +90,147 @@ function filterConditions(db: DatabaseSync, filters: SearchFilters, bind: Array<
   return conditions;
 }
 
-/**
- * Valores distintos no ASCII de una clave a partir de los cuales una búsqueda con un par de esa
- * clave no los deja en manos del motor: `searchKeyed` los trae todos a JS en cada página y por cada
- * par, y con 750 000 agota 256 MiB de memoria con un solo par (medido; SPEC.md §6.3). Muy por encima
- * de lo que tiene una biblioteca normal, y por debajo del límite de variables de SQLite.
- */
-const ENGINE_FOLDED_VALUES_MAX = 20_000;
+/** ¿Hay algún par de `props` con valor? Sin ninguno, la búsqueda va directa, como siempre. */
+export function hasValuedProps(filters: SearchFilters | null | undefined): boolean {
+  return (filters?.props ?? []).some((prop) => prop.value !== null);
+}
 
-/** ¿Algún par con valor apunta a una clave que el motor no debe plegar? Mira como mucho
- *  `ENGINE_FOLDED_VALUES_MAX` valores distintos por clave, en SQLite y sin traerlos. */
-function overloadsEngine(db: DatabaseSync, filters: SearchFilters | null): boolean {
-  const keys = new Set(
-    (filters?.props ?? []).filter((prop) => prop.value !== null).map((prop) => prop.key.toLowerCase())
-  );
-  if (keys.size === 0) return false;
-  const statement = db.prepare(`SELECT 1 FROM (
-      SELECT DISTINCT value FROM note_props WHERE key = ? AND length(CAST(value AS BLOB)) > length(value)
-    ) LIMIT 1 OFFSET ?`);
-  for (const key of keys) {
-    if (statement.get(key, ENGINE_FOLDED_VALUES_MAX) !== undefined) return true;
+/** Filas de una clave de una nota que se pliegan por turno. Una nota no tiene tope de valores:
+ *  por encima de esto se suelta el hilo y se sigue donde iba. */
+const VALUE_ROWS_PER_TURN = 20_000;
+
+/** Filas por consulta al leer los valores de una nota, en orden: reanudan sin dejar nada abierto
+ *  entre dos turnos. */
+const VALUE_ROWS_PER_READ = 2_000;
+
+/** Los pares con valor por clave en minúsculas, con su valor plegado. */
+function valuesByKey(filters: SearchFilters): Map<string, Set<string>> {
+  const wanted = new Map<string, Set<string>>();
+  for (const prop of filters.props ?? []) {
+    if (prop.value === null) continue;
+    const key = prop.key.toLowerCase();
+    let needles = wanted.get(key);
+    if (!needles) wanted.set(key, (needles = new Set()));
+    needles.add(foldFileName(prop.value));
   }
-  return false;
+  return wanted;
 }
 
-/** ¿Es el error del motor con demasiadas variantes plegadas de un valor? Solo ese. */
-function isTooManyVariables(error: unknown): boolean {
-  return error instanceof Error && error.message.includes('too many SQL variables');
+/** Lo que recibe la búsqueda interna: cada clave con valor, como un par solo de clave, y una sola
+ *  vez. Es un filtro previo: solo mira si la nota tiene la clave. */
+function withoutValues(filters: SearchFilters): SearchFilters {
+  const keys = new Set((filters.props ?? []).map((prop) => prop.key.toLowerCase()));
+  return { ...filters, props: [...keys].map((key) => ({ key, value: null })) };
 }
 
 /**
- * Una página del motor sin los pares con valor, que se comprueban aquí con el SQL de arriba, sobre
- * cada página de resultados: el mismo orden y el mismo cursor (`updated_at`, id) que si los hubiera
- * filtrado él. Pide páginas hasta llenar la de `want` o agotarlas: más caro si casan pocas, y solo
- * se usa cuando el motor no puede con esos pares.
+ * ¿Tiene esta nota todos los pares con valor? Mira solo las filas de ESTA nota, plegando en JS con la
+ * regla del motor (el valor ENTERO sin mayúsculas ni acentos), y para en cuanto los ha visto todos o
+ * le falta una clave. Es un generador: cede cada `VALUE_ROWS_PER_TURN` filas para que quien lo mueve
+ * suelte el hilo, sin dejar ninguna consulta abierta. Devuelve si casa.
  */
-export function searchFilteringValues(
-  engine: SqliteLibraryEngine,
+function* noteHasValues(
+  reads: { first: StatementSync; next: StatementSync },
+  noteId: string,
+  wanted: ReadonlyMap<string, ReadonlySet<string>>,
+  budget: { rows: number }
+): Generator<void, boolean, void> {
+  for (const [key, needles] of wanted) {
+    const missing = new Set(needles);
+    let after: string | null = null;
+    while (missing.size > 0) {
+      const rows = (after === null
+        ? reads.first.all(noteId, key, VALUE_ROWS_PER_READ)
+        : reads.next.all(noteId, key, after, VALUE_ROWS_PER_READ)) as Array<{ value: string }>;
+      for (const row of rows) missing.delete(foldFileName(String(row.value)));
+      budget.rows += rows.length;
+      if (budget.rows >= VALUE_ROWS_PER_TURN) {
+        budget.rows = 0;
+        yield;
+      }
+      if (missing.size === 0) break;
+      if (rows.length < VALUE_ROWS_PER_READ) return false;
+      after = String(rows[rows.length - 1]!.value);
+    }
+  }
+  return true;
+}
+
+/** Los resultados de una página que tienen todos los pares con valor, en su orden, hasta `room`. */
+function* keptHits(
   db: DatabaseSync,
-  query: string,
-  cursor: string | null,
-  want: number,
-  filters: SearchFilters,
-  scope: NotesScope | null
-): SearchPage {
-  const valued = (filters.props ?? []).filter((prop) => prop.value !== null);
-  const rest = (filters.props ?? []).filter((prop) => prop.value === null);
-  const engineFilters: SearchFilters = { ...filters, props: rest };
-  const bind: Array<string | number> = [];
-  const conditions = filterConditions(db, { props: valued }, bind);
-  if (conditions === ' AND 0') return { items: [], nextCursor: null };
-  const accepted = db.prepare(
-    `SELECT n.id AS id FROM notes n WHERE n.id IN (SELECT value FROM json_each(?))${conditions}`
-  );
-  const items: SearchHit[] = [];
-  let next = cursor;
-  do {
-    const page = engine.search(query, next, 200, engineFilters, scope);
-    const kept = new Set(
-      (accepted.all(JSON.stringify(page.items.map((item) => item.id)), ...bind) as Array<{ id: string }>)
-        .map((row) => String(row.id))
-    );
-    items.push(...page.items.filter((item) => kept.has(item.id)));
-    next = page.nextCursor;
-  } while (next && items.length < want);
-  const shown = items.slice(0, want);
-  const last = shown.at(-1);
-  return {
-    items: shown,
-    nextCursor: last && shown.length === want ? encodeCursor([last.updatedAt], last.id) : null
+  items: readonly SearchHit[],
+  wanted: ReadonlyMap<string, ReadonlySet<string>>,
+  room: number
+): Generator<void, SearchHit[], void> {
+  const reads = {
+    first: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? ORDER BY value LIMIT ?'),
+    next: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? AND value > ? ORDER BY value LIMIT ?')
   };
+  const kept: SearchHit[] = [];
+  const budget = { rows: 0 };
+  for (const item of items) {
+    if (kept.length >= room) break;
+    if (yield* noteHasValues(reads, item.id, wanted, budget)) kept.push(item);
+  }
+  return kept;
+}
+
+/** Suelta el hilo: un `await` de la cola no llega, porque son microtareas y no deja correr a nadie. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /**
- * La búsqueda entera del motor (sin nada privado configurado), salvo con una clave que no debe
- * plegar (`overloadsEngine`). El error de demasiadas variables se queda como está: sin nada privado
- * no hay nada que ocultar y lo provocan los valores que el usuario puede ver.
+ * La búsqueda con pares de `props` con valor, el mismo camino con algo privado y sin nada privado
+ * (SPEC.md §6.3). El motor no los recibe nunca: con uno, lee todos los valores no ASCII de esa clave
+ * en TODA la biblioteca, también los de notas ocultas, y mete como parámetro SQL los que pliegan
+ * igual, así que la respuesta y la memoria dependerían de lo oculto.
+ *
+ * Un solo bucle alrededor de la búsqueda interna (`page`, la del motor o `safeTextSearch`): pide una
+ * página de 200 con cada clave como filtro previo, comprueba los pares nota a nota sobre esa página,
+ * mirando solo las filas de cada nota, y sigue con el `nextCursor` de la interna hasta llenar `want` o
+ * agotarlas. Con el mismo orden y el mismo cursor (`updated_at`, id) que el motor con los pares
+ * (`test/store/search-safe-filters.node.test.ts`). El cursor lo decodifica siempre la interna, también
+ * si no casa nada: uno inválido da siempre el mismo error.
+ *
+ * Cada página y cada tramo de comprobación van en su propio turno de la cola (`turn`) y entre dos se
+ * suelta el hilo: un recorrido largo tarda más, pero no para a las demás cuentas. `want` es el tope de
+ * lo que se guarda.
  */
-export function engineSearch(
-  engine: SqliteLibraryEngine,
-  db: DatabaseSync,
-  query: string,
-  cursor: string | null,
-  limit: number | undefined,
-  filters: SearchFilters | null,
-  scope: NotesScope | null
-): SearchPage {
-  if (filters && overloadsEngine(db, filters)) {
-    const want = Math.min(Math.max(limit ?? 50, 1), 200);
-    return searchFilteringValues(engine, db, query, cursor, want, filters, scope);
-  }
-  return engine.search(query, cursor, limit, filters, scope);
+export async function searchCheckingValues(options: {
+  db: DatabaseSync;
+  cursor: string | null;
+  limit: number | undefined;
+  filters: SearchFilters;
+  page(cursor: string | null, filters: SearchFilters): SearchPage;
+  turn<T>(operation: () => T): Promise<T>;
+}): Promise<SearchPage> {
+  const want = Math.min(Math.max(options.limit ?? 50, 1), 200);
+  const wanted = valuesByKey(options.filters);
+  const inner = withoutValues(options.filters);
+  const items: SearchHit[] = [];
+  let next = options.cursor;
+  do {
+    const from = next;
+    const page: SearchPage = await options.turn(() => options.page(from, inner));
+    const checks = keptHits(options.db, page.items, wanted, want - items.length);
+    for (;;) {
+      const step: IteratorResult<void, SearchHit[]> = await options.turn(() => checks.next());
+      if (step.done) {
+        items.push(...step.value);
+        break;
+      }
+      await yieldToEventLoop();
+    }
+    next = page.nextCursor;
+    if (next && items.length < want) await yieldToEventLoop();
+  } while (next && items.length < want);
+  const last = items.at(-1);
+  return {
+    items,
+    nextCursor: last && items.length === want ? encodeCursor([last.updatedAt], last.id) : null
+  };
 }
 
 /** Una página de la rama de subcadenas, con el mismo orden y cursor que el motor. */
@@ -308,22 +332,8 @@ export function safeTextSearch(
   const exactItems: SearchHit[] = [];
   let exactCursor = cursor;
   let exact: SearchPage;
-  // Los valores de la clave cuentan también los de notas ocultas: ni la memoria ni un error del
-  // motor por demasiadas variantes pueden depender de ellas. Por eso, con pares que no puede
-  // plegar, los filtra aquí, y la respuesta es la misma haya o no esas filas (§6.3).
-  let ownValues = overloadsEngine(db, safeFilters);
-  const exactPage = (from: string | null): SearchPage => {
-    if (ownValues) return searchFilteringValues(engine, db, query, from, want, safeFilters, scope);
-    try {
-      return engine.search(query, from, want, safeFilters, scope);
-    } catch (error) {
-      if (!isTooManyVariables(error)) throw error;
-      ownValues = true;
-      return searchFilteringValues(engine, db, query, from, want, safeFilters, scope);
-    }
-  };
   do {
-    exact = exactPage(exactCursor);
+    exact = engine.search(query, exactCursor, want, safeFilters, scope);
     exactItems.push(...(excluded
       ? exact.items.filter((hit) => !db.prepare(`SELECT 1 FROM notes_trigram
           WHERE notes_trigram MATCH ? AND rowid = (SELECT rowid FROM notes WHERE id = ?)`)

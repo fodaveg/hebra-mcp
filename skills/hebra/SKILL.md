@@ -312,6 +312,9 @@ traigas entera para tocar un apartado.
   buscar por palabras (ignora tildes y encuentra por prefijo). Después, `hebra_read_note`
   con `lines` (unas líneas alrededor de la `line` encontrada) o con `heading` (el apartado
   que da `heading`), sin traer la nota entera.
+- **`hebra_search` con `props` con valor** comprueba el valor nota a nota sobre los aciertos de
+  texto: si casan muy pocas de una biblioteca grande, tarda más que sin él. Para listar por una
+  propiedad sin buscar texto, mejor `hebra_query_properties`.
 - **Consultar por propiedades del frontmatter**: `hebra_list_properties` para saber qué claves
   y valores hay (una clave en minúsculas), `hebra_query_properties` para las notas que cumplen
   algo, ordenadas y con los valores que pidas, sin leer ninguna nota. Para buscar por palabras

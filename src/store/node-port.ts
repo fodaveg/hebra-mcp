@@ -70,7 +70,7 @@ import {
   type PropCountsRequest,
   type PropsMatch
 } from './props-sql';
-import { engineSearch, safeTextSearch } from './search-safe';
+import { hasValuedProps, safeTextSearch, searchCheckingValues } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
   grepNoteRows,
@@ -439,12 +439,22 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     scope?: NotesScope | null,
     options?: PortSearchOptions
   ): Promise<SearchPage> {
-    if (options?.embedded === true) {
-      return this.read(() => cleanSearchPage(engineSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null)));
+    const page = (from: string | null, size: number | undefined, used: SearchFilters | null): SearchPage => cleanSearchPage(
+      options?.embedded === true
+        ? this.engine.search(q, from, size, used, scope ?? null)
+        : safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable)
+    );
+    if (filters && hasValuedProps(filters)) {
+      return searchCheckingValues({
+        db: this.db,
+        cursor,
+        limit,
+        filters,
+        page: (from, used) => page(from, 200, used),
+        turn: (operation) => this.read(operation)
+      });
     }
-    return this.read(() => cleanSearchPage(
-      safeTextSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null, this.conn, this.writable)
-    ));
+    return this.read(() => page(cursor, limit, filters ?? null));
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
