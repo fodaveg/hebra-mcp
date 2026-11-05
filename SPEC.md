@@ -166,7 +166,7 @@ Reglas comunes:
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `props?` (D23; hasta 32, todas a la vez: `[{key, value}]`, `value` el valor entero sin distinguir mayúsculas ni tildes, `null` para pedir que tenga la clave, también definida sin valor), `linksTo?` (D23; hasta 8 títulos ENTEROS, no ids, sin distinguir mayúsculas ni tildes, todos a la vez: notas con un enlace, por id o por título, a una nota VISIBLE con ese título; §6.3), `titleOnly?` (D23; `query` solo en el título; def. `false`), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `props?` (D23; hasta 32, todas a la vez: `[{key, value}]`, `value` el valor entero sin distinguir mayúsculas ni tildes, `null` para pedir que tenga la clave, también definida sin valor; con valor se comprueba nota a nota sobre los aciertos de texto, §6.3: si casan pocas, tarda más), `linksTo?` (D23; hasta 8 títulos ENTEROS, no ids, sin distinguir mayúsculas ni tildes, todos a la vez: notas con un enlace, por id o por título, a una nota VISIBLE con ese título; §6.3), `titleOnly?` (D23; `query` solo en el título; def. `false`), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
 | `hebra_grep` (D13) | `pattern` (1-1 000 caracteres, sin saltos de línea), `regex?` (def. `false`: literal; con `true`, expresión regular de JavaScript con la bandera `u`), `caseSensitive?` (def. `false`; las tildes cuentan siempre), `folder?`, `subfolders?`, `tag?` (como en `hebra_search`), `contextLines?` (0-5, def. 0), `limit` (1-100, def. 20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, textStart?, lineChars?, before?, after?, heading, headingOccurrence}], nextCursor, cutoff}`. Una entrada por línea que casa (la primera coincidencia de la línea), en orden de id de nota y de línea. `line` y `column`, 1-based (la columna en unidades UTF-16); `line` es la de `hebra_read_note` con `lines`. `text`: la línea sin su terminador; si pasa de 300 caracteres, un trozo de 300 alrededor de la coincidencia, con `textStart` (columna donde empieza) y `lineChars` (longitud de la línea). `before`/`after`, solo con `contextLines`: las líneas de alrededor dentro de la nota, cortadas a 300 caracteres con `…`. `heading`: el apartado más interno que contiene la línea (D11), o `null` antes del primer encabezado; `headingOccurrence`: cuál de los encabezados con ese título es (1-based, como `occurrence` de `hebra_note_outline`, `null` con `heading` `null`), para pasar los dos tal cual a `hebra_read_note` aunque el título se repita. `cutoff`: `time` (se agotó el plazo de recorrido, 2 s, o se interrumpió el hilo de la expresión regular) o `size` (la respuesta llegó a 100 000 caracteres), con `nextCursor` para seguir justo ahí; `null` si no. `skipped?: {id, fromLine}`: solo si la página se saltó una nota en la que la expresión regular se interrumpió dos veces seguidas sin avanzar (§5, «Búsqueda línea a línea»). Errores: `invalid_input` (patrón vacío, largo, con un salto de línea o con la sintaxis mal; `contextLines` o `cursor` que no valen), `pattern_too_slow` (una expresión regular que no termina ni una nota en el plazo; lleva `nextCursor`, que la reintenta una vez y, si vuelve a fallar, la salta). |
 | `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `archived?` (D23: `true` lista las archivadas, la última archivada primero; con `folder` o `tag`, `invalid_input`, porque el ámbito `archive` del motor no los admite), `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`, `favorite`, `archivedAt`, `generalHidden`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy, favorite, archivedAt, generalHidden}], nextCursor}`. D23: `archivedAt` ISO o `null`; `generalHidden`: oculta del listado general por su marca o por su carpeta (o una antecesora). Sin `archived`, el motor NO lista las archivadas (`{kind: 'all'}`, `folder` y `tag` exigen `archived_at IS NULL`) y SÍ las ocultas del listado general (salen con `generalHidden: true`). |
 | `hebra_read_note` | `id` o `title` (exactamente uno), `heading?` (título de un apartado, D11), `headingOccurrence?` (entero ≥ 1; solo con `heading`, si no `invalid_input`), `lines?: {from, to?}` (D13: enteros ≥ 1, `to` ≥ `from`; no con `heading`) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). D23: la salida lleva también `favorite`, `archivedAt` (ISO o `null`) y `generalHidden`, siempre (también con `heading` y `lines`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`, como mucho 50 y solo visibles. **Con `heading`**: `body` es SOLO el apartado (desde su línea de encabezado, incluida, hasta su final, subapartados incluidos) y se añaden `section: {heading, level, line, occurrence}` y `totalChars` (tamaño del cuerpo entero); `revision` sigue siendo la de la NOTA entera. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates: [{heading, level, line, occurrence}]`, como mucho 50) y, en una nota bloqueada, `note_locked`. **Con `lines`** (D13): `body` es SOLO ese tramo, tal como está (desde el principio de la línea `from` hasta el de la siguiente a `to`, terminadores incluidos), y se añaden `lines: {from, to}` (el tramo devuelto: `to` recortado a la última línea y a 2 000 líneas por lectura; sin `to`, hasta ese tope), `totalLines` y `totalChars`; `revision` sigue siendo la de la nota entera. Líneas como en D11 (`\n` y `\r\n`; un salto final no abre una línea vacía de más), las mismas de `hebra_grep` y de `line` de `hebra_note_outline`. `from` más allá de la última línea (una nota vacía no tiene ninguna), `to` < `from` o `lines` con `heading`: `invalid_input`. Nota bloqueada: `note_locked`. |
@@ -1603,40 +1603,49 @@ El dispositivo acumula tres secretos:
     Espera un título entero: un id se trata como un título que nadie tiene, así que tampoco sirve para
     sondear ids.
   - **Con algo privado configurado**, `hebra_search` usa la búsqueda segura (M6), cuya rama de
-    subcadenas aplica estos filtros igual: `titleOnly` en sus consultas, y `props` y `linksTo` como
-    condiciones de su SQL, con las reglas de `searchKeyed` del motor (`src/store/search-safe.ts`), que
-    no las expone sueltas; `test/store/search-safe-filters.node.test.ts` las compara con él, caso a
-    caso. Hasta la revisión de D23 pedía al motor todas las notas que los cumplen, de 200 en 200, y
-    paraba el hilo varios segundos con 20 000 notas. Un par de clave y valor o un título repetidos se
-    pasan una vez. Sin ninguno de estos parámetros, la búsqueda no cambia ni hace ninguna consulta de
-    más.
-  - **Los valores plegados de una clave** (2.ª revisión de D23, 5 nov 2026): con un par de `props` con
-    valor, el motor lee todos los valores distintos no ASCII de la clave en toda la biblioteca, también
-    los de notas ocultas, los trae a JS en cada página y por cada par, y mete como parámetro SQL los que
-    pliegan igual. Eso podía cambiar la respuesta por algo oculto: 32 767 variantes de un valor en una
-    oculta daban `invalid_input` (`too many SQL variables`) a una búsqueda que sin ellas respondía. Y
-    agotaba la memoria: con 750 000 valores distintos el proceso abortaba con 256 MiB ya con un solo
-    par. Ahora, en las dos búsquedas, con una clave de más de 20 000 valores distintos no ASCII el
-    motor no recibe los pares con valor: los comprueba hebra-mcp sobre cada página de resultados con
-    su SQL (`searchFilteringValues`, una sola pasada por clave), con el mismo orden y el mismo cursor
-    (`test/store/search-safe-filters.node.test.ts`). Con algo privado configurado, además, si varios
-    pares por debajo de ese corte suman más de lo que admite SQLite, se captura ese error concreto del
-    motor y se hace lo mismo, así que la respuesta es la misma con y sin esas filas ocultas. **Sin nada
-    privado configurado ese error puede quedarse** (`invalid_input`, solo con varios pares que juntos
-    pasan del límite): no hay nada que ocultar y lo provocan valores que se ven. El máximo de 32 `props`
-    por llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, heap de 256 MiB, por el camino
-    entero: 75 notas con 10 000 valores distintos no ASCII cada una, 32 pares con valor): con algo
-    privado, hueco máximo del bucle de eventos de 1,1 s; sin nada privado, 0,6 s; no aborta. Coste
-    asumido: si casan pocos, filtrar página a página recorre todos los aciertos de texto; con 20 000
-    notas más que casan por texto y no por la propiedad, 2,7 s con algo privado y 3,6 s sin nada
-    privado, y crece con los aciertos de texto.
+    subcadenas aplica estos filtros igual: `titleOnly` en sus consultas, y `linksTo` y las claves de
+    `props` como condiciones de su SQL, con las reglas de `searchKeyed` del motor
+    (`src/store/search-safe.ts`), que no las expone sueltas. Un par de clave y valor o un título
+    repetidos se pasan una vez. Sin ninguno de estos parámetros, la búsqueda no cambia ni hace ninguna
+    consulta de más.
+  - **Los pares de `props` con valor no llegan nunca al motor** (3.ª revisión de D23, 5 nov 2026), con
+    algo privado o sin nada privado. Con uno, el motor lee todos los valores no ASCII de esa clave en
+    toda la biblioteca, también los de notas ocultas, y mete como parámetro SQL los que pliegan igual:
+    la respuesta dependía de lo oculto (32 767 variantes de un valor en una oculta daban `invalid_input`,
+    por `too many SQL variables`) y la memoria también (con 750 000 valores distintos, el proceso abortaba
+    con 256 MiB ya con un solo par). Y elegir el camino según cuántos valores tenía la clave, o armar el
+    SQL con los que casaban, seguía mirando valores de otras notas, y lo oculto se notaba en resultados,
+    en `nextCursor` y en un cursor inválido. Ahora hay un solo camino (`searchCheckingValues`): cada par
+    con valor llega a la búsqueda interna como un par solo de clave, una vez por clave, de filtro previo.
+    Un bucle pide páginas de 200 a la búsqueda interna (la del motor sin nada privado, la segura con
+    algo privado) y comprueba los pares sobre cada página, nota a nota, mirando solo las filas de esa
+    nota (plegando en JS con la regla del motor, el valor ENTERO sin mayúsculas ni acentos, y parando
+    en cuanto los ha visto todos), hasta llenar `limit` o agotar la búsqueda interna. Ninguna consulta
+    mira valores de otra nota, así que la respuesta es idéntica, byte a byte, con y sin filas ocultas
+    (`test/privacy/properties-bounds.test.ts`), y sale en el mismo orden y con el mismo cursor que el
+    motor con los pares (`test/store/search-safe-filters.node.test.ts`, también con la consulta vacía y
+    solo con espacios). El cursor lo decodifica siempre la búsqueda interna: uno inválido da siempre el
+    mismo error. Cada página, y cada 20 000 valores de una misma página, van en su propio turno de la
+    cola y sueltan el hilo, así que un recorrido largo tarda más sin parar a las demás cuentas. Coste
+    asumido: una búsqueda con un par con valor pide páginas de 200 aunque `limit` sea menor, y si casan
+    pocas notas recorre todos los aciertos de texto que tienen la clave; también lee los valores de las
+    notas ocultas que están entre esos aciertos, sin que salga nada de ahí. El máximo de 32 `props` por
+    llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, por el camino entero, con algo privado
+    y sin nada privado; hueco máximo del bucle de eventos): 75 notas con 10 000 valores distintos no
+    ASCII cada una, 1 o 32 pares, con heap de 256 MiB, unos 0,5 s en total y 83 a 150 ms de hueco; cuatro
+    claves con 750 000 variantes de un valor en una sola nota, 1 a 9 ms con un texto que no existe, y
+    1,4 s y 284 a 296 ms con los valores que no casan; 32 pares con 20 000 notas que casan por texto y
+    tienen la clave pero no el valor, de 6 a 10 s en total y 159 a 450 ms (el mayor, en la primera llamada
+    del proceso). Ninguna aborta. En una biblioteca normal (20 000 notas, 1 par): con un valor abundante,
+    de 123 a 228 ms, como antes; con un valor que tiene una sola nota o ninguna, de 3,2 a 5,3 s en total
+    (antes, unos 150 ms), con 98 a 186 ms de hueco.
   - **Notas bloqueadas**: las mismas reglas que el resto. Con etiquetas privadas configuradas, ocultas
     (A1). Sin ellas, visibles: salen en `hebra_query_properties` con su título, como en
     `hebra_list_notes`, sin propiedades, porque no derivan ninguna. Una fila de `note_props` anterior
     al bloqueo no cuenta en ningún sitio: la nota se juzga como una sin propiedades, con la misma
     respuesta con el valor acertado y con otro (`missing` y los filtros de título la encuentran, los
     demás no), no entra en los recuentos ni en el modo del orden, y `props` de `hebra_search` no la
-    hace casar en ninguna de sus ramas, incluidas las del motor (lo quita la herramienta).
+    hace casar por ningún camino (lo quita la herramienta).
   - **La puerta final** juzga todas las visibles (de ellas sale el orden, los recuentos y si hay
     cursor) y, con su sello, cada nota devuelta y su carpeta; si algo cambia a mitad, repite la llamada
     (`hebra_query_properties`, `notes: []`; `hebra_list_properties`, `keys: []` o `values: []`, en el
