@@ -28,6 +28,7 @@ import {
 } from '../pagination';
 import type { QUERY_PROPERTIES_FIELDS } from '../schemas';
 import { PROPERTIES_RESPONSE_MAX_CHARS } from '../../store/props-limits';
+import type { PropsMatch } from '../../store/props-sql';
 import {
   SortKeysCollector,
   assertCursorMode,
@@ -143,29 +144,33 @@ export async function runQueryProperties(
 
   // Los valores, solo de esta página y hasta el tope de la respuesta: si no caben todos, la página
   // se corta antes, con `nextCursor`. Sin `properties` entre los campos pedidos, ni se leen.
-  const wantsValues = shown.length > 0 && (!input.fields || input.fields.includes('properties'));
-  // De una bloqueada no se lee nada: no tiene propiedades.
-  const toRead = wantsValues
-    ? page.items.map(({ match }) => match.id).filter((id) => !ctx.privacy.isLockedNote(id))
-    : [];
-  const { notes: read } = toRead.length > 0
-    ? await ctx.port.propValuesOfNotes(toRead, shown, PROPERTIES_RESPONSE_MAX_CHARS)
-    : { notes: [] };
-  const valuesOf = new Map(read.map((note) => [note.id, note.values]));
-  const cut = read.length < toRead.length;
-  const items = cut
-    ? page.items.slice(0, page.items.findIndex(({ match }) => match.id === read.at(-1)!.id) + 1)
-    : page.items;
-
-  const notes = items.map(({ match }) => {
-    const folderId = visible.get(match.id)!.folderId;
-    const folderPath = ctx.privacy.folderPath(folderId);
-    used.note(match.id, match.localSeq);
-    used.folder(folderId, folderPath);
-    const values = valuesOf.get(match.id);
+  const wantsProperties = !input.fields || input.fields.includes('properties');
+  const fields = input.fields as ReadonlyArray<keyof QueryPropertiesNote & string> | undefined;
+  const element = (match: PropsMatch, values?: ReadonlyMap<string, string[]>) => {
+    const folderPath = ctx.privacy.folderPath(visible.get(match.id)!.folderId);
     const properties = Object.fromEntries(shown.map((key) => [key, values?.get(key) ?? []]));
     const note: QueryPropertiesNote = { id: match.id, title: match.title, folderPath, properties };
-    return pickFields(note, input.fields as ReadonlyArray<keyof QueryPropertiesNote & string> | undefined);
+    return pickFields(note, fields);
+  };
+  // Cada nota cuenta entera para el tope: su id, su título, su carpeta y sus claves, sin valores
+  // todavía. De una bloqueada no se lee nada: no tiene propiedades.
+  const { notes: read } = await ctx.port.propValuesOfNotes(
+    page.items.map(({ match }) => ({
+      id: match.id,
+      chars: JSON.stringify(element(match)).length + 1,
+      readValues: wantsProperties && shown.length > 0 && !ctx.privacy.isLockedNote(match.id)
+    })),
+    shown,
+    PROPERTIES_RESPONSE_MAX_CHARS
+  );
+  const cut = read.length < page.items.length;
+  const items = page.items.slice(0, read.length);
+
+  const notes = items.map(({ match }, index) => {
+    const folderId = visible.get(match.id)!.folderId;
+    used.note(match.id, match.localSeq);
+    used.folder(folderId, ctx.privacy.folderPath(folderId));
+    return element(match, read[index]!.values);
   });
   const lastKey = cut ? items.at(-1)!.key : page.lastKey;
   return {

@@ -554,12 +554,21 @@ describe('lecturas de estado (D23)', () => {
   it('noteAuthors: el motor solo desde state-reads.ts; el metodo del puerto, de tres sitios exactos', () => {
     // El puerto tiene un metodo con el mismo nombre (`port.noteAuthors(id)`): lo llaman la
     // herramienta y el envoltorio estable de `library-instance.ts`. `node-port.ts` lo DEFINE
-    // y delega en `noteAuthorsOf`, asi que tampoco llama a `.noteAuthors(`.
-    expect(callersOf(reachPattern('noteAuthors'))).toEqual([
-      'src/server/tools/note-authors.ts',
-      'src/store/state-reads.ts',
-      'src/sync/library-instance.ts'
-    ]);
+    // y delega en `noteAuthorsOf`, asi que tampoco llama a `.noteAuthors(`. Se mira quien recibe
+    // la llamada, no solo el fichero: en cada sitio, UNA forma exacta y ninguna otra, asi que
+    // `engine.noteAuthors` en la herramienta no pasa. `library-instance.ts` no necesita el motor.
+    const allowed: Record<string, string> = {
+      'src/server/tools/note-authors.ts': 'ctx.port.noteAuthors(',
+      'src/store/state-reads.ts': 'engine.noteAuthors(',
+      'src/sync/library-instance.ts': 'current().noteAuthors('
+    };
+    const reach = reachPattern('noteAuthors');
+    expect(callersOf(reach)).toEqual(Object.keys(allowed));
+    for (const [path, form] of Object.entries(allowed)) {
+      const text = readFileSync(join(root, path), 'utf8');
+      expect(text.split(form).length - 1, path).toBe(1);
+      expect(reach.exec(text.replace(form, ''))?.[0] ?? null, path).toBeNull();
+    }
   });
 
   it('notesRelinkingFile (ids sin filtrar) solo lo llama file-relink.ts', () => {
