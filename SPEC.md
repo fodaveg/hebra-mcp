@@ -1625,12 +1625,21 @@ El dispositivo acumula tres secretos:
     (`test/privacy/properties-bounds.test.ts`), y sale en el mismo orden y con el mismo cursor que el
     motor con los pares (`test/store/search-safe-filters.node.test.ts`, también con la consulta vacía y
     solo con espacios). El cursor lo decodifica siempre la búsqueda interna: uno inválido da siempre el
-    mismo error. Cada página, y cada 20 000 valores de una misma página, van en su propio turno de la
-    cola y sueltan el hilo, así que un recorrido largo tarda más sin parar a las demás cuentas. Coste
-    asumido: una búsqueda con un par con valor pide páginas de 200 aunque `limit` sea menor, y si casan
-    pocas notas recorre todos los aciertos de texto que tienen la clave; también lee los valores de las
-    notas ocultas que están entre esos aciertos, sin que salga nada de ahí. El máximo de 32 `props` por
-    llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, por el camino entero, con algo privado
+    mismo error. Cada página, y cada 20 000 valores o 500 000 caracteres de valores de una misma página,
+    van en su propio turno de la cola y sueltan el hilo, así que un recorrido largo tarda más sin parar
+    a las demás cuentas; los valores se leen de uno en uno, y uno gigante se pliega entero. El relevo
+    entre lector y escritor (`closeWhenIdle`) espera a que acaben los recorridos en curso, también si
+    uno falla, sin ocupar la cola mientras espera. Con un `close()` forzado a mitad, el puerto rechaza
+    la búsqueda con `busy_other_instance`, y como la puerta final tampoco puede leer, la herramienta
+    responde un error sin resultados. **Qué no entra en esa garantía**: el bucle de un término negativo
+    por subcadena de la búsqueda segura (`while (excluded && ...)` en `safeTextSearch`), anterior a D23,
+    recorre páginas del motor sin ceder (10 001 notas, `garbanzos -anzos`, `limit: 1`: 51 consultas y
+    663 ms); y una sola página de 200 de la búsqueda interna no se parte, así que con cuerpos muy largos
+    su fragmento de texto para el hilo lo que tarde (199 notas de 100 000 caracteres: 1,2 s por palabra
+    y 2,2 s por subcadena). Coste asumido: una búsqueda con un par con valor pide páginas de 200 aunque
+    `limit` sea menor, y si casan pocas notas recorre todos los aciertos de texto que tienen la clave;
+    también lee los valores de las notas ocultas que están entre esos aciertos, sin que salga nada de
+    ahí. El máximo de 32 `props` por llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, por el camino entero, con algo privado
     y sin nada privado; hueco máximo del bucle de eventos): 75 notas con 10 000 valores distintos no
     ASCII cada una, 1 o 32 pares, con heap de 256 MiB, unos 0,5 s en total y 83 a 150 ms de hueco; cuatro
     claves con 750 000 variantes de un valor en una sola nota, 1 a 9 ms con un texto que no existe, y

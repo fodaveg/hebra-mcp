@@ -309,6 +309,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** Vaciados de la biblioteca (`libraryReset`) hechos por esta conexión: parte de la época
    *  de privacidad (`epochRow`). */
   private resets = 0;
+  /** Recorridos de varios turnos en curso (`walking`), y quien espera a que acaben. */
+  private walks = 0;
+  private readonly walksDone: Array<() => void> = [];
 
   constructor(
     private readonly engine: SqliteLibraryEngine,
@@ -445,16 +448,37 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         : safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable)
     );
     if (filters && hasValuedProps(filters)) {
-      return searchCheckingValues({
+      return this.walking(() => searchCheckingValues({
         db: this.db,
         cursor,
         limit,
         filters,
         page: (from, used) => page(from, 200, used),
-        turn: (operation) => this.read(operation)
-      });
+        turn: (operation) => this.read(() => {
+          // Con un `close()` forzado a mitad, un error con código, no una consulta sobre una
+          // conexión cerrada. `closeWhenIdle` espera a que termine: ahí no pasa.
+          if (this.closed) throw busyOtherInstance();
+          return operation();
+        })
+      }));
     }
     return this.read(() => page(cursor, limit, filters ?? null));
+  }
+
+  /**
+   * Un recorrido de varios turnos de la cola: entre dos no hay nada encolado, así que
+   * `closeWhenIdle` no lo vería. Cuenta hasta que termina, también si lanza un error.
+   */
+  private async walking<T>(run: () => Promise<T>): Promise<T> {
+    this.walks += 1;
+    try {
+      return await run();
+    } finally {
+      this.walks -= 1;
+      if (this.walks === 0) {
+        for (const resolve of this.walksDone.splice(0)) resolve();
+      }
+    }
   }
 
   async notesByTitlePrefix(prefix: string, limit?: number): Promise<TitleCandidates> {
@@ -1037,10 +1061,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.syncView;
   }
 
-  /** Espera a que termine lo que haya en cola y cierra la conexión. */
+  /** Espera a que terminen los recorridos en curso y lo que haya en cola, y cierra la conexión. No
+   *  ocupa la cola mientras espera: un turno de un recorrido sigue pudiendo entrar. */
   async closeWhenIdle(): Promise<void> {
     if (this.closed) return;
-    await this.queue.whenIdle();
+    do {
+      if (this.walks > 0) await new Promise<void>((resolve) => this.walksDone.push(resolve));
+      await this.queue.whenIdle();
+    } while (this.walks > 0);
     this.close();
   }
 
