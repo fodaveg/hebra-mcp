@@ -76,13 +76,15 @@ export interface RelinkFile {
 
 export type RelinkPlan = Pick<FileRelinkInput, 'noteRevisions' | 'entries'>;
 
-/** Los ids de las notas reescritas, para la puerta final y el registro de la operación. Si
- *  pasan del tope, no viajan: la escritura vale, y `relinked` no sale (no consta). */
-export function relinkedNotesOf(plan: Pick<RelinkPlan, 'entries'>): string[] | undefined {
-  return plan.entries.length > RELINKED_NOTES_MAX ? undefined : plan.entries.map((entry) => entry.id);
+/** Los ids de las notas reescritas, para la puerta final y el registro de la operación.
+ *  `planRelink` ya rechazó un plan de más de `RELINKED_NOTES_MAX`. */
+export function relinkedNotesOf(plan: Pick<RelinkPlan, 'entries'>): string[] {
+  return plan.entries.map((entry) => entry.id);
 }
 
-/** Prepara el renombrado sin escribir nada; rechaza (`not_found`, `file_exists`) sin escribir. */
+/** Prepara el renombrado sin escribir nada; rechaza (`not_found`, `file_exists`,
+ *  `too_many_linked_notes`) sin escribir. El tope va después de mirar que ninguna nota sea
+ *  oculta, así que solo cuenta visibles, y corta en cuanto se pasa, sin derivar el resto. */
 export async function planRelink(turn: RelinkTurn, file: RelinkFile, newName: string): Promise<RelinkPlan> {
   const { store, live, files, index } = turn;
   const noteIds = store.notesRelinkingFile(file.id, file.name, file.sha256);
@@ -100,6 +102,7 @@ export async function planRelink(turn: RelinkTurn, file: RelinkFile, newName: st
     if (resolvesToAnother || note.body.startsWith(LOCKED_BODY_PREFIX)) continue;
     const body = renameFileEmbedInMarkdown(note.body, file.name, newName);
     if (body === note.body) continue;
+    if (entries.length >= RELINKED_NOTES_MAX) throw writeRejected('too_many_linked_notes');
     const derived = deriveNoteKeepingTitle(body, note);
     // El nombre no puede traer una etiqueta (`#` no vale en él), pero es la regla de toda
     // escritura: el cuerpo resultante no deja la nota oculta (decisión 4 de D2).
