@@ -23,7 +23,7 @@ export type FileRelinkInput = Parameters<RenameAndRelink>[0];
 export type NoteRestoreGuard = Parameters<SqliteLibraryEngine['noteRestoreRowIfUnchanged']>[1];
 
 export interface NoteStateEngine {
-  /** «Ocultar del listado general» y su contrario: idempotentes en el motor, pero marcan la
+  /** Ocultar del listado general y su contrario: idempotentes en el motor, pero marcan la
    *  fila sucia y suben `local_seq` también al repetir (quien llama corta antes). */
   noteHide(id: string): Promise<NoteRow>;
   noteUnhide(id: string): Promise<NoteRow>;

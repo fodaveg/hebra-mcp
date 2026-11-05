@@ -6,7 +6,7 @@
  * - `moveNote`, `trashNote` y `restoreNote` con `expectedRevision`: las versiones con guarda
  *   del motor (`noteMoveIfUnchanged`, `noteTrashIfUnchanged`, `noteRestoreRowIfUnchanged`). Sin
  *   `expectedRevision` no pasan por aquí: siguen por `organize`, igual que antes.
- * - `setHidden`: «Ocultar del listado general» (`noteHide`, `noteUnhide`). Es una preferencia
+ * - `setHidden`: ocultar del listado general (`noteHide`, `noteUnhide`). Es una preferencia
  *   de vista, no privacidad (SPEC.md §13.7): la nota sigue saliendo por el MCP. Viaja por sync
  *   como un metadato más, y en un espacio compartido vale para todos sus miembros.
  * - `clearConflict`: quita la marca de una copia de conflicto (`noteClearConflict`). El motor

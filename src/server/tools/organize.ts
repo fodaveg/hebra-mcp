@@ -40,7 +40,7 @@ import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { syncOf, type NoteStateOutcome, type OrganizeOutcome, type SyncFields } from '../write-context';
-import { requireVisibleNote } from './guards';
+import { requireValidRevision, requireVisibleNote } from './guards';
 import { mapWriteError } from './write-errors';
 
 export type NoteOrganizeOutput = {
@@ -110,6 +110,7 @@ export async function runMoveNote(
   ctx: ToolContext,
   input: { id: string; folderId: string; expectedRevision?: string }
 ): Promise<NoteOrganizeOutput> {
+  requireValidRevision(input.expectedRevision);
   requireVisibleNote(ctx, input.id);
   requireVisibleFolder(ctx, input.folderId);
   const action = { action: 'moveNote', id: input.id, folderId: input.folderId } as const;
@@ -149,6 +150,7 @@ export async function runTrashNote(
   ctx: ToolContext,
   input: { id: string; expectedRevision?: string }
 ): Promise<NoteTrashOutput> {
+  requireValidRevision(input.expectedRevision);
   await requireVisibleLiveOrTrashed(ctx, input.id);
   const action = { action: 'trashNote', id: input.id } as const;
   const outcome =
@@ -169,6 +171,7 @@ export async function runRestoreNote(
   ctx: ToolContext,
   input: { id: string; expectedRevision?: string }
 ): Promise<NoteOrganizeOutput> {
+  requireValidRevision(input.expectedRevision);
   await requireVisibleLiveOrTrashed(ctx, input.id);
   const action = { action: 'restoreNote', id: input.id } as const;
   const outcome =

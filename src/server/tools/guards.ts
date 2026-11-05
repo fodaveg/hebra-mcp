@@ -3,6 +3,7 @@
  * longitud de `operationId`). Cada una lanza `ToolError`, igual que antes estaban copiadas.
  */
 import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
+import { REVISION_MAX_LENGTH } from '../../store/revision';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 
@@ -31,6 +32,14 @@ export function declareWriteUsage(
   const used = usageOf(ctx);
   used.note(result.id);
   if (result.outcome === 'conflict_copy' && result.copyId !== undefined) used.noteInAnyState(result.copyId);
+}
+
+/** `expectedRevision` opcional de a lo sumo `REVISION_MAX_LENGTH` (D23); si no, `invalid_input`,
+ *  aquí y antes de mirar ninguna nota: en un lector, el socket la rechazaría como
+ *  `invalid_request`, que esas ops traducen a `writer_outdated`. No va en el esquema: un `.max()`
+ *  saldría como el error de validación del SDK (`-32602`, con eco), no como `invalid_input`. */
+export function requireValidRevision(revision: string | undefined): void {
+  if (revision !== undefined && revision.length > REVISION_MAX_LENGTH) throw new ToolError('invalid_input');
 }
 
 /** `operationId` no vacío y de a lo sumo `OPERATION_ID_MAX_LENGTH`; si no, `invalid_input`. */

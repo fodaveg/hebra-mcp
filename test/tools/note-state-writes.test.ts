@@ -3,9 +3,9 @@
  * la biblioteca de prueba: `hebra_set_hidden`, `hebra_clear_conflict` y `expectedRevision` en
  * `hebra_move_note`, `hebra_trash_note` y `hebra_restore_note`. Sin sync: `sync: "not_linked"`.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveToolContext } from '../../src/server/context';
-import { encodeRevision, decodeRevision } from '../../src/store/revision';
+import { encodeRevision, decodeRevision, REVISION_MAX_LENGTH } from '../../src/store/revision';
 import { startLooseFiles, type LooseFilesHarness } from '../fixtures/loose-files';
 import { createNote } from '../fixtures/test-library';
 import type { PrivacyConfig } from '../../src/privacy';
@@ -261,6 +261,26 @@ describe('cambios de estado de una nota (D23)', () => {
         expect(await call('hebra_move_note', { id, folderId, expectedRevision })).toEqual(NOT_FOUND);
       }
       expect(await row(harness, id)).toEqual(before);
+    });
+
+    it('una revisión de más de REVISION_MAX_LENGTH: invalid_input, igual en una nota oculta, sin llegar al escritor', async () => {
+      const harness = await start();
+      const { call, test } = harness;
+      const tooLong = 'r'.repeat(REVISION_MAX_LENGTH + 1);
+      const reached = vi.spyOn(test.serverContext.write!, 'noteState');
+      const invalid = { isError: true, value: { error: 'invalid_input' } };
+      for (const id of [test.library.publicNote2Id, ...hiddenIds(harness)]) {
+        expect(await call('hebra_move_note', { id, folderId: 'root', expectedRevision: tooLong }), id).toEqual(invalid);
+        expect(await call('hebra_trash_note', { id, expectedRevision: tooLong }), id).toEqual(invalid);
+        expect(await call('hebra_restore_note', { id, expectedRevision: tooLong }), id).toEqual(invalid);
+      }
+      expect(reached).not.toHaveBeenCalled();
+      reached.mockRestore();
+      // Justo en el tope no se rechaza por largo: sigue a la comprobación de siempre.
+      const atLimit = 'r'.repeat(REVISION_MAX_LENGTH);
+      expect(
+        await call('hebra_move_note', { id: test.library.publicNote2Id, folderId: 'root', expectedRevision: atLimit })
+      ).toEqual(invalid);
     });
 
     it('una revisión ilegible o de otra nota: invalid_input; de otra biblioteca: revision_conflict', async () => {

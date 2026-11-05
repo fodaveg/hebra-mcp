@@ -12,8 +12,9 @@
  *   sin escribir, sin decir cuál ni cuántas.
  * - Una nota que cruce a privada no puede colarse entre esta comprobación y la escritura: el
  *   filtro se construye en el mismo turno de la cola, y el sync espera su propio turno. Si
- *   cruza DESPUÉS, enlaza ya el nombre nuevo, así que el fichero queda oculto por la regla (b)
- *   y la puerta final responde `not_found`, sin `relinked`.
+ *   cruza DESPUÉS, aunque además le quiten el enlace, la herramienta declara a la puerta final
+ *   los ids de las notas reescritas (`relinkedNotesOf`, nunca salen en la respuesta), y responde
+ *   `not_found`. También al reintentar: los ids se guardan en el registro de la operación.
  * - Una BLOQUEADA no deriva enlaces, y lo que incrusta va cifrado: no se puede arreglar. Si es
  *   oculta y el nombre se puede incrustar, el fichero ya es oculto (variante de D16). Si es
  *   visible (sin etiquetas privadas configuradas), se queda sin tocar, como una que no lo
@@ -28,13 +29,30 @@
  * Homónimos: un enlace por nombre resuelve al fichero vivo de menor id, en cualquier carpeta
  * (`resolveLink` del motor). Si el nombre anterior resuelve a OTRO fichero visible, esas notas
  * no incrustan este y no se tocan. Si el nombre nuevo lo tiene otro fichero visible de otra
- * carpeta, reescribirlas podría apuntarlas a ese: `file_exists` con su id. Uno oculto no
- * cuenta: la respuesta no puede depender de él.
+ * carpeta, reescribirlas podría apuntarlas a ese: `file_exists` con su id.
+ *
+ * Homónimo oculto, dos efectos declarados (SPEC.md §6.3, decisión de David del 5 nov 2026):
+ * - Oráculo. Renombrar al nombre exacto de un fichero oculto vivo de la MISMA carpeta, con notas
+ *   que arreglar, responde `not_found`; con ese nombre libre, renombra. Se queda: el motor no
+ *   renombra con ese homónimo al lado (`file_name_taken`), y renombrar sin arreglar las notas
+ *   también lo delataría y dejaría enlaces rotos. NO es el coste asumido de D17: D17 responde si
+ *   alguna nota oculta enlaza ese nombre o esos bytes; esto responde si existe un fichero oculto
+ *   con ese nombre en esa carpeta, aunque nada enlace ese nombre. El agente puede provocar la
+ *   condición creando una nota visible con el incrustado. Límites: hay que adivinar el nombre y
+ *   la extensión exactos, hace falta un fichero visible de esa extensión en esa carpeta, un
+ *   intento que falla no escribe, y uno que acierta un nombre libre sí escribe (renombra,
+ *   reescribe la nota, deja versión y sync).
+ * - Integridad, sin arreglar. Si el fichero F pasa a llamarse N y hay un H con el nombre N en una
+ *   carpeta privada y con menor id, la nota visible queda con el incrustado de N y `resolveLink`
+ *   la resuelve a H: en la app esa nota enseñaría H a la persona dueña; por el MCP no sale nada.
+ *   El caso inverso, un H de menor id con el nombre ANTERIOR: la nota se reescribe igualmente.
+ *   Rechazar cualquiera de los dos sería otro oráculo.
  */
 import { deriveNoteKeepingTitle, renameFileEmbedInMarkdown } from '../hebra';
 import type { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { existingFileRejected, writeRejected } from './errors';
+import { RELINKED_NOTES_MAX } from './file-content';
 import type { FileRelinkInput } from './note-state-engine';
 import type { FilesIndex } from './types';
 import { LOCKED_BODY_PREFIX, type NoteWriteStore } from './writes';
@@ -57,6 +75,12 @@ export interface RelinkFile {
 }
 
 export type RelinkPlan = Pick<FileRelinkInput, 'noteRevisions' | 'entries'>;
+
+/** Los ids de las notas reescritas, para la puerta final y el registro de la operación. Si
+ *  pasan del tope, no viajan: la escritura vale, y `relinked` no sale (no consta). */
+export function relinkedNotesOf(plan: Pick<RelinkPlan, 'entries'>): string[] | undefined {
+  return plan.entries.length > RELINKED_NOTES_MAX ? undefined : plan.entries.map((entry) => entry.id);
+}
 
 /** Prepara el renombrado sin escribir nada; rechaza (`not_found`, `file_exists`) sin escribir. */
 export async function planRelink(turn: RelinkTurn, file: RelinkFile, newName: string): Promise<RelinkPlan> {

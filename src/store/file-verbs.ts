@@ -30,13 +30,15 @@
  *    prueba de lo guardado, leída del almacén: `sha256` de la fila, y los bytes de ese blob
  *    o lo que su fila de `blobs` sabe. Renombrar (D23, 5 nov 2026) arregla además, en la misma
  *    transacción (`fileRenameAndRelink`), las notas que incrustan el fichero por su nombre,
- *    y dice cuántas (`relinked`); qué notas y por qué ninguna oculta, en `./file-relink.ts`.
+ *    y devuelve sus ids (`relinkedNotes`), que también anota el registro: la herramienta los
+ *    declara a la puerta final y solo enseña cuántas son (`relinked`). Qué notas y por qué
+ *    ninguna oculta, en `./file-relink.ts`.
  *    Sin ninguna que arreglar, `fileRename` a secas.
  *
  * Registro: renombrar y mover lo empiezan (`started`) antes de escribir, con el id del
  * fichero; si el proceso muere entre la escritura y `finish`, el reintento ve el fichero
- * ya con el nombre o la carpeta pedidos y lo da por guardado (sin `relinked`: las notas van
- * en la misma transacción que el nombre, pero cuántas no consta). Crear y duplicar no saben
+ * ya con el nombre o la carpeta pedidos y lo da por guardado (sin `relinkedNotes`: las notas
+ * van en la misma transacción que el nombre, pero cuáles no consta). Crear y duplicar no saben
  * el id antes de `fileCreate` (lo pone el motor): anotan `started` y `done` justo después, en
  * el mismo turno. Si el proceso muere entre medias, el reintento no duplica: el fichero ya
  * existe en esa carpeta con ese nombre y responde `file_exists` con su id.
@@ -56,7 +58,7 @@ import {
   looseFileMime,
   validFileName
 } from './file-content';
-import { planRelink } from './file-relink';
+import { planRelink, relinkedNotesOf } from './file-relink';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import type { FilesIndex } from './types';
 import {
@@ -101,9 +103,11 @@ export interface LooseFileSaved {
   mimeType: string | null;
   /** `saved`: escrito ahora; `already`: ya tenía ese nombre o estaba en esa carpeta. */
   outcome: 'saved' | 'already';
-  /** Renombrar (D23): cuántas notas se arreglaron. Ausente en las otras acciones y si no
-   *  consta (un registro anterior a D23 o recuperado del estado `started`). */
-  relinked?: number;
+  /** Renombrar (D23): los ids de las notas que se arreglaron, para la puerta final. Nunca salen
+   *  en la respuesta MCP. Ausente en las otras acciones y si no consta (un registro sin ids,
+   *  recuperado del estado `started` o de más de `RELINKED_NOTES_MAX` notas): entonces la
+   *  herramienta no da `relinked`. */
+  relinkedNotes?: string[];
   replayed?: true;
 }
 
@@ -136,7 +140,8 @@ export function isLooseFileSaved(value: unknown): value is LooseFileSaved {
     (record.byteLength === null || typeof record.byteLength === 'number') &&
     (record.mimeType === null || typeof record.mimeType === 'string') &&
     (record.outcome === 'saved' || record.outcome === 'already') &&
-    (record.relinked === undefined || typeof record.relinked === 'number')
+    (record.relinkedNotes === undefined ||
+      (Array.isArray(record.relinkedNotes) && record.relinkedNotes.every((id) => typeof id === 'string')))
   );
 }
 
@@ -449,7 +454,7 @@ export async function writeLooseFile(
               log.finish(input.operationId, saved);
               return { result: { ...saved, replayed: true }, wrote: false };
             }
-            return { result: record({ ...done, relinked: 0 }), wrote: false };
+            return { result: record({ ...done, relinkedNotes: [] }), wrote: false };
           }
           rejectVisibleHomonym(turn, source.file.folderId, name, input.id);
           if (wouldHide(turn, name, source.sha256)) throw writeRejected('not_found');
@@ -484,9 +489,10 @@ export async function writeLooseFile(
                   // la enseña, y solo nombra un fichero que se ve.
                   cause: `Antes de renombrar «${stored.name}» → «${name}»`
                 });
+          const relinkedNotes = relinkedNotesOf(plan);
           const saved = {
             ...rowProof(row, source.file.byteLength, source.file.mime, 'saved'),
-            relinked: plan.entries.length
+            ...(relinkedNotes ? { relinkedNotes } : {})
           };
           log.finish(input.operationId, saved);
           return { result: saved, wrote: true };

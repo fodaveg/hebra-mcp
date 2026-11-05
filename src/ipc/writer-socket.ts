@@ -71,7 +71,8 @@
  *   `file_exists` vuelve con el id del fichero que choca (`existing`). Un escritor sin
  *   ella (o de una versión anterior) responde `invalid_request`.
  * - `renameFileRelinking` (D23, 5 nov 2026): `looseFileWrite` con `renameFile` y nada más, que
- *   además arregla las notas que incrustan el fichero (`relinked`). Op propia para fallar
+ *   además arregla las notas que incrustan el fichero y devuelve sus ids (`relinkedNotes`,
+ *   acotados, para la puerta final del lector; nunca salen en la respuesta MCP). Op propia para fallar
  *   cerrado: un escritor anterior la rechaza sin escribir (el lector lo traduce a
  *   `writer_outdated`), en vez de renombrar sin arreglarlas. Un lector anterior sigue mandando
  *   `looseFileWrite`, y este escritor también las arregla.
