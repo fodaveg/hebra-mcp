@@ -135,7 +135,7 @@ export async function runSearch(
       if (!meta) return undefined;
       if (extra.linkSources && !extra.linkSources.has(hit.id)) return undefined;
       // Una bloqueada no tiene propiedades: una fila de antes de bloquearla no la hace casar. El
-      // filtro del motor la mira sin saberlo, en sus dos ramas, y aquí se quita (D23).
+      // filtro por clave y la comprobación de valores la miran sin saberlo, y aquí se quita (D23).
       if (extra.filters.props && ctx.privacy.isLockedNote(hit.id)) return undefined;
       // También la de mirar por delante: decide si hay `nextCursor`.
       const folderPath = ctx.privacy.folderPath(meta.folderId);

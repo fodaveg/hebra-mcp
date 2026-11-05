@@ -1,13 +1,11 @@
 /**
- * La rama de subcadenas de la búsqueda segura (`src/store/search-safe.ts`) lleva su propia versión
- * de `props` y `linksTo` en SQL, porque pedirle al motor todas las notas que los cumplen paraba el
- * hilo varios segundos con una biblioteca grande. Aquí se compara con el motor (la misma búsqueda
- * con `embedded`, en el mismo puerto), caso a caso, y se fija que ya no hace aquel recorrido.
+ * `hebra_search` no le pasa nunca al motor un par de `props` con valor: los comprueba
+ * `searchCheckingValues` (`src/store/search-safe.ts`) sobre cada página de la búsqueda interna, y la
+ * rama de subcadenas lleva `linksTo` en su SQL. Aquí se compara con el motor, llamándolo directamente
+ * con el par con valor: el mismo orden, el mismo cursor y los mismos resultados, caso a caso.
  */
-import type { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it, vi } from 'vitest';
 import type { SearchFilters, SearchPage, SqliteLibraryEngine } from '../../src/hebra';
-import { searchFilteringValues } from '../../src/store/search-safe';
 import { auditHarness, createNote } from '../privacy/audit-harness';
 
 const FILTERS: Array<[string, SearchFilters]> = [
@@ -92,22 +90,24 @@ describe('la rama de subcadenas aplica `props` y `linksTo` como el motor', () =>
   });
 
   it.each(FILTERS.filter(([, filters]) => filters.props?.some((prop) => prop.value !== null)))(
-    'filtrar los pares con valor fuera del motor da su mismo orden y su mismo cursor: %s',
+    'comprobar los pares fuera del motor da su mismo orden, cursor y resultados, por los dos caminos: %s',
     async (_name, filters) => {
       const h = await library();
       try {
-        const { engine, db } = h.port as unknown as { engine: SqliteLibraryEngine; db: DatabaseSync };
-        for (const query of ['garbanzos', 'arbanz']) {
-          for (const want of [1, 2, 50]) {
-            let cursor: string | null = null;
-            do {
-              const own: SearchPage = searchFilteringValues(engine, db, query, cursor, want, filters, null);
-              const direct: SearchPage = engine.search(query, cursor, want, filters, null);
-              expect(own.items.map((item) => item.id), `${query} ${want}`).toEqual(direct.items.map((item) => item.id));
-              expect(own.nextCursor !== null, `${query} ${want}`).toBe(direct.nextCursor !== null);
-              if (own.nextCursor) expect(own.nextCursor).toBe(direct.nextCursor);
-              cursor = own.nextCursor;
-            } while (cursor);
+        const { engine } = h.port as unknown as { engine: SqliteLibraryEngine };
+        for (const embedded of [true, false]) {
+          for (const query of ['garbanzos', 'arbanz', '', '   ']) {
+            for (const want of [1, 2, 50]) {
+              const label = `${embedded ? 'motor' : 'segura'} ${JSON.stringify(query)} ${want}`;
+              let cursor: string | null = null;
+              do {
+                const own: SearchPage = await h.port.search(query, cursor, want, filters, null, { embedded });
+                const direct: SearchPage = await engine.search(query, cursor, want, filters, null);
+                expect(own.items.map((item) => item.id), label).toEqual(direct.items.map((item) => item.id));
+                expect(own.nextCursor, label).toBe(direct.nextCursor);
+                cursor = own.nextCursor;
+              } while (cursor);
+            }
           }
         }
       } finally {

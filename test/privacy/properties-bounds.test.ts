@@ -284,49 +284,204 @@ describe('las variantes plegadas de un valor en notas ocultas', () => {
     }, config);
   }
 
-  const args = (query: string, props: Array<{ key: string; value: string }>) => ({ query, props, limit: 1, fields: ['title'] });
+  type Harness = Awaited<ReturnType<typeof library>>;
+
+  /** Todas las páginas de una búsqueda, tal cual salen: el texto de cada respuesta. */
+  async function walk(h: Harness, args: Record<string, unknown>): Promise<string[]> {
+    const raws: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const page = await h.call('hebra_search', { ...args, ...(cursor ? { cursor } : {}) });
+      raws.push(page.raw);
+      cursor = page.json?.nextCursor ?? undefined;
+    } while (cursor);
+    return raws;
+  }
+
+  /** Mete las filas por SQL en la nota oculta, con el puerto ya abierto, sin tocar ninguna nota. */
+  async function loadHidden(h: Harness, keys: readonly string[], count: number): Promise<void> {
+    await h.mutate(async (_engine, _library, db) => {
+      const hidden = db.prepare("SELECT id FROM notes WHERE title = 'Oculta'").get() as { id: string };
+      const insert = db.prepare('INSERT OR IGNORE INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      for (const key of keys) for (let index = 1; index <= count; index += 1) insert.run(String(hidden.id), key, variant(index));
+      db.exec('COMMIT');
+    });
+  }
+
+  const FIFTEEN = 'a'.repeat(15);
 
   it.each([
+    ['solo espacios', ' '],
     ['por subcadena', 'arbanz'],
     ['por palabra', 'garbanzos']
-  ])('32 767 variantes de un valor en una oculta no cambian la respuesta, %s', async (_name, query) => {
-    const props = [{ key: 'clave', value: 'a'.repeat(15) }];
-    const clean = await library(() => {});
-    const loaded = await library((_id, insert) => {
-      for (let index = 1; index < 2 ** 15; index += 1) insert('clave', variant(index));
-    });
+  ])('20 001 valores no ASCII en una oculta: respuesta idéntica byte a byte, %s, también al continuar', async (_name, query) => {
+    const h = await library(() => {});
     try {
-      for (const h of [clean, loaded]) {
-        const titles: string[] = [];
-        let cursor: string | undefined;
-        do {
-          const page = await h.call('hebra_search', { ...args(query, props), ...(cursor ? { cursor } : {}) });
-          expect(page.isError, page.raw.slice(0, 200)).toBe(false);
-          titles.push(...page.json.results.map((hit: { title: string }) => hit.title));
-          cursor = page.json.nextCursor ?? undefined;
-        } while (cursor);
-        expect(titles).toEqual(['Visible dos', 'Visible']);
-        expect(JSON.stringify(titles)).not.toContain('Oculta');
-      }
+      const args = { query, props: [{ key: 'clave', value: FIFTEEN }], limit: 1 };
+      const before = await walk(h, args);
+      expect(before).toHaveLength(2);
+      expect(JSON.parse(before[0]!).results).toHaveLength(1);
+      expect(JSON.parse(before[0]!).nextCursor).not.toBeNull();
+      await loadHidden(h, ['clave'], 20_001);
+      expect(await walk(h, args)).toEqual(before);
+      // Y una página que se pidió antes de que llegaran las filas sigue igual después.
+      const resumed = await h.call('hebra_search', { ...args, cursor: JSON.parse(before[0]!).nextCursor });
+      expect(resumed.raw).toBe(before[1]);
+      expect(before.join('')).not.toContain('Oculta');
     } finally {
-      await clean.close();
-      await loaded.close();
+      await h.close();
     }
   });
 
-  it('dos pares por debajo del corte que juntos pasan del límite: captura el error del motor y responde igual', async () => {
-    const props = [{ key: 'clave', value: 'a'.repeat(15) }, { key: 'otra', value: 'a'.repeat(15) }];
-    const h = await library((_id, insert) => {
-      for (let index = 1; index < 17_000; index += 1) {
-        insert('clave', variant(index));
-        insert('otra', variant(index));
-      }
-    });
+  it('dos claves de 16 999 variantes en una oculta: respuesta idéntica byte a byte', async () => {
+    const h = await library(() => {});
     try {
-      for (const query of ['arbanz', 'garbanzos']) {
-        const page = await h.call('hebra_search', { query, props, limit: 5, fields: ['title'] });
-        expect(page.isError, page.raw.slice(0, 200)).toBe(false);
-        expect(page.json.results.map((hit: { title: string }) => hit.title)).toEqual(['Visible']);
+      const args = { props: [{ key: 'clave', value: FIFTEEN }, { key: 'otra', value: FIFTEEN }], limit: 5 };
+      const before = await Promise.all([' ', 'arbanz', 'garbanzos'].map((query) => walk(h, { ...args, query })));
+      expect(JSON.parse(before[2]![0]!).results.map((hit: { title: string }) => hit.title)).toEqual(['Visible']);
+      await loadHidden(h, ['clave', 'otra'], 16_999);
+      const after = await Promise.all([' ', 'arbanz', 'garbanzos'].map((query) => walk(h, { ...args, query })));
+      expect(after).toEqual(before);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('32 767 variantes en una oculta: lo que hacía saltar `too many SQL variables` responde igual', async () => {
+    const h = await library(() => {});
+    try {
+      const args = { query: 'arbanz', props: [{ key: 'clave', value: FIFTEEN }], limit: 1 };
+      const before = await walk(h, args);
+      await loadHidden(h, ['clave'], 2 ** 15 - 1);
+      expect(await walk(h, args)).toEqual(before);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('un cursor inválido da el mismo error, con un valor que no existe y con o sin las filas ocultas', async () => {
+    const h = await library(() => {});
+    try {
+      const garbage = `s1.${Buffer.from('garbage').toString('base64url')}`;
+      const calls = [' ', 'arbanz', 'garbanzos'].map((query) => ({
+        query,
+        cursor: garbage,
+        props: [{ key: 'clave', value: 'no-existe' }]
+      }));
+      const before = await Promise.all(calls.map((args) => h.call('hebra_search', args)));
+      for (const call of before) {
+        expect(call.isError).toBe(true);
+        expect(call.json).toEqual({ error: 'invalid_input' });
+      }
+      await loadHidden(h, ['clave'], 20_001);
+      const after = await Promise.all(calls.map((args) => h.call('hebra_search', args)));
+      expect(after.map((call) => call.raw)).toEqual(before.map((call) => call.raw));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it.each([['con algo privado', undefined], ['sin nada privado', OPEN]])(
+    'el motor nunca recibe un par con valor, %s',
+    async (_name, config) => {
+      const h = await library(() => {}, config);
+      try {
+        const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+        const spy = vi.spyOn(engine, 'search');
+        try {
+          const props = [
+            { key: 'CLAVE', value: FIFTEEN },
+            { key: 'clave', value: 'otro' },
+            { key: 'otra', value: FIFTEEN },
+            { key: 'tercera', value: null }
+          ];
+          for (const query of [' ', 'arbanz', 'garbanzos']) await h.call('hebra_search', { query, props, cursor: undefined });
+          expect(spy).toHaveBeenCalled();
+          for (const call of spy.mock.calls) {
+            const sent = (call[3] as { props?: Array<{ key: string; value: string | null }> }).props;
+            expect(sent).toEqual([
+              { key: 'clave', value: null },
+              { key: 'otra', value: null },
+              { key: 'tercera', value: null }
+            ]);
+          }
+        } finally {
+          spy.mockRestore();
+        }
+      } finally {
+        await h.close();
+      }
+    }
+  );
+
+  it('sin pares con valor, los dos caminos van directos: una sola consulta y sin ceder el hilo', async () => {
+    const h = await library(() => {}, OPEN);
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search');
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        await h.port.search('garbanzos', null, 7, { props: [{ key: 'clave', value: null }] }, null, { embedded: true });
+        expect(spy).toHaveBeenCalledTimes(1);
+        expect(spy.mock.calls[0]![2]).toBe(7);
+        expect(immediate).not.toHaveBeenCalled();
+      } finally {
+        immediate.mockRestore();
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('una página de 200 por turno, cediendo el hilo entre páginas, y nunca guarda más que `want`', async () => {
+    const h = await auditHarness(async (engine) => {
+      for (let index = 0; index < 450; index += 1) {
+        await createNote(engine, null, `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`);
+      }
+    }, OPEN);
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search');
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'si' }] }, null, { embedded: true });
+        expect(page.items.map((item) => item.title)).toEqual(['Nota 0']);
+        expect(page.nextCursor).toBeNull();
+        expect(spy.mock.calls.map((call) => call[2])).toEqual([200, 200, 200]);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+        // Con `want` lleno, no sigue pidiendo.
+        spy.mockClear();
+        const full = await h.port.search('garbanzos', null, 1, { props: [{ key: 'clave', value: 'no' }] }, null, { embedded: true });
+        expect(full.items).toHaveLength(1);
+        expect(full.nextCursor).not.toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        immediate.mockRestore();
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('una sola nota con muchos valores en la clave también cede el hilo', async () => {
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Muchos\ngarbanzos\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      for (let index = 0; index < 50_000; index += 1) insert.run(note.id, 'clave', `v${index}`);
+      db.exec('COMMIT');
+    }, OPEN);
+    try {
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'no-existe' }] }, null, { embedded: true });
+        expect(page.items).toEqual([]);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        immediate.mockRestore();
       }
     } finally {
       await h.close();
@@ -344,28 +499,6 @@ describe('las variantes plegadas de un valor en notas ocultas', () => {
         const page = await h.call('hebra_search', { query: 'garbanzos', props: [{ key: 'clave', value: 'x' }] });
         expect(page.isError).toBe(true);
         expect(spy).toHaveBeenCalled();
-      } finally {
-        spy.mockRestore();
-      }
-    } finally {
-      await h.close();
-    }
-  });
-
-  it('sin nada privado, pasadas de 20 000 variantes la búsqueda entera tampoco las pide al motor', async () => {
-    const h = await library((_id, insert) => {
-      for (let index = 1; index < 21_000; index += 1) insert('clave', variant(index));
-    }, OPEN);
-    try {
-      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
-      const spy = vi.spyOn(engine, 'search');
-      try {
-        const page = await h.call('hebra_search', { query: 'garbanzos', props: [{ key: 'clave', value: 'a'.repeat(15) }], fields: ['title'] });
-        // Sin nada privado, la nota de `#secreto` se ve, y casa por sus variantes.
-        expect(page.json.results.map((hit: { title: string }) => hit.title).sort()).toEqual(['Oculta', 'Visible', 'Visible dos']);
-        for (const call of spy.mock.calls) {
-          expect((call[3] as { props?: unknown[] }).props).toEqual([]);
-        }
       } finally {
         spy.mockRestore();
       }
