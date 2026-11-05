@@ -33,6 +33,9 @@ export const SERVER_LOCK_FILE = 'server.lock';
 /** `SQLITE_BUSY`, sin los bits de código extendido. */
 const SQLITE_BUSY = 5;
 
+/** Conexiones que tienen un `server.lock`: el bloqueo vive lo que viva la conexión abierta. */
+const HELD_CONNECTIONS = new Set<DatabaseSync>();
+
 export interface ServerLock {
   /** Identificador de este arranque: lo llevan los `writer.lock` que se tomen bajo la raíz. */
   readonly bootId: string;
@@ -63,6 +66,9 @@ export function acquireServerLock(dataDir: string, controlDir: string): ServerLo
     if (isBusy(error)) return null;
     throw error;
   }
+  // Alcanzable hasta `release`: si nadie más referencia la conexión, el GC la finaliza y SQLite
+  // cierra el descriptor, con lo que el kernel suelta el bloqueo con el proceso vivo.
+  HELD_CONNECTIONS.add(db);
   const bootId = randomUUID();
   const unregister = registerServerBoot(dataDir, bootId);
   let held = true;
@@ -73,6 +79,7 @@ export function acquireServerLock(dataDir: string, controlDir: string): ServerLo
       held = false;
       unregister();
       db.close();
+      HELD_CONNECTIONS.delete(db);
     }
   };
 }
