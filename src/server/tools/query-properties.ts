@@ -8,10 +8,12 @@
  * visible. Por eso esta es una LISTA CALCULADA, como `hebra_list_files`: se leen todas las notas
  * que cumplen los filtros, se quitan las ocultas, se ordena y se corta. Así el contenido de una
  * página, su tamaño, su orden y su cursor solo dependen de lo visible. Coste asumido: cada página
- * lee todas las que cumplen los filtros (una consulta, sin cuerpos), no solo las suyas.
+ * lee todas las que cumplen los filtros (una consulta, sin cuerpos), no solo las suyas, y recorre
+ * los valores de la clave de orden sin guardarlos.
  *
  * `properties` de cada nota: los valores de las claves pedidas (por defecto, las de los filtros y
- * la del orden), en orden binario como las da el motor. Una clave sin valor sale `[]`.
+ * la del orden), en orden binario como las da el motor. Una clave sin valor sale `[]`. Se leen solo
+ * los de la página y hasta `PROPERTIES_RESPONSE_MAX_CHARS`: si no caben, la página se corta antes.
  */
 import { ROOT_FOLDER_ID, type PropsFilterOp, type PropsQueryFilter } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
@@ -25,7 +27,15 @@ import {
   wrapCursor
 } from '../pagination';
 import type { QUERY_PROPERTIES_FIELDS } from '../schemas';
-import { buildSortKeys, compareSortKeys, decodeSortKey, encodeSortKey, type PropsSort } from './props-order';
+import { PROPERTIES_RESPONSE_MAX_CHARS } from '../../store/props-limits';
+import {
+  SortKeysCollector,
+  assertCursorMode,
+  compareSortKeys,
+  decodeSortKey,
+  encodeSortKey,
+  type PropsSort
+} from './props-order';
 
 export interface QueryPropertiesNote {
   id: string;
@@ -100,10 +110,7 @@ export async function runQueryProperties(
           )
     )
   ];
-  const scan = await ctx.port.propsScan(
-    { props: filters },
-    [...new Set([...shown, ...(sort.key === null ? [] : [sort.key])])]
-  );
+  const matches = await ctx.port.propsMatches({ props: filters });
 
   // Toda la respuesta sale de las visibles (también el modo del orden, y si hay `nextCursor`):
   // las declara todas, como un recuento. La puerta final las vuelve a juzgar.
@@ -111,25 +118,22 @@ export async function runQueryProperties(
   const used = usageOf(ctx);
   used.visibleNotes(visible.keys());
 
-  const valuesByKey = new Map<string, Map<string, string[]>>();
-  for (const row of scan.props) {
-    if (!visible.has(row.noteId)) continue;
-    let byNote = valuesByKey.get(row.key);
-    if (!byNote) valuesByKey.set(row.key, (byNote = new Map()));
-    const values = byNote.get(row.noteId);
-    if (values) values.push(row.value);
-    else byNote.set(row.noteId, [row.value]);
+  const selected = matches.filter((match) => {
+    const note = visible.get(match.id);
+    return note !== undefined && (folderIds === null || folderIds.has(note.folderId));
+  });
+  const collector = new SortKeysCollector(sort, new Set(selected.map((match) => match.id)));
+  if (sort.key !== null) {
+    await ctx.port.visitPropValues(sort.key, (noteId, value) => {
+      // Una bloqueada no tiene propiedades, aunque quede una fila de antes de bloquearla.
+      if (visible.has(noteId) && !ctx.privacy.isLockedNote(noteId)) collector.add(noteId, value);
+    });
   }
+  if (after) assertCursorMode(after, collector.mode);
 
-  const sortKeyOf = buildSortKeys(sort, (sort.key !== null && valuesByKey.get(sort.key)) || new Map());
-  const rows = scan.matches
-    .filter((match) => {
-      const note = visible.get(match.id);
-      return note !== undefined && (folderIds === null || folderIds.has(note.folderId));
-    })
-    .map((match) => ({ match, key: sortKeyOf(match) }))
+  const rows = selected
+    .map((match) => ({ match, key: collector.keyOf(match) }))
     .sort((left, right) => compareSortKeys(sort, left.key, right.key));
-
   const page = sliceAfterKey(rows, {
     limit,
     after,
@@ -137,24 +141,35 @@ export async function runQueryProperties(
     compare: (left, right) => compareSortKeys(sort, left, right)
   });
 
-  const notes = page.items.map(({ match }) => {
+  // Los valores, solo de esta página y hasta el tope de la respuesta: si no caben todos, la página
+  // se corta antes, con `nextCursor`. Sin `properties` entre los campos pedidos, ni se leen.
+  const wantsValues = shown.length > 0 && (!input.fields || input.fields.includes('properties'));
+  // De una bloqueada no se lee nada: no tiene propiedades.
+  const toRead = wantsValues
+    ? page.items.map(({ match }) => match.id).filter((id) => !ctx.privacy.isLockedNote(id))
+    : [];
+  const { notes: read } = toRead.length > 0
+    ? await ctx.port.propValuesOfNotes(toRead, shown, PROPERTIES_RESPONSE_MAX_CHARS)
+    : { notes: [] };
+  const valuesOf = new Map(read.map((note) => [note.id, note.values]));
+  const cut = read.length < toRead.length;
+  const items = cut
+    ? page.items.slice(0, page.items.findIndex(({ match }) => match.id === read.at(-1)!.id) + 1)
+    : page.items;
+
+  const notes = items.map(({ match }) => {
     const folderId = visible.get(match.id)!.folderId;
     const folderPath = ctx.privacy.folderPath(folderId);
     used.note(match.id, match.localSeq);
     used.folder(folderId, folderPath);
-    const properties = Object.fromEntries(
-      shown.map((key) => [
-        key,
-        (valuesByKey.get(key)?.get(match.id) ?? [])
-          .filter((value) => value !== '')
-          .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)))
-      ])
-    );
+    const values = valuesOf.get(match.id);
+    const properties = Object.fromEntries(shown.map((key) => [key, values?.get(key) ?? []]));
     const note: QueryPropertiesNote = { id: match.id, title: match.title, folderPath, properties };
     return pickFields(note, input.fields as ReadonlyArray<keyof QueryPropertiesNote & string> | undefined);
   });
+  const lastKey = cut ? items.at(-1)!.key : page.lastKey;
   return {
     notes,
-    nextCursor: page.lastKey === null ? null : wrapCursor('pq1', encodeSortKey(page.lastKey))
+    nextCursor: lastKey === null ? null : wrapCursor('pq1', encodeSortKey(lastKey))
   };
 }

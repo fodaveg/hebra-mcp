@@ -57,7 +57,18 @@ import {
   type TitleCandidates
 } from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
-import { readIdsByFoldedTitle, readPropRows, readPropsMatches, type PropRow, type PropsScan } from './props-sql';
+import {
+  readFoldedTitleTargets,
+  readLinkSources,
+  readPropCounts,
+  readPropsMatches,
+  readPropValuesOfNotes,
+  visitPropValues,
+  type NotePropValues,
+  type PropCountsPage,
+  type PropCountsRequest,
+  type PropsMatch
+} from './props-sql';
 import { safeTextSearch } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
@@ -467,22 +478,32 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     });
   }
 
-  /** Propiedades del frontmatter, sin filtro de privados: SQL propio en `./props-sql.ts`. */
-  async propRows(keys?: readonly string[]): Promise<PropRow[]> {
-    return this.read(() => readPropRows(this.db, keys));
+  /** Propiedades del frontmatter, sin filtro de privados salvo lo que se pase: SQL propio en
+   *  `./props-sql.ts`. */
+  async propCounts(request: PropCountsRequest): Promise<PropCountsPage> {
+    return this.read(() => readPropCounts(this.db, request));
   }
 
-  async propsScan(filters: PropsQueryFilters, keys: readonly string[]): Promise<PropsScan> {
+  async propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]> {
     const conn = this.conn;
-    if (!conn) throw new Error('propsScan: puerto sin conexión del motor');
-    return this.read(() => ({
-      matches: readPropsMatches(this.db, conn, filters),
-      props: keys.length > 0 ? readPropRows(this.db, keys) : []
-    }));
+    if (!conn) throw new Error('propsMatches: puerto sin conexión del motor');
+    return this.read(() => readPropsMatches(this.db, conn, filters));
+  }
+
+  async visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void> {
+    return this.read(() => visitPropValues(this.db, key, visit));
+  }
+
+  async propValuesOfNotes(noteIds: readonly string[], keys: readonly string[], maxChars: number): Promise<NotePropValues> {
+    return this.read(() => readPropValuesOfNotes(this.db, noteIds, keys, maxChars));
   }
 
   async notesByFoldedTitle(title: string): Promise<string[]> {
-    return this.read(() => readIdsByFoldedTitle(this.db, title));
+    return this.read(() => readFoldedTitleTargets(this.db, title).map((target) => target.id));
+  }
+
+  async linkSources(noteIds: readonly string[]): Promise<string[]> {
+    return this.read(() => readLinkSources(this.db, noteIds));
   }
 
   /**

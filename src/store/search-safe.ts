@@ -15,6 +15,7 @@ import {
   ftsQuery,
   ftsSubstringQuery,
   flushSubstringPending,
+  foldFileName,
   ROOT_FOLDER_ID,
   SEARCH_MARK_END,
   SEARCH_MARK_START,
@@ -31,6 +32,7 @@ import {
   type SqliteConn
 } from '../hebra';
 import { FolderIndex } from '../privacy/folder-index';
+import { readFoldedTitleTargets } from './props-sql';
 
 type SearchHit = SearchPage['items'][number];
 
@@ -55,25 +57,53 @@ function folderClause(engine: SqliteLibraryEngine, scope: NotesScope | null, bin
 }
 
 /**
- * Ids de las notas que cumplen `props` y `linksTo`, o `null` sin ninguno: el mismo motor, con la
- * consulta sin texto que lista por esos filtros, para que la rama de subcadenas no tenga otra
- * versión de sus reglas (el plegado de valores y títulos). Solo se llama cuando esa rama va a
- * buscar de verdad.
+ * `props` y `linksTo` como condiciones de la rama de subcadenas, con sus `?` en `bind`: las evalúa
+ * SQLite una vez por consulta. Antes se pedían al motor todas las notas que los cumplen (su búsqueda
+ * sin texto, de 200 en 200, con todas sus subconsultas en cada página), lo que paraba el hilo varios
+ * segundos con una biblioteca grande. Son las reglas de `searchKeyed` del motor, que no las expone
+ * sueltas, y `test/tools/search-filters.test.ts` las compara con él, caso a caso:
+ * - La clave, en minúsculas. Sin valor, que la nota tenga la clave. Con valor, el valor ENTERO sin
+ *   mayúsculas ni acentos: SQLite solo pliega ASCII, así que los valores de la clave con algún
+ *   carácter de fuera se pliegan aquí y entran como lista.
+ * - `linksTo`: las notas con un enlace a alguna nota de ese título, por id o por título, sin contar
+ *   el enlace de una nota a sí misma. Sin destinos, nada.
  */
-function idsMatchingFilters(engine: SqliteLibraryEngine, filters: SearchFilters): Set<string> | null {
-  const { props, linksTo } = filters;
-  if (!props?.length && !linksTo?.length) return null;
-  const ids = new Set<string>();
-  let cursor: string | null = null;
-  do {
-    const page: SearchPage = engine.search('', cursor, 200, {
-      ...(props?.length ? { props } : {}),
-      ...(linksTo?.length ? { linksTo } : {})
-    }, null);
-    for (const item of page.items) ids.add(item.id);
-    cursor = page.nextCursor;
-  } while (cursor);
-  return ids;
+function filterConditions(db: DatabaseSync, filters: SearchFilters, bind: Array<string | number>): string {
+  let conditions = '';
+  for (const prop of filters.props ?? []) {
+    const key = prop.key.toLowerCase();
+    if (prop.value === null) {
+      conditions += ' AND n.id IN (SELECT p.note_id FROM note_props p WHERE p.key = ?)';
+      bind.push(key);
+      continue;
+    }
+    const needle = foldFileName(prop.value);
+    const folded: string[] = [];
+    const nonAscii = db.prepare(
+      'SELECT DISTINCT value FROM note_props WHERE key = ? AND length(CAST(value AS BLOB)) > length(value)'
+    );
+    for (const row of nonAscii.iterate(key) as Iterable<{ value: string }>) {
+      if (foldFileName(String(row.value)) === needle) folded.push(String(row.value));
+    }
+    conditions += ` AND n.id IN (SELECT p.note_id FROM note_props p WHERE p.key = ?
+      AND (lower(p.value) = ? OR p.value IN (SELECT value FROM json_each(?))))`;
+    bind.push(key, needle, JSON.stringify(folded));
+  }
+  for (const title of filters.linksTo ?? []) {
+    const targets = readFoldedTitleTargets(db, title).map((target) => [target.id, target.titleNorm]);
+    if (targets.length === 0) return ' AND 0';
+    const json = JSON.stringify(targets);
+    conditions += ` AND n.id IN (
+      SELECT l.src_note_id FROM json_each(?) t
+        JOIN links l ON l.target_kind = 'id' AND l.target = json_extract(t.value, '$[0]')
+        WHERE l.src_note_id <> json_extract(t.value, '$[0]')
+      UNION
+      SELECT l.src_note_id FROM json_each(?) t
+        JOIN links l ON l.target_kind = 'title' AND l.target = json_extract(t.value, '$[1]')
+        WHERE l.src_note_id <> json_extract(t.value, '$[0]'))`;
+    bind.push(json, json);
+  }
+  return conditions;
 }
 
 /** Una página de la rama de subcadenas, con el mismo orden y cursor que el motor. */
@@ -111,12 +141,11 @@ function substringPage(
     conditions += ' AND n.id IN (SELECT t.note_id FROM note_tags t WHERE t.tag = ?)';
     bind.push(tag);
   }
-  const matching = idsMatchingFilters(engine, filters);
-  if (matching) {
-    if (matching.size === 0) return [];
-    conditions += ' AND n.id IN (SELECT value FROM json_each(?))';
-    bind.push(JSON.stringify([...matching]));
-  }
+  const filterBind: Array<string | number> = [];
+  const filterSql = filterConditions(db, filters, filterBind);
+  if (filterSql === ' AND 0') return [];
+  conditions += filterSql;
+  bind.push(...filterBind);
   if (cursor) {
     const after = decodeCursor(cursor, 1);
     conditions += ' AND (n.updated_at, n.id) < (?, ?)';

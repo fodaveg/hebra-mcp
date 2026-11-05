@@ -60,8 +60,8 @@ describe('capacidades', () => {
     expect(capabilities.limits.search).toEqual({ default: 20, max: 50 });
     expect(capabilities.limits.listNotes).toEqual({ default: 50, max: 100 });
     expect(capabilities.limits.listOrganizations).toEqual({ default: 50, max: 100 });
-    expect(capabilities.limits.listProperties).toEqual({ default: 100, max: 500 });
-    expect(capabilities.limits.queryProperties).toEqual({ default: 50, max: 100, filters: 32, properties: 32 });
+    expect(capabilities.limits.listProperties).toEqual({ default: 100, max: 500, responseChars: 100_000 });
+    expect(capabilities.limits.queryProperties).toEqual({ default: 50, max: 100, filters: 32, properties: 32, responseChars: 100_000 });
     expect(capabilities.limits.searchFilters).toEqual({ props: 32, linksTo: 8 });
     expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
     expect(capabilities.limits.appendTextChars).toBe(20_000);

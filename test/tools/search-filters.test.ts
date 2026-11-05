@@ -104,6 +104,28 @@ describe('hebra_search con filtros de propiedad y enlace', () => {
     }
   });
 
+  it('un `props` o un `linksTo` repetido se pasa una vez: el mismo resultado y una sola condición', async () => {
+    const ctx = contexts.segura!;
+    const search = vi.spyOn(ctx.port, 'search');
+    try {
+      const once = await runSearch(ctx, { query: 'garbanzos', props: [{ key: 'estado', value: 'activo' }] });
+      const repeated = await runSearch(ctx, {
+        query: 'garbanzos',
+        props: [
+          ...Array.from({ length: 20 }, () => ({ key: 'estado', value: 'activo' })),
+          ...Array.from({ length: 12 }, () => ({ key: 'ESTADO', value: 'ÁCTIVO' }))
+        ]
+      });
+      expect(repeated).toEqual(once);
+      const filters = search.mock.calls.at(-1)![3]!;
+      expect(filters.props).toEqual([{ key: 'estado', value: 'activo' }]);
+      await runSearch(ctx, { query: 'garbanzos', linksTo: [SHARED_TITLE, SHARED_TITLE.toUpperCase()] });
+      expect(search.mock.calls.at(-1)![3]!.linksTo).toEqual([SHARED_TITLE]);
+    } finally {
+      search.mockRestore();
+    }
+  });
+
   it('`props` pagina con el mismo cursor de siempre', async () => {
     const ctx = contexts.segura!;
     const first = await runSearch(ctx, { query: 'garbanzos', props: [{ key: 'estado', value: 'activo' }], limit: 2 });

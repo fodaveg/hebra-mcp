@@ -29,7 +29,7 @@ import type {
   TitleCandidates
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
-import type { PropRow, PropsScan } from './props-sql';
+import type { NotePropValues, PropCountsPage, PropCountsRequest, PropsMatch } from './props-sql';
 import type { PrivacyConfig } from '../privacy/config';
 import type { FolderTrashEntry, NoteStateRow } from './state-reads';
 
@@ -257,15 +257,24 @@ export interface HebraLibraryPort {
   /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
    *  de `notesByTitlePrefix`). */
   notesByExactTitle(title: string): Promise<TitleCandidates>;
-  /** Filas de `note_props` de las notas vivas no bloqueadas, de esas claves o de todas
-   *  (`hebra_list_properties`). Sin filtro de privados: lo aplica la herramienta. */
-  propRows(keys?: readonly string[]): Promise<PropRow[]>;
-  /** Las notas que cumplen los filtros y las filas de `keys`, en UN turno de la cola
-   *  (`hebra_query_properties`). Sin orden ni filtro de privados: los pone la herramienta. */
-  propsScan(filters: PropsQueryFilters, keys: readonly string[]): Promise<PropsScan>;
+  /** Una página de claves o valores con su recuento sobre `noteIds`, agrupada en SQLite
+   *  (`hebra_list_properties`). Lo oculto queda fuera porque no está en `noteIds`. */
+  propCounts(request: PropCountsRequest): Promise<PropCountsPage>;
+  /** Las notas que cumplen los filtros (`hebra_query_properties`), una bloqueada como una nota
+   *  sin propiedades. Sin orden ni filtro de privados: los pone la herramienta. */
+  propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]>;
+  /** Cada valor no vacío de una clave, de uno en uno y sin guardarlos, en un turno de la cola.
+   *  `visit` no puede esperar a nada. Sin filtro de privados: lo aplica `visit`. */
+  visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void>;
+  /** Los valores de esas claves en esas notas, nota a nota hasta `maxChars`: una que no cabe y
+   *  las de detrás no salen, salvo la primera. Quien llama pasa solo notas visibles sin bloquear. */
+  propValuesOfNotes(noteIds: readonly string[], keys: readonly string[], maxChars: number): Promise<NotePropValues>;
   /** Ids de las notas vivas con ese título entero, sin mayúsculas ni acentos, como los destinos
    *  de `SearchFilters.linksTo`. Sin filtro de privados: lo aplica quien llama. */
   notesByFoldedTitle(title: string): Promise<string[]>;
+  /** Las notas que enlazan a alguna de esas, con la regla de `backlinks`, en una consulta. Sin
+   *  filtro de privados: lo aplica quien llama. */
+  linkSources(noteIds: readonly string[]): Promise<string[]>;
   /** Carpeta EFECTIVA y etiquetas canónicas (con ancestros, como las guarda
    *  `note_tags`) de cada nota VIVA (ni papelera ni lápida). Para el filtro de
    *  privados (`src/privacy/`): antes se componía con `notesPage`/`noteRead` por nota

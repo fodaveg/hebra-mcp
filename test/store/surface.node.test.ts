@@ -566,8 +566,8 @@ describe('lecturas de estado (D23)', () => {
 describe('propiedades del frontmatter (D23)', () => {
   it('props-sql.ts no escribe', () => {
     const text = readFileSync(join(root, 'src/store/props-sql.ts'), 'utf8');
-    const statements = [...text.matchAll(/(?:prepare\(\s*)[`'](\s*\w+)/g)].map((match) => match[1]!.trim());
-    expect(statements.length).toBeGreaterThanOrEqual(3);
+    const statements = [...text.matchAll(/prepare\(\s*[`'"](\s*\w+)/g)].map((match) => match[1]!.trim());
+    expect(statements.length).toBeGreaterThanOrEqual(6);
     expect(new Set(statements)).toEqual(new Set(['SELECT']));
   });
 
