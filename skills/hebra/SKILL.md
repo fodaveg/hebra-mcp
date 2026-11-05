@@ -50,7 +50,7 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 41 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 42 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las de ficheros sueltos, `hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, `hebra_read_file`, `hebra_replace_file_text`,
@@ -184,7 +184,7 @@ Si el usuario pide algo de la columna derecha, díselo en una línea y ofrece lo
 que la mueva o la borre en la app, el texto listo para que lo pegue, una edición por
 sustituciones o, si esa máquina tiene hebra-mcp emparejado, un `checkout` / `apply` en local.
 
-## Herramientas (41)
+## Herramientas (42)
 
 Las herramientas de contenido aceptan además `space?`: se omite o vale `personal` para la
 biblioteca personal, y usa un `spaceId` autorizado para contenido compartido. La tabla enumera
@@ -194,8 +194,8 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 |---|---|---|
 | `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading`: el apartado más interno del fragmento (o `null`); vale tal cual como `heading` de `hebra_read_note`. Ignora tildes. Pagina con `nextCursor`. |
 | `hebra_grep` | `pattern` (literal; con `regex: true`, expresión regular de JavaScript), `caseSensitive?` (def. `false`), `folder?`, `subfolders?`, `tag?`, `contextLines?` 0-5, `limit` 1-100 (20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, before?, after?, heading, headingOccurrence}], nextCursor, cutoff}`, una por línea que casa. `heading` y `headingOccurrence` van tal cual a `hebra_read_note`. Las tildes cuentan. `cutoff: "time"` o `"size"`: se paró antes, sigue con `nextCursor`. `pattern_too_slow`: simplifica la expresión (o reintenta con el `nextCursor` del error: si esa nota vuelve a fallar, se salta). `skipped: {id, fromLine}`: esa nota se saltó sin buscar en ella; dilo si importa. `line` vale para `lines` de `hebra_read_note`. Sin recuentos. |
-| `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
-| `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?`, `lines?: {from, to?}` (no con `heading`) | Cuerpo íntegro y **`revision`** (la necesita la edición). Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; con `lines`, solo esas líneas (hasta 2 000) y salen `lines`, `totalLines` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
+| `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `archived?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Cada nota trae `favorite`, `archivedAt` (ISO o `null`) y `generalHidden` (oculta del listado general). Sin `archived` no salen las archivadas y sí las ocultas; `archived: true` lista solo las archivadas (la última archivada primero) y con `folder` o `tag` es `invalid_input`. Pagina con `nextCursor`. |
+| `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?`, `lines?: {from, to?}` (no con `heading`) | Cuerpo íntegro, **`revision`** (la necesita la edición) y el estado: `favorite`, `archivedAt`, `generalHidden`. Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; con `lines`, solo esas líneas (hasta 2 000) y salen `lines`, `totalLines` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
 | `hebra_note_outline` | `id` **o** `title`, `maxLevel?` 1-6, `limit?` 1-500 (200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`, sin cuerpo. `chars` = lo que devolvería la lectura de ese apartado. `occurrence` solo sale en los títulos repetidos: es el `headingOccurrence` que hay que pasar. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
@@ -211,7 +211,8 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 | `hebra_set_archived` | `id`, `archived` (bool) | Idempotente. Misma salida que mover. |
 | `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
 | `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
-| `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
+| `hebra_list_trash` | `kind?` (`notes` por defecto o `folders`), `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Con `kind: "folders"`, `{folders: [{id, name, path, trashedAt}]}` (una carpeta privada, o dentro de una privada, no sale). Pagina con `nextCursor`. |
+| `hebra_note_authors` | `id`, `space?` | Quién escribió la nota: `lastEditor` ({accountId, name, role, isSelf, actorKind?} o `null`), `declaredAuthorId`, `mismatch`, `namesResolved`. Son cuentas de `hebra_list_organizations`, cuyo directorio da `name`/`role`/`isSelf` (`null` si no se conocen). Solo hay autores en un espacio compartido. Oculta, en la papelera o inexistente: `not_found`. |
 | `hebra_list_files` | `folder?` (ruta), `subfolders?`, `name?` (parte del nombre, sin distinguir mayúsculas), `trashed?` (bool), `limit` 1-100 (50), `cursor?` | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. Los ficheros SUELTOS (con carpeta propia; no los adjuntos de una nota), por nombre. Con `trashed: true`, los de la papelera, el último en entrar primero, y `folderPath` = donde volverá. `mimeType`/`byteLength` pueden ser `null`. Sin recuento y sin contenido. Pagina con `nextCursor`, que sigue valiendo aunque el último fichero de la página ya no esté en la lista. |
 | `hebra_trash_file` | `id` (de `hebra_list_files`) | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_file`. Un fichero que alguna nota incrusta (un dibujo, por ejemplo) deja de verse en esa nota mientras esté en la papelera. |
 | `hebra_restore_file` | `id` (de `hebra_list_files` con `trashed: true`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Idempotente. `{id, folderPath, sync}`. |

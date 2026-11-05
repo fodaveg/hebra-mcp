@@ -14,7 +14,7 @@ vincula como un dispositivo más de la biblioteca. En el conector remoto, el ser
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
+Estado a 4 de noviembre de 2026: el servidor MCP tiene 42 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
