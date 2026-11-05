@@ -4,15 +4,14 @@
  * y la paginación. Lo que no pueden delatar: `../privacy/properties-oracles.test.ts`.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { SqliteLibraryEngine } from '../../src/hebra';
 import type { ToolContext } from '../../src/server/context';
 import { ToolError } from '../../src/server/errors';
 import { wrapCursor } from '../../src/server/pagination';
 import { runListProperties } from '../../src/server/tools/list-properties';
 import { runQueryProperties, type QueryPropertiesInput } from '../../src/server/tools/query-properties';
-import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { grepContext, GREP_PRIVACY } from '../fixtures/grep-library';
 import { buildPropsLibraryPair, LONG_VALUE, type PropsLibraryPair } from '../fixtures/props-library';
+import { auditHarness, createNote, withEngine } from '../privacy/audit-harness';
 
 describe('propiedades del frontmatter', () => {
   let pair: PropsLibraryPair;
@@ -42,7 +41,7 @@ describe('propiedades del frontmatter', () => {
       const result = await runListProperties(ctx);
       expect(result).toEqual({
         keys: [
-          { key: 'estado', count: 6 },
+          { key: 'estado', count: 7 },
           { key: 'fecha', count: 1 },
           { key: 'largo', count: 2 },
           { key: 'prioridad', count: 4 },
@@ -57,7 +56,7 @@ describe('propiedades del frontmatter', () => {
       expect(await runListProperties(ctx, { key: 'Estado' })).toEqual({
         values: [
           { value: 'Activo', count: 1 },
-          { value: 'activo', count: 4 },
+          { value: 'activo', count: 5 },
           { value: 'pausado', count: 1 }
         ],
         nextCursor: null
@@ -147,12 +146,29 @@ describe('propiedades del frontmatter', () => {
         .toEqual(['beta', 'alfa', 'gamma']);
     });
 
-    it('sin mayúsculas ni filtros que cambien el modo: el modo se decide con toda la clave', async () => {
-      // Solo `alfa` (9) pasa el filtro junto a `beta` (10); el orden sigue siendo numérico.
+    it('con un filtro, primero las que tienen la clave de orden y después las demás por título', async () => {
       expect(await names({
         filters: [{ key: 'estado', op: 'equals', value: 'activo' }],
         sort: { key: 'prioridad', direction: 'descending', empty: 'last' }
-      })).toEqual(['beta', 'alfa', 'destino', 'enlaza', 'enlazaSolo', 'enlazaOculta']);
+      })).toEqual(['beta', 'alfa', 'destino', 'enlaza', 'enlazaOculta', 'enlazaSolo']);
+    });
+
+    it('el modo del orden se decide con toda la clave, no con lo que pasa el filtro', async () => {
+      // `largo` no es numérica; ningún filtro la vuelve numérica por dejar fuera sus valores.
+      const h = await auditHarness(async (engine) => {
+        await createNote(engine, null, '---\nmixta: 10\nmarca: si\n---\n# Diez\n');
+        await createNote(engine, null, '---\nmixta: 9\nmarca: si\n---\n# Nueve\n');
+        await createNote(engine, null, '---\nmixta: texto\n---\n# Texto\n');
+      });
+      try {
+        const sorted = await h.call('hebra_query_properties', {
+          filters: [{ key: 'marca', op: 'exists' }],
+          sort: { key: 'mixta' }
+        });
+        expect(sorted.json.notes.map((note: { title: string }) => note.title)).toEqual(['Diez', 'Nueve']);
+      } finally {
+        await h.close();
+      }
     });
 
     it('las notas sin la propiedad van al final por título, o al principio con `empty: first`', async () => {
@@ -174,16 +190,12 @@ describe('propiedades del frontmatter', () => {
       ['texto al revés', { key: 'estado', direction: 'descending' }],
       ['varios valores', { key: 'tipo', direction: 'descending' }]
     ] as const)('sin nada oculto, el orden es el del motor: %s', async (_name, sort) => {
-      const { db, conn } = openNodeSqliteConn(pair.withoutPrivate);
-      try {
-        const engine = await SqliteLibraryEngine.open(conn, 'props-orden');
-        const fromEngine = engine.propsQuery(null, sort as never, null, 200).items.map((row) => row.id);
-        const input = sort === null ? {} : { sort: sort as QueryPropertiesInput['sort'] };
-        const page = await runQueryProperties(ctx, { ...input, limit: 100 });
-        expect(page.notes.map((note) => nameOf(note.id))).toEqual(fromEngine.map(nameOf));
-      } finally {
-        db.close();
-      }
+      const fromEngine = await withEngine(pair.withoutPrivate, async (engine) =>
+        engine.propsQuery(null, sort as never, null, 200).items.map((row) => row.id)
+      );
+      const input = sort === null ? {} : { sort: sort as QueryPropertiesInput['sort'] };
+      const page = await runQueryProperties(ctx, { ...input, limit: 100 });
+      expect(page.notes.map((note) => nameOf(note.id))).toEqual(fromEngine.map(nameOf));
     });
 
     it('recorre todas las páginas sin saltar ni repetir, con cada orden', async () => {

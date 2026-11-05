@@ -104,7 +104,7 @@ describe('hebra_search con filtros de propiedad y enlace', () => {
     }
   });
 
-  it('`linksTo` pagina con el mismo cursor de siempre', async () => {
+  it('`props` pagina con el mismo cursor de siempre', async () => {
     const ctx = contexts.segura!;
     const first = await runSearch(ctx, { query: 'garbanzos', props: [{ key: 'estado', value: 'activo' }], limit: 2 });
     expect(first.results).toHaveLength(2);
@@ -112,7 +112,7 @@ describe('hebra_search con filtros de propiedad y enlace', () => {
     const second = await runSearch(ctx, {
       query: 'garbanzos',
       props: [{ key: 'estado', value: 'activo' }],
-      limit: 100 > 50 ? 50 : 50,
+      limit: 50,
       cursor: first.nextCursor!
     });
     const ids = [...first.results, ...second.results].map((result) => nameOf(result.id)).sort();

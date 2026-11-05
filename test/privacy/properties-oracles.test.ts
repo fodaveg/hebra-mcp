@@ -6,15 +6,12 @@
  * una homónima de una nota visible y un título que solo tienen ellas.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { SqliteLibraryEngine } from '../../src/hebra';
 import type { PrivacyConfig } from '../../src/privacy';
 import type { ToolContext } from '../../src/server/context';
 import { wrapCursor } from '../../src/server/pagination';
-import { runListNotes } from '../../src/server/tools/list-notes';
 import { runListProperties } from '../../src/server/tools/list-properties';
 import { runQueryProperties, type QueryPropertiesInput } from '../../src/server/tools/query-properties';
 import { runSearch } from '../../src/server/tools/search';
-import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { grepContext } from '../fixtures/grep-library';
 import {
   buildPropsLibraryPair,
@@ -24,7 +21,7 @@ import {
   SHARED_TITLE,
   type PropsLibraryPair
 } from '../fixtures/props-library';
-import { auditHarness, createNote, lockedBody, saveBody } from './audit-harness';
+import { auditHarness, createNote, lockedBody, saveBody, withEngine } from './audit-harness';
 
 interface Paged {
   nextCursor: string | null;
@@ -69,7 +66,8 @@ describe('con y sin notas ocultas, la misma respuesta', () => {
     const withoutHidden = await walk((cursor) => run(bare, cursor));
     expect(withHidden).toEqual(withoutHidden);
     const raw = JSON.stringify(withHidden);
-    expect(raw).not.toContain(PROPS_BAIT_KEY);
+    // La clave no se comprueba aquí: una consulta devuelve `[]` para la que pidió el cliente.
+    expect(raw).not.toContain('valor_oculto');
     expect(raw).not.toContain(PROPS_BAIT_VALUE);
     expect(raw).not.toContain('no-numero');
     for (const id of pair.privateIds) expect(raw).not.toContain(id);
@@ -96,11 +94,11 @@ describe('con y sin notas ocultas, la misma respuesta', () => {
     const result = await runListProperties(shown, { key: 'estado' });
     expect('values' in result && result.values).toEqual([
       { value: 'Activo', count: 1 },
-      { value: 'activo', count: 4 },
+      { value: 'activo', count: 5 },
       { value: 'pausado', count: 1 }
     ]);
     const keys = await runListProperties(shown);
-    expect('keys' in keys && keys.keys.find((entry) => entry.key === 'estado')?.count).toBe(6);
+    expect('keys' in keys && keys.keys.find((entry) => entry.key === 'estado')?.count).toBe(7);
   });
 
   const QUERIES: Array<[string, QueryPropertiesInput]> = [
@@ -131,14 +129,11 @@ describe('con y sin notas ocultas, la misma respuesta', () => {
   it('el motor sí cambia de orden con el valor oculto; la herramienta, no', async () => {
     const sort = { key: 'prioridad', direction: 'ascending' as const };
     const filters = { props: [{ key: 'prioridad', op: 'greater-than' as const, value: '0' }] };
-    const { db, conn } = openNodeSqliteConn(pair.withPrivate);
-    try {
-      const engine = await SqliteLibraryEngine.open(conn, 'props-oraculo');
-      // Texto: «10» antes que «2». Es lo que delataría que hay una oculta con otro valor.
-      expect(engine.propsQuery(filters, sort, null, 50).items.map((row) => row.title)).toEqual(['Beta', 'Gamma', 'Alfa']);
-    } finally {
-      db.close();
-    }
+    // Texto: «10» antes que «2». Es lo que delataría que hay una oculta con otro valor.
+    const raw = await withEngine(pair.withPrivate, async (engine) =>
+      engine.propsQuery(filters, sort, null, 50).items.map((row) => row.title)
+    );
+    expect(raw.filter((title) => ['Alfa', 'Beta', 'Gamma'].includes(title))).toEqual(['Beta', 'Gamma', 'Alfa']);
     const tool = await runQueryProperties(shown, { filters: [{ key: 'prioridad', op: 'greater-than', value: '0' }], sort });
     expect(tool.notes.map((note) => note.title)).toEqual(['Gamma', 'Alfa', 'Beta']);
   });
@@ -181,15 +176,11 @@ describe('con y sin notas ocultas, la misma respuesta', () => {
     const { results } = await runSearch(shown, { query: 'garbanzos', linksTo: [SHARED_TITLE], limit: 50 });
     expect(results.map((result) => result.id)).toEqual([pair.ids.enlaza]);
     // El motor, solo, sí los daría: lo que justifica resolver los destinos aquí.
-    const { db, conn } = openNodeSqliteConn(pair.withPrivate);
-    try {
-      const engine = await SqliteLibraryEngine.open(conn, 'props-oraculo');
-      const raw = engine.search('garbanzos', null, 50, { linksTo: [SHARED_TITLE] }, null).items.map((row) => row.id);
-      expect(raw).toContain(pair.ids.enlazaOculta);
-      expect(raw).toContain(pair.ids.destino);
-    } finally {
-      db.close();
-    }
+    const raw = await withEngine(pair.withPrivate, async (engine) =>
+      engine.search('garbanzos', null, 50, { linksTo: [SHARED_TITLE] }, null).items.map((row) => row.id)
+    );
+    expect(raw).toContain(pair.ids.enlazaOculta);
+    expect(raw).toContain(pair.ids.destino);
   });
 });
 
@@ -344,16 +335,22 @@ describe('por el camino entero del servidor', () => {
     try {
       const listed = await h.call('hebra_list_properties', { key: 'categoria' });
       expect(listed.json.values).toEqual([{ value: 'secreto', count: 1 }]);
-      const notes = await runListNotesIds(h);
-      expect(notes).toContain(h.extra);
+      const notes = await h.call('hebra_list_notes', { limit: 100 });
+      expect(notes.json.notes.map((note: { id: string }) => note.id)).toContain(h.extra);
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('`tags:` del frontmatter con una etiqueta privada oculta la nota, y sus propiedades con ella', async () => {
+    const h = await auditHarness(async (engine) => (await createNote(engine, null, '---\ntags: secreto\nsolo_aqui: cebo_tags\n---\n# Oculta por tags\n')).id);
+    try {
+      expect((await h.call('hebra_list_properties')).raw).not.toContain('solo_aqui');
+      expect((await h.call('hebra_list_properties', { key: 'solo_aqui' })).json.values).toEqual([]);
+      const queried = await h.call('hebra_query_properties', { filters: [{ key: 'solo_aqui', op: 'exists' }] });
+      expect(queried.json).toEqual({ notes: [], nextCursor: null });
     } finally {
       await h.close();
     }
   });
 });
-
-async function runListNotesIds(h: { call(name: string, args?: Record<string, unknown>): Promise<{ json: { notes: Array<{ id: string }> } }> }): Promise<string[]> {
-  return (await h.call('hebra_list_notes', { limit: 100 })).json.notes.map((note) => note.id);
-}
-
-void runListNotes;

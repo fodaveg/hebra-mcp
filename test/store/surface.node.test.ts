@@ -453,6 +453,29 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
   });
 });
 
+/**
+ * Las propiedades del frontmatter (D23, 5 nov 2026) solo LEEN: `src/store/props-sql.ts` es SQL
+ * propio de `SELECT` y lo que toma del motor es `propsFilterSql`, que solo arma un `WHERE`. Ni
+ * renombrar una propiedad ni reescribir notas en lote están alcanzables desde el puerto.
+ */
+describe('propiedades del frontmatter (D23)', () => {
+  it('props-sql.ts no escribe', () => {
+    const text = readFileSync(join(root, 'src/store/props-sql.ts'), 'utf8');
+    const statements = [...text.matchAll(/(?:prepare\(\s*)[`'](\s*\w+)/g)].map((match) => match[1]!.trim());
+    expect(statements.length).toBeGreaterThanOrEqual(3);
+    expect(new Set(statements)).toEqual(new Set(['SELECT']));
+  });
+
+  it('el puerto no alcanza ninguna mutación de propiedades', async () => {
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      expect(methodNames(port).filter((name) => /^(propRename|prop_rename|notesRewriteBatch)$/.test(name))).toEqual([]);
+    } finally {
+      port.close();
+    }
+  });
+});
+
 /** Todas las fuentes de `src`, recorriendo sus carpetas. */
 function allSourceFiles(dir = join(root, 'src')): string[] {
   const out: string[] = [];

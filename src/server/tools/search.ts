@@ -25,6 +25,9 @@
  * `subfolders`, el ámbito sigue el árbol de padres efectivos y no la coincidencia de
  * prefijo de la ruta por nombre (que, con dos carpetas hermanas del mismo nombre, mezclaba
  * sus notas).
+ *
+ * `props`, `linksTo` y `titleOnly` (D23, `./search-filters.ts`) pasan a `SearchFilters` del motor;
+ * `linksTo`, con los destinos resueltos antes solo entre las visibles. Sin ellos, nada cambia.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';

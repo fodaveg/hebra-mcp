@@ -1,6 +1,6 @@
 /**
- * `annotations` MCP de las 41 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026): cada una
+ * `annotations` MCP de las 43 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026; D23 del 5 nov 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
