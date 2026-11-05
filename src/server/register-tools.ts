@@ -520,7 +520,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
   /** El manejador de una herramienta, por la puerta final con su política. */
   function gated<Input>(
     name: string,
-    run: (toolCtx: ToolContext, input: Input) => Promise<unknown>
+    run: (toolCtx: ToolContext, input: Input, server: ServerContext) => Promise<unknown>
   ): (input: Input) => Promise<ReturnType<typeof toOkResult>> {
     const policy = GATE_POLICIES[name];
     if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
@@ -539,7 +539,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
         }
         const result = await runTool(selected, name,
           typeof policy === 'function' ? policy(fields, selected) : policy,
-          (toolCtx) => run(toolCtx, fields as Input));
+          (toolCtx) => run(toolCtx, fields as Input, selected));
         // Origen explícito también para imágenes/recursos y errores ligados al contenido.
         if (selected.spaceId) return { ...result, content: [
           { type: 'text' as const, text: JSON.stringify({ spaceId: selected.spaceId, name: selected.spaceName?.() ?? null }) }, ...result.content
@@ -833,11 +833,13 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
     {
       title: 'Autores de una nota',
       description:
-        'Quién escribió una nota, por `id`: `lastEditor` ({accountId, name, role, isSelf, actorKind?}, la cuenta que selló el relé en la última revisión confirmada), `declaredAuthorId` (la que dijo el sobre), `mismatch` (si no coinciden) y `namesResolved`. Las cuentas son las de `hebra_list_organizations`: `name`, `role` e `isSelf` salen de ese directorio (en todas las organizaciones de la persona) y son `null` si no se conocen o no hay directorio; no se inventa ninguno. Solo hay autores en un espacio compartido (`space`): en la biblioteca personal, y en una nota sin subir o una copia de conflicto, `lastEditor` es null. Una nota oculta, en la papelera o inexistente responde not_found.',
+        'Quién escribió una nota, por `id`: `lastEditor` ({accountId, name, role, isSelf, actorKind?}, la cuenta que selló el relé en la última revisión confirmada), `declaredAuthorId` (la que dijo el sobre), `mismatch` (si no coinciden) y `namesResolved`. Las cuentas son las de `hebra_list_organizations`: `name` e `isSelf` salen de ese directorio (`name` de cualquier organización de la persona) y `role` solo de la organización dueña del espacio (`null` si la cuenta no es miembro de ella o no se sabe cuál es); son `null` si no se conocen o no hay directorio; no se inventa ninguno. Solo hay autores en un espacio compartido (`space`): en la biblioteca personal, y en una nota sin subir o una copia de conflicto, `lastEditor` es null. Una nota oculta, en la papelera o inexistente responde not_found.',
       inputSchema: scoped(noteAuthorsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_note_authors', (toolCtx, input) => runNoteAuthors(toolCtx, input, ctx.directory))
+    gated('hebra_note_authors', (toolCtx, input, selected) =>
+      runNoteAuthors(toolCtx, input, ctx.directory, selected.spaceId)
+    )
   );
 
   server.registerTool(
