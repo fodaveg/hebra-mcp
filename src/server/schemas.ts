@@ -35,6 +35,13 @@ export const LIST_NOTES_FIELDS = [
   'generalHidden'
 ] as const;
 
+export const QUERY_PROPERTIES_FIELDS = ['title', 'folderPath', 'properties'] as const;
+
+/** Filtros de propiedad por llamada (D23); el motor admite 64 en total. */
+export const PROPS_FILTERS_MAX = 32;
+/** Títulos de `linksTo` de `hebra_search` por llamada (D23). */
+export const LINKS_TO_MAX = 8;
+
 export const searchInputShape = {
   query: z.string().min(1),
   limit: z.number().int().min(1).max(50).optional(),
@@ -44,11 +51,88 @@ export const searchInputShape = {
   /** Igual que en `hebra_list_notes`: con `folder`, incluye su subárbol. */
   subfolders: z.boolean().optional(),
   tag: z.string().optional(),
+  props: z
+    .array(z.object({ key: z.string().min(1), value: z.string().nullable() }))
+    .min(1)
+    .max(PROPS_FILTERS_MAX)
+    .optional()
+    .describe('Solo notas con estas propiedades del frontmatter (todas a la vez). `value`: el valor entero, sin distinguir mayúsculas ni tildes; `null`: que tenga la clave, con cualquier valor.'),
+  linksTo: z
+    .array(z.string())
+    .min(1)
+    .max(LINKS_TO_MAX)
+    .optional()
+    .describe('Solo notas con un enlace a una nota con este título ENTERO, no un id (sin distinguir mayúsculas ni tildes; varios, todos a la vez). Sin nota con ese título, lista vacía.'),
+  titleOnly: z.boolean().optional().describe('Buscar `query` solo en el título. Def. `false`.'),
   fields: z
     .array(z.enum(SEARCH_FIELDS))
     .min(1)
     .optional()
     .describe('Solo estos campos de cada resultado (`id` siempre). Ausente: todos.')
+};
+
+/** `hebra_list_properties` (D23). */
+export const listPropertiesInputShape = {
+  key: z
+    .string()
+    .min(1)
+    .optional()
+    .describe('Una clave de propiedad: da sus valores con su recuento. Ausente: las claves con su recuento.'),
+  limit: z.number().int().min(1).max(500).optional(),
+  cursor: cursorField
+};
+
+/** Los operadores de `PropsFilterOp` del motor, ni uno más. */
+const PROPS_FILTER_OPS = [
+  'equals',
+  'not-equals',
+  'contains',
+  'not-contains',
+  'greater-than',
+  'greater-or-equal',
+  'less-than',
+  'less-or-equal',
+  'exists',
+  'missing'
+] as const;
+
+/** `hebra_query_properties` (D23). Un operador de comparación sin `value` lo rechaza la
+ *  herramienta con `invalid_input`. */
+export const queryPropertiesInputShape = {
+  filters: z
+    .array(
+      z.object({
+        key: z.string().min(1),
+        op: z.enum(PROPS_FILTER_OPS),
+        value: z.string().nullable().optional()
+      })
+    )
+    .max(PROPS_FILTERS_MAX)
+    .optional()
+    .describe('Todos a la vez. `exists` y `missing` no llevan `value`; los demás, sí. `equals` y `contains` no distinguen mayúsculas ASCII; `greater-*` y `less-*` comparan como número si los dos lados lo son y si no como texto, así que valen para fechas ISO. `not-equals` y `not-contains` exigen que la nota tenga la propiedad. `null` y `~` de YAML cuentan como sin valor. Sin `filters`, todas las notas.'),
+  folder: z.string().optional()
+    .describe('Ruta de carpeta, como `path` de hebra_list_folders.'),
+  subfolders: z.boolean().optional(),
+  sort: z
+    .object({
+      key: z.string().min(1).nullable().optional(),
+      direction: z.enum(['ascending', 'descending']).optional(),
+      empty: z.enum(['first', 'last']).optional()
+    })
+    .optional()
+    .describe('`key`: la propiedad por la que ordenar; ausente o `null`, por título. `direction`: def. `ascending`. `empty`: dónde van las notas sin esa propiedad, por título; def. `last`.'),
+  properties: z
+    .array(z.string().min(1))
+    .max(PROPS_FILTERS_MAX)
+    .optional()
+    .describe('Las claves cuyos valores devolver en cada nota. Ausente: las de `filters` y `sort`.'),
+  limit: z.number().int().min(1).max(100).optional(),
+  cursor: cursorField,
+  fields: z
+    .array(z.enum(QUERY_PROPERTIES_FIELDS))
+    .min(1)
+    .optional()
+    .describe('Solo estos campos de cada nota (`id` siempre). Ausente: todos.')
 };
 
 export const listNotesInputShape = {

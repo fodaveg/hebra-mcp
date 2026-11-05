@@ -21,6 +21,8 @@ const TOOL_NAMES = [
   'hebra_list_notes',
   'hebra_read_note',
   'hebra_list_tags',
+  'hebra_list_properties',
+  'hebra_query_properties',
   'hebra_list_folders',
   'hebra_links',
   'hebra_status',

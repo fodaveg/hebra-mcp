@@ -85,6 +85,12 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       }
     },
     { name: 'hebra_list_tags', arguments: {} },
+    { name: 'hebra_list_properties', arguments: {} },
+    { name: 'hebra_list_properties', arguments: { key: BAIT_FOLDER } },
+    { name: 'hebra_query_properties', arguments: { filters: [{ key: BAIT_TAG, op: 'equals', value: BAIT_FOLDER }] } },
+    { name: 'hebra_query_properties', arguments: { folder: 'Diario', subfolders: true } },
+    { name: 'hebra_search', arguments: { query: BAIT_FOLDER, props: [{ key: BAIT_TAG, value: BAIT_FOLDER }] } },
+    { name: 'hebra_search', arguments: { query: 'oculta', linksTo: ['Nota oculta de carpeta'], titleOnly: true } },
     { name: 'hebra_list_folders', arguments: {} },
     { name: 'hebra_links', arguments: { id: library.publicNoteId } },
     { name: 'hebra_status', arguments: {} },

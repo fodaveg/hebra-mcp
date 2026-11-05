@@ -49,6 +49,7 @@ import {
   type NoteSaveResult,
   type NotesPage,
   type NotesScope,
+  type PropsQueryFilters,
   type SearchFilters,
   type SearchPage,
   type SqliteConn,
@@ -56,6 +57,7 @@ import {
   type TitleCandidates
 } from '../hebra';
 import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
+import { readIdsByFoldedTitle, readPropRows, readPropsMatches, type PropRow, type PropsScan } from './props-sql';
 import { safeTextSearch } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
@@ -462,6 +464,24 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         }))
       };
     });
+  }
+
+  /** Propiedades del frontmatter, sin filtro de privados: SQL propio en `./props-sql.ts`. */
+  async propRows(keys?: readonly string[]): Promise<PropRow[]> {
+    return this.read(() => readPropRows(this.db, keys));
+  }
+
+  async propsScan(filters: PropsQueryFilters, keys: readonly string[]): Promise<PropsScan> {
+    const conn = this.conn;
+    if (!conn) throw new Error('propsScan: puerto sin conexión del motor');
+    return this.read(() => ({
+      matches: readPropsMatches(this.db, conn, filters),
+      props: keys.length > 0 ? readPropRows(this.db, keys) : []
+    }));
+  }
+
+  async notesByFoldedTitle(title: string): Promise<string[]> {
+    return this.read(() => readIdsByFoldedTitle(this.db, title));
   }
 
   /**

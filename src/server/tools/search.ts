@@ -25,6 +25,9 @@
  * `subfolders`, el ámbito sigue el árbol de padres efectivos y no la coincidencia de
  * prefijo de la ruta por nombre (que, con dos carpetas hermanas del mismo nombre, mezclaba
  * sus notas).
+ *
+ * `props`, `linksTo` y `titleOnly` (D23, `./search-filters.ts`) pasan a `SearchFilters` del motor;
+ * `linksTo`, con los destinos resueltos antes solo entre las visibles. Sin ellos, nada cambia.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
@@ -41,6 +44,7 @@ import { hasPrivates } from '../../privacy/config';
 import { headingOfSnippet } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
+import { resolveSearchExtra, type SearchExtraInput } from './search-filters';
 
 export interface SearchResult {
   id: string;
@@ -63,6 +67,9 @@ interface SearchInputBase {
   folder?: string;
   subfolders?: boolean;
   tag?: string;
+  props?: SearchExtraInput['props'];
+  linksTo?: SearchExtraInput['linksTo'];
+  titleOnly?: SearchExtraInput['titleOnly'];
 }
 
 /** Sin `fields`, la salida completa; con `fields`, cada elemento solo lleva `id` y esos campos. */
@@ -102,6 +109,10 @@ export async function runSearch(
       : { kind: 'folder', folderId: resolved };
   }
 
+  // `props`, `linksTo` y `titleOnly` (D23): `linksTo`, resuelto solo contra lo visible.
+  const extra = await resolveSearchExtra(ctx, input);
+  if (!extra) return empty;
+
   // Cada resultado que sale, con su carpeta, para la puerta final (`../privacy-gate.ts`):
   // antes de responder lo vuelve a juzgar con el filtro de ahora y el sello de la fila con la
   // que se decidió que se veía, y si ya no se ve o cambió, repite la llamada (C1, y la 2.ª
@@ -116,11 +127,13 @@ export async function runSearch(
     startCursor,
     fetch: (cursor, want) =>
       ctx.port.search(input.query, cursor, storePageSize(want), {
-        ...(tagFilter ? { tags: [tagFilter] } : {})
+        ...(tagFilter ? { tags: [tagFilter] } : {}),
+        ...extra.filters
       }, scope, { embedded }),
     accept: (hit) => {
       const meta = ctx.privacy.visibleMeta(hit.id);
       if (!meta) return undefined;
+      if (extra.linkSources && !extra.linkSources.has(hit.id)) return undefined;
       // También la de mirar por delante: decide si hay `nextCursor`.
       const folderPath = ctx.privacy.folderPath(meta.folderId);
       used.note(hit.id);

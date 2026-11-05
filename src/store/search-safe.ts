@@ -22,6 +22,7 @@ import {
   SqliteLibraryEngine,
   SUBSTRING_INDEX_READY_SQL,
   SUBSTRING_INDEX_VERSION,
+  substringColumn,
   substringResidualSql,
   substringSnippet,
   type NotesScope,
@@ -53,6 +54,28 @@ function folderClause(engine: SqliteLibraryEngine, scope: NotesScope | null, bin
   return ' AND n.folder_id = ?';
 }
 
+/**
+ * Ids de las notas que cumplen `props` y `linksTo`, o `null` sin ninguno: el mismo motor, con la
+ * consulta sin texto que lista por esos filtros, para que la rama de subcadenas no tenga otra
+ * versión de sus reglas (el plegado de valores y títulos). Solo se llama cuando esa rama va a
+ * buscar de verdad.
+ */
+function idsMatchingFilters(engine: SqliteLibraryEngine, filters: SearchFilters): Set<string> | null {
+  const { props, linksTo } = filters;
+  if (!props?.length && !linksTo?.length) return null;
+  const ids = new Set<string>();
+  let cursor: string | null = null;
+  do {
+    const page: SearchPage = engine.search('', cursor, 200, {
+      ...(props?.length ? { props } : {}),
+      ...(linksTo?.length ? { linksTo } : {})
+    }, null);
+    for (const item of page.items) ids.add(item.id);
+    cursor = page.nextCursor;
+  } while (cursor);
+  return ids;
+}
+
 /** Una página de la rama de subcadenas, con el mismo orden y cursor que el motor. */
 function substringPage(
   engine: SqliteLibraryEngine,
@@ -65,25 +88,34 @@ function substringPage(
 ): SearchHit[] {
   const substring = ftsSubstringQuery(query);
   if (!substring.candidates) return [];
-  const { query: match, literal } = ftsQuery(query);
-  if (!match) return [];
+  const { query: parsed, literal } = ftsQuery(query);
+  if (!parsed) return [];
+  // `titleOnly`: las dos consultas y lo excluido, solo en la columna `title`. Sin él, igual.
+  const titleOnly = filters.titleOnly === true;
+  const match = substringColumn(parsed, titleOnly);
 
-  const bind: Array<string | number> = [substring.candidates, match];
+  const bind: Array<string | number> = [substringColumn(substring.candidates, titleOnly), match];
   let conditions = '';
-  if (substring.residual) conditions += ` AND ${substringResidualSql(substring.residual, false, bind)}`;
+  if (substring.residual) conditions += ` AND ${substringResidualSql(substring.residual, titleOnly, bind)}`;
   const prefixExcluded = literal ? '' : ftsExcludedQuery(query);
   if (prefixExcluded) {
     conditions += ' AND n.rowid NOT IN (SELECT rowid FROM notes_fts WHERE notes_fts MATCH ?)';
-    bind.push(prefixExcluded);
+    bind.push(substringColumn(prefixExcluded, titleOnly));
   }
   if (substring.excluded) {
     conditions += ' AND n.rowid NOT IN (SELECT rowid FROM notes_trigram WHERE notes_trigram MATCH ?)';
-    bind.push(substring.excluded);
+    bind.push(substringColumn(substring.excluded, titleOnly));
   }
   conditions += folderClause(engine, scope, bind);
   for (const tag of filters.tags ?? []) {
     conditions += ' AND n.id IN (SELECT t.note_id FROM note_tags t WHERE t.tag = ?)';
     bind.push(tag);
+  }
+  const matching = idsMatchingFilters(engine, filters);
+  if (matching) {
+    if (matching.size === 0) return [];
+    conditions += ' AND n.id IN (SELECT value FROM json_each(?))';
+    bind.push(JSON.stringify([...matching]));
   }
   if (cursor) {
     const after = decodeCursor(cursor, 1);
@@ -138,7 +170,9 @@ export function safeTextSearch(
     }
   }
   // Un término negativo por subcadena también excluye las coincidencias FTS normales.
-  const excluded = substring?.excluded;
+  const excluded = substring?.excluded
+    ? substringColumn(substring.excluded, filters?.titleOnly === true)
+    : undefined;
   const exactItems: SearchHit[] = [];
   let exactCursor = cursor;
   let exact: SearchPage;
