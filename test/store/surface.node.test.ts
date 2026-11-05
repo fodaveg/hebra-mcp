@@ -534,19 +534,38 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
  * de la papelera o la restauran (`folderPurge`, `folderRestore`, `folderUndoTrash`).
  */
 describe('lecturas de estado (D23)', () => {
-  it('el motor se alcanza solo desde state-reads.ts', () => {
-    const reach = reachPattern('noteSummary|foldersTrashList|noteAuthors(?:Many)?');
+  /** Rutas (desde la raiz) de las fuentes de `src` que casan `reach`. */
+  function callersOf(reach: RegExp): string[] {
+    return allSourceFiles()
+      .filter((file) => reach.test(readFileSync(file, 'utf8')))
+      .map((file) => relative(root, file).split(sep).join('/'))
+      .sort();
+  }
+
+  it('el motor se alcanza solo desde state-reads.ts, sin exenciones', () => {
+    // `noteSummary`, `foldersTrashList` y `noteAuthorsMany` no tienen homonimo en el puerto: ni
+    // `node-port.ts` ni nadie mas puede llamarlos.
+    const reach = reachPattern('noteSummary|foldersTrashList|noteAuthorsMany');
     for (const form of reachForms('foldersTrashList')) expect(reach.test(form), form).toBe(true);
-    const callers: string[] = [];
-    for (const file of allSourceFiles()) {
-      if (reach.test(readFileSync(file, 'utf8'))) callers.push(relative(root, file).split(sep).join('/'));
-    }
-    // `node-port.ts` y `library-instance.ts` llaman a `port.noteAuthors(id)` (el método del
-    // puerto, no el del motor); `noteAuthors(` en las herramientas es también el del puerto.
-    const engineCallers = callers.filter(
-      (path) => !['src/store/node-port.ts', 'src/sync/library-instance.ts', 'src/server/tools/note-authors.ts'].includes(path)
-    );
-    expect(engineCallers).toEqual(['src/store/state-reads.ts']);
+    for (const form of reachForms('noteSummary')) expect(reach.test(form), form).toBe(true);
+    expect(callersOf(reach)).toEqual(['src/store/state-reads.ts']);
+  });
+
+  it('noteAuthors: el motor solo desde state-reads.ts; el metodo del puerto, de tres sitios exactos', () => {
+    // El puerto tiene un metodo con el mismo nombre (`port.noteAuthors(id)`): lo llaman la
+    // herramienta y el envoltorio estable de `library-instance.ts`. `node-port.ts` lo DEFINE
+    // y delega en `noteAuthorsOf`, asi que tampoco llama a `.noteAuthors(`.
+    expect(callersOf(reachPattern('noteAuthors'))).toEqual([
+      'src/server/tools/note-authors.ts',
+      'src/store/state-reads.ts',
+      'src/sync/library-instance.ts'
+    ]);
+  });
+
+  it('notesRelinkingFile (ids sin filtrar) solo lo llama file-relink.ts', () => {
+    const reach = reachPattern('notesRelinkingFile');
+    for (const form of reachForms('notesRelinkingFile')) expect(reach.test(form), form).toBe(true);
+    expect(callersOf(reach)).toEqual(['src/store/file-relink.ts']);
   });
 
   it('purgar o restaurar una carpeta de la papelera sigue fuera', () => {
@@ -569,6 +588,10 @@ describe('propiedades del frontmatter (D23)', () => {
     const statements = [...text.matchAll(/prepare\(\s*[`'"](\s*\w+)/g)].map((match) => match[1]!.trim());
     expect(statements.length).toBeGreaterThanOrEqual(6);
     expect(new Set(statements)).toEqual(new Set(['SELECT']));
+    // Ni `exec` ni `run` (que no pasan por `prepare(`), ni una sentencia de escritura o de
+    // esquema en cualquier otro sitio del texto.
+    expect(/\.\s*(?:exec|run)\s*\(/.test(text)).toBe(false);
+    expect(/\b(?:INSERT|UPDATE|DELETE|REPLACE|DROP|ALTER|CREATE|PRAGMA|ATTACH|VACUUM)\b/i.test(text)).toBe(false);
   });
 
   it('el puerto no alcanza ninguna mutación de propiedades', async () => {

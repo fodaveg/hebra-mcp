@@ -10,7 +10,7 @@
  *
  * Un ID de cuenta no le dice nada a un agente, así que se cruza con el directorio de la
  * persona (`ServerContext.directory`, el de `hebra_list_organizations`): de ahí salen `name`
- * (puede ser `null` aunque se encuentre), `role` y `isSelf`. No se inventa nada: sin
+ * (puede ser `null` aunque se encuentre), `role` (solo el de la organizacion dueña del espacio de la nota; `null` si la cuenta no es miembro de ella o no se sabe cual es) y `isSelf`. No se inventa nada: sin
  * directorio (stdio, relé sin publicar, 429…) o con una cuenta que ya no es miembro, el
  * `accountId` sale tal cual, con `name`, `role` e `isSelf` a `null`, y `namesResolved` lo
  * dice. Los nombres se buscan en todas las organizaciones de la persona, no solo en la del
@@ -49,7 +49,8 @@ export interface NoteAuthorsOutput {
 export async function runNoteAuthors(
   ctx: ToolContext,
   input: { id: string },
-  directory?: () => Promise<DirectoryView>
+  directory?: () => Promise<DirectoryView>,
+  spaceId?: string
 ): Promise<NoteAuthorsOutput> {
   const meta = ctx.privacy.visibleMeta(input.id);
   if (!meta) throw new ToolError('not_found');
@@ -78,8 +79,12 @@ export async function runNoteAuthors(
     for (const organization of view.directory.organizations) {
       const member = organization.members.find((entry) => entry.accountId === accountId);
       if (!member) continue;
-      role ??= member.role;
       name ??= member.name ?? null;
+      // El rol solo vale en la organizacion dueña del espacio de la nota: ser admin en otra
+      // no dice nada de este espacio.
+      if (spaceId !== undefined && organization.spaces.some((space) => space.spaceId === spaceId)) {
+        role = member.role;
+      }
     }
     return { accountId, name, role, isSelf: accountId === view.selfAccountId };
   };

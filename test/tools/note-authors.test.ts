@@ -17,6 +17,8 @@ const ANA = 'b'.repeat(32);
 const BEA = 'c'.repeat(32);
 const GONE = 'd'.repeat(32);
 const BAIT = 'CEBO_AUTORES_9be4';
+/** El espacio de la organizacion `1…` del directorio de prueba. */
+const OWN_SPACE = '9'.repeat(32);
 
 const DIRECTORY: DirectoryView = {
   selfAccountId: SELF,
@@ -30,7 +32,7 @@ const DIRECTORY: DirectoryView = {
           { accountId: ANA, role: 'member', name: 'Ana' },
           { accountId: BEA, role: 'member', name: null }
         ],
-        spaces: []
+        spaces: [{ spaceId: OWN_SPACE, name: null, granted: true }]
       },
       {
         orgId: '2'.repeat(32),
@@ -82,7 +84,7 @@ describe('hebra_note_authors', () => {
     await withOwnLibrary(build, async (fresh, ids) => {
       const ctx = await fresh();
       const directory = vi.fn(async () => DIRECTORY);
-      const member = await runNoteAuthors(ctx, { id: ids.member }, directory);
+      const member = await runNoteAuthors(ctx, { id: ids.member }, directory, OWN_SPACE);
       expect(member).toEqual({
         id: ids.member,
         lastEditor: { accountId: ANA, name: 'Ana', role: 'member', isSelf: false, actorKind: 'app' },
@@ -90,7 +92,7 @@ describe('hebra_note_authors', () => {
         mismatch: false,
         namesResolved: true
       });
-      const self = await runNoteAuthors(ctx, { id: ids.self }, directory);
+      const self = await runNoteAuthors(ctx, { id: ids.self }, directory, OWN_SPACE);
       expect(self.lastEditor).toEqual({
         accountId: SELF,
         name: 'David',
@@ -99,17 +101,17 @@ describe('hebra_note_authors', () => {
         actorKind: 'agent'
       });
       // Un miembro cuyo nombre no se conoce: el id y el rol, `name` null (no se inventa).
-      const unnamed = await runNoteAuthors(ctx, { id: ids.unknownName }, directory);
+      const unnamed = await runNoteAuthors(ctx, { id: ids.unknownName }, directory, OWN_SPACE);
       expect(unnamed.lastEditor).toEqual({ accountId: BEA, name: null, role: 'member', isSelf: false });
       // Una cuenta que ya no está en ninguna organización: solo el id.
-      const gone = await runNoteAuthors(ctx, { id: ids.gone }, directory);
+      const gone = await runNoteAuthors(ctx, { id: ids.gone }, directory, OWN_SPACE);
       expect(gone.lastEditor).toEqual({ accountId: GONE, name: null, role: null, isSelf: false });
     });
   });
 
   it('el sobre y el relé que discrepan se marcan, y manda el relé', async () => {
     await withOwnLibrary(build, async (fresh, ids) => {
-      const result = await runNoteAuthors(await fresh(), { id: ids.mismatch }, async () => DIRECTORY);
+      const result = await runNoteAuthors(await fresh(), { id: ids.mismatch }, async () => DIRECTORY, OWN_SPACE);
       expect(result.mismatch).toBe(true);
       expect(result.declaredAuthorId).toBe(BEA);
       expect(result.lastEditor?.accountId).toBe(SELF);
@@ -123,7 +125,7 @@ describe('hebra_note_authors', () => {
         throw new ToolError('organizations_unavailable', { reason: 'not_available' });
       };
       for (const directory of [unavailable, undefined]) {
-        const result = await runNoteAuthors(ctx, { id: ids.member }, directory);
+        const result = await runNoteAuthors(ctx, { id: ids.member }, directory, OWN_SPACE);
         expect(result).toEqual({
           id: ids.member,
           lastEditor: { accountId: ANA, name: null, role: null, isSelf: null, actorKind: 'app' },
@@ -170,6 +172,49 @@ describe('hebra_note_authors', () => {
       expect(new Set(bodies).size).toBe(1);
       expect(directory).not.toHaveBeenCalled();
       expect(bodies.join('')).not.toContain(BAIT);
+    });
+  });
+});
+
+describe('hebra_note_authors: el rol es el de la organizacion dueña del espacio', () => {
+  const SPACE = 'e'.repeat(32);
+  const OTHER_SPACE = 'f'.repeat(32);
+  const org = (orgId: string, role: 'admin' | 'manager' | 'member', spaceId: string) => ({
+    orgId,
+    name: orgId,
+    members: [{ accountId: ANA, role, name: 'Ana' }],
+    spaces: [{ spaceId, name: null, granted: true }]
+  });
+  const view = (...organizations: ReturnType<typeof org>[]): DirectoryView => ({
+    selfAccountId: SELF,
+    directory: { organizations, spaces: [] }
+  });
+
+  it('con la misma cuenta en dos organizaciones, en los dos ordenes, manda la dueña del espacio', async () => {
+    await withOwnLibrary(build, async (fresh, ids) => {
+      const ctx = await fresh();
+      const owner = org('1'.repeat(32), 'member', SPACE);
+      const other = org('2'.repeat(32), 'admin', OTHER_SPACE);
+      for (const organizations of [[owner, other], [other, owner]]) {
+        const result = await runNoteAuthors(ctx, { id: ids.member }, async () => view(...organizations), SPACE);
+        expect(result.lastEditor).toMatchObject({ name: 'Ana', role: 'member' });
+      }
+    });
+  });
+
+  it('role es null si la cuenta no es miembro de la dueña o no se sabe cual es', async () => {
+    await withOwnLibrary(build, async (fresh, ids) => {
+      const ctx = await fresh();
+      const other = org('2'.repeat(32), 'admin', OTHER_SPACE);
+      const ownerWithoutAna = { ...org('1'.repeat(32), 'member', SPACE), members: [] };
+      // Dueña sin la cuenta: ser admin en otra no cuenta.
+      const notMember = await runNoteAuthors(ctx, { id: ids.member }, async () => view(ownerWithoutAna, other), SPACE);
+      expect(notMember.lastEditor).toMatchObject({ name: 'Ana', role: null });
+      // Espacio desconocido (personal, o fuera del directorio) o sin id de espacio.
+      for (const spaceId of [undefined, 'a1'.repeat(16)]) {
+        const unknown = await runNoteAuthors(ctx, { id: ids.member }, async () => view(other), spaceId);
+        expect(unknown.lastEditor).toMatchObject({ role: null });
+      }
     });
   });
 });
