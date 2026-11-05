@@ -488,6 +488,225 @@ describe('las variantes plegadas de un valor en notas ocultas', () => {
     }
   });
 
+  describe('el presupuesto de cada turno cuenta también caracteres', () => {
+    const LONG = 'é'.repeat(100_000);
+
+    async function longValues(notes: number) {
+      return auditHarness(async (engine, _library, db) => {
+        const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+        for (let index = 0; index < notes; index += 1) {
+          const note = await createNote(engine, null, `# Nota ${index}\ngarbanzos\n`);
+          insert.run(note.id, 'clave', LONG);
+        }
+      }, OPEN);
+    }
+
+    it('30 notas con un valor de 100 000 caracteres ceden cada 5, sin esperar a 20 000 filas', async () => {
+      const h = await longValues(30);
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        const page = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'otro' }] }, null, { embedded: true });
+        expect(page.items).toEqual([]);
+        // 3 millones de caracteres en tramos de 500 000.
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(6);
+      } finally {
+        immediate.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('cede dentro de una misma nota, antes de plegar el valor largo siguiente, y sigue donde iba', async () => {
+      const h = await auditHarness(async (engine, _library, db) => {
+        const note = await createNote(engine, null, '# Larga\ngarbanzos\n');
+        const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+        for (let index = 0; index < 12; index += 1) insert.run(note.id, 'clave', `${String(index).padStart(2, '0')}${LONG}`);
+        insert.run(note.id, 'clave', 'zzz');
+      }, OPEN);
+      const immediate = vi.spyOn(globalThis, 'setImmediate');
+      try {
+        // Solo el último valor casa: tiene que seguir detrás de cada corte sin saltarse nada.
+        const page = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'ZZZ' }] }, null, { embedded: true });
+        expect(page.items.map((item) => item.title)).toEqual(['Larga']);
+        expect(immediate.mock.calls.length).toBeGreaterThanOrEqual(2);
+      } finally {
+        immediate.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un valor gigante se pliega entero, sin partirlo', async () => {
+      const h = await auditHarness(async (engine, _library, db) => {
+        const note = await createNote(engine, null, '# Gigante\ngarbanzos\n');
+        db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)').run(note.id, 'clave', 'é'.repeat(700_000));
+      }, OPEN);
+      try {
+        const found = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'e'.repeat(700_000) }] }, null, { embedded: true });
+        expect(found.items.map((item) => item.title)).toEqual(['Gigante']);
+        const other = await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'e'.repeat(699_999) }] }, null, { embedded: true });
+        expect(other.items).toEqual([]);
+      } finally {
+        await h.close();
+      }
+    });
+
+    it('no lee las filas de golpe: ninguna consulta de valores usa `.all`', async () => {
+      const h = await longValues(3);
+      const allSpy = vi.spyOn(StatementSync.prototype, 'all');
+      try {
+        await h.port.search(' ', null, 1, { props: [{ key: 'clave', value: 'otro' }] }, null, { embedded: true });
+        const onValues = allSpy.mock.contexts.filter((statement) =>
+          (statement as StatementSync).sourceSQL.startsWith('SELECT value FROM note_props WHERE note_id'));
+        expect(onValues).toEqual([]);
+      } finally {
+        allSpy.mockRestore();
+        await h.close();
+      }
+    });
+  });
+
+  describe('cerrar la conexión con un recorrido en curso', () => {
+    type Engine = { search: (...args: unknown[]) => unknown };
+
+    /** 450 notas con la clave y un solo valor que casa: tres páginas. `onPage` corre al pedir cada una. */
+    async function walkLibrary() {
+      return auditHarness(async (engine) => {
+        for (let index = 0; index < 450; index += 1) {
+          await createNote(engine, null, `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`);
+        }
+      }, OPEN);
+    }
+
+    function onSecondPage(h: Awaited<ReturnType<typeof walkLibrary>>, run: () => void) {
+      const engine = (h.port as unknown as { engine: Engine }).engine;
+      const real = engine.search.bind(engine);
+      let calls = 0;
+      return vi.spyOn(engine, 'search').mockImplementation((...args: unknown[]) => {
+        calls += 1;
+        const result = real(...args);
+        if (calls === 1) run();
+        return result;
+      });
+    }
+
+    const search = (h: Awaited<ReturnType<typeof walkLibrary>>) =>
+      h.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'si' }] }, null, { embedded: true });
+
+    it('closeWhenIdle entre dos páginas: la búsqueda termina bien y el cierre llega después', async () => {
+      const h = await walkLibrary();
+      const order: string[] = [];
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle().then(() => {
+          order.push('cerrado');
+        });
+      });
+      try {
+        const page = await search(h);
+        order.push('búsqueda');
+        expect(page.items.map((item) => item.title)).toEqual(['Nota 0']);
+        expect(spy).toHaveBeenCalledTimes(3);
+        await closing;
+        expect(order).toEqual(['búsqueda', 'cerrado']);
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un error dentro del bucle libera el recorrido: el cierre no se queda esperando', async () => {
+      const h = await walkLibrary();
+      const engine = (h.port as unknown as { engine: Engine }).engine;
+      const real = engine.search.bind(engine);
+      let calls = 0;
+      let closing: Promise<void> | undefined;
+      const spy = vi.spyOn(engine, 'search').mockImplementation((...args: unknown[]) => {
+        calls += 1;
+        if (calls === 1) {
+          closing = h.port.closeWhenIdle();
+          return real(...args);
+        }
+        throw new Error('disk I/O error');
+      });
+      try {
+        await expect(search(h)).rejects.toThrow('disk I/O error');
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('sin bloqueo mutuo: lo que entra en la cola mientras el cierre espera se atiende', async () => {
+      const h = await walkLibrary();
+      let queued: Promise<unknown> | undefined;
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle();
+        queued = h.port.tagsList();
+      });
+      try {
+        const page = await search(h);
+        expect(page.items).toHaveLength(1);
+        await expect(queued).resolves.toBeDefined();
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('dos recorridos a la vez: el cierre espera a los dos', async () => {
+      const h = await walkLibrary();
+      let closing: Promise<void> | undefined;
+      const spy = onSecondPage(h, () => {
+        closing = h.port.closeWhenIdle();
+      });
+      try {
+        const [one, two] = await Promise.all([search(h), search(h)]);
+        expect(one.items).toHaveLength(1);
+        expect(two.items).toHaveLength(1);
+        await closing;
+        expect(h.port.writable).toBe(false);
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('un `close()` forzado a mitad: la búsqueda rechaza con `busy_other_instance`, no con una consulta rota', async () => {
+      const h = await walkLibrary();
+      const spy = onSecondPage(h, () => {
+        // Después de este turno: `close()` dentro de la consulta del motor la dejaría a medias.
+        setImmediate(() => h.port.close());
+      });
+      try {
+        await expect(search(h)).rejects.toMatchObject({ message: 'busy_other_instance' });
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+
+    it('y por el camino del servidor responde un error, sin resultados: la puerta final tampoco puede leer', async () => {
+      const h = await walkLibrary();
+      const spy = onSecondPage(h, () => {
+        setImmediate(() => h.port.close());
+      });
+      try {
+        const page = await h.call('hebra_search', { query: 'garbanzos', limit: 5, props: [{ key: 'clave', value: 'si' }] });
+        expect(page.isError, page.raw).toBe(true);
+        expect(page.json).toBeNull();
+        expect(page.raw).not.toContain('Nota');
+      } finally {
+        spy.mockRestore();
+        await h.close();
+      }
+    });
+  });
+
   it('otro error del motor no se traga: sale como siempre', async () => {
     const h = await library(() => {});
     try {

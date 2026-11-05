@@ -95,13 +95,13 @@ export function hasValuedProps(filters: SearchFilters | null | undefined): boole
   return (filters?.props ?? []).some((prop) => prop.value !== null);
 }
 
-/** Filas de una clave de una nota que se pliegan por turno. Una nota no tiene tope de valores:
- *  por encima de esto se suelta el hilo y se sigue donde iba. */
+/** Valores que se pliegan por turno. Una nota no tiene tope de valores: por encima de esto se suelta
+ *  el hilo y se sigue donde iba. */
 const VALUE_ROWS_PER_TURN = 20_000;
 
-/** Filas por consulta al leer los valores de una nota, en orden: reanudan sin dejar nada abierto
- *  entre dos turnos. */
-const VALUE_ROWS_PER_READ = 2_000;
+/** Caracteres que se pliegan por turno, porque plegar cuesta según el largo: unos 45 ms con caracteres
+ *  no ASCII (1,8 s por 20 millones, medido). */
+const VALUE_CHARS_PER_TURN = 500_000;
 
 /** Los pares con valor por clave en minúsculas, con su valor plegado. */
 function valuesByKey(filters: SearchFilters): Map<string, Set<string>> {
@@ -126,31 +126,45 @@ function withoutValues(filters: SearchFilters): SearchFilters {
 /**
  * ¿Tiene esta nota todos los pares con valor? Mira solo las filas de ESTA nota, plegando en JS con la
  * regla del motor (el valor ENTERO sin mayúsculas ni acentos), y para en cuanto los ha visto todos o
- * le falta una clave. Es un generador: cede cada `VALUE_ROWS_PER_TURN` filas para que quien lo mueve
- * suelte el hilo, sin dejar ninguna consulta abierta. Devuelve si casa.
+ * le falta una clave. Lee las filas de una en una, así que nunca hay en memoria más que un valor.
+ * Es un generador: cede en cuanto el tramo pasa de `VALUE_ROWS_PER_TURN` filas o de
+ * `VALUE_CHARS_PER_TURN` caracteres, antes de plegar el valor siguiente, para que quien lo mueve
+ * suelte el hilo; cierra la consulta antes de ceder y reanuda detrás del último valor visto. Un valor
+ * gigante se pliega entero: no hay forma de partirlo sin cambiar la regla. Devuelve si casa.
  */
 function* noteHasValues(
   reads: { first: StatementSync; next: StatementSync },
   noteId: string,
   wanted: ReadonlyMap<string, ReadonlySet<string>>,
-  budget: { rows: number }
+  budget: { rows: number; chars: number }
 ): Generator<void, boolean, void> {
+  const spent = (): boolean => budget.rows >= VALUE_ROWS_PER_TURN || budget.chars >= VALUE_CHARS_PER_TURN;
   for (const [key, needles] of wanted) {
     const missing = new Set(needles);
     let after: string | null = null;
     while (missing.size > 0) {
       const rows = (after === null
-        ? reads.first.all(noteId, key, VALUE_ROWS_PER_READ)
-        : reads.next.all(noteId, key, after, VALUE_ROWS_PER_READ)) as Array<{ value: string }>;
-      for (const row of rows) missing.delete(foldFileName(String(row.value)));
-      budget.rows += rows.length;
-      if (budget.rows >= VALUE_ROWS_PER_TURN) {
+        ? reads.first.iterate(noteId, key)
+        : reads.next.iterate(noteId, key, after)) as Iterable<{ value: string }>;
+      let finished = true;
+      for (const row of rows) {
+        const value = String(row.value);
+        missing.delete(foldFileName(value));
+        budget.rows += 1;
+        budget.chars += value.length;
+        if (missing.size === 0 || spent()) {
+          after = value;
+          finished = false;
+          break;
+        }
+      }
+      if (spent()) {
         budget.rows = 0;
+        budget.chars = 0;
         yield;
       }
       if (missing.size === 0) break;
-      if (rows.length < VALUE_ROWS_PER_READ) return false;
-      after = String(rows[rows.length - 1]!.value);
+      if (finished) return false;
     }
   }
   return true;
@@ -164,11 +178,11 @@ function* keptHits(
   room: number
 ): Generator<void, SearchHit[], void> {
   const reads = {
-    first: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? ORDER BY value LIMIT ?'),
-    next: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? AND value > ? ORDER BY value LIMIT ?')
+    first: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? ORDER BY value'),
+    next: db.prepare('SELECT value FROM note_props WHERE note_id = ? AND key = ? AND value > ? ORDER BY value')
   };
   const kept: SearchHit[] = [];
-  const budget = { rows: 0 };
+  const budget = { rows: 0, chars: 0 };
   for (const item of items) {
     if (kept.length >= room) break;
     if (yield* noteHasValues(reads, item.id, wanted, budget)) kept.push(item);

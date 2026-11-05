@@ -323,6 +323,66 @@ describe('LibraryInstance: escritor único', () => {
     await reader.createNote({ body: '# Después', privacy });
   });
 
+  it('el relevo llega entre dos páginas de una búsqueda con `props`: termina bien y el cierre va después', async () => {
+    const dataDir = tempDataDir();
+    const creator = await open(dataDir, { lock: { releaseOnExit: false } });
+    for (let index = 0; index < 450; index += 1) {
+      await creator.createNote({ body: `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`, privacy });
+    }
+    await creator.close();
+    const owner = liveProcess();
+    writeLock(dataDir, owner.pid!);
+    const reader = await open(dataDir);
+    expect(reader.role).toBe('other_instance');
+    await killAndWait(owner);
+
+    type Reading = {
+      closed: boolean;
+      engine: { search: (...args: unknown[]) => unknown };
+      read<T>(operation: () => T): Promise<T>;
+      closeWhenIdle(): Promise<void>;
+    };
+    const reading = (reader as unknown as { current: Reading }).current;
+    const real = reading.engine.search.bind(reading.engine);
+    let takeover: Promise<void> | undefined;
+    let closedDuringWalk = false;
+    let calls = 0;
+    const search = vi.spyOn(reading.engine, 'search').mockImplementation((...args: unknown[]) => {
+      calls += 1;
+      closedDuringWalk ||= reading.closed;
+      const result = real(...args);
+      if (calls === 1) takeover = reader.checkWriter();
+      return result;
+    });
+    // Sin medir tiempos: el segundo turno del recorrido espera a que el relevo pida el cierre, así
+    // que siempre llega entre dos páginas por muy rápido que vaya la búsqueda.
+    let closeAsked!: () => void;
+    const closeRequested = new Promise<void>((resolve) => { closeAsked = resolve; });
+    const realClose = reading.closeWhenIdle.bind(reading);
+    reading.closeWhenIdle = () => {
+      closeAsked();
+      return realClose();
+    };
+    const realRead = reading.read.bind(reading);
+    let turns = 0;
+    reading.read = async (operation) => {
+      turns += 1;
+      if (turns === 2) await closeRequested;
+      return realRead(operation);
+    };
+    try {
+      const page = await reader.port.search('garbanzos', null, 5, { props: [{ key: 'clave', value: 'si' }] }, null, { embedded: true });
+      expect(page.items.map((item) => item.title)).toEqual(['Nota 0']);
+      expect(calls).toBe(3);
+      expect(closedDuringWalk).toBe(false);
+      await takeover;
+      expect(reader.role).toBe('this');
+      expect(reading.closed).toBe(true);
+    } finally {
+      search.mockRestore();
+    }
+  });
+
   it('bloqueo huérfano al arrancar: la instancia arranca como escritora', async () => {
     const dataDir = tempDataDir();
     writeLock(dataDir, await deadPid());
