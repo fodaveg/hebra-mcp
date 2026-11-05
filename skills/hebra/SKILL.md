@@ -21,7 +21,8 @@ description: >-
   de la nota X», «crea la carpeta W», «renombra la carpeta W», «adjunta esta captura a la
   nota X», «qué ficheros sueltos hay en Hebra», «tira ese fichero a la papelera», «qué
   pone en el .base de tareas», «añade una vista a la base X», «crea una base para la
-  carpeta Y», «renombra / mueve / duplica ese fichero», «saca estas notas a una carpeta
+  carpeta Y», «renombra / mueve / duplica ese fichero», «oculta esta nota del listado»,
+  «marca esta copia de conflicto como resuelta», «saca estas notas a una carpeta
   para editarlas con herramientas», «devuelve la carpeta de trabajo a Hebra», «crea un ID
   nuevo en la 21 para X», «dame un número JD para Y», «audita el JDex», «archiva esta nota
   en el 21.34», «mueve la carpeta X al ID 21.11».
@@ -50,7 +51,8 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 41 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 43 tools (p. ej. sin `hebra_edit_note`, sin `hebra_set_hidden` ni
+  `hebra_clear_conflict`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las de ficheros sueltos, `hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, `hebra_read_file`, `hebra_replace_file_text`,
@@ -206,11 +208,13 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 | `hebra_append_to_note` | `id`, `text` (≤ 20 000 caracteres), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: saved \| conflict_copy`. Con `saved` devuelve la prueba de lo guardado: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. |
 | `hebra_edit_note` | `id`, `edits[{find, replace}]` (1-50), `expectedRevision`, `operationId` | Ver «Cómo se edita». Devuelve `outcome`, `revision` nueva, `totalChars`, `applied`, `sync`, `replayed`. |
 | `hebra_replace_in_notes` | `mode`: `simulate` (`pattern`, `regex?`, `caseSensitive?`, `replacement`, `folder?`, `subfolders?`, `tag?`, `ids?`, `maxNotes?` 1-200 (200), `limit?` 1-200 (50), `after?`), `preview` (`planId`, `cursor`, `limit?`), `apply` (`planId`, `operationId`) o `undo` (`planId`) | Ver «Sustituir en varias notas». `simulate`/`preview`: `{planId, expiresAt, notes: [{id, title, isConflictCopy, matches, changes: [{line, column, before, after}]}], nextCursor, planNotes?, planMatches?, cutoff?, continueAfter?, skipped?}`. `apply`: `{planId, complete, replayed?, undone?, notes: [{id, title, outcome, revision?, totalChars?, bodySha256?, copyId?}], sync}`. `undo`: `{planId, complete, notes: [{id, title, outcome?, copyId?, copyOutcome?}], sync}`. |
-| `hebra_move_note` | `id`, `folderId` (`"root"` = raíz) | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. |
+| `hebra_move_note` | `id`, `folderId` (`"root"` = raíz), `expectedRevision?` | Solo a carpetas que ya existen. Devuelve `folderPath`, `favorite`, `archived`, `sync`. Con `expectedRevision` (la `revision` leída), si el texto cambió, `revision_conflict` sin mover. |
 | `hebra_set_favorite` | `id`, `favorite` (bool) | Idempotente. Misma salida que mover. |
 | `hebra_set_archived` | `id`, `archived` (bool) | Idempotente. Misma salida que mover. |
-| `hebra_trash_note` | `id` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. |
-| `hebra_restore_note` | `id` (de `hebra_list_trash`) | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. |
+| `hebra_set_hidden` | `id`, `hidden` (bool) | Oculta o muestra la nota en el listado general de Hebra. Idempotente. Misma salida que mover, más `hidden`. Es una preferencia de vista, no privacidad: la nota sigue en su carpeta, la búsqueda y aquí, y en un espacio vale para todos sus miembros. |
+| `hebra_clear_conflict` | `id` (una copia, `isConflictCopy: true`) | Marca la copia como resuelta: deja de ser copia. No cambia su texto ni toca la original. Misma salida que mover, más `cleared`; sobre otra nota, `cleared: false` sin escribir. |
+| `hebra_trash_note` | `id`, `expectedRevision?` | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_note`. `expectedRevision`, como en mover. |
+| `hebra_restore_note` | `id` (de `hebra_list_trash`), `expectedRevision?` | Vuelve a su carpeta; si esa carpeta ya no existe, a la raíz. Misma salida que mover. `expectedRevision`: solo la que leíste antes de mandarla a la papelera (ver «Comprobar que no cambió»). |
 | `hebra_list_trash` | `cursor?`, `limit` 1-100 (50) | La última en entrar primero; `folderPath` = donde volverá. Pagina con `nextCursor`. |
 | `hebra_list_files` | `folder?` (ruta), `subfolders?`, `name?` (parte del nombre, sin distinguir mayúsculas), `trashed?` (bool), `limit` 1-100 (50), `cursor?` | `{files: [{id, name, folderPath, mimeType, byteLength, updatedAt, trashedAt}], nextCursor}`. Los ficheros SUELTOS (con carpeta propia; no los adjuntos de una nota), por nombre. Con `trashed: true`, los de la papelera, el último en entrar primero, y `folderPath` = donde volverá. `mimeType`/`byteLength` pueden ser `null`. Sin recuento y sin contenido. Pagina con `nextCursor`, que sigue valiendo aunque el último fichero de la página ya no esté en la lista. |
 | `hebra_trash_file` | `id` (de `hebra_list_files`) | A la papelera. Idempotente. `{id, trashed: true, sync}`. Se deshace con `hebra_restore_file`. Un fichero que alguna nota incrusta (un dibujo, por ejemplo) deja de verse en esa nota mientras esté en la papelera. |
@@ -218,7 +222,7 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 | `hebra_read_file` | `id` (de `hebra_list_files`, vivo), `offset?` (0), `maxChars?` (1–100 000, def. 100 000) | Bloque `{id, name, folderPath, mimeType, byteLength, sha256, updatedAt}` y el contenido: texto (`.base` y `.yaml` como `text/yaml`, `.md`, `.txt`, `.json`, `.csv`) por tramos, con `{totalChars, truncated, nextOffset}`; imagen PNG/JPEG/GIF/WebP como imagen; PDF como recurso. Hasta 5 MiB (`file_too_large`); otro tipo, `file_type_not_allowed`. `sha256` es la base para reemplazarlo. Solo lectura. |
 | `hebra_replace_file_text` | `id`, `expectedSha256` (el `sha256` leído), `text` (el contenido ENTERO nuevo, ≤ 1 000 000 bytes) **o** `undoOperationId`, `operationId` | Ver «Reemplazar el texto de un fichero suelto». `{id, outcome: "saved" \| "already", sha256, byteLength, mimeType, previousSha256, replayed?, sync}`, leídos de lo guardado. `file_changed`: cambió desde la lectura, no se escribió. |
 | `hebra_create_file` | `folder?` (ruta) **o** `folderId?` (sin ninguno, la raíz), `name` (con extensión `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`; ≤ 255; sin `/`, `\|`, `[`, `]`, `\`, `#` ni saltos de línea), `text` (≤ 1 000 000 bytes), `operationId` | Ver «Crear, renombrar, mover y duplicar ficheros sueltos». `{id, name, folderPath, sha256, byteLength, mimeType, outcome, replayed?, sync}`. |
-| `hebra_rename_file` | `id` (de `hebra_list_files`, vivo), `name` (misma extensión), `operationId` | Misma salida. El nombre que ya tiene: `outcome: "already"`. |
+| `hebra_rename_file` | `id` (de `hebra_list_files`, vivo), `name` (misma extensión), `operationId` | Misma salida, más `relinked`: cuántas notas que lo incrustaban quedaron con el nombre nuevo. El nombre que ya tiene: `outcome: "already"`. |
 | `hebra_move_file` | `id`, `folder?` **o** `folderId?` (sin ninguno, la raíz), `operationId` | Misma salida. Ya estaba ahí: `already`. |
 | `hebra_duplicate_file` | `id`, `name` (misma extensión), `folder?` **o** `folderId?` (sin ninguno, la carpeta del original), `operationId` | Fichero NUEVO con los mismos bytes (mismo `sha256`), hasta 5 MiB. Misma salida. |
 | `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Son las de este dispositivo: las 5 más recientes de cada nota se conservan siempre y las demás caducan a los 7 días. Pagina con `nextCursor`; un cursor cuya versión ya no existe da `invalid_input`. |
@@ -252,7 +256,7 @@ Para cambiar un `.base` (YAML de Obsidian Bases), un `.md` suelto o un `.json`: 
    "operationId": "<uuid nuevo>"}
   ```
 
-- **Renombrar** (`hebra_rename_file`) y **duplicar** (`hebra_duplicate_file`) no cambian la extensión (`invalid_input`). Renombrar un fichero que una nota incrusta por nombre (`![[plano.pdf]]`) rompe ese incrustado: avísalo antes. Duplicar copia los mismos bytes, hasta 5 MiB; sin `folder`, a la carpeta del original.
+- **Renombrar** (`hebra_rename_file`) y **duplicar** (`hebra_duplicate_file`) no cambian la extensión (`invalid_input`). Renombrar arregla en la misma escritura las notas vivas que lo incrustan (`![[plano.pdf]]`, con su alias si lo lleva) y `relinked` dice cuántas; cada una guarda su versión anterior. Se quedan con el nombre anterior un enlace `[[plano.pdf]]`, una ruta escrita a mano (`![[docs/plano.pdf]]`), las notas de la papelera y las bloqueadas: si importa, míralo con `hebra_grep` o avísalo. Si otro fichero visible de otra carpeta ya tiene el nombre nuevo y hay notas que arreglar, `file_exists` con su `id`. Duplicar copia los mismos bytes, hasta 5 MiB; sin `folder`, a la carpeta del original.
 - **Mover** (`hebra_move_file`): a otra carpeta (`folder` o `folderId`); sin ninguno, a la raíz.
 - **Nombre repetido**: si en la carpeta ya hay un fichero con ese nombre (sin distinguir mayúsculas), `file_exists` con su `id` y no se escribe: elige otro nombre o trabaja sobre ese.
 - **Lo que no se ve**: una carpeta oculta responde `not_found`, como una que no existe; un nombre que no se puede usar, al crear, `file_name_unavailable` (sin más detalle: no insistas con variantes, dile al usuario que elija otro nombre o lo haga desde la app).
@@ -320,6 +324,10 @@ restaure desde Hebra.
 `sync` en las respuestas de edición, organización, papelera, versiones, carpetas, adjuntos añadidos y ficheros sueltos: `uploaded` (ya subido; en un adjunto, también el fichero), `pending`
 (guardado, sin subir aún), `error` (con `syncError`, p. ej. `offline`, `revoked`) o
 `not_linked`. `pending` no es un fallo: lo guardado sube en la siguiente ronda. `hebra_create_note` y `hebra_append_to_note` no devuelven `sync`. Repetir una escritura que ya está aplicada responde al momento y puede decir `pending` si lo anterior aún no subió; no es un fallo.
+
+## Comprobar que no cambió, al mover o tirar
+
+`hebra_move_note`, `hebra_trash_note` y `hebra_restore_note` aceptan `expectedRevision`: la misma `revision` que `hebra_edit_note`. Úsala cuando decidas por lo que pone la nota («esta ya está resuelta, a la papelera»): si el texto cambió desde tu lectura, `revision_conflict` y no se escribe; vuelve a leerla. Solo compara el texto: favorita, carpeta o papelera no cuentan como cambio. Si la nota ya está en el estado pedido, responde sin escribir aunque la revisión sea vieja. Con una nota bloqueada, `note_locked` (sin `expectedRevision` se puede mover). Una nota de la papelera no se puede leer y `hebra_list_trash` no da revisión, así que para sacarla solo sirve la que leíste antes de mandarla; si no la tienes, sácala sin `expectedRevision`.
 
 ## Cómo se edita
 
@@ -622,8 +630,8 @@ título) ni especules sobre qué hay oculto.
 | `overlapping_edits` | Dos sustituciones tocan el mismo tramo (`edit` = índice) | Fúndelas en una. |
 | `heading_not_found` | Ningún apartado con ese título (o esa aparición) | `hebra_note_outline` y copia el título exacto; si no está, añade al final o crea el encabezado. |
 | `ambiguous_heading` | Varios apartados con ese título (`candidates`: `heading`, `level`, `line`, `occurrence`). Lo dan `hebra_read_note`, `hebra_append_to_note` y `hebra_add_attachment` con `heading`; `hebra_note_outline` nunca | Elige uno y pasa su `occurrence` como `headingOccurrence`. |
-| `writer_outdated` | `hebra_add_attachment` con `heading`: el proceso que escribe es de una versión anterior y no admite apartados. No se escribió nada. Solo sale con `heading` | Añade el adjunto sin `heading` y mueve la referencia como en «Reglas al escribir», punto 9. |
-| `note_locked` | La nota está bloqueada en Hebra | No se edita desde aquí; díselo. Moverla, favorita y archivar sí funcionan. |
+| `writer_outdated` | `hebra_add_attachment` con `heading`, `hebra_rename_file`, `hebra_set_hidden`, `hebra_clear_conflict` o `expectedRevision` al mover, tirar o sacar: el proceso que escribe es de una versión anterior y no lo admite. No se escribió nada. En `hebra_add_attachment`, solo sale con `heading` | Añade el adjunto sin `heading` y mueve la referencia como en «Reglas al escribir», punto 9. |
+| `note_locked` | La nota está bloqueada en Hebra | No se edita desde aquí; díselo. Moverla, favorita y archivar sí funcionan (mover con `expectedRevision`, no: quítalo). |
 | `operation_id_reused` | Ese `operationId` ya se usó con otra petición | Genera un UUID nuevo. |
 | `privacy_config_unresolved` | Una carpeta privada de la configuración ya no existe | Todo el MCP queda cerrado hasta que el usuario la corrija en el `config.json` del servidor. |
 | `busy_other_instance` | Otro proceso tiene el escritor | Reintenta una vez más tarde; si persiste, díselo. |

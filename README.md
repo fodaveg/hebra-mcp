@@ -14,7 +14,7 @@ vincula como un dispositivo más de la biblioteca. En el conector remoto, el ser
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
+Estado a 4 de noviembre de 2026: el servidor MCP tiene 43 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -50,8 +50,12 @@ Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
   `hebra_append_to_note`, `applied` en `hebra_edit_note`); con una copia de conflicto no
   hay prueba. Un apartado es un encabezado `#` hasta el siguiente de su nivel o menor; los
   encabezados Setext (`===`, `---`) no cuentan.
-- Organización: `hebra_move_note`, `hebra_set_favorite` y `hebra_set_archived`.
-- Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga).
+- Organización: `hebra_move_note`, `hebra_set_favorite` y `hebra_set_archived`;
+  `hebra_set_hidden` oculta del listado general de Hebra (una preferencia de vista, no
+  privacidad) y `hebra_clear_conflict` marca como resuelta una copia de conflicto (D23).
+- Papelera: `hebra_trash_note`, `hebra_restore_note` y `hebra_list_trash` (sin purga). Mover,
+  mandar a la papelera y sacar aceptan `expectedRevision`: si el texto cambió desde esa lectura,
+  `revision_conflict` sin escribir.
 - Ficheros sueltos (D10; los recursos con carpeta propia que no cuelgan de una nota, como
   un `.base` o un PDF): `hebra_list_files` (los vivos por nombre o, con `trashed: true`,
   los de la papelera; limit 1-100, def. 50), `hebra_trash_file` y `hebra_restore_file`.
@@ -67,7 +71,8 @@ Estado a 4 de noviembre de 2026: el servidor MCP tiene 41 herramientas
 - Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026):
   `hebra_create_file` crea uno de texto (`.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`,
   hasta 1 000 000 bytes; un `.base` creado así sale en Bases de Hebra tras el sync),
-  `hebra_rename_file` lo renombra sin cambiar la extensión, `hebra_move_file` lo mueve a otra
+  `hebra_rename_file` lo renombra sin cambiar la extensión y arregla las notas que lo incrustan
+  (`relinked`, D23), `hebra_move_file` lo mueve a otra
   carpeta y `hebra_duplicate_file` lo copia (mismos bytes, hasta 5 MiB) con otro nombre. Las
   cuatro llevan `operationId`; un nombre que ya usa otro fichero visible de la carpeta
   responde `file_exists` con su id, y lo privado responde como lo inexistente.

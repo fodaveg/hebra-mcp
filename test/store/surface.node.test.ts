@@ -432,7 +432,14 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * prohibido en todo `src` (lista de arriba), y fuera del turno nadie los tiene.
    */
   it('mover a un ID (D19): las mutaciones con guarda solo en el turno del escritor y en jd-move-port.ts', async () => {
-    const allowed = ['src/store/node-port.ts', 'src/store/jd-move-port.ts'];
+    // D23: `hebra_move_note` con `expectedRevision` usa la de notas (`note-state.ts`), nunca la de
+    // carpetas: mover carpetas sigue sin otra vía.
+    const allowed = ['src/store/node-port.ts', 'src/store/jd-move-port.ts', 'src/store/note-state.ts'];
+    expect(
+      reachPattern('folderMoveIfUnchanged|folderRenameIfUnchanged').test(
+        readFileSync(join(root, 'src/store/note-state.ts'), 'utf8')
+      )
+    ).toBe(false);
     const guarded = reachPattern('noteMoveIfUnchanged|folderMoveIfUnchanged|folderRenameIfUnchanged');
     for (const name of ['noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged']) {
       for (const form of reachForms(name)) expect(guarded.test(form), form).toBe(true);

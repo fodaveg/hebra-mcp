@@ -1,5 +1,5 @@
 /**
- * Registro de las 41 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 43 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota

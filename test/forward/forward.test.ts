@@ -1874,7 +1874,13 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     ).rejects.toMatchObject(invalid);
     expect(seen).toEqual([]);
 
-    const write = buildRoutedWriteContext(fakeInstance(path, 'other_instance'), localSpy());
+    const never = async (): Promise<never> => {
+      throw new Error('el lector no escribe aquí: lo hace el escritor');
+    };
+    const write = buildRoutedWriteContext(
+      fakeInstance(path, 'other_instance'),
+      localSpy({ looseFileWrite: never, noteState: never })
+    );
     expect(
       await write.noteState!({ action: 'moveNote', id: 'n1', folderId: 'root', expectedRevision: 'r1.x', privacy })
     ).toMatchObject({ id: 'n1', hidden: true, changed: true });
