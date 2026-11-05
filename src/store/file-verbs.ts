@@ -104,9 +104,8 @@ export interface LooseFileSaved {
   /** `saved`: escrito ahora; `already`: ya tenía ese nombre o estaba en esa carpeta. */
   outcome: 'saved' | 'already';
   /** Renombrar (D23): los ids de las notas que se arreglaron, para la puerta final. Nunca salen
-   *  en la respuesta MCP. Ausente en las otras acciones y si no consta (un registro sin ids,
-   *  recuperado del estado `started` o de más de `RELINKED_NOTES_MAX` notas): entonces la
-   *  herramienta no da `relinked`. */
+   *  en la respuesta MCP. Ausente en las otras acciones y si no consta (un registro sin ids o
+   *  recuperado del estado `started`): entonces la herramienta no da `relinked`. */
   relinkedNotes?: string[];
   replayed?: true;
 }
@@ -489,10 +488,9 @@ export async function writeLooseFile(
                   // la enseña, y solo nombra un fichero que se ve.
                   cause: `Antes de renombrar «${stored.name}» → «${name}»`
                 });
-          const relinkedNotes = relinkedNotesOf(plan);
           const saved = {
             ...rowProof(row, source.file.byteLength, source.file.mime, 'saved'),
-            ...(relinkedNotes ? { relinkedNotes } : {})
+            relinkedNotes: relinkedNotesOf(plan)
           };
           log.finish(input.operationId, saved);
           return { result: saved, wrote: true };

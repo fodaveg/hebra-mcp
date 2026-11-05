@@ -40,7 +40,7 @@ import {
 } from '../../src/server/forward';
 import { localWriteContext } from '../../src/server/serve';
 import { buildWriteContext, type WriteContext } from '../../src/server/write-context';
-import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
+import { isBusyOtherInstance, StoreError, writeRejected } from '../../src/store/errors';
 import { mapWriteError } from '../../src/server/tools/write-errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
 import { FILE_TEXT_REPLACE_MAX_BYTES, RELINKED_NOTES_MAX } from '../../src/store/file-content';
@@ -1835,6 +1835,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
           return { id: input.id, ...saved, sync: 'not_linked' };
         },
         looseFileWrite: async (input) => {
+          if (input.action === 'renameFile' && input.name === 'muchas.base') throw writeRejected('too_many_linked_notes');
           seen.push(input.action);
           return {
             id: 'action' in input && input.action === 'renameFile' ? input.id : 'x',
@@ -1889,6 +1890,11 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     const renamed = await write.looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-r', privacy });
     expect(renamed).toMatchObject({ id: 'f1', relinkedNotes: ['n1', 'n2'] });
     expect(stderrText()).toContain('"op":"renameFileRelinking","outcome":"forwarded"');
+    // El rechazo por el tope cruza el socket con su código, sin parecer un escritor anterior.
+    const tooMany = await write
+      .looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'muchas.base', operationId: 'op-tope', privacy })
+      .catch((error: unknown) => error);
+    expect(mapWriteError(tooMany).code).toBe('too_many_linked_notes');
     // Los ids del escritor se validan y se acotan: otra forma o de más, `writer_protocol`.
     for (const bad of ['n1', [1], [''], ['x'.repeat(201)], Array.from({ length: RELINKED_NOTES_MAX + 1 }, () => 'n')]) {
       relinkedFromWriter = bad;

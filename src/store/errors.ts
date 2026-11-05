@@ -54,6 +54,9 @@ import type { SectionRef } from './sections';
  * - `file_name_unavailable`: el fichero que se crearía quedaría oculto (lo enlaza una nota
  *   oculta, o hay una nota bloqueada oculta y el nombre se puede incrustar). Uno solo, sin
  *   detalles.
+ * - `too_many_linked_notes` (D23, `./file-relink.ts`): renombrar tendría que reescribir más de
+ *   `RELINKED_NOTES_MAX` notas, más de las que puede juzgar la puerta final. Solo cuenta notas
+ *   visibles: con una oculta, el fichero ya es oculto y la respuesta es `not_found`.
  * Mover a un ID (`hebra_jd_move`, D19, 19 oct 2026; `./jd-move-port.ts`):
  * - `destination_unavailable`: una nota o un fichero que el destino dejaría oculto (un nombre o
  *   unos bytes que enlaza una nota oculta). Uno solo, sin detalles, como
@@ -88,6 +91,7 @@ export type WriteRejectionCode =
   | 'file_unavailable'
   | 'file_exists'
   | 'file_name_unavailable'
+  | 'too_many_linked_notes'
   | 'destination_unavailable'
   | JdRejectionCode;
 
@@ -147,6 +151,7 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'file_unavailable',
   'file_exists',
   'file_name_unavailable',
+  'too_many_linked_notes',
   'destination_unavailable',
   'jdex_not_found',
   'templates_not_found',

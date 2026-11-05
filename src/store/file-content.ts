@@ -137,9 +137,10 @@ export const FILE_CREATE_MAX_BYTES = FILE_TEXT_REPLACE_MAX_BYTES;
 /** Bytes del fichero que `hebra_duplicate_file` copia: los mismos que se leen. */
 export const FILE_DUPLICATE_MAX_BYTES = FILE_READ_MAX_BYTES;
 
-/** Ids de notas reescritas que acompañan a un renombrado (D23), para la puerta final: lo que
- *  cabe de sobra en una respuesta de `writer.sock` (1 MiB, unos 39 bytes por id) y en el registro
- *  de la operación. Con más, no viajan y `relinked` no sale: nunca un recuento sin juzgar. */
+/** Notas que un renombrado puede reescribir (D23), porque sus ids acompañan a la respuesta para
+ *  la puerta final: lo que cabe de sobra en una respuesta de `writer.sock` (1 MiB, unos 39 bytes
+ *  por id) y en el registro de la operación. Con más, el escritor rechaza sin escribir
+ *  (`too_many_linked_notes`): una respuesta nunca es correcta sin juzgar esos ids. */
 export const RELINKED_NOTES_MAX = 5_000;
 
 /** Extensiones (en minúsculas) de un fichero que `hebra_create_file` puede crear. Un `.md`

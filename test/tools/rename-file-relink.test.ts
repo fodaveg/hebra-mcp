@@ -6,6 +6,7 @@
  * privada antes y después de escribir, y que la respuesta no cambia por una nota oculta.
  */
 import { extname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveToolContext } from '../../src/server/context';
 import { runRenameFile } from '../../src/server/tools/loose-files';
@@ -419,11 +420,108 @@ describe('hebra_rename_file arregla las notas (D23)', () => {
       expect(again.value).not.toHaveProperty('relinked');
     });
 
-    it('más notas que el tope: no viajan ids, así que no hay recuento', () => {
+    it('relinkedNotesOf da siempre los ids: el tope lo aplica planRelink rechazando', () => {
       const entries = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `n${index}` })) as never;
       expect(relinkedNotesOf({ entries: entries(2) })).toEqual(['n0', 'n1']);
-      expect(relinkedNotesOf({ entries: entries(RELINKED_NOTES_MAX) })).toHaveLength(RELINKED_NOTES_MAX);
-      expect(relinkedNotesOf({ entries: entries(RELINKED_NOTES_MAX + 1) })).toBeUndefined();
+      expect(relinkedNotesOf({ entries: entries(RELINKED_NOTES_MAX + 1) })).toHaveLength(RELINKED_NOTES_MAX + 1);
+    });
+  });
+
+  describe('el tope de notas reescritas', () => {
+    /** `count` notas reales más que incrustan `name`: copias, en una sentencia, de una nota creada
+     *  con el motor, con sus enlaces. Son filas vivas de `notes` y `links` como cualquiera. */
+    const manyNotes = async (harness: LooseFilesHarness, name: string, count: number): Promise<string> => {
+      const template = await note(harness, `# Muchas\n\n![[${name}]]\n`);
+      const db = new DatabaseSync(harness.test.sqlitePath, { readOnly: true });
+      const columns = (db.prepare('PRAGMA table_info(notes)').all() as Array<{ name: string; pk: number }>)
+        .filter((column) => column.name !== 'id' && column.pk === 0)
+        .map((column) => column.name);
+      db.close();
+      const list = columns.join(', ');
+      const series = `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ${count})`;
+      harness.exec(
+        `INSERT INTO notes (id, ${list}) ${series} SELECT printf('copia-%05d', i), ${list} FROM notes, n WHERE notes.id = ?`,
+        template
+      );
+      harness.exec(
+        `INSERT INTO links (src_note_id, target_kind, target, target_path) ${series}
+         SELECT printf('copia-%05d', i), target_kind, target, target_path FROM links, n WHERE src_note_id = ?`,
+        template
+      );
+      return template;
+    };
+
+    /** Lo que cambiaría cualquier escritura en notas, versiones o el registro de operaciones. */
+    const footprint = (harness: LooseFilesHarness) => {
+      const db = new DatabaseSync(harness.test.sqlitePath, { readOnly: true });
+      try {
+        return db
+          .prepare(
+            `SELECT (SELECT COUNT(*) FROM notes) AS notes, (SELECT SUM(local_seq) FROM notes) AS seq,
+                    (SELECT COUNT(*) FROM note_versions) AS versions,
+                    (SELECT COUNT(*) FROM hebra_mcp_operations) AS operations`
+          )
+          .get();
+      } finally {
+        db.close();
+      }
+    };
+
+    it('5001 notas que reescribir: too_many_linked_notes sin escribir nada, también al reintentar', { timeout: 60_000 }, async () => {
+      const harness = await start();
+      const { call, rawFiles, test } = harness;
+      const id = test.library.files.inventario;
+      await manyNotes(harness, FILE_NAMES.inventario, RELINKED_NOTES_MAX);
+      const files = rawFiles();
+      const before = footprint(harness);
+      const rejected = { isError: true, value: { error: 'too_many_linked_notes' } };
+      const args = { id, name: 'Tareas.base', operationId: 'op-tope' };
+      expect(await call('hebra_rename_file', args)).toEqual(rejected);
+      expect(await call('hebra_rename_file', args)).toEqual(rejected);
+      // Tampoco quedó registro: el mismo `operationId` con otra petición no es `operation_id_reused`.
+      expect(await call('hebra_rename_file', { ...args, name: 'Otra.base' })).toEqual(rejected);
+      expect(rawFiles()).toEqual(files);
+      expect(footprint(harness)).toEqual(before);
+    });
+
+    it('el rechazo solo depende de notas visibles: con una oculta que lo enlaza, not_found como uno inexistente', { timeout: 60_000 }, async () => {
+      const harness = await start();
+      const { call, rawFiles, test } = harness;
+      await manyNotes(harness, FILE_NAMES.inventario, RELINKED_NOTES_MAX);
+      await note(harness, `# Oculta\n#secreto\n\n![[${FILE_NAMES.inventario}]]\n`);
+      const files = rawFiles();
+      const before = footprint(harness);
+      const missing = await call('hebra_rename_file', { id: 'no-existe', name: 'x.base', operationId: 'op-no' });
+      expect(missing).toEqual(NOT_FOUND);
+      expect(
+        await call('hebra_rename_file', { id: test.library.files.inventario, name: 'Tareas.base', operationId: 'op-oc' })
+      ).toEqual(missing);
+      // Y en el escritor, sin pasar por la herramienta: la oculta se mira antes que el tope.
+      await expect(
+        test.serverContext.write!.looseFileWrite!({
+          action: 'renameFile',
+          id: test.library.files.inventario,
+          name: 'Tareas.base',
+          operationId: 'op-oc2',
+          privacy: test.serverContext.privacyConfig
+        })
+      ).rejects.toMatchObject({ code: 'not_found' });
+      expect(rawFiles()).toEqual(files);
+      expect(footprint(harness)).toEqual(before);
+    });
+
+    it('justo en el tope: escribe, da el recuento y la puerta juzga los ids', { timeout: 60_000 }, async () => {
+      const harness = await start();
+      const { call, test, withEngine } = harness;
+      await manyNotes(harness, FILE_NAMES.inventario, RELINKED_NOTES_MAX - 1);
+      const args = { id: test.library.files.inventario, name: 'Tareas.base', operationId: 'op-justo' };
+      const result = await call('hebra_rename_file', args);
+      expect(result.value).toMatchObject({ outcome: 'saved', relinked: RELINKED_NOTES_MAX });
+      expect((await stored(harness, 'copia-02500')).body).toBe('# Muchas\n\n![[Tareas.base]]\n');
+      // Una de las 5000 pasa a privada: el reintento ya no da el recuento. Quitarle el enlace no
+      // cambia nada: la juzga por su id, y era el agujero con más notas que el tope.
+      await withEngine((engine) => engine.noteMove('copia-02500', test.library.folders.diario));
+      expect(await call('hebra_rename_file', args)).toEqual(NOT_FOUND);
     });
   });
 
