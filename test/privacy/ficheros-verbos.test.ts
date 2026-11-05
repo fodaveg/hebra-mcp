@@ -27,6 +27,7 @@ import type { ServerContext } from '../../src/server/context';
 import { buildRoutedWriteContext, RoutedStatusSource, writerSocketHandlers } from '../../src/server/forward';
 import { registerTools } from '../../src/server/register-tools';
 import { localWriteContext } from '../../src/server/serve';
+import { REVISION_MAX_LENGTH } from '../../src/store/revision';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import { BAIT_FOLDER, createNote } from '../fixtures/test-library';
 import { sha256, startLooseFiles, type LooseFilesHarness } from '../fixtures/loose-files';
@@ -395,6 +396,49 @@ describe('reenvío lector→escritor (D17)', () => {
     }).catch((error: unknown) => error);
     expect(unresolved).toMatchObject({ code: 'privacy_config_unresolved' });
     expect((await writer.port.filesIndex()).files.map((file) => file.name)).toEqual(['Reenviada.base']);
+
+    // D23: una nota que lo incrusta, por el socket. Los ids de las notas viajan para la puerta
+    // final de este lector y no salen en la respuesta.
+    const embedding = await call('hebra_create_note', { body: '# Con la base\n\n![[Reenviada.base]]\n', folder: 'Docs' });
+    expect(embedding.isError).toBe(false);
+    const relinked = await call('hebra_rename_file', { id: created.value.id, name: 'Final.base', operationId: 'op-fwd-r' });
+    expect(relinked.value).toMatchObject({ outcome: 'saved', relinked: 1 });
+    expect(JSON.stringify(relinked)).not.toContain(embedding.value.id as string);
+    expect(await call('hebra_rename_file', { id: created.value.id, name: 'Final.base', operationId: 'op-fwd-r' })).toEqual({
+      isError: false,
+      value: { ...relinked.value, replayed: true }
+    });
+    expect((await writer.port.noteRead(embedding.value.id as string))?.body).toBe('# Con la base\n\n![[Final.base]]\n');
+    // D23: una revisión de más no llega al socket: `invalid_input`, nunca `writer_outdated`.
+    const tooLong = 'r'.repeat(REVISION_MAX_LENGTH + 1);
+    const noteId = embedding.value.id as string;
+    for (const [tool, input] of [
+      ['hebra_move_note', { id: noteId, folderId: 'root', expectedRevision: tooLong }],
+      ['hebra_trash_note', { id: noteId, expectedRevision: tooLong }],
+      ['hebra_restore_note', { id: noteId, expectedRevision: tooLong }]
+    ] as const) {
+      expect(await call(tool, input), tool).toEqual({ isError: true, value: { error: 'invalid_input' } });
+    }
+    // Ni los demás campos de las herramientas nuevas: la herramienta los corta antes del socket
+    // con su error de siempre, así que un escritor al día nunca parece uno anterior.
+    const long = 'x'.repeat(5_000);
+    const fileId = created.value.id as string;
+    for (const [tool, input, error] of [
+      ['hebra_rename_file', { id: long, name: 'a.base', operationId: 'op-l1' }, 'not_found'],
+      ['hebra_rename_file', { id: fileId, name: `${long}.base`, operationId: 'op-l2' }, 'invalid_input'],
+      ['hebra_rename_file', { id: fileId, name: 'a.base', operationId: long }, 'invalid_input'],
+      ['hebra_set_hidden', { id: long, hidden: true }, 'not_found'],
+      ['hebra_clear_conflict', { id: long }, 'not_found'],
+      ['hebra_move_note', { id: long, folderId: 'root', expectedRevision: 'r' }, 'not_found'],
+      ['hebra_move_note', { id: noteId, folderId: long, expectedRevision: 'r' }, 'not_found'],
+      ['hebra_trash_note', { id: long, expectedRevision: 'r' }, 'not_found'],
+      ['hebra_restore_note', { id: long, expectedRevision: 'r' }, 'not_found']
+    ] as const) {
+      expect(await call(tool, input), `${tool} ${JSON.stringify(input).slice(0, 40)}`).toEqual({
+        isError: true,
+        value: { error }
+      });
+    }
 
     expect(stderrText()).toContain('"event":"write.forward","op":"looseFileWrite","outcome":"forwarded"');
     expect(stderrText()).not.toContain('Reenviada');

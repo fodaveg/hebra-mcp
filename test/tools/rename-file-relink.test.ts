@@ -9,7 +9,9 @@ import { extname } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveToolContext } from '../../src/server/context';
 import { runRenameFile } from '../../src/server/tools/loose-files';
-import { planRelink, type RelinkTurn } from '../../src/store/file-relink';
+import { deriveNote } from '../../src/hebra';
+import { RELINKED_NOTES_MAX } from '../../src/store/file-content';
+import { planRelink, relinkedNotesOf, type RelinkTurn } from '../../src/store/file-relink';
 import { FILE_NAMES, createNote } from '../fixtures/test-library';
 import { startLooseFiles, type LooseFilesHarness } from '../fixtures/loose-files';
 import type { PrivacyConfig } from '../../src/privacy';
@@ -313,6 +315,207 @@ describe('hebra_rename_file arregla las notas (D23)', () => {
       const allowed = await call('hebra_rename_file', { id: quiet, name: twin.name, operationId: 'op-twin-2' });
       expect(allowed.value).toMatchObject({ outcome: 'saved', relinked: 0 });
       expect(JSON.stringify(allowed)).not.toContain(test.library.files.referencedByHash);
+    });
+  });
+
+  describe('relinked pasa por la puerta final', () => {
+    /** Guarda otro cuerpo con el motor, como lo haría otro dispositivo. */
+    const saveBody = (harness: LooseFilesHarness, id: string, body: string): Promise<unknown> =>
+      harness.withEngine(async (engine) => {
+        const row = (await engine.noteRead(id))!;
+        const derived = deriveNote(body);
+        return engine.noteSave({
+          id,
+          body,
+          title: derived.title,
+          titleNorm: derived.titleNorm,
+          excerpt: derived.excerpt,
+          expectedLocalSeq: row.localSeq,
+          baseBodySha256: row.bodySha256,
+          tags: derived.tags,
+          links: derived.links,
+          blobRefs: derived.blobRefs,
+          props: derived.props,
+          searchBody: derived.searchBody
+        });
+      });
+
+    /** Después de escribir y antes de responder, una vez: lo que hiciera la ronda. */
+    const afterWrite = (harness: LooseFilesHarness, run: () => Promise<unknown>) => {
+      const write = harness.test.serverContext.write!;
+      const original = write.looseFileWrite!.bind(write);
+      return vi.spyOn(write, 'looseFileWrite').mockImplementationOnce(async (input) => {
+        const result = await original(input);
+        await run();
+        return result;
+      });
+    };
+
+    it('la nota pasa a privada y le quitan el enlace antes de la puerta: not_found, y también al reintentar', async () => {
+      const harness = await start();
+      const { call, test, withEngine } = harness;
+      const id = test.library.files.inventario;
+      const noteId = await note(harness, `# Carrera\n\n![[${FILE_NAMES.inventario}]]\n`);
+      const args = { id, name: 'Tareas.base', operationId: 'op-carrera' };
+      const spy = afterWrite(harness, async () => {
+        await saveBody(harness, noteId, '# Carrera\n\nYa sin enlace.\n');
+        await withEngine((engine) => engine.noteMove(noteId, test.library.folders.diario));
+      });
+      const result = await call('hebra_rename_file', args);
+      spy.mockRestore();
+      expect(result).toEqual(NOT_FOUND);
+      // El fichero sigue viéndose: sin ids en la puerta, esto salía con `relinked: 1`.
+      const listed = (await call('hebra_list_files', { name: 'tareas' })).value.files as Array<{ id: string }>;
+      expect(listed.map((file) => file.id)).toEqual([id]);
+      // El reintento lee los ids del registro, y tampoco da el recuento.
+      expect(await call('hebra_rename_file', args)).toEqual(NOT_FOUND);
+    });
+
+    it('la nota va a la papelera sin ser privada: el renombrado no es un error, tampoco al reintentar', async () => {
+      const harness = await start();
+      const { call, test, withEngine } = harness;
+      const id = test.library.files.inventario;
+      const noteId = await note(harness, `# Tirada luego\n\n![[${FILE_NAMES.inventario}]]\n`);
+      const args = { id, name: 'Tareas.base', operationId: 'op-tirada' };
+      const spy = afterWrite(harness, () => withEngine((engine) => engine.noteTrash(noteId)));
+      const result = await call('hebra_rename_file', args);
+      spy.mockRestore();
+      expect(result.value).toMatchObject({ id, outcome: 'saved', relinked: 1 });
+      expect((await call('hebra_rename_file', args)).value).toMatchObject({ outcome: 'saved', relinked: 1, replayed: true });
+    });
+
+    it('los ids no salen en la respuesta ni en el log', async () => {
+      const harness = await start();
+      const { call, test } = harness;
+      const noteId = await note(harness, `# Muda\n\n![[${FILE_NAMES.inventario}]]\n`);
+      const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const result = await call('hebra_rename_file', {
+        id: test.library.files.inventario,
+        name: 'Tareas.base',
+        operationId: 'op-muda'
+      });
+      const logged = (stderr.mock.calls as unknown as [string][]).map(([line]) => String(line)).join('');
+      stderr.mockRestore();
+      expect(result.value).toMatchObject({ relinked: 1 });
+      expect(result.value).not.toHaveProperty('relinkedNotes');
+      expect(JSON.stringify(result)).not.toContain(noteId);
+      expect(logged).not.toContain(noteId);
+    });
+
+    it('un registro sin ids responde como si no constara: sin relinked, nunca un recuento sin juzgar', async () => {
+      const harness = await start();
+      const { call, exec, test } = harness;
+      const id = test.library.files.inventario;
+      await note(harness, `# Sin ids\n\n![[${FILE_NAMES.inventario}]]\n`);
+      const args = { id, name: 'Tareas.base', operationId: 'op-sin-ids' };
+      expect((await call('hebra_rename_file', args)).value).toMatchObject({ relinked: 1 });
+      // Como lo dejaría una versión que anotaba solo el recuento.
+      exec(
+        `UPDATE hebra_mcp_operations SET result = json_set(json_remove(result, '$.relinkedNotes'), '$.relinked', 1) WHERE operation_id = ?`,
+        'op-sin-ids'
+      );
+      const again = await call('hebra_rename_file', args);
+      expect(again.value).toMatchObject({ outcome: 'saved', replayed: true });
+      expect(again.value).not.toHaveProperty('relinked');
+    });
+
+    it('más notas que el tope: no viajan ids, así que no hay recuento', () => {
+      const entries = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `n${index}` })) as never;
+      expect(relinkedNotesOf({ entries: entries(2) })).toEqual(['n0', 'n1']);
+      expect(relinkedNotesOf({ entries: entries(RELINKED_NOTES_MAX) })).toHaveLength(RELINKED_NOTES_MAX);
+      expect(relinkedNotesOf({ entries: entries(RELINKED_NOTES_MAX + 1) })).toBeUndefined();
+    });
+  });
+
+  describe('homónimo oculto: efectos declarados en SPEC.md §6.3', () => {
+    /** Un id menor que cualquier UUID del motor: el que gana en `resolveLink`. */
+    const LOWEST_ID = '00000000-0000-4000-8000-000000000000';
+
+    /** Un fichero en la carpeta privada `Diario`, con el menor id. */
+    const hiddenFile = async (harness: LooseFilesHarness, name: string): Promise<string> => {
+      const id = await harness.engineFile(harness.test.library.folders.diario, name, 'contenido privado');
+      harness.exec('UPDATE files SET id = ? WHERE id = ?', LOWEST_ID, id);
+      return LOWEST_ID;
+    };
+
+    const resolved = (harness: LooseFilesHarness, name: string) =>
+      harness.withEngine(
+        async (engine) => engine.resolveLink({ targetKind: 'file', target: name, targetPath: null }).candidates[0]?.id
+      );
+
+    it('oráculo: el nombre de un oculto de la misma carpeta da not_found sin escribir; un nombre libre escribe', async () => {
+      const harness = await start();
+      const { call, engineFile, rawFiles, test } = harness;
+      const twin = rawFiles().find((row) => row.id === test.library.files.referencedByHash)!;
+      const ext = extname(twin.name);
+      const listed = (await call('hebra_list_files', {})).value.files as Array<{ id: string }>;
+      expect(listed.map((file) => file.id)).not.toContain(twin.id);
+      const probe = await engineFile(null, `Sonda${ext}`, 'bytes');
+      const noteId = await note(harness, `# Sacrificio\n\n![[Sonda${ext}]]\n`);
+      const noteBefore = await stored(harness, noteId);
+      const filesBefore = rawFiles();
+
+      // Acierta el nombre del oculto: rechazo, y nada escrito.
+      expect(await call('hebra_rename_file', { id: probe, name: twin.name, operationId: 'op-o1' })).toEqual(NOT_FOUND);
+      expect(rawFiles()).toEqual(filesBefore);
+      expect(await stored(harness, noteId)).toEqual(noteBefore);
+      // Solo el nombre exacto: otras mayúsculas ya no chocan con él.
+      const other = twin.name.toUpperCase().replace(ext.toUpperCase(), ext);
+      if (other !== twin.name) {
+        const cased = await call('hebra_rename_file', { id: probe, name: other, operationId: 'op-o2' });
+        expect(cased.value).toMatchObject({ outcome: 'saved', relinked: 1 });
+        await call('hebra_rename_file', { id: probe, name: `Sonda${ext}`, operationId: 'op-o3' });
+      }
+      // Un nombre libre: renombra, reescribe la nota y deja versión.
+      const versionsBefore = ((await call('hebra_list_versions', { id: noteId })).value.versions as unknown[]).length;
+      const free = await call('hebra_rename_file', { id: probe, name: `Libre${ext}`, operationId: 'op-o4' });
+      expect(free.value).toMatchObject({ outcome: 'saved', relinked: 1 });
+      expect((await stored(harness, noteId)).body).toBe(`# Sacrificio\n\n![[Libre${ext}]]\n`);
+      const versionsAfter = ((await call('hebra_list_versions', { id: noteId })).value.versions as unknown[]).length;
+      expect(versionsAfter).toBe(versionsBefore + 1);
+      expect(rawFiles().find((row) => row.id === probe)!.name).toBe(`Libre${ext}`);
+      // Hace falta la misma extensión: con otra, `invalid_input` antes de mirar nada más.
+      expect((await call('hebra_rename_file', { id: probe, name: `${twin.name}.bin`, operationId: 'op-o5' })).value).toEqual({
+        error: 'invalid_input'
+      });
+    });
+
+    it('integridad: renombrar a N con un H de carpeta privada y menor id deja la nota resuelta a H, y por MCP no sale nada', async () => {
+      const harness = await start();
+      const { call, engineFile, test } = harness;
+      const hidden = await hiddenFile(harness, 'Plano.base');
+      const visible = await engineFile(null, 'Publico.base', 'contenido publico');
+      const noteId = await note(harness, '# Visible\n\n![[Publico.base]]\n');
+      expect(await resolved(harness, 'Publico.base')).toBe(visible);
+
+      const renamed = await call('hebra_rename_file', { id: visible, name: 'Plano.base', operationId: 'op-b' });
+      expect(renamed.value).toMatchObject({ id: visible, outcome: 'saved', relinked: 1 });
+      expect((await stored(harness, noteId)).body).toBe('# Visible\n\n![[Plano.base]]\n');
+      // Límite declarado: en la app esa nota enseñaría H a la persona dueña.
+      expect(await resolved(harness, 'Plano.base')).toBe(hidden);
+      // Por el MCP, nada de H.
+      const seen = JSON.stringify([
+        renamed,
+        await call('hebra_links', { id: noteId }),
+        await call('hebra_read_note', { id: noteId }),
+        await call('hebra_list_files', { name: 'plano' })
+      ]);
+      expect(seen).not.toContain(hidden);
+      expect(seen).not.toContain(test.library.folders.diario);
+    });
+
+    it('integridad, caso inverso: con un H de menor id y el nombre ANTERIOR, la nota se reescribe igualmente', async () => {
+      const harness = await start();
+      const { call, engineFile } = harness;
+      const hidden = await hiddenFile(harness, 'Viejo.base');
+      const visible = await engineFile(null, 'Viejo.base', 'publico');
+      const noteId = await note(harness, '# Inversa\n\n![[Viejo.base]]\n');
+      expect(await resolved(harness, 'Viejo.base')).toBe(hidden);
+
+      const renamed = await call('hebra_rename_file', { id: visible, name: 'Nuevo.base', operationId: 'op-b2' });
+      expect(renamed.value).toMatchObject({ outcome: 'saved', relinked: 1 });
+      expect((await stored(harness, noteId)).body).toBe('# Inversa\n\n![[Nuevo.base]]\n');
+      expect(await resolved(harness, 'Nuevo.base')).toBe(visible);
     });
   });
 

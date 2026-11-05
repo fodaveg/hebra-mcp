@@ -4,7 +4,7 @@
  * vez en el escritor dentro de su turno (`../../store/note-state.ts`) y en la puerta final tras
  * la ronda. Oculta por privacidad, en la papelera o inexistente: `not_found`, las tres igual.
  *
- * «Oculta» aquí es del listado general: una preferencia de vista de Hebra, no privacidad
+ * Oculta, aquí, es del listado general: una preferencia de vista de Hebra, no privacidad
  * (SPEC.md §13.7). La nota sigue en su carpeta, sus etiquetas, la búsqueda, los enlaces y el MCP.
  */
 import type { ToolContext } from '../context';

@@ -93,6 +93,7 @@ import type {
   RestoreVersionInput
 } from '../store/writes';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
+import { RELINKED_NOTES_MAX } from '../store/file-content';
 import type { LooseFileWriteInput } from '../store/file-verbs';
 import type { NoteStateInput } from '../store/note-state';
 import type { JdNewIdRequest } from '../store/jd-new-id';
@@ -339,6 +340,19 @@ function asReplaceFileTextOutcome(value: unknown, id: string): ReplaceFileTextOu
   };
 }
 
+/** Los ids de las notas que arregló un renombrado (D23), acotados: para la puerta final de ESTE
+ *  lector, nunca para la respuesta. */
+function asRelinkedNotes(value: unknown): string[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > RELINKED_NOTES_MAX ||
+    !value.every((id) => typeof id === 'string' && id.length > 0 && id.length <= 200)
+  ) {
+    throw new Error('writer_protocol');
+  }
+  return value as string[];
+}
+
 /** Valida el `LooseFileOutcome` que devuelve el escritor (D17), campo a campo. Con un
  *  `id` de origen (renombrar, mover), tiene que ser ese. */
 function asLooseFileOutcome(value: unknown, id?: string): LooseFileOutcome {
@@ -364,7 +378,7 @@ function asLooseFileOutcome(value: unknown, id?: string): LooseFileOutcome {
     byteLength: value.byteLength === null ? null : asCount(value.byteLength),
     mimeType: value.mimeType,
     outcome: value.outcome,
-    ...(value.relinked !== undefined ? { relinked: asCount(value.relinked) } : {}),
+    ...(value.relinkedNotes !== undefined ? { relinkedNotes: asRelinkedNotes(value.relinkedNotes) } : {}),
     ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
   };

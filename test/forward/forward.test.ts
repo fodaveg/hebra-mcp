@@ -43,7 +43,7 @@ import { buildWriteContext, type WriteContext } from '../../src/server/write-con
 import { isBusyOtherInstance, StoreError } from '../../src/store/errors';
 import { mapWriteError } from '../../src/server/tools/write-errors';
 import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
-import { FILE_TEXT_REPLACE_MAX_BYTES } from '../../src/store/file-content';
+import { FILE_TEXT_REPLACE_MAX_BYTES, RELINKED_NOTES_MAX } from '../../src/store/file-content';
 import { EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import {
@@ -1825,6 +1825,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
       changed: true
     };
     const seen: unknown[] = [];
+    let relinkedFromWriter: unknown = ['n1', 'n2'];
     const server = await WriterSocketServer.listen({
       path,
       handlers: {
@@ -1843,7 +1844,7 @@ describe('lector: qué hace cuando el escritor no responde', () => {
             byteLength: null,
             mimeType: null,
             outcome: 'saved',
-            relinked: 3,
+            relinkedNotes: relinkedFromWriter as string[],
             sync: 'not_linked'
           };
         }
@@ -1886,8 +1887,16 @@ describe('lector: qué hace cuando el escritor no responde', () => {
     ).toMatchObject({ id: 'n1', hidden: true, changed: true });
     expect(seen[0]).toMatchObject({ action: 'moveNote', expectedRevision: 'r1.x', privacy });
     const renamed = await write.looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-r', privacy });
-    expect(renamed).toMatchObject({ id: 'f1', relinked: 3 });
+    expect(renamed).toMatchObject({ id: 'f1', relinkedNotes: ['n1', 'n2'] });
     expect(stderrText()).toContain('"op":"renameFileRelinking","outcome":"forwarded"');
+    // Los ids del escritor se validan y se acotan: otra forma o de más, `writer_protocol`.
+    for (const bad of ['n1', [1], [''], ['x'.repeat(201)], Array.from({ length: RELINKED_NOTES_MAX + 1 }, () => 'n')]) {
+      relinkedFromWriter = bad;
+      const rejected = await write
+        .looseFileWrite!({ action: 'renameFile', id: 'f1', name: 'x.base', operationId: 'op-mala', privacy })
+        .catch((error: unknown) => error);
+      expect(rejected, JSON.stringify(bad).slice(0, 40)).toMatchObject({ message: 'writer_protocol' });
+    }
   });
 
   it('adjunto sin heading sigue por addAttachment; con heading, por addAttachmentInSection', async () => {
