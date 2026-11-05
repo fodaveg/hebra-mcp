@@ -29,7 +29,10 @@ export const LIST_NOTES_FIELDS = [
   'tags',
   'excerpt',
   'updatedAt',
-  'isConflictCopy'
+  'isConflictCopy',
+  'favorite',
+  'archivedAt',
+  'generalHidden'
 ] as const;
 
 export const searchInputShape = {
@@ -56,6 +59,10 @@ export const listNotesInputShape = {
    *  siempre. Sin `folder`, no tiene efecto. */
   subfolders: z.boolean().optional(),
   tag: z.string().optional(),
+  /** D23: `true` lista las notas archivadas (de la última archivada a la primera); no se
+   *  combina con `folder` ni `tag` (`invalid_input`). Ausente o `false`: las no archivadas. */
+  archived: z.boolean().optional()
+    .describe('`true`: las notas archivadas, la última archivada primero. No se combina con `folder` ni `tag`. Ausente o `false`: las no archivadas.'),
   cursor: cursorField,
   limit: z.number().int().min(1).max(100).optional(),
   fields: z
@@ -139,6 +146,11 @@ export const noteOutlineInputShape = {
     .describe('Solo los encabezados de este nivel (1-6) o menor.'),
   limit: z.number().int().min(1).max(500).optional(),
   cursor: cursorField
+};
+
+/** `hebra_note_authors` (D23): la nota, por su `id`. */
+export const noteAuthorsInputShape = {
+  id: z.string().describe('Id de la nota.')
 };
 
 /** `limit` y `cursor` valen para `outgoing` y `backlinks` a la vez; `nextCursor` existe
@@ -275,6 +287,9 @@ export const restoreNoteInputShape = {
 };
 
 export const listTrashInputShape = {
+  /** D23: `folders` lista las carpetas de la papelera; `notes` o ausente, las notas. */
+  kind: z.enum(['notes', 'folders']).optional()
+    .describe('`folders`: las carpetas de la papelera. `notes` o ausente: las notas.'),
   cursor: cursorField,
   limit: z.number().int().min(1).max(100).optional()
 };

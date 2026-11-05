@@ -924,6 +924,10 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     folderDirty: (id: string): Promise<boolean | null> => current().folderDirty(id),
     blobUploaded: (sha256: string): Promise<boolean | null> => current().blobUploaded(sha256),
     looseFileDirty: (id: string): Promise<boolean | null> => current().looseFileDirty(id),
+    // D23 (`src/store/state-reads.ts`): estado de notas, carpetas de la papelera y autores.
+    noteStates: (ids: readonly string[]) => current().noteStates(ids),
+    foldersTrash: () => current().foldersTrash(),
+    noteAuthors: (id: string) => current().noteAuthors(id),
     grepNotes: (): Promise<GrepNoteRow[]> => current().grepNotes(),
     grepCandidates: (match: string, rowids: readonly number[]): Promise<Set<number> | null> =>
       current().grepCandidates(match, rowids),

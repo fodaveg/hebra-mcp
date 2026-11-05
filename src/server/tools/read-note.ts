@@ -20,6 +20,10 @@
  * más allá de la última línea es `invalid_input`. La numeración es la de la nota entera
  * (la de `hebra_grep` y `hebra_note_outline`), así que `lines` y `heading` juntos son
  * `invalid_input`. Una nota bloqueada, `note_locked`.
+ *
+ * Estado (D23, 5 nov 2026): la salida lleva `favorite`, `archivedAt` (ISO o `null`) y
+ * `generalHidden` (oculta del listado general por su marca o por su carpeta), siempre,
+ * con `heading` y `lines` también (`./note-state.ts`).
  */
 import { lineStarts, READ_LINES_MAX, sliceLines } from '../../store/grep';
 import { encodeRevision } from '../../store/revision';
@@ -33,9 +37,10 @@ import {
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
+import { loadNoteStates, stateFields, type NoteStateFields } from './note-state';
 import { resolveNoteId } from './note-ref';
 
-export interface ReadNoteOutput {
+export interface ReadNoteOutput extends NoteStateFields {
   id: string;
   title: string;
   body: string;
@@ -120,6 +125,10 @@ export async function runReadNote(
   used.note(note.id, note.localSeq);
   used.folder(meta.folderId, ctx.privacy.folderPath(meta.folderId));
   const libraryId = await ctx.port.libraryId();
+  // D23: favorita, archivada y oculta del listado general. Si la nota se purgó entre la
+  // lectura y esto, ya no existe.
+  const state = (await loadNoteStates(ctx.port, [id])).get(id);
+  if (!state) throw new ToolError('not_found');
 
   let body = note.body;
   let section: SectionRef | undefined;
@@ -161,6 +170,7 @@ export async function runReadNote(
     createdAt: new Date(note.createdAt).toISOString(),
     updatedAt: new Date(note.updatedAt).toISOString(),
     isConflictCopy: note.conflictOf !== null,
+    ...stateFields(state),
     // De la fila que se acaba de leer, la misma cuyo `body` sale arriba: es la base que
     // `hebra_edit_note` exigirá (`src/store/revision.ts`).
     revision: encodeRevision({

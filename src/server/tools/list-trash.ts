@@ -12,6 +12,9 @@
  *
  * Paginación común (`pagination.ts`): `nextCursor` va envuelto (`r1.…`, opaco) sobre la
  * clave `trashedAt:id` del motor, como en `hebra_list_notes`.
+ *
+ * `kind: "folders"` (D23, 5 nov 2026) lista las carpetas de la papelera en vez de las notas
+ * (`./list-trash-folders.ts`); sin `kind`, o con `"notes"`, todo sigue igual.
  */
 import { encodeCursor } from '../../hebra';
 import { TrashFilter } from '../../privacy/trash-filter';
@@ -24,6 +27,7 @@ import {
   unwrapCursor,
   wrapCursor
 } from '../pagination';
+import { runListTrashFolders, type TrashedFolder } from './list-trash-folders';
 
 export interface TrashedNote {
   id: string;
@@ -39,8 +43,27 @@ export interface TrashedNote {
 
 export async function runListTrash(
   ctx: ToolContext,
-  input: { cursor?: string; limit?: number }
-): Promise<{ notes: TrashedNote[]; nextCursor: string | null }> {
+  input: { kind?: 'notes'; cursor?: string; limit?: number }
+): Promise<{ notes: TrashedNote[]; nextCursor: string | null }>;
+export async function runListTrash(
+  ctx: ToolContext,
+  input: { kind: 'folders'; cursor?: string; limit?: number }
+): Promise<{ folders: TrashedFolder[]; nextCursor: string | null }>;
+export async function runListTrash(
+  ctx: ToolContext,
+  input: { kind?: 'notes' | 'folders'; cursor?: string; limit?: number }
+): Promise<
+  | { notes: TrashedNote[]; nextCursor: string | null }
+  | { folders: TrashedFolder[]; nextCursor: string | null }
+>;
+export async function runListTrash(
+  ctx: ToolContext,
+  input: { kind?: 'notes' | 'folders'; cursor?: string; limit?: number }
+): Promise<
+  | { notes: TrashedNote[]; nextCursor: string | null }
+  | { folders: TrashedFolder[]; nextCursor: string | null }
+> {
+  if (input.kind === 'folders') return runListTrashFolders(ctx, input);
   const limit = effectiveLimit(input.limit, LIMITS.listTrash);
   const startCursor = input.cursor === undefined ? null : unwrapCursor('r1', input.cursor);
   const trash = await TrashFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);

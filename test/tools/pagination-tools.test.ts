@@ -92,7 +92,11 @@ describe('paginación de las herramientas de lista', () => {
         'tags',
         'excerpt',
         'updatedAt',
-        'isConflictCopy'
+        'isConflictCopy',
+        // D23: el estado de la nota.
+        'favorite',
+        'archivedAt',
+        'generalHidden'
       ]);
     });
   });
