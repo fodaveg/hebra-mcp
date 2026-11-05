@@ -81,7 +81,7 @@ incrustado»).
 
 ```
 Claude Code / Desktop ──stdio(MCP)──► hebra-mcp (Node 24)
-                                        ├─ servidor MCP: 41 herramientas + filtro de privados
+                                        ├─ servidor MCP: 43 herramientas + filtro de privados
                                         ├─ almacén: sqlite-engine.ts de Hebra sobre node:sqlite
                                         ├─ motor: LibrarySyncEngine de Hebra (sin cambios)
                                         └─ secretos: llavero del SO
@@ -165,12 +165,14 @@ Reglas comunes:
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
-| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
+| `hebra_search` | `query` (texto, FTS5), `limit` (1-50, def. 20), `cursor?`, `folder?` (ruta), `subfolders?` (con `folder`, incluye su subárbol según el árbol de carpetas, igual que `hebra_list_notes`; def. `false`), `tag?`, `props?` (D23; hasta 32, todas a la vez: `[{key, value}]`, `value` el valor entero sin distinguir mayúsculas ni tildes, `null` para «tiene la clave», también definida sin valor), `linksTo?` (D23; hasta 8 títulos ENTEROS, no ids, sin distinguir mayúsculas ni tildes, todos a la vez: notas con un enlace, por id o por título, a una nota VISIBLE con ese título; §6.3), `titleOnly?` (D23; `query` solo en el título; def. `false`), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`; `id` siempre) | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading` (D11): el título, tal como está en la nota, del apartado MÁS INTERNO que contiene el fragmento que enseña `snippet`; sirve tal cual como `heading` de `hebra_read_note`. `null` si el fragmento cae antes del primer encabezado, si no se logra localizar o si la nota está bloqueada. Solo se lee el cuerpo de los resultados visibles que se devuelven y solo si `heading` está entre los campos pedidos. |
 | `hebra_grep` (D13) | `pattern` (1-1 000 caracteres, sin saltos de línea), `regex?` (def. `false`: literal; con `true`, expresión regular de JavaScript con la bandera `u`), `caseSensitive?` (def. `false`; las tildes cuentan siempre), `folder?`, `subfolders?`, `tag?` (como en `hebra_search`), `contextLines?` (0-5, def. 0), `limit` (1-100, def. 20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, textStart?, lineChars?, before?, after?, heading, headingOccurrence}], nextCursor, cutoff}`. Una entrada por línea que casa (la primera coincidencia de la línea), en orden de id de nota y de línea. `line` y `column`, 1-based (la columna en unidades UTF-16); `line` es la de `hebra_read_note` con `lines`. `text`: la línea sin su terminador; si pasa de 300 caracteres, un trozo de 300 alrededor de la coincidencia, con `textStart` (columna donde empieza) y `lineChars` (longitud de la línea). `before`/`after`, solo con `contextLines`: las líneas de alrededor dentro de la nota, cortadas a 300 caracteres con `…`. `heading`: el apartado más interno que contiene la línea (D11), o `null` antes del primer encabezado; `headingOccurrence`: cuál de los encabezados con ese título es (1-based, como `occurrence` de `hebra_note_outline`, `null` con `heading` `null`), para pasar los dos tal cual a `hebra_read_note` aunque el título se repita. `cutoff`: `time` (se agotó el plazo de recorrido, 2 s, o se interrumpió el hilo de la expresión regular) o `size` (la respuesta llegó a 100 000 caracteres), con `nextCursor` para seguir justo ahí; `null` si no. `skipped?: {id, fromLine}`: solo si la página se saltó una nota en la que la expresión regular se interrumpió dos veces seguidas sin avanzar (§5, «Búsqueda línea a línea»). Errores: `invalid_input` (patrón vacío, largo, con un salto de línea o con la sintaxis mal; `contextLines` o `cursor` que no valen), `pattern_too_slow` (una expresión regular que no termina ni una nota en el plazo; lleva `nextCursor`, que la reintenta una vez y, si vuelve a fallar, la salta). |
 | `hebra_list_notes` | `folder?`, `subfolders?` (con `folder`, incluye su subárbol; def. `false`), `tag?`, `cursor?`, `limit` (1-100, def. 50), `fields?` (subconjunto de `title`, `folderPath`, `tags`, `excerpt`, `updatedAt`, `isConflictCopy`; `id` siempre); orden por favoritas primero y `updatedAt` descendente | `{notes: [{id, title, folderPath, tags, excerpt, updatedAt, isConflictCopy}], nextCursor}` |
 | `hebra_read_note` | `id` o `title` (exactamente uno), `heading?` (título de un apartado, D11), `headingOccurrence?` (entero ≥ 1; solo con `heading`, si no `invalid_input`), `lines?: {from, to?}` (D13: enteros ≥ 1, `to` ≥ `from`; no con `heading`) | `{id, title, body, folderPath, tags, createdAt, updatedAt, isConflictCopy, conflictOf?, revision}`. `revision`: opaca, la versión leída (para `hebra_edit_note`). Con `title` ambiguo: error `ambiguous_title` con los candidatos `[{id, title, folderPath}]`, como mucho 50 y solo visibles. **Con `heading`**: `body` es SOLO el apartado (desde su línea de encabezado, incluida, hasta su final, subapartados incluidos) y se añaden `section: {heading, level, line, occurrence}` y `totalChars` (tamaño del cuerpo entero); `revision` sigue siendo la de la NOTA entera. Errores nuevos: `heading_not_found`, `ambiguous_heading` (con `candidates: [{heading, level, line, occurrence}]`, como mucho 50) y, en una nota bloqueada, `note_locked`. **Con `lines`** (D13): `body` es SOLO ese tramo, tal como está (desde el principio de la línea `from` hasta el de la siguiente a `to`, terminadores incluidos), y se añaden `lines: {from, to}` (el tramo devuelto: `to` recortado a la última línea y a 2 000 líneas por lectura; sin `to`, hasta ese tope), `totalLines` y `totalChars`; `revision` sigue siendo la de la nota entera. Líneas como en D11 (`\n` y `\r\n`; un salto final no abre una línea vacía de más), las mismas de `hebra_grep` y de `line` de `hebra_note_outline`. `from` más allá de la última línea (una nota vacía no tiene ninguna), `to` < `from` o `lines` con `heading`: `invalid_input`. Nota bloqueada: `note_locked`. |
 | `hebra_note_outline` | `id` o `title` (exactamente uno, con la misma resolución y los mismos errores que `hebra_read_note`), `maxLevel?` (1-6: solo encabezados de ese nivel o menor), `limit?` (1-500, def. 200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`. `chars`: el tamaño del apartado tal como lo devuelve `hebra_read_note` con ese `heading` (subapartados incluidos). `occurrence` solo sale en los encabezados cuyo título se repite en la nota, y es el valor para `headingOccurrence` (se cuenta sobre TODOS los encabezados, no sobre los filtrados por `maxLevel` ni sobre la página). Sin cuerpo. Errores: `not_found` (oculta, en la papelera o inexistente), `note_locked`, `invalid_input` (también un `cursor` de otra revisión: la nota cambió entre páginas). |
 | `hebra_list_tags` | `limit?` (1-500; sin él, todas), `cursor?` | `{tags: [{tag, count}], nextCursor}` (anidadas como `a/b`) |
+| `hebra_list_properties` (D23) | `key?`, `limit?` (1-500, def. 100), `cursor?` | Sin `key`: `{keys: [{key, count}], nextCursor}`, las claves del frontmatter con su recuento de notas (una clave definida sin valor cuenta). Con `key`: `{values: [{value, count}], nextCursor}`, sus valores no vacíos con su recuento (`null` y `~` de YAML salen como texto, como en el motor). Las claves se guardan en minúsculas y `key` se pasa a minúsculas. En orden binario. Solo notas visibles (§6.3). |
+| `hebra_query_properties` (D23) | `filters?` (hasta 32, todos a la vez: `[{key, op, value?}]`), `folder?`, `subfolders?`, `sort?: {key?, direction?, empty?}`, `properties?` (hasta 32 claves), `limit` (1-100, def. 50), `cursor?`, `fields?` (subconjunto de `title`, `folderPath`, `properties`; `id` siempre) | `{notes: [{id, title, folderPath, properties: {clave: [valores]}}], nextCursor}`. `op`, los de `PropsFilterOp` del motor: `equals`, `not-equals`, `contains`, `not-contains`, `greater-than`, `greater-or-equal`, `less-than`, `less-or-equal` (con `value`; sin él, `invalid_input`), `exists` y `missing` (sin `value`). `equals` y `contains` no distinguen mayúsculas ASCII; las comparaciones son numéricas si los dos lados son números y por texto si no, así que valen para fechas ISO; `not-equals` y `not-contains` exigen que la nota tenga la propiedad; `null`, `~` y el valor vacío cuentan como sin valor. La clave `note.title` filtra por el título. `sort.key` ausente o `null`: por título; con clave, por su valor (`direction`, def. `ascending`; con varios valores, el menor o el mayor), y las notas sin ella, por título, al final o al principio (`empty`, def. `last`). `properties`: las claves cuyos valores devolver; ausente, las de `filters` y `sort`. Una clave sin valor sale `[]`. Sin `filters`, todas las notas. |
 | `hebra_list_folders` | `limit?` (1-500; sin él, todas), `cursor?` | `{folders: [{id, path, count}], nextCursor}` |
 | `hebra_links` | `id`, `limit?` (1-200; sin él, todo), `cursor?` | `{outgoing: [{ref, resolvedId?, title?}], backlinks: [{id, title}], nextCursor}` |
 | `hebra_create_note` | `body` (Markdown; el primer H1 es el título, como en Hebra; si existe, el `title:` del frontmatter manda sobre el H1), `folder?` (ruta existente; por defecto, la raíz) | `{id, title, folderPath}` |
@@ -207,7 +209,7 @@ Reglas comunes:
 | `hebra_status` | nada | `{linked, lastSyncAt, lastSyncOutcome, pendingUpload, errorsByCode, writer: "this" \| "other_instance", revoked, revokedReason?, capabilities}`. `revokedReason` solo aparece con `revoked: true` (§12.9). Sin contenido de notas. |
 
 Anotaciones MCP (2 oct 2026, decision D8; 3 oct 2026, D9; 9 oct 2026, D10; 10 oct 2026, D15; 12 oct 2026, D17; 19 oct 2026, D18):
-- Las 41 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_read_file` (D15), `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`, `hebra_jd_audit` (D18), `hebra_list_spaces`, `hebra_list_organizations` (D22).
+- Las 43 herramientas declaran `annotations` en el esquema. **Lectura** (`readOnlyHint: true`): `hebra_search`, `hebra_grep` (D13), `hebra_list_notes`, `hebra_read_note`, `hebra_note_outline`, `hebra_list_tags`, `hebra_list_properties` (D23), `hebra_query_properties` (D23), `hebra_list_folders`, `hebra_links`, `hebra_status`, `hebra_list_trash`, `hebra_list_files`, `hebra_read_file` (D15), `hebra_list_versions`, `hebra_read_version`, `hebra_list_attachments`, `hebra_read_attachment`, `hebra_jd_audit` (D18), `hebra_list_spaces`, `hebra_list_organizations` (D22).
 - **Un ID nuevo del JDex** (D18): `hebra_jd_new_id`, escritura no destructiva e idempotente (`destructiveHint: false`, `idempotentHint: true`): simular no escribe nada, aplicar con el mismo `operationId` completa lo que falte sin duplicar, y solo crea (una nota y una carpeta nuevas).
 - **Mover a un ID** (D19): `hebra_jd_move`, igual (`destructiveHint: false`, `idempotentHint: true`): simular no escribe nada, aplicar y deshacer con el mismo `operationId` no repiten nada, y mover no destruye contenido (se deshace con `undo`).
 - **Escritura no destructiva** (`destructiveHint: false`): `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_trash_note`, `hebra_restore_note` (ambas idempotentes); `hebra_trash_file` y `hebra_restore_file` (`idempotentHint: true`: repetirlas no vuelve a escribir); `hebra_edit_note` y `hebra_restore_version` (con `idempotentHint: true` por el control de concurrencia y la revocación de `operationId`); `hebra_create_folder` y `hebra_rename_folder` (`idempotentHint: true`: repetirlas no crea otra carpeta ni vuelve a escribir) y `hebra_add_attachment` (`idempotentHint: true` por su `operationId`); `hebra_replace_in_notes` (D14: simular no escribe ninguna nota, aplicar con el mismo `operationId` no repite nada y deshacer otra vez no cambia nada más); `hebra_create_file`, `hebra_rename_file`, `hebra_move_file` y `hebra_duplicate_file` (D17, `idempotentHint: true` por su `operationId`; renombrar al nombre que tiene o mover a la carpeta donde está no escribe, y ninguna destruye contenido: renombrar y mover se deshacen con otra llamada, y crear o duplicar dejan un fichero nuevo que se manda a la papelera con `hebra_trash_file`).
@@ -228,6 +230,15 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   `mode: "preview"` (con un cursor de otro plan, `invalid_input`), y `continueAfter` (`rc1`,
   `[id, desde]`) sigue el ámbito en OTRA simulación (`after`), siempre desde el id de una nota
   visible ya mirada.
+- **Cursores de las propiedades** (D23): `hebra_list_properties` e `hebra_query_properties` también
+  paginan con `limit`, `cursor` y `nextCursor` (propiedades 100 por defecto, consulta 50). El de
+  `hebra_list_properties` (`pk1` de las claves, `pv1` de los valores) es la posición en la lista ya
+  filtrada: un valor puede ser más largo que el tope de un cursor. El de `hebra_query_properties`
+  (`pq1`) es la clave de orden de la última nota devuelta, con los primeros 128 puntos de código de
+  su valor o su título y su id, y la página siguiente empieza en la primera que va después: listar
+  por `estado: pendiente`, cambiar el estado de la última y pedir la siguiente funciona. Dos valores
+  con esos 128 primeros iguales ordenan por id. Un cursor de un orden con clave no vale en uno por
+  título, ni al revés (`invalid_input`).
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
   los vivos, los primeros 200 caracteres de su nombre en NFC y en minúsculas, y su id; para la papelera, la
   fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
@@ -247,11 +258,11 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
 - **Filtros comunes**: `folder` (ruta), `subfolders` y `tag` se llaman y se comportan igual en
   `hebra_search`, `hebra_grep` (D13) y `hebra_list_notes` (`subfolders` es nuevo en la búsqueda). Una carpeta o etiqueta
   privada o inexistente da lista vacía en ambas. No hubo renombrados, así que no hay alias.
-- **`fields?`** (`hebra_search`, `hebra_list_notes`): cada elemento lleva `id` y solo los campos pedidos,
+- **`fields?`** (`hebra_search`, `hebra_list_notes`, `hebra_query_properties`): cada elemento lleva `id` y solo los campos pedidos,
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listProperties`, `queryProperties` con sus topes de filtros y claves, `searchFilters` con los de `props` y `linksTo`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
   papelera, borrar carpetas, `folder_delete`, y moverlas salvo con `hebra_jd_move`,
   `folder_move_outside_jd_move`, ambos desde D19, antes `folder_move_or_delete`; cambiar o
   borrar adjuntos, y purgar un fichero suelto:
@@ -981,8 +992,9 @@ El dispositivo acumula tres secretos:
      se cierra como oculto. Se comprueban también las carpetas con la ruta que se enseñó (en crear y renombrar, también sus
      hermanas visibles, con las que se mira el choque de nombres), los ficheros sueltos, los
      bytes de los adjuntos cuyo tamaño, tipo o contenido salen, las etiquetas que se enseñan, y
-     todas las notas visibles cuando la respuesta es un recuento (`hebra_list_tags`,
-     `hebra_list_folders`). Cada cosa tiene que seguir visible y, la que se enseña, ser la MISMA
+     todas las notas visibles cuando la respuesta es un recuento o sale de todas ellas
+     (`hebra_list_tags`, `hebra_list_folders`, `hebra_list_properties`,
+     `hebra_query_properties`). Cada cosa tiene que seguir visible y, la que se enseña, ser la MISMA
      fila: el sello es `local_seq` (sube con cada guardado, también los del sync, mover,
      bloquear o mandar a la papelera), el de la fila con la que el filtro de la llamada la juzgó
      visible y, si se leyó aparte, el de la fila leída, y los dos tienen que coincidir entre sí y
@@ -1092,7 +1104,8 @@ El dispositivo acumula tres secretos:
   - Búsqueda: la paginación rellena hasta `limit` con notas visibles.
   - Listados, lectura (una nota oculta responde `not_found`, igual que una inexistente).
   - Recuentos de `hebra_list_tags` y `hebra_list_folders`: las carpetas privadas no aparecen, y las
-    etiquetas privadas o solo presentes en notas ocultas tampoco.
+    etiquetas privadas o solo presentes en notas ocultas tampoco. Lo mismo las claves y los valores
+    de `hebra_list_properties` (abajo, «Propiedades del frontmatter»).
   - `outgoing` de `hebra_links`: un enlace a una nota oculta sale como `ref` sin resolver. Un
     enlace por título se resuelve SOLO entre las notas visibles con ese título exacto, y la ruta
     escrita en el enlace solo desempata entre ellas (M1 de D16): antes resolvía el motor, que
@@ -1396,6 +1409,62 @@ El dispositivo acumula tres secretos:
   `test/replace/replace-privacy.node.test.ts` con la biblioteca doble del grep: simulación,
   páginas, cortes e informes de aplicar y deshacer idénticos con y sin las siete ocultas,
   y una nota que pasa a oculta entre simular y aplicar, que no se toca ni se nombra.
+- **Propiedades del frontmatter** (D23, 5 nov 2026; ninguna regla nueva de qué se oculta):
+  `hebra_list_properties`, `hebra_query_properties` y `props`, `linksTo` y `titleOnly` de
+  `hebra_search`.
+  - **D3 no llega a las propiedades**: la configuración de privados son carpetas y etiquetas, y una
+    nota con ellas queda oculta entera, con sus propiedades. No hay claves ni valores privados: un
+    `categoria: secreto` en una nota visible no es privado aunque `secreto` sea una etiqueta privada
+    (no es una etiqueta de la nota), y sale como el resto de un frontmatter que `hebra_read_note` ya
+    enseña. Un `tags: secreto` sí deriva la etiqueta, y oculta la nota. Basta filtrar por nota.
+  - **Lo oculto no existe**: una clave o un valor que solo tienen notas ocultas no sale, y los
+    recuentos cuentan solo notas visibles. Filtrar u ordenar por ellos responde lo mismo que por una
+    clave que no existe. Lo comprueba `test/privacy/properties-oracles.test.ts` con el método de
+    `hebra_grep`: la biblioteca con nueve notas ocultas (una de cada caso, más una homónima de una
+    visible y un título que solo tienen ellas) y sin ellas da respuestas idénticas, página a página y
+    con los cursores.
+  - **Qué no se puede usar del motor**, y el coste: `propsKeysList` y `propsValues` agrupan sobre
+    todas las notas vivas, con lo que el recuento bruto ya lleva las ocultas y no se puede corregir
+    sin saber qué notas lo forman (el tipo de la clave, tampoco, y por eso no sale); `propsValues`
+    además corta a 50, y unos valores ocultos dejarían fuera los visibles. `propsQuery` decide si una
+    clave ordena como número mirando todos sus valores de la biblioteca (`allPropValuesNumericPrefixed`):
+    un valor no numérico en una nota oculta, o en la papelera, pasaba `9, 10` a `10, 9`, y eso la
+    delataba; y su cursor solo existe al final de una página del almacén. Del motor se usa el filtro
+    (`propsFilterSql`, que solo mira la fila de cada nota); las filas salen de SQL propio
+    (`src/store/props-sql.ts`), con los recuentos y el orden en `src/server/tools/`, sobre lo visible.
+    Sin notas ocultas, el orden coincide con el del motor (`test/tools/properties.test.ts`). Coste
+    asumido: cada llamada lee todas las filas que hacen falta, también las de las notas ocultas (id,
+    clave y valor, que no salen de ahí), y cada página de una consulta las vuelve a leer; el tiempo
+    depende de las filas de toda la biblioteca, como el filtro de cada llamada. **Medido** (5 nov 2026,
+    este Mac tras un reinicio, Node 24; `test/perf/properties-latency.perf.ts`, 3 000 notas con 6
+    propiedades, 50 llamadas por el camino entero tras 10 en caliente): las claves, mediana 108 ms;
+    los valores de una clave, 29 ms; una consulta sin filtros, 43 ms; filtrada, 147 ms; ordenada por un
+    número, 92 ms. Los p95, de 122 a 387 ms, con la máquina recién arrancada.
+  - **Cursores** (§5): los de `hebra_list_properties` son posiciones en la lista ya filtrada; el de
+    `hebra_query_properties` lleva la clave de orden de la última nota devuelta, nunca de una oculta,
+    y solo existe si detrás queda otra visible. Uno escrito a mano con el id de una oculta responde lo
+    mismo que con un id que no existe.
+  - **`linksTo`**: el motor resuelve el título contra todas las notas vivas. Un `[[Título]]` de una
+    nota visible casaba aunque la única nota con ese título fuera oculta, así que «¿hay alguna con este
+    título?» se contestaba distinto con una oculta y sin ella. Y con una homónima oculta de una visible
+    salían de más la nota que enlaza a la oculta por `[[id:…]]` y la propia visible si se enlaza a sí
+    misma por título. Por eso los destinos se resuelven solo entre las visibles, con el mismo plegado
+    de título, y un resultado vale si `backlinks` del motor lo da para alguno de ellos (por id o por
+    título, sin la propia nota); el filtro del motor queda de prefiltro. Una privada y una inexistente
+    responden la misma lista vacía. Espera un título entero: un id se trata como un título que nadie
+    tiene, así que tampoco sirve para sondear ids.
+  - **Con algo privado configurado**, `hebra_search` usa la búsqueda segura (M6), cuya rama de
+    subcadenas aplica estos filtros igual: `titleOnly` en sus consultas, y `props` y `linksTo` con el
+    conjunto de notas que da el motor sin texto, sin otra versión de sus reglas. Sin ninguno de estos
+    parámetros, la búsqueda no cambia ni hace ninguna consulta de más.
+  - **Notas bloqueadas**: las mismas reglas que el resto. Con etiquetas privadas configuradas, ocultas
+    (A1). Sin ellas, visibles: salen en `hebra_query_properties` con su título, como en
+    `hebra_list_notes`, sin propiedades, porque no derivan ninguna (`missing` las encuentra; `exists`,
+    no). Por si quedara una fila anterior al bloqueo, la lectura las excluye.
+  - **La puerta final** juzga todas las visibles (de ellas sale el orden, los recuentos y si hay
+    cursor) y, con su sello, cada nota devuelta y su carpeta; si algo cambia a mitad, repite la llamada
+    (`hebra_query_properties`, `notes: []`; `hebra_list_properties`, `keys: []` o `values: []`, en el
+    estado fresco).
 - **Cerrado ante la duda**: si una carpeta de `privateFolders` no existe (renombrada o borrada), el
   servidor responde a toda herramienta con `privacy_config_unresolved` hasta que se corrija la
   configuración. Lo mismo si `config.json` cambió con el proceso en marcha y ya no se puede leer o

@@ -50,7 +50,7 @@ del repo hebra-mcp (§2 D2, §5 herramientas, §6 privacidad).
 - Si el servidor no conectó (el arranque de la sesión lo dice, p. ej. 502), dilo tal cual
   y no inventes notas ni resultados. Se reconecta con `/mcp`. El conector remoto vive en
   `mcp.hebra.pro` (runbook: `deploy/README-deploy.md` del repo hebra-mcp).
-- Si no ves las 41 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
+- Si no ves las 43 tools (p. ej. sin `hebra_edit_note`, sin las de papelera y versiones,
   sin las de adjuntos, sin `hebra_create_folder`, `hebra_rename_folder` y
   `hebra_add_attachment`, o sin las de ficheros sueltos, `hebra_list_files`,
   `hebra_trash_file`, `hebra_restore_file`, `hebra_read_file`, `hebra_replace_file_text`,
@@ -192,12 +192,14 @@ solo sus entradas específicas. Las `hebra_jd_*` no operan sobre espacios compar
 
 | Tool | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading`: el apartado más interno del fragmento (o `null`); vale tal cual como `heading` de `hebra_read_note`. Ignora tildes. Pagina con `nextCursor`. |
+| `hebra_search` | `query` (FTS5), `limit` 1-50 (20), `cursor?`, `folder?`, `subfolders?`, `tag?`, `props?` (`[{key, value}]`: el valor entero, o `null` para «tiene la clave»), `linksTo?` (títulos enteros, no ids), `titleOnly?`, `fields?` (subconjunto de `title`, `folderPath`, `tags`, `snippet`, `heading`, `updatedAt`, `isConflictCopy`). Con `folder`, `subfolders` incluye el subárbol, como en `hebra_list_notes` | `{results: [{id, title, folderPath, tags, snippet, heading, updatedAt, isConflictCopy}], nextCursor}`. `heading`: el apartado más interno del fragmento (o `null`); vale tal cual como `heading` de `hebra_read_note`. Ignora tildes. Pagina con `nextCursor`. |
 | `hebra_grep` | `pattern` (literal; con `regex: true`, expresión regular de JavaScript), `caseSensitive?` (def. `false`), `folder?`, `subfolders?`, `tag?`, `contextLines?` 0-5, `limit` 1-100 (20), `cursor?` | `{matches: [{id, title, isConflictCopy, line, column, text, before?, after?, heading, headingOccurrence}], nextCursor, cutoff}`, una por línea que casa. `heading` y `headingOccurrence` van tal cual a `hebra_read_note`. Las tildes cuentan. `cutoff: "time"` o `"size"`: se paró antes, sigue con `nextCursor`. `pattern_too_slow`: simplifica la expresión (o reintenta con el `nextCursor` del error: si esa nota vuelve a fallar, se salta). `skipped: {id, fromLine}`: esa nota se saltó sin buscar en ella; dilo si importa. `line` vale para `lines` de `hebra_read_note`. Sin recuentos. |
 | `hebra_list_notes` | `folder?`, `subfolders?`, `tag?`, `cursor?`, `limit` 1-100 (50), `fields?` | Favoritas primero, después por `updatedAt` descendente. Pagina con `nextCursor`. |
 | `hebra_read_note` | `id` **o** `title` (exactamente uno), `heading?`, `headingOccurrence?`, `lines?: {from, to?}` (no con `heading`) | Cuerpo íntegro y **`revision`** (la necesita la edición). Con `heading`, `body` es solo ese apartado (con sus subapartados) y salen `section` y `totalChars`; con `lines`, solo esas líneas (hasta 2 000) y salen `lines`, `totalLines` y `totalChars`; la `revision` sigue siendo la de la nota entera. Título ambiguo → `ambiguous_title` con hasta 50 candidatas visibles; apartado repetido → `ambiguous_heading` con `candidates`. |
 | `hebra_note_outline` | `id` **o** `title`, `maxLevel?` 1-6, `limit?` 1-500 (200), `cursor?` | `{id, title, revision, totalChars, sections: [{heading, level, line, chars, occurrence?}], nextCursor}`, sin cuerpo. `chars` = lo que devolvería la lectura de ese apartado. `occurrence` solo sale en los títulos repetidos: es el `headingOccurrence` que hay que pasar. |
 | `hebra_list_tags` | `limit?` 1-500, `cursor?` | Anidadas como `a/b`, con recuento. Pagina con `nextCursor`. |
+| `hebra_list_properties` | `key?`, `limit?` 1-500 (100), `cursor?` | Sin `key`, `{keys: [{key, count}], nextCursor}`: las claves del frontmatter con su recuento de notas. Con `key`, `{values: [{value, count}], nextCursor}`: sus valores con su recuento. |
+| `hebra_query_properties` | `filters?` (hasta 32: `[{key, op, value?}]`, `op` = `equals`, `not-equals`, `contains`, `not-contains`, `greater-than`, `greater-or-equal`, `less-than`, `less-or-equal`, `exists`, `missing`; los dos últimos sin `value`, los demás con él), `folder?`, `subfolders?`, `sort?: {key?, direction?, empty?}`, `properties?`, `limit` 1-100 (50), `cursor?`, `fields?` (`title`, `folderPath`, `properties`) | `{notes: [{id, title, folderPath, properties: {clave: [valores]}}], nextCursor}`. `properties`: las claves cuyos valores quieres; sin él, las de `filters` y `sort`. Sin `sort.key`, por título; con él, por su valor (numérico si todos lo son), y las notas sin ella al final, o al principio con `empty: "first"`. |
 | `hebra_list_folders` | `limit?` 1-500, `cursor?` | `folders[{id, path, count}]`. Pagina con `nextCursor`. `path` para `folder`; `id` para `hebra_move_note`. |
 | `hebra_list_spaces` | sin argumentos | `{spaces: [{spaceId, name, organization: {orgId, name} \| null, granted}], organizationsAvailable}` (`name` es `null` si no se pudo leer). Solo los de `granted: true` se pasan como `space` a las herramientas de contenido. Con `organizationsAvailable: false` quedan solo los espacios con concesión. Comprueba el `name` antes de escribir en un espacio; el bloque de origen de las respuestas compartidas también lo lleva. |
 | `hebra_list_organizations` | `limit?` 1-100, `cursor?` | `{organizations: [{orgId, name, members: [{accountId, role, name, isSelf}], spaces: [{spaceId, name, granted}]}], nextCursor}`. `isSelf` marca a la persona; `name` de un miembro es `null` si no se conoce. No acepta `space` ni abre contenido: se entra con `space`, espacio por espacio. |
@@ -305,6 +307,12 @@ traigas entera para tocar un apartado.
   buscar por palabras (ignora tildes y encuentra por prefijo). Después, `hebra_read_note`
   con `lines` (unas líneas alrededor de la `line` encontrada) o con `heading` (el apartado
   que da `heading`), sin traer la nota entera.
+- **Consultar por propiedades del frontmatter**: `hebra_list_properties` para saber qué claves
+  y valores hay (una clave en minúsculas), `hebra_query_properties` para las notas que cumplen
+  algo, ordenadas y con los valores que pidas, sin leer ninguna nota. Para buscar por palabras
+  entre las que tienen una propiedad, `hebra_search` con `props`. Las notas que enlazan a otra:
+  `hebra_links` con su id; dentro de una búsqueda por texto, `hebra_search` con `linksTo` y el
+  título entero.
 - Un apartado es un encabezado `#` y todo hasta el siguiente de su nivel o menor. Los
   encabezados dentro del frontmatter o de un bloque de código no cuentan, ni los
   subrayados con `===` o `---`. Un título que no existe da `heading_not_found`; uno repetido
