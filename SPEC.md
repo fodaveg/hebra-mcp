@@ -248,9 +248,10 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   visibles, así que nada oculto puede provocar ese error.
 - **Tope de una respuesta de propiedades** (D23): `hebra_list_properties` y `hebra_query_properties`
   cortan la página antes de 100 000 caracteres (`limits.listProperties.responseChars`,
-  `limits.queryProperties.responseChars`), con `nextCursor`, y siempre llevan un elemento: un valor,
-  o los valores de una nota, más largos que el tope salen solos. Por eso una página puede traer menos
-  que `limit` y seguir teniendo `nextCursor`.
+  `limits.queryProperties.responseChars`), con `nextCursor`, y siempre llevan un elemento. Cuenta el
+  tamaño serializado del elemento entero: en la consulta, el id, el título, la carpeta, las claves y
+  los valores (solo los campos que pide `fields`). Un elemento más largo que el tope sale solo. Por
+  eso una página puede traer menos que `limit` y seguir teniendo `nextCursor`.
 - **Cursor de `hebra_list_files`** (D10): lleva la clave de orden del último fichero devuelto (para
   los vivos, los primeros 200 caracteres de su nombre en NFC y en minúsculas, y su id; para la papelera, la
   fecha en que entró y su id, los dos en descendente: borrar una carpeta manda todos sus ficheros
@@ -1601,6 +1602,26 @@ El dispositivo acumula tres secretos:
     paraba el hilo varios segundos con 20 000 notas. Un par de clave y valor o un título repetidos se
     pasan una vez. Sin ninguno de estos parámetros, la búsqueda no cambia ni hace ninguna consulta de
     más.
+  - **Los valores plegados de una clave** (2.ª revisión de D23, 5 nov 2026): con un par de `props` con
+    valor, el motor lee todos los valores distintos no ASCII de la clave en toda la biblioteca, también
+    los de notas ocultas, los trae a JS en cada página y por cada par, y mete como parámetro SQL los que
+    pliegan igual. Eso podía cambiar la respuesta por algo oculto: 32 767 variantes de un valor en una
+    oculta daban `invalid_input` (`too many SQL variables`) a una búsqueda que sin ellas respondía. Y
+    agotaba la memoria: con 750 000 valores distintos el proceso abortaba con 256 MiB ya con un solo
+    par. Ahora, en las dos búsquedas, con una clave de más de 20 000 valores distintos no ASCII el
+    motor no recibe los pares con valor: los comprueba hebra-mcp sobre cada página de resultados con
+    su SQL (`searchFilteringValues`, una sola pasada por clave), con el mismo orden y el mismo cursor
+    (`test/store/search-safe-filters.node.test.ts`). Con algo privado configurado, además, si varios
+    pares por debajo de ese corte suman más de lo que admite SQLite, se captura ese error concreto del
+    motor y se hace lo mismo, así que la respuesta es la misma con y sin esas filas ocultas. **Sin nada
+    privado configurado ese error puede quedarse** (`invalid_input`, solo con varios pares que juntos
+    pasan del límite): no hay nada que ocultar y lo provocan valores que se ven. El máximo de 32 `props`
+    por llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, heap de 256 MiB, por el camino
+    entero: 75 notas con 10 000 valores distintos no ASCII cada una, 32 pares con valor): con algo
+    privado, hueco máximo del bucle de eventos de 1,1 s; sin nada privado, 0,6 s; no aborta. Coste
+    asumido: si casan pocos, filtrar página a página recorre todos los aciertos de texto; con 20 000
+    notas más que casan por texto y no por la propiedad, 2,7 s con algo privado y 3,6 s sin nada
+    privado, y crece con los aciertos de texto.
   - **Notas bloqueadas**: las mismas reglas que el resto. Con etiquetas privadas configuradas, ocultas
     (A1). Sin ellas, visibles: salen en `hebra_query_properties` con su título, como en
     `hebra_list_notes`, sin propiedades, porque no derivan ninguna. Una fila de `note_props` anterior

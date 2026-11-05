@@ -29,7 +29,7 @@ import type {
   TitleCandidates
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
-import type { NotePropValues, PropCountsPage, PropCountsRequest, PropsMatch } from './props-sql';
+import type { NotePropValues, NoteValuesRequest, PropCountsPage, PropCountsRequest, PropsMatch } from './props-sql';
 import type { PrivacyConfig } from '../privacy/config';
 import type { FolderTrashEntry, NoteStateRow } from './state-reads';
 
@@ -266,9 +266,10 @@ export interface HebraLibraryPort {
   /** Cada valor no vacío de una clave, de uno en uno y sin guardarlos, en un turno de la cola.
    *  `visit` no puede esperar a nada. Sin filtro de privados: lo aplica `visit`. */
   visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void>;
-  /** Los valores de esas claves en esas notas, nota a nota hasta `maxChars`: una que no cabe y
-   *  las de detrás no salen, salvo la primera. Quien llama pasa solo notas visibles sin bloquear. */
-  propValuesOfNotes(noteIds: readonly string[], keys: readonly string[], maxChars: number): Promise<NotePropValues>;
+  /** Los valores de esas claves en esas notas, nota a nota hasta `maxChars` contando cada nota
+   *  entera: una que no cabe y las de detrás no salen, salvo la primera. Quien llama pasa solo
+   *  notas visibles. */
+  propValuesOfNotes(notes: readonly NoteValuesRequest[], keys: readonly string[], maxChars: number): Promise<NotePropValues>;
   /** Ids de las notas vivas con ese título entero, sin mayúsculas ni acentos, como los destinos
    *  de `SearchFilters.linksTo`. Sin filtro de privados: lo aplica quien llama. */
   notesByFoldedTitle(title: string): Promise<string[]>;

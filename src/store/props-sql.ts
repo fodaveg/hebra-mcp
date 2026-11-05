@@ -65,13 +65,10 @@ export interface PropCountsPage {
   more: boolean;
 }
 
-/**
- * El coste en caracteres de un elemento de una respuesta, con su clave y su recuento: lo que
- * descuenta de la página. No hace falta que sea exacto, sí que no dependa de nada más que del
- * propio texto.
- */
-function itemChars(name: string): number {
-  return JSON.stringify(name).length + 24;
+/** Lo que ocupa un elemento serializado: `{"key":…,"count":…},` o `{"value":…,"count":…},`, con el
+ *  nombre del campo que le toca. Lo que descuenta de la página. */
+function itemChars(name: string, count: number, isValue: boolean): number {
+  return JSON.stringify(name).length + String(count).length + (isValue ? 20 : 18);
 }
 
 /**
@@ -103,13 +100,14 @@ export function readPropCounts(db: DatabaseSync, request: PropCountsRequest): Pr
   let more = false;
   for (const row of statement.iterate(...bind, request.limit + 1, request.offset) as Iterable<Record<string, unknown>>) {
     const name = String(row.name);
-    const size = itemChars(name);
+    const count = Number(row.count);
+    const size = itemChars(name, count, request.key !== undefined);
     if (items.length >= request.limit || (items.length > 0 && chars + size > request.maxChars)) {
       more = true;
       break;
     }
     chars += size;
-    items.push({ name, count: Number(row.count) });
+    items.push({ name, count });
   }
   return { items, more };
 }
@@ -132,6 +130,15 @@ export function visitPropValues(
   }
 }
 
+/** Una nota de una página de `hebra_query_properties`, lo que ya ocupa y si tiene valores que leer. */
+export interface NoteValuesRequest {
+  id: string;
+  /** Lo que ocupa serializada sin ningún valor: su id, su título, su carpeta y sus claves. */
+  chars: number;
+  /** `false` en una bloqueada, que no tiene propiedades, o si no se han pedido. */
+  readValues: boolean;
+}
+
 /** Los valores de una página de notas, por nota y por clave. */
 export interface NotePropValues {
   /** En el orden pedido: una nota que no cupo y las de detrás no están. */
@@ -139,13 +146,14 @@ export interface NotePropValues {
 }
 
 /**
- * Los valores no vacíos de `keys` en esas notas, en orden binario, nota a nota y hasta `maxChars`:
- * una nota con miles de valores en una clave no puede traer los de toda la página. La primera sale
- * siempre entera. Sin filtro de privados: quien llama pasa solo notas visibles y sin bloquear.
+ * Los valores no vacíos de `keys` en esas notas, en orden binario, nota a nota y hasta `maxChars`
+ * de la respuesta, contando cada nota entera (`NoteValuesRequest.chars` y sus valores): una nota con
+ * miles de valores en una clave no puede traer los de toda la página. La primera sale siempre
+ * entera. Sin filtro de privados: quien llama pasa solo notas visibles.
  */
 export function readPropValuesOfNotes(
   db: DatabaseSync,
-  noteIds: readonly string[],
+  requested: readonly NoteValuesRequest[],
   keys: readonly string[],
   maxChars: number
 ): NotePropValues {
@@ -157,18 +165,22 @@ export function readPropValuesOfNotes(
   const wanted = JSON.stringify(keys);
   const notes: NotePropValues['notes'] = [];
   let chars = 0;
-  for (const id of noteIds) {
+  for (const note of requested) {
+    chars += note.chars;
+    if (notes.length > 0 && chars > maxChars) return { notes };
     const values = new Map<string, string[]>();
-    for (const row of statement.iterate(id, wanted) as Iterable<Record<string, unknown>>) {
-      const value = String(row.prop_value);
-      chars += JSON.stringify(value).length + 1;
-      if (notes.length > 0 && chars > maxChars) return { notes };
-      const key = String(row.prop_key);
-      const list = values.get(key);
-      if (list) list.push(value);
-      else values.set(key, [value]);
+    if (note.readValues) {
+      for (const row of statement.iterate(note.id, wanted) as Iterable<Record<string, unknown>>) {
+        const value = String(row.prop_value);
+        chars += JSON.stringify(value).length + 1;
+        if (notes.length > 0 && chars > maxChars) return { notes };
+        const key = String(row.prop_key);
+        const list = values.get(key);
+        if (list) list.push(value);
+        else values.set(key, [value]);
+      }
     }
-    notes.push({ id, values });
+    notes.push({ id: note.id, values });
     if (chars > maxChars) return { notes };
   }
   return { notes };

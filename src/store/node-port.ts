@@ -65,11 +65,12 @@ import {
   readPropValuesOfNotes,
   visitPropValues,
   type NotePropValues,
+  type NoteValuesRequest,
   type PropCountsPage,
   type PropCountsRequest,
   type PropsMatch
 } from './props-sql';
-import { safeTextSearch } from './search-safe';
+import { engineSearch, safeTextSearch } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
   grepNoteRows,
@@ -439,7 +440,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     options?: PortSearchOptions
   ): Promise<SearchPage> {
     if (options?.embedded === true) {
-      return this.read(() => cleanSearchPage(this.engine.search(q, cursor, limit, filters ?? null, scope ?? null)));
+      return this.read(() => cleanSearchPage(engineSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null)));
     }
     return this.read(() => cleanSearchPage(
       safeTextSearch(this.engine, this.db, q, cursor, limit, filters ?? null, scope ?? null, this.conn, this.writable)
@@ -494,8 +495,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => visitPropValues(this.db, key, visit));
   }
 
-  async propValuesOfNotes(noteIds: readonly string[], keys: readonly string[], maxChars: number): Promise<NotePropValues> {
-    return this.read(() => readPropValuesOfNotes(this.db, noteIds, keys, maxChars));
+  async propValuesOfNotes(notes: readonly NoteValuesRequest[], keys: readonly string[], maxChars: number): Promise<NotePropValues> {
+    return this.read(() => readPropValuesOfNotes(this.db, notes, keys, maxChars));
   }
 
   async notesByFoldedTitle(title: string): Promise<string[]> {

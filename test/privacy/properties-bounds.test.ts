@@ -195,6 +195,186 @@ describe('hebra_query_properties no guarda los valores de todas las notas', () =
   });
 });
 
+describe('el tope cuenta cada nota entera', () => {
+  it('21 notas con 32 claves pedidas de 256 caracteres: se corta con `nextCursor` y sale todo', async () => {
+    const h = await auditHarness(async (engine) => {
+      for (let index = 0; index < 21; index += 1) {
+        await createNote(engine, null, `---\nmarca: si\n---\n# Nota ${String(index).padStart(2, '0')}\n`);
+      }
+    });
+    try {
+      const properties = Array.from({ length: 32 }, (_, index) => `${String(index).padStart(2, '0')}${'k'.repeat(254 + (index % 2))}`);
+      const args = { filters: [{ key: 'marca', op: 'exists' }], properties, limit: 100 };
+      const titles: string[] = [];
+      let cursor: string | undefined;
+      let pages = 0;
+      do {
+        const page = await h.call('hebra_query_properties', { ...args, ...(cursor ? { cursor } : {}) });
+        expect(page.json.notes.length).toBeGreaterThan(0);
+        // El sobre y el cursor van aparte: unas decenas de caracteres.
+        expect(page.raw.length).toBeLessThanOrEqual(PROPERTIES_RESPONSE_MAX_CHARS + 500);
+        titles.push(...page.json.notes.map((note: { title: string }) => note.title));
+        cursor = page.json.nextCursor ?? undefined;
+        pages += 1;
+      } while (cursor);
+      expect(pages).toBe(2);
+      expect(titles).toEqual(Array.from({ length: 21 }, (_, index) => `Nota ${String(index).padStart(2, '0')}`));
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('con `fields` cuenta solo lo que sale, sin leer valores, y una nota sola nunca se queda fuera', async () => {
+    const longKey = 'k'.repeat(200_000);
+    const h = await auditHarness(async (engine) => {
+      await createNote(engine, null, '---\nmarca: si\n---\n# Una\n');
+      await createNote(engine, null, '---\nmarca: si\n---\n# Dos\n');
+    });
+    try {
+      const filters = [{ key: 'marca', op: 'exists' }];
+      const small = await h.call('hebra_query_properties', { filters, properties: [longKey], fields: ['title'], limit: 100 });
+      expect(small.json.notes).toHaveLength(2);
+      expect(small.json.nextCursor).toBeNull();
+      const big = await h.call('hebra_query_properties', { filters, properties: [longKey], limit: 100 });
+      expect(big.json.notes).toHaveLength(1);
+      expect(big.json.nextCursor).not.toBeNull();
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('hebra_list_properties ya cuenta el elemento entero con claves largas', async () => {
+    const keys = Array.from({ length: 40 }, (_, index) => `${String(index).padStart(2, '0')}${'k'.repeat(5_000)}`);
+    const h = await auditHarness(async (engine, _library, db) => {
+      const note = await createNote(engine, null, '# Claves largas\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      for (const key of keys) insert.run(note.id, key, 'v');
+    });
+    try {
+      const seen: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await h.call('hebra_list_properties', { limit: 500, ...(cursor ? { cursor } : {}) });
+        expect(page.raw.length).toBeLessThanOrEqual(PROPERTIES_RESPONSE_MAX_CHARS + 200);
+        seen.push(...page.json.keys.map((entry: { key: string }) => entry.key));
+        cursor = page.json.nextCursor ?? undefined;
+      } while (cursor);
+      expect(seen.filter((key) => key.endsWith('k'))).toEqual(keys);
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('las variantes plegadas de un valor en notas ocultas', () => {
+  /** La variante número `index` de quince letras, con `á` donde el bit está puesto. */
+  const variant = (index: number): string =>
+    Array.from({ length: 15 }, (_, bit) => ((index >> bit) & 1 ? 'á' : 'a')).join('');
+
+  async function library(rows: (noteId: string, insert: (key: string, value: string) => void) => void, config?: PrivacyConfig) {
+    return auditHarness(async (engine, _library, db) => {
+      const visible = await createNote(engine, null, `---\nclave: ${'a'.repeat(15)}\notra: ${'a'.repeat(15)}\n---\n# Visible\ngarbanzos\n`);
+      const twin = await createNote(engine, null, `---\nclave: ${'a'.repeat(15)}\n---\n# Visible dos\ngarbanzos\n`);
+      const hidden = await createNote(engine, null, '# Oculta\n#secreto\ngarbanzos\n');
+      const insert = db.prepare('INSERT INTO note_props(note_id, key, value) VALUES (?, ?, ?)');
+      db.exec('BEGIN');
+      rows(hidden.id, (key, value) => insert.run(hidden.id, key, value));
+      db.exec('COMMIT');
+      return { visible: visible.id, twin: twin.id };
+    }, config);
+  }
+
+  const args = (query: string, props: Array<{ key: string; value: string }>) => ({ query, props, limit: 1, fields: ['title'] });
+
+  it.each([
+    ['por subcadena', 'arbanz'],
+    ['por palabra', 'garbanzos']
+  ])('32 767 variantes de un valor en una oculta no cambian la respuesta, %s', async (_name, query) => {
+    const props = [{ key: 'clave', value: 'a'.repeat(15) }];
+    const clean = await library(() => {});
+    const loaded = await library((_id, insert) => {
+      for (let index = 1; index < 2 ** 15; index += 1) insert('clave', variant(index));
+    });
+    try {
+      for (const h of [clean, loaded]) {
+        const titles: string[] = [];
+        let cursor: string | undefined;
+        do {
+          const page = await h.call('hebra_search', { ...args(query, props), ...(cursor ? { cursor } : {}) });
+          expect(page.isError, page.raw.slice(0, 200)).toBe(false);
+          titles.push(...page.json.results.map((hit: { title: string }) => hit.title));
+          cursor = page.json.nextCursor ?? undefined;
+        } while (cursor);
+        expect(titles).toEqual(['Visible dos', 'Visible']);
+        expect(JSON.stringify(titles)).not.toContain('Oculta');
+      }
+    } finally {
+      await clean.close();
+      await loaded.close();
+    }
+  });
+
+  it('dos pares por debajo del corte que juntos pasan del límite: captura el error del motor y responde igual', async () => {
+    const props = [{ key: 'clave', value: 'a'.repeat(15) }, { key: 'otra', value: 'a'.repeat(15) }];
+    const h = await library((_id, insert) => {
+      for (let index = 1; index < 17_000; index += 1) {
+        insert('clave', variant(index));
+        insert('otra', variant(index));
+      }
+    });
+    try {
+      for (const query of ['arbanz', 'garbanzos']) {
+        const page = await h.call('hebra_search', { query, props, limit: 5, fields: ['title'] });
+        expect(page.isError, page.raw.slice(0, 200)).toBe(false);
+        expect(page.json.results.map((hit: { title: string }) => hit.title)).toEqual(['Visible']);
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('otro error del motor no se traga: sale como siempre', async () => {
+    const h = await library(() => {});
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search').mockImplementation(() => {
+        throw new Error('disk I/O error');
+      });
+      try {
+        const page = await h.call('hebra_search', { query: 'garbanzos', props: [{ key: 'clave', value: 'x' }] });
+        expect(page.isError).toBe(true);
+        expect(spy).toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('sin nada privado, pasadas de 20 000 variantes la búsqueda entera tampoco las pide al motor', async () => {
+    const h = await library((_id, insert) => {
+      for (let index = 1; index < 21_000; index += 1) insert('clave', variant(index));
+    }, OPEN);
+    try {
+      const engine = (h.port as unknown as { engine: { search: (...args: unknown[]) => unknown } }).engine;
+      const spy = vi.spyOn(engine, 'search');
+      try {
+        const page = await h.call('hebra_search', { query: 'garbanzos', props: [{ key: 'clave', value: 'a'.repeat(15) }], fields: ['title'] });
+        // Sin nada privado, la nota de `#secreto` se ve, y casa por sus variantes.
+        expect(page.json.results.map((hit: { title: string }) => hit.title).sort()).toEqual(['Oculta', 'Visible', 'Visible dos']);
+        for (const call of spy.mock.calls) {
+          expect((call[3] as { props?: unknown[] }).props).toEqual([]);
+        }
+      } finally {
+        spy.mockRestore();
+      }
+    } finally {
+      await h.close();
+    }
+  });
+});
+
 describe('el modo del orden cambia entre dos páginas', () => {
   const values = (notes: Array<{ properties: { rank: string[] } }>): string[] => notes.flatMap((note) => note.properties.rank);
   const query = { filters: [{ key: 'marca', op: 'exists' }], sort: { key: 'rank' }, properties: ['rank'], limit: 1 };
