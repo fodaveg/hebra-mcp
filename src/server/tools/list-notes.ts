@@ -3,7 +3,7 @@
  * `folder?`/`tag?`. `NotesScope` solo admite UN ámbito nativo a la vez; si la persona
  * da los dos, el más selectivo (`folder` si está, si no `tag`) es el ámbito nativo y el
  * otro se aplica aquí. El `nextCursor` que se devuelve es el cursor REAL del almacén
- * (`encodeCursor`, misma clave `favorite:updatedAt:id` que `notesPageQuery`): quien
+ * (`encodeCursor`, misma clave `banda:updatedAt:id` que `notesPageQuery`, con la banda «anclada aquí» (`pinned`, §26.3)): quien
  * llame puede seguir paginando aunque esta página haya tenido que saltar notas
  * ocultas o filtradas.
  *
@@ -132,7 +132,9 @@ export async function runListNotes(
       };
       return pickFields(note, input.fields);
     },
-    cursorAfter: (item) => encodeCursor([item.favorite ? 1 : 0, item.updatedAt], item.id)
+    // La banda es «anclada aquí» (`pinned`, §26.3), no `favorite`: una nota anclada solo en otro
+    // sitio no sube en esta lista y su cursor llevaría una banda que el motor no usa.
+    cursorAfter: (item) => encodeCursor([item.pinned === true ? 1 : 0, item.updatedAt], item.id)
   });
   return {
     notes: page.items,
