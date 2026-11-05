@@ -70,6 +70,15 @@
  *   `{id, name, folderId?}`. Ninguna otra acción (purgar no existe): `invalid_request`. Un
  *   `file_exists` vuelve con el id del fichero que choca (`existing`). Un escritor sin
  *   ella (o de una versión anterior) responde `invalid_request`.
+ * - `renameFileRelinking` (D23, 5 nov 2026): `looseFileWrite` con `renameFile` y nada más, que
+ *   además arregla las notas que incrustan el fichero (`relinked`). Op propia para fallar
+ *   cerrado: un escritor anterior la rechaza sin escribir (el lector lo traduce a
+ *   `writer_outdated`), en vez de renombrar sin arreglarlas. Un lector anterior sigue mandando
+ *   `looseFileWrite`, y este escritor también las arregla.
+ * - `noteState` `{action, id, …, privacy}` (D23) → `NoteStateOutcome`, con la ronda ya
+ *   esperada: `moveNote` `{folderId, expectedRevision}`, `trashNote` y `restoreNote`
+ *   `{expectedRevision}`, `setHidden` `{hidden}` o `clearConflict`. Op propia por lo mismo: un
+ *   escritor anterior ignoraría `expectedRevision` y movería la nota sin guarda.
  * - `jdNewId` `{mode, …, privacy}` (D18, 19 oct 2026) → el resultado de `hebra_jd_new_id`:
  *   `simulate` `{category, title, systemId?, createFolder?, jdexFolderId?,
  *   templatesFolderId?}` (guarda el plan en la base del escritor), `apply` `{planId,
@@ -130,6 +139,7 @@ import type {
   JdMoveOutcome,
   JdNewIdOutcome,
   LooseFileOutcome,
+  NoteStateOutcome,
   OrganizeOutcome,
   ReplaceFileTextOutcome,
   ReplaceOutcome,
@@ -163,6 +173,7 @@ import { REVISION_MAX_LENGTH } from '../store/revision';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from '../store/file-content';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
+import type { NoteStateInput } from '../store/note-state';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
@@ -239,6 +250,8 @@ export type WriterSocketOp =
   | 'fetchFile'
   | 'replaceFileText'
   | 'looseFileWrite'
+  | 'renameFileRelinking'
+  | 'noteState'
   | 'jdNewId'
   | 'jdMove'
   | 'replaceBody'
@@ -250,6 +263,8 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'fetchFile',
   'replaceFileText',
   'looseFileWrite',
+  'renameFileRelinking',
+  'noteState',
   'jdNewId',
   'jdMove',
   'createNote',
@@ -328,6 +343,9 @@ export interface WriterSocketHandlers {
   /** Crear, renombrar, mover o duplicar un fichero suelto (D17, 12 oct 2026), con la ronda
    *  ya esperada. Opcional: un escritor sin él responde `invalid_request`. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
+  /** Cambios de estado de una nota de D23, con la ronda ya esperada. Opcional: un escritor
+   *  sin él responde `invalid_request`. */
+  noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
   /** Un ID nuevo del JDex (D18, 19 oct 2026): simular, aplicar (con la ronda ya esperada) o
    *  descartar un plan. Opcional: un escritor sin él responde `invalid_request`. */
   jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
@@ -664,6 +682,35 @@ function looseFileWriteInputOf(params: Record<string, unknown>): LooseFileWriteI
         operationId,
         privacy
       };
+    default:
+      throw new InvalidRequest();
+  }
+}
+
+/** `noteState` (D23): una de sus acciones, con sus campos y nada más; la revisión es
+ *  obligatoria en mover, mandar a la papelera y sacar (sin ella van por `organize`). */
+function noteStateInputOf(params: Record<string, unknown>): NoteStateInput {
+  const privacy = privacyOf(params.privacy);
+  const { id, folderId, hidden, expectedRevision } = params;
+  if (!isId(id)) throw new InvalidRequest();
+  const revision = (): string => {
+    if (typeof expectedRevision !== 'string' || expectedRevision.length > REVISION_MAX_LENGTH) {
+      throw new InvalidRequest();
+    }
+    return expectedRevision;
+  };
+  switch (params.action) {
+    case 'moveNote':
+      if (!isId(folderId)) throw new InvalidRequest();
+      return { action: 'moveNote', id, folderId, expectedRevision: revision(), privacy };
+    case 'trashNote':
+    case 'restoreNote':
+      return { action: params.action, id, expectedRevision: revision(), privacy };
+    case 'setHidden':
+      if (typeof hidden !== 'boolean') throw new InvalidRequest();
+      return { action: 'setHidden', id, hidden, privacy };
+    case 'clearConflict':
+      return { action: 'clearConflict', id, privacy };
     default:
       throw new InvalidRequest();
   }
@@ -1165,6 +1212,18 @@ export class WriterSocketServer {
           const input = looseFileWriteInputOf(envelope.params);
           if (!handlers.looseFileWrite) throw new InvalidRequest();
           result = await handlers.looseFileWrite(input);
+          break;
+        }
+        case 'renameFileRelinking': {
+          const input = looseFileWriteInputOf(envelope.params);
+          if (input.action !== 'renameFile' || !handlers.looseFileWrite) throw new InvalidRequest();
+          result = await handlers.looseFileWrite(input);
+          break;
+        }
+        case 'noteState': {
+          const input = noteStateInputOf(envelope.params);
+          if (!handlers.noteState) throw new InvalidRequest();
+          result = await handlers.noteState(input);
           break;
         }
         case 'jdNewId': {

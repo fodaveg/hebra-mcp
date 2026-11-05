@@ -249,9 +249,14 @@ export const addAttachmentInputShape = {
     .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a añadir el adjunto.')
 };
 
+/** D23: lo que exige, opcional, mover, mandar a la papelera y sacar. */
+const GUARD_REVISION_HINT =
+  'Opcional: la `revision` que devolvió hebra_read_note o una edición. Si el texto de la nota cambió desde entonces, revision_conflict sin escribir.';
+
 export const moveNoteInputShape = {
   id: z.string(),
-  folderId: z.string().describe(FOLDER_ID_HINT)
+  folderId: z.string().describe(FOLDER_ID_HINT),
+  expectedRevision: z.string().optional().describe(GUARD_REVISION_HINT)
 };
 
 export const setFavoriteInputShape = {
@@ -267,11 +272,28 @@ export const setArchivedInputShape = {
 /** Papelera (ampliación de D2, 30 sep 2026): mandar y sacar, por id. Nada de purgar ni
  *  vaciar la papelera. */
 export const trashNoteInputShape = {
-  id: z.string()
+  id: z.string(),
+  expectedRevision: z.string().optional().describe(GUARD_REVISION_HINT)
 };
 
 export const restoreNoteInputShape = {
-  id: z.string().describe('Id de una nota de hebra_list_trash.')
+  id: z.string().describe('Id de una nota de hebra_list_trash.'),
+  expectedRevision: z
+    .string()
+    .optional()
+    .describe(
+      `${GUARD_REVISION_HINT} Solo la que leíste ANTES de mandarla a la papelera: hebra_list_trash no da revisión y hebra_read_note no lee una nota de la papelera.`
+    )
+};
+
+/** D23: ocultar del listado general y quitar la marca de conflicto, por id. */
+export const setHiddenInputShape = {
+  id: z.string(),
+  hidden: z.boolean().describe('true la oculta del listado general; false la vuelve a mostrar.')
+};
+
+export const clearConflictInputShape = {
+  id: z.string().describe('Id de una copia de conflicto (`isConflictCopy: true`).')
 };
 
 export const listTrashInputShape = {

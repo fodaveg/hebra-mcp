@@ -33,15 +33,18 @@ import { LibraryInstance } from '../../src/sync/library-instance';
 /**
  * `file[A-Z]…` sigue cerrado por defecto: cualquier método de recursos sueltos del motor,
  * de hoy o de mañana, está prohibido salvo los dos que D10 permite, `fileTrash` y
- * `fileRestore`, el que añade D15 (10 oct 2026), `fileReplace`, y los tres que añade D17
- * (12 oct 2026), `fileCreate`, `fileRename` y `fileMove`, nombrados uno a uno (`\b` para
- * que `fileTrashEmpty`, `fileRestoreAll`, `fileReplaceAll` o `fileMoveAll` NO pasen).
+ * `fileRestore`, el que añade D15 (10 oct 2026), `fileReplace`, los tres que añade D17
+ * (12 oct 2026), `fileCreate`, `fileRename` y `fileMove`, y el que añade D23 (5 nov 2026),
+ * `fileRenameAndRelink`, nombrados uno a uno (`\b` para que `fileTrashEmpty`, `fileRestoreAll`,
+ * `fileReplaceAll` o `fileMoveAll` NO pasen).
  * `filePurge` sigue prohibido. Que solo salgan del turno del escritor lo comprueban los
  * tres últimos tests.
+ *
+ * `noteClearConflict` salió de la lista con D23: su test, abajo, lo deja solo en el turno.
  */
-const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|Move\\b';
+const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|RenameAndRelink\\b|Move\\b';
 const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
-const FORBIDDEN = `notePurge|noteClearConflict|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
+const FORBIDDEN = `notePurge|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 
 /**
@@ -126,6 +129,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'fileReplaced',
       'fileCreateMany',
       'fileRenameAll',
+      'fileRenameAndRelinkAll',
       'fileMoveAll'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(true);
@@ -137,12 +141,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'noteVersionsList',
       'noteVersionRead',
       'noteVersionSnapshot',
-      // D10, D15 y D17: los seis únicos `file*` que pasan.
+      // D10, D15, D17 y D23: los siete únicos `file*` que pasan.
       'fileTrash',
       'fileRestore',
       'fileReplace',
       'fileCreate',
       'fileRename',
+      'fileRenameAndRelink',
       'fileMove'
     ]) {
       expect(FORBIDDEN_NAME.test(name), name).toBe(false);
@@ -279,12 +284,14 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         'fileCreate',
         'fileMove',
         'fileRename',
+        // D23: renombrar con las notas que lo incrustan (test de abajo).
+        'fileRenameAndRelink',
         'fileReplace',
         'fileRestore',
         'fileTrash',
         'filesIndex',
         'folderCreate',
-        // D19: mover a un ID, con guarda (test de abajo).
+        // D19: mover a un ID, con guarda (test de abajo). D23 no añade ningún `folder*`.
         'folderMoveIfUnchanged',
         'folderRename',
         'folderRenameIfUnchanged'
@@ -358,6 +365,7 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         'fileCreate',
         'fileMove',
         'fileRename',
+        'fileRenameAndRelink',
         'fileReplace',
         'fileRestore',
         'fileTrash',
@@ -398,7 +406,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * oculto, dentro del turno. Ninguna otra fuente de `src` (herramientas incluidas).
    */
   it('crear, renombrar y mover un fichero suelto (D17): solo en el turno del escritor y en file-verbs.ts', () => {
-    // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno.
+    // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno. Renombrar con
+    // los enlaces (D23), con su propio test.
     const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts', 'src/store/jd-move-port.ts'];
     const verbCall = reachPattern('fileCreate|fileRename|fileMove');
     for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
@@ -446,6 +455,63 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         for (const name of ['noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged']) {
           expect(names, `${label}.${name}`).not.toContain(name);
         }
+      }
+    } finally {
+      port.close();
+    }
+  });
+
+  /**
+   * Las escrituras de D23 (5 nov 2026), función por función: solo las tiene el turno de
+   * escritura, las pone ahí `src/store/note-state-engine.ts` y las llama quien aplica antes el
+   * filtro en el turno. `noteMoveIfUnchanged` ya estaba (D19), y desde D23 también la llama
+   * `note-state.ts`. Y todas pasan por la guarda de cada mutación de un espacio
+   * (`assertSpaceUserWrite`, la lista `mutations` de `node-port.ts`): una que faltara escribiría
+   * en un espacio tras revocarlo.
+   */
+  it('las escrituras de D23: solo en el turno del escritor y desde quien aplica el filtro', async () => {
+    const reach: Array<[string, string[]]> = [
+      ['noteHide', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteUnhide', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteClearConflict', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteTrashIfUnchanged', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['noteRestoreRowIfUnchanged', ['src/store/note-state-engine.ts', 'src/store/note-state.ts']],
+      ['fileRenameAndRelink', ['src/store/note-state-engine.ts', 'src/store/file-verbs.ts']],
+      ['noteMoveIfUnchanged', ['src/store/node-port.ts', 'src/store/jd-move-port.ts', 'src/store/note-state.ts']]
+    ];
+    const sources = allSourceFiles().map((file) => [
+      relative(root, file).split(sep).join('/'),
+      readFileSync(file, 'utf8')
+    ] as const);
+    for (const [name, allowed] of reach) {
+      const pattern = reachPattern(name);
+      for (const form of reachForms(name)) expect(pattern.test(form), form).toBe(true);
+      const callers = sources.filter(([, text]) => pattern.test(text)).map(([path]) => path).sort();
+      expect(callers, name).toEqual([...allowed].sort());
+    }
+    // Ni `noteRestoreIfUnchanged` (otra forma de la misma guarda), ni otra vía sin filtro de
+    // reescribir notas en lote o de deshacer metadatos.
+    const closed = reachPattern('noteRestoreIfUnchanged|notesRewriteBatch|noteUndoMetadata');
+    for (const [path, text] of sources) expect(closed.exec(text)?.[0] ?? null, path).toBeNull();
+
+    const nodePort = readFileSync(join(root, 'src/store/node-port.ts'), 'utf8');
+    const mutations = /const mutations = new Set\(\[([\s\S]*?)\]\)/.exec(nodePort)?.[1] ?? '';
+    for (const [name] of reach) expect(mutations, name).toContain(`'${name}'`);
+
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['SyncStorePort', port.syncStorePort()]
+      ] as Array<[string, object]>) {
+        const names = methodNames(value);
+        for (const [name] of reach) expect(names, `${label}.${name}`).not.toContain(name);
+      }
+      const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      for (const [name] of reach) expect(storeKeys, name).toContain(name);
+      // Y lo que sigue fuera, también del turno.
+      for (const name of ['notePurge', 'trashEmpty', 'filePurge', 'tagRename', 'folderMove', 'folderTrash']) {
+        expect(storeKeys, name).not.toContain(name);
       }
     } finally {
       port.close();

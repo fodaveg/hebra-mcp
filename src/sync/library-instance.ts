@@ -67,6 +67,7 @@ import {
   type LooseFileSaved,
   type LooseFileWriteInput
 } from '../store/file-verbs';
+import { writeNoteState, type NoteStateInput, type NoteStateSaved } from '../store/note-state';
 import {
   runJdNewId,
   type JdNewIdRequest,
@@ -767,6 +768,13 @@ export class LibraryInstance implements NoteWriteTarget {
       runner ? (sha256) => runner.readBlob(sha256) : null,
       () => this.afterWrite()
     );
+  }
+
+  /** Cambios de estado de una nota de D23 (`../store/note-state.ts`): ocultar del listado
+   *  general, quitar la marca de conflicto, y mover, mandar a la papelera o sacar con guarda.
+   *  Pide la ronda de después sin esperarla. */
+  noteStateLocal(input: NoteStateInput): Promise<LocalWrite<NoteStateSaved>> {
+    return writeNoteState(this, input, () => this.afterWrite());
   }
 
   /** `hebra_jd_new_id` (D18, `../store/jd-new-id.ts`): simular, aplicar o descartar un plan

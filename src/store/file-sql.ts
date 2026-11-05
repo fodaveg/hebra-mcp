@@ -36,6 +36,24 @@ export function blobNoteRefRows(db: DatabaseSync, sha256: string): BlobNoteRef[]
 }
 
 /**
+ * Las notas VIVAS que `fileRenameAndRelink` del motor exige con su revisión al renombrar un
+ * fichero (D23): las que tienen un enlace `file` con ese nombre exacto o uno `blob` con ese
+ * SHA-256. Tiene que ser el mismo conjunto que mira el motor (si no, `file_stale` sin
+ * escribir): sin las de la papelera y sin `note_blob_refs`, que el motor no mira.
+ */
+export function relinkNoteRows(db: DatabaseSync, fileId: string, name: string, sha256: string): string[] {
+  const rows = db
+    .prepare(
+      `SELECT DISTINCT l.src_note_id AS note_id
+       FROM links l JOIN notes n ON n.id = l.src_note_id
+       WHERE n.deleted = 0 AND n.trashed_at IS NULL AND n.id <> ?1
+         AND ((l.target_kind = 'file' AND l.target = ?2) OR (l.target_kind = 'blob' AND l.target = ?3))`
+    )
+    .all(fileId, name, sha256) as Array<{ note_id: string }>;
+  return rows.map((row) => String(row.note_id));
+}
+
+/**
  * Las notas (no lápidas, vivas o de la papelera) que enlazan un fichero por su NOMBRE: un
  * enlace `file` de `links` con ese nombre exacto, la rama «por nombre» de la regla (b) de
  * D10, como en `filesIndex`. Para saber, antes de crear, renombrar o duplicar un fichero

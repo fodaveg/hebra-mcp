@@ -115,7 +115,9 @@ describe('capacidades', () => {
         'hebra_rename_file',
         'hebra_move_file',
         'hebra_duplicate_file',
-        'hebra_note_outline'
+        'hebra_note_outline',
+        'hebra_set_hidden',
+        'hebra_clear_conflict'
       ])
     );
   });

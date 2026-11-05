@@ -50,6 +50,8 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   hebra_read_attachment: READ,
   hebra_move_note: WRITE_IDEMPOTENT,
   hebra_set_favorite: WRITE_IDEMPOTENT,
+  hebra_set_hidden: WRITE_IDEMPOTENT,
+  hebra_clear_conflict: WRITE_IDEMPOTENT,
   hebra_set_archived: WRITE_IDEMPOTENT,
   hebra_trash_note: WRITE_IDEMPOTENT,
   hebra_restore_note: WRITE_IDEMPOTENT,

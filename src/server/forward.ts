@@ -94,6 +94,7 @@ import type {
 } from '../store/writes';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
+import type { NoteStateInput } from '../store/note-state';
 import type { JdNewIdRequest } from '../store/jd-new-id';
 import type { JdMoveItem, JdMoveRequest } from '../store/jd-move';
 import type { CreatedItem, PlanWrite } from '../jd';
@@ -108,6 +109,7 @@ import {
   type JdMoveOutcome,
   type JdNewIdOutcome,
   type LooseFileOutcome,
+  type NoteStateOutcome,
   type OrganizeOutcome,
   type ReplaceFileTextOutcome,
   type ReplaceOutcome,
@@ -142,6 +144,9 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // Crear, renombrar, mover o duplicar (D17): al duplicar, quizá bajar los bytes del
   // origen; al crear, el `blobPut`; y la ronda.
   looseFileWrite: AWAIT_ROUND_TIMEOUT_MS + 60_000,
+  // D23: renombrar con las notas que lo incrustan, en una transacción, y la ronda.
+  renameFileRelinking: AWAIT_ROUND_TIMEOUT_MS + 60_000,
+  noteState: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
   jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   // Mover a un ID (D19): leer la biblioteca, crear carpetas, mover y la ronda.
@@ -218,6 +223,21 @@ function asOrganizeOutcome(value: unknown): OrganizeOutcome {
     };
   }
   throw new Error('writer_protocol');
+}
+
+/** Valida el `NoteStateOutcome` que devuelve el escritor (D23). */
+function asNoteStateOutcome(value: unknown, id: string): NoteStateOutcome {
+  const organized = asOrganizeOutcome(value);
+  const record = value as Record<string, unknown>;
+  if (
+    organized.id !== id ||
+    typeof record.hidden !== 'boolean' ||
+    typeof record.isConflictCopy !== 'boolean' ||
+    typeof record.changed !== 'boolean'
+  ) {
+    throw new Error('writer_protocol');
+  }
+  return { ...organized, hidden: record.hidden, isConflictCopy: record.isConflictCopy, changed: record.changed };
 }
 
 /** Un tamaño que viene del escritor: entero no negativo. */
@@ -344,6 +364,7 @@ function asLooseFileOutcome(value: unknown, id?: string): LooseFileOutcome {
     byteLength: value.byteLength === null ? null : asCount(value.byteLength),
     mimeType: value.mimeType,
     outcome: value.outcome,
+    ...(value.relinked !== undefined ? { relinked: asCount(value.relinked) } : {}),
     ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
   };
@@ -1036,11 +1057,15 @@ export function buildRoutedWriteContext(
     // Crear, renombrar, mover o duplicar (D17): todo en el escritor, con la privacidad de
     // ESTE lector. Si la conexión se corta tras enviarla, no se repite: el agente reintenta
     // con el mismo `operationId`.
+    //
+    // Renombrar, con op propia desde D23 (como `addAttachmentInSection`): un escritor anterior
+    // la rechaza sin escribir (`writer_outdated`), en vez de renombrar sin arreglar las notas.
     ...(local.looseFileWrite
       ? {
-          looseFileWrite: (input: LooseFileWriteInput) =>
-            routed(
-              'looseFileWrite',
+          looseFileWrite: (input: LooseFileWriteInput) => {
+            const renaming = input.action === 'renameFile';
+            return routed(
+              renaming ? 'renameFileRelinking' : 'looseFileWrite',
               { ...input },
               (value) =>
                 asLooseFileOutcome(
@@ -1048,7 +1073,31 @@ export function buildRoutedWriteContext(
                   input.action === 'renameFile' || input.action === 'moveFile' ? input.id : undefined
                 ),
               () => local.looseFileWrite!(input)
-            )
+            ).catch((error: unknown) => {
+              if (renaming && error instanceof WriterRemoteError && error.code === 'invalid_request') {
+                throw new ToolError('writer_outdated');
+              }
+              throw error;
+            });
+          }
+        }
+      : {}),
+    // Cambios de estado de una nota (D23): op propia, para fallar cerrado igual. Un escritor
+    // anterior ignoraría `expectedRevision` y movería la nota sin guarda.
+    ...(local.noteState
+      ? {
+          noteState: (input: NoteStateInput) =>
+            routed(
+              'noteState',
+              { ...input },
+              (value) => asNoteStateOutcome(value, input.id),
+              () => local.noteState!(input)
+            ).catch((error: unknown) => {
+              if (error instanceof WriterRemoteError && error.code === 'invalid_request') {
+                throw new ToolError('writer_outdated');
+              }
+              throw error;
+            })
         }
       : {}),
     // Un ID nuevo del JDex (D18): todo en el escritor, que guarda los planes, con la
@@ -1120,6 +1169,8 @@ export function writerSocketHandlers(
     ...(local.looseFileWrite
       ? { looseFileWrite: (input: LooseFileWriteInput) => local.looseFileWrite!(input) }
       : {}),
+    // D23: cambios de estado de una nota, con la privacidad del lector y la ronda aquí.
+    ...(local.noteState ? { noteState: (input: NoteStateInput) => local.noteState!(input) } : {}),
     // D18: un ID nuevo del JDex, con la privacidad del lector y, al aplicar, la ronda aquí.
     ...(local.jdNewId ? { jdNewId: (request: JdNewIdRequest) => local.jdNewId!(request) } : {}),
     // D19: mover a un ID, con la privacidad del lector y, al aplicar o deshacer, la ronda aquí.

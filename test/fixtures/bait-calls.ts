@@ -116,6 +116,8 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_move_note', arguments: { id: library.privateFolderNoteId, folderId: 'root' } },
     { name: 'hebra_set_favorite', arguments: { id: library.privateTagNoteId, favorite: true } },
     { name: 'hebra_set_archived', arguments: { id: library.privateFolderNoteId, archived: true } },
+    { name: 'hebra_set_hidden', arguments: { id: library.privateFolderNoteId, hidden: true } },
+    { name: 'hebra_clear_conflict', arguments: { id: library.privateFolderNoteId } },
     // Papelera y versiones (ampliación de D2, 30 sep 2026). La lista de la papelera tiene
     // cebos ocultos por carpeta, por etiqueta y por una carpeta privada ya borrada; mandar
     // o sacar notas ocultas es `not_found`; la versión con etiqueta privada de una nota
