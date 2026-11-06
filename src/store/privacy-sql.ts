@@ -211,10 +211,13 @@ export function noteStamps(db: DatabaseSync, ids: readonly string[]): Map<string
  * (vivas, de la papelera y lápidas, con sus etiquetas, carpeta y bloqueo, que se guardan con
  * la fila), `folders` (vivas y lápidas: nombre y padre) y `files`. Y la memoria de las carpetas
  * privadas (A3), la de la tabla y la del proceso (`remembered`), entera. Y `data_version` de
- * SQLite, que cambia con cada escritura que confirma OTRA conexión. Lo que no cubre: lo que
- * esta misma conexión reescribe sin subir `local_seq` (al abrir una biblioteca de una versión
- * anterior, las derivadas de `deriveVersion`, antes de servir nada; vaciar la biblioteca lo
- * cuenta el puerto, `NodeLibraryPort.epochRow`).
+ * SQLite, que cambia con cada escritura que confirma OTRA conexión, y `total_changes()`, las
+ * filas que ha escrito ESTA (B1, 6 nov 2026: antes, lo que esta conexión reescribía sin subir
+ * `local_seq`, o dos escrituras suyas que dejaban número y suma iguales, no lo veía nadie).
+ * Cualquier escritura en `library.sqlite` de esta conexión cambia la época, también las de
+ * tablas que no tocan la privacidad (el registro de operaciones, la memoria de carpetas): por
+ * eso los planes de las simulaciones viven en su propio fichero. Vaciar la biblioteca lo cuenta
+ * además el puerto (`NodeLibraryPort.epochRow`).
  */
 /**
  * Índices propios de hebra-mcp para la época (`privacyEpochOf`): con `local_seq` en un índice,
@@ -242,12 +245,20 @@ export function privacyEpochOf(db: DatabaseSync, remembered: readonly Remembered
   // o vaciar y volver a importar lo mismo (R4-2 y R4-3 de la 4.ª revisión de Codex). Cuenta
   // de más (también lo que no toca la privacidad), nunca de menos.
   const dataVersion = (db.prepare('PRAGMA data_version').get() as { data_version: number | bigint }).data_version;
+  // Y cualquier fila que escriba ESTA conexión (B1 de la revisión del candidato de memoria, 6
+  // nov 2026): `data_version` no ve las propias, y dos escrituras de aquí pueden dejar número y
+  // suma como estaban (o no subir `local_seq`). `total_changes()` solo crece mientras vive la
+  // conexión; como `data_version`, cuenta de más, nunca de menos. Lo que esta misma llamada
+  // escribe al anotar la memoria de carpetas privadas lo absorbe `resolveToolContext`, que toma
+  // la época otra vez después.
+  const ownChanges = (db.prepare('SELECT total_changes() AS changes').get() as { changes: number | bigint }).changes;
   const memory = remembered.map((entry) => `${entry.pathKey}\u0000${entry.folderId}`).sort();
   return JSON.stringify([
     String(sums.notes),
     String(sums.folders),
     String(sums.files),
     String(dataVersion),
+    String(ownChanges),
     memory
   ]);
 }

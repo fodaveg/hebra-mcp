@@ -84,6 +84,11 @@ export const GATE_ATTEMPTS = 3;
 interface SealedUse {
   seal: number | undefined;
   conflict: boolean;
+  /** Se declaró una nota viva que el filtro de la llamada no tenía cargada (B3 de la revisión
+   *  del candidato de memoria, 6 nov 2026): no hay sello con el que decidió, y eso no es «sin
+   *  sello». En una lectura (`seals: true`) la comprobación no pasa y la llamada se repite; en
+   *  una escritura no cuenta (lo que acaba de crear no está en su filtro). */
+  unloaded?: boolean;
 }
 
 function useSeal(uses: Map<string, SealedUse>, id: string, seal: number | undefined): void {
@@ -126,7 +131,14 @@ export class GateUsage {
    *  visible y, si se leyó aparte, el de la fila leída: los dos tienen que coincidir entre sí y
    *  con el de ahora. */
   note(id: string, localSeq?: number): void {
-    useSeal(this.notes, id, this.privacy?.sealOf(id));
+    if (this.privacy) {
+      const own = this.privacy.gateSealOf(id);
+      useSeal(this.notes, id, own.seal);
+      // B3: sin cargar en el filtro de la llamada, falla cerrando (`SealedUse.unloaded`).
+      if (!own.loaded) this.notes.get(id)!.unloaded = true;
+    } else {
+      useSeal(this.notes, id, undefined);
+    }
     if (localSeq !== undefined) useSeal(this.notes, id, localSeq);
   }
 
@@ -311,8 +323,10 @@ export async function passGate(
   const trash = trashIndex ? TrashFilter.fromSnapshot(live, trashIndex, now) : undefined;
   const files = snapshot.files ? FileFilter.fromSnapshot(live, snapshot.files, now) : undefined;
 
+  // Una nota declarada sin cargar en el filtro de la llamada (`unloaded`, B3) no pasa con
+  // sellos: no se sabe con qué fila decidió.
   const sealHolds = (use: SealedUse, current: number | undefined): boolean =>
-    !use.conflict && (!options.seals || use.seal === undefined || use.seal === current);
+    !use.conflict && (!options.seals || (!use.unloaded && (use.seal === undefined || use.seal === current)));
 
   // El sello de ahora de una nota viva (o de la papelera), del mismo estado que se juzga: una
   // que cambió de estado no es la misma fila.

@@ -13,6 +13,9 @@
  * filtro (`VISIBILITY_COLUMNS` de `./privacy-sql.ts`). Una nota viva (ni papelera ni lápida) se ve
  * si a la vez:
  * - no está bloqueada mientras haya etiquetas privadas (A1);
+ * - su carpeta efectiva es una que el filtro conoce (la raíz o una viva cuando leyó las carpetas;
+ *   una creada después, quizá dentro de una privada, oculta la nota: B2 de la revisión del
+ *   candidato de memoria);
  * - su carpeta efectiva no es una carpeta oculta (privada o debajo de una, también las que una
  *   ruta privada resolvió antes, A3: la lista ya la trae el filtro);
  * - si su carpeta guardada no está viva (A2), la subida por las lápidas desde ella resuelve a algo
@@ -37,6 +40,10 @@ import { inReadTransaction } from './grep-sql';
 /** Las reglas del filtro de privados de una llamada, para aplicarlas dentro de una consulta
  *  (`PrivacyFilter.notesScope()`). */
 export interface VisibleNotesScope {
+  /** Las carpetas vivas que conoce el índice del filtro, con la raíz: una nota cuya carpeta
+   *  efectiva no está entre ellas (una subcarpeta creada después de leer las carpetas, quizá
+   *  dentro de una privada) se oculta, como en `PrivacyFilter.isHiddenNote` (B2). */
+  readonly knownFolderIds: readonly string[];
   /** Las carpetas ocultas: privadas, sus descendientes y las que resolvió antes una ruta
    *  privada (`PrivacyFilter.isFolderHidden`). */
   readonly hiddenFolderIds: readonly string[];
@@ -94,6 +101,7 @@ function bindScope(db: DatabaseSync, scope: VisibleNotesScope): BoundScope {
       WHERE n.deleted = 0 AND n.trashed_at IS NULL
     ) sv
     WHERE NOT (? <> 0 AND sv.locked IS NOT NULL AND sv.locked <> 0)
+      AND sv.folder_id IN (SELECT value FROM json_each(?))
       AND sv.folder_id NOT IN (SELECT value FROM json_each(?))
       AND (sv.stored_folder_id IS NULL OR sv.stored_folder_id IN (SELECT value FROM json_each(?)))
       AND NOT EXISTS (
@@ -105,6 +113,7 @@ function bindScope(db: DatabaseSync, scope: VisibleNotesScope): BoundScope {
     table,
     params: [
       scope.hideLocked ? 1 : 0,
+      JSON.stringify(scope.knownFolderIds),
       JSON.stringify(scope.hiddenFolderIds),
       JSON.stringify(visibleStoredFolders(db, scope)),
       JSON.stringify(scope.privateTags)
