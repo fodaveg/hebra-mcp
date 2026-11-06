@@ -31,7 +31,7 @@ it('apply no revela ni reutiliza el id de una copia de conflicto movida a una ca
     });
     if (result.outcome !== 'conflict_copy') throw new Error('Fixture: se esperaba una copia de conflicto');
     await writer.organizeLocal({ action: 'moveNote', id: result.copyId, folderId, privacy: OPEN });
-    const filter = await PrivacyFilter.build(writer.port, { privateFolders: [['diario']], privateTags: ['secreto'] });
+    const filter = await (await PrivacyFilter.build(writer.port, { privateFolders: [['diario']], privateTags: ['secreto'] })).ensureAll();
     expect(filter.isHiddenNote(result.copyId), 'Fixture: la copia está oculta antes de apply').toBe(true);
     return result.copyId;
   });

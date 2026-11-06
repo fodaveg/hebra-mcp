@@ -100,7 +100,7 @@ export async function buildTestContext(
 
   const port: NodeLibraryPort = await openNodeLibraryPort({ sqlitePath, dataDir });
   const status = new UnlinkedStatusSource();
-  const privacy = await PrivacyFilter.build(port, privacyConfig);
+  const privacy = await (await PrivacyFilter.build(port, privacyConfig)).ensureAll();
   const write = testWriteContext(port);
 
   return {

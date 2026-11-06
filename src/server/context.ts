@@ -130,9 +130,16 @@ export function afterGate(ctx: ToolContext, run: () => void): void {
   else run();
 }
 
-/** `PrivacyFilter.build` es dos consultas al almacén (`foldersList()` +
- *  `notesVisibilityIndex()`, ambas O(1) ronda): barato de sobra para pagarlo en cada
- *  llamada de herramienta en vez de cachearlo. Antes, la configuración vigente (M5: un
+/** El filtro se rehace en cada llamada en vez de cachearlo (el sync cambia el almacén).
+ *  `PrivacyFilter.build` solo lee las carpetas; las notas se cargan aparte, y cargarlas
+ *  TODAS no es barato: a 30 000 notas, unos 40-50 MiB y 0,2 s por llamada aunque la
+ *  herramienta toque una sola nota (medido, A3 del plan de memoria, 6 nov 2026).
+ *
+ *  TRANSICIÓN (A3): aquí se llama a `filter.ensureAll()` para que TODAS las herramientas
+ *  sigan exactamente igual. Las piezas A4-A8 las pasan una a una a pedir solo sus notas con
+ *  `await ctx.privacy.ensure(ids)` (patrón en la cabecera de `../privacy/filter.ts`); cuando
+ *  no quede ninguna que dependa de la carga entera, esta llamada se quita. Antes, la
+ *  configuración vigente (M5: un
  *  `stat` de `config.json`; si no se puede aplicar, `PrivacyConfigUnreadable`) y la memoria
  *  de las carpetas privadas (A3, `privacyWithMemory`: una lectura más, y una escritura solo
  *  cuando una ruta resuelve a una carpeta nueva). La `privacyConfig` que sale lleva esa
@@ -150,6 +157,8 @@ export async function resolveToolContext(ctx: ServerContext): Promise<ToolContex
     resolved = await privacyWithMemory(ctx.port, current);
   }
   const { config, filter } = resolved;
+  // Transición A3: la biblioteca entera, como antes (comentario de arriba).
+  await filter.ensureAll();
   return {
     port: ctx.port,
     privacy: filter,

@@ -9,11 +9,28 @@
  * reconstruye una por llamada). El sync cambia el almacén mientras el proceso vive
  * (`SyncRunner`, `src/sync/`): una instancia cacheada al arrancar se queda obsoleta y
  * puede enseñar, o esconder, una nota que ya no es así (hallazgo del coordinador, 26
- * sep 2026; reproducido en `test/privacy-live-refresh.test.ts`). Dos consultas del
- * almacén (`foldersList()` + `notesVisibilityIndex()`, ambas de una sola vuelta SQL)
- * lo hacen barato de sobra para pagarlo en cada llamada: medido en
- * `test/store/notes-visibility-index.node.test.ts` (milisegundos de un dígito con
- * 5 000 notas).
+ * sep 2026; reproducido en `test/privacy-live-refresh.test.ts`).
+ *
+ * Lo que NO es barato es cargar todas las notas en cada llamada: a 30 000 notas son unos
+ * 40-50 MiB de JS y 0,2 s por llamada, aunque la herramienta solo toque una nota (medido,
+ * pieza A3 del plan de memoria, 6 nov 2026). Por eso `build` solo lee lo que no crece con
+ * las notas (las carpetas, y de la configuración las etiquetas privadas y las carpetas
+ * recordadas) y las notas se cargan a petición, en el índice de ESTA instancia
+ * (`./library-index.ts`):
+ * - `await filter.ensure(ids)` carga las notas de `ids` que falten (una lectura de
+ *   `notesVisibilityIndexFor`);
+ * - `await filter.ensureAll()` carga la biblioteca entera, como antes.
+ * Preguntar por una nota que no se cargó la trata como OCULTA (falla cerrando) y deja rastro
+ * en `unloadedLookups` (y en `unloadedLookupsTotal()` del índice) para los tests.
+ *
+ * Cómo se adapta una herramienta (A4-A8): hoy `resolveToolContext` llama a `ensureAll()` por
+ * todas (transición). Para una herramienta concreta, se quita esa dependencia y, ANTES de la
+ * primera pregunta sobre una nota (`isHiddenNote`, `visibleMeta`, `visibleTagsOf`, `hasTag`,
+ * `isLockedNote`, `sealOf`), se hace `await ctx.privacy.ensure(idsQueVaATocar)` con todos los
+ * ids que decidirá (los de la página leída, la nota pedida, las homónimas…). Se puede llamar
+ * más de una vez (solo lee los que falten). Su test comprueba que `unloadedLookupsTotal()` no
+ * sube al llamarla. Las que recorren la biblioteca (`visibleNotes`, `hasHiddenLockedNote`)
+ * siguen necesitando `ensureAll()` hasta que pasen a SQL (A6/A7).
  *
  * Audit de privacidad adversarial del 10 oct 2026 (D16, `test/privacy/`): una nota
  * bloqueada se oculta mientras haya etiquetas privadas (A1), una nota viva cuya carpeta
@@ -30,11 +47,15 @@ import type {
 } from '../store/types';
 import type { PrivacyConfig } from './config';
 import { FolderIndex, privacyPathKey } from './folder-index';
-import { LibraryIndex } from './library-index';
+import { LibraryIndex, type NoteIndexEntry } from './library-index';
 import { climbFolder, type LiveFolders } from './tombstones';
 
-/** Lo que el filtro lee del almacén: carpetas y carpeta/etiquetas de cada nota viva. */
-export type PrivacySource = Pick<HebraLibraryPort, 'foldersList' | 'notesVisibilityIndex'>;
+/** Lo que el filtro lee del almacén: carpetas y carpeta/etiquetas de las notas vivas (todas
+ *  con `ensureAll`, las pedidas con `ensure`). */
+export type PrivacySource = Pick<
+  HebraLibraryPort,
+  'foldersList' | 'notesVisibilityIndex' | 'notesVisibilityIndexFor'
+>;
 
 export class PrivacyFilter implements LiveFolders {
   readonly unresolved: boolean;
@@ -49,13 +70,21 @@ export class PrivacyFilter implements LiveFolders {
   private readonly privateRootIds: Set<string>;
   /** A qué carpetas resuelve ahora cada ruta configurada, para anotarlo (A3). */
   private readonly resolvedNow: RememberedPrivateFolder[] = [];
-  /** Las lápidas por encima de las notas vivas cuya carpeta guardada no está viva (A2). */
-  private readonly trailRows = new Map<string, FolderRowFact>();
+  /** Las lápidas por encima de cada nota viva cuya carpeta guardada no está viva (A2), como
+   *  mapa por id, hecho la primera vez que se juzga esa nota. Cada nota se sube con SUS filas
+   *  (`folderTrail` llega hasta la primera viva o hasta donde falta una fila): antes de A3 era
+   *  la unión de las de todas las notas, que leídas a la vez dan lo mismo; con notas cargadas
+   *  en momentos distintos (`ensure`), una fila vieja de otra nota podría continuar una subida
+   *  que la suya corta. */
+  private readonly trails = new WeakMap<NoteIndexEntry, ReadonlyMap<string, FolderRowFact>>();
 
   private constructor(
     private readonly folders: FolderIndex,
     private readonly library: LibraryIndex,
-    config: PrivacyConfig
+    config: PrivacyConfig,
+    /** De dónde cargar las notas (`ensure`/`ensureAll`); sin él (`fromSnapshot`), el índice
+     *  ya viene entero. */
+    private readonly source?: PrivacySource
   ) {
     this.privateTags = new Set(config.privateTags);
     this.privateFolderPaths = config.privateFolders;
@@ -86,20 +115,49 @@ export class PrivacyFilter implements LiveFolders {
       if (!folders.has(root)) continue;
       for (const id of folders.subtree(root)) hidden.add(id);
     }
-    for (const [, entry] of library.entries()) {
-      for (const row of entry.folderTrail ?? []) this.trailRows.set(row.id, row);
-    }
     this.unresolved = unresolved;
     this.hiddenFolderIds = hidden;
     this.privateRootIds = roots;
   }
 
+  /**
+   * El filtro de una llamada SIN notas cargadas: lee las carpetas (O(carpetas)) y aplica la
+   * configuración (etiquetas privadas y carpetas recordadas, que ya trae `config`). Todo lo que
+   * depende solo de carpetas y configuración (`unresolved`, `isFolderHidden`, `folderPath`,
+   * `hidesAnyTag`, `isTagHidden`…) ya funciona; para juzgar notas, antes `ensure(ids)` o
+   * `ensureAll()` (comentario de cabecera). Nunca se guarda entre llamadas.
+   */
   static async build(port: PrivacySource, config: PrivacyConfig): Promise<PrivacyFilter> {
-    const [folders, library] = await Promise.all([
-      FolderIndex.build(port),
-      LibraryIndex.build(port)
-    ]);
-    return new PrivacyFilter(folders, library, config);
+    const folders = await FolderIndex.build(port);
+    return new PrivacyFilter(folders, LibraryIndex.lazy(), config, port);
+  }
+
+  /**
+   * Carga las notas de `ids` que aún no se cargaron, en UNA lectura del almacén
+   * (`notesVisibilityIndexFor`); ninguna si ya estaban todas (o con `ensureAll` hecho). Después,
+   * cada una se juzga igual que con el filtro entero. Un id que no existe, en la papelera o
+   * purgado queda como desconocido: oculto. Devuelve el propio filtro, para encadenar.
+   */
+  async ensure(ids: readonly string[]): Promise<this> {
+    if (this.source) await this.library.ensure(this.source, ids);
+    return this;
+  }
+
+  /**
+   * TRANSICIÓN (A3 del plan de memoria): carga la biblioteca entera como antes de A3. Lo
+   * llama `resolveToolContext` para que todas las herramientas sigan igual mientras A4-A8 las
+   * pasan, una a una, a `ensure(ids)`; y quien recorre la biblioteca (`visibleNotes`,
+   * `hasHiddenLockedNote`). Devuelve el propio filtro.
+   */
+  async ensureAll(): Promise<this> {
+    if (this.source) await this.library.ensureAll(this.source);
+    return this;
+  }
+
+  /** Preguntas a ESTE filtro por notas que no se cargaron (tratadas como ocultas): el rastro
+   *  de un consumidor que se olvidó de `ensure`. */
+  get unloadedLookups(): number {
+    return this.library.unloadedLookups;
   }
 
   /**
@@ -113,6 +171,7 @@ export class PrivacyFilter implements LiveFolders {
     notes: readonly NoteVisibilityEntry[],
     config: PrivacyConfig
   ): PrivacyFilter {
+    // `notes` es la biblioteca entera leída en el turno: el índice ya viene completo.
     return new PrivacyFilter(FolderIndex.fromList(folders), LibraryIndex.fromRows(notes), config);
   }
 
@@ -144,7 +203,7 @@ export class PrivacyFilter implements LiveFolders {
     if (this.hiddenFolderIds.has(entry.folderId)) return true;
     if (
       entry.storedFolderId !== undefined &&
-      climbFolder(entry.storedFolderId, this.trailRows, this, this.privatePathKeys) === undefined
+      climbFolder(entry.storedFolderId, this.trailOf(entry), this, this.privatePathKeys) === undefined
     ) {
       return true;
     }
@@ -154,16 +213,35 @@ export class PrivacyFilter implements LiveFolders {
     return false;
   }
 
+  /** Las filas de lápida de la subida de UNA nota, como mapa (ver `trails`). */
+  private trailOf(entry: NoteIndexEntry): ReadonlyMap<string, FolderRowFact> {
+    let rows = this.trails.get(entry);
+    if (rows === undefined) {
+      rows = new Map((entry.folderTrail ?? []).map((row) => [row.id, row]));
+      this.trails.set(entry, rows);
+    }
+    return rows;
+  }
+
   /** `local_seq` de la fila de la nota con la que se construyó este filtro (`undefined` si
-   *  no la conoce o la fila no lo trae): el sello por defecto de la puerta final
+   *  no la conoce, no se cargó o la fila no lo trae): el sello por defecto de la puerta final
    *  (`src/server/privacy-gate.ts`). */
   sealOf(id: string): number | undefined {
     return this.library.get(id)?.localSeq;
   }
 
   /** ¿Hay alguna nota viva BLOQUEADA y oculta? Para la variante de A1 de los ficheros
-   *  sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado. */
+   *  sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado.
+   *
+   *  Recorre la biblioteca entera: necesita `ensureAll()`. Sin él responde `true` (falla
+   *  cerrando: se ocultan los ficheros que se pueden incrustar por nombre) y deja rastro.
+   *  A6/A7 lo pasarán a SQL (una consulta de «existe una bloqueada oculta») y dejará de
+   *  depender del índice. */
   hasHiddenLockedNote(): boolean {
+    if (!this.library.isFull()) {
+      this.library.noteUnloaded();
+      return true;
+    }
     for (const [id, entry] of this.library.entries()) {
       if (entry.locked && this.isHiddenNote(id)) return true;
     }
@@ -306,8 +384,15 @@ export class PrivacyFilter implements LiveFolders {
   /** Notas visibles con su carpeta y etiquetas, para recalcular recuentos (SPEC.md §6.3:
    *  «Recuentos de `hebra_list_tags` y `hebra_list_folders`… las etiquetas privadas o
    *  solo presentes en notas ocultas tampoco» — y por la aceptación #5, una nota oculta
-   *  por ETIQUETA tampoco cuenta en el recuento de una CARPETA visible). */
+   *  por ETIQUETA tampoco cuenta en el recuento de una CARPETA visible).
+   *
+   *  Recorre la biblioteca entera: necesita `ensureAll()`. Sin él solo devuelve las visibles
+   *  de las cargadas con `ensure` (falla cerrando: lo no cargado no cuenta, nunca se enseña de
+   *  más) y deja rastro. A6/A7 pasarán sus consumidores (`hebra_list_tags`,
+   *  `hebra_list_folders`, `hebra_list_properties`, `hebra_query_properties`, `jd-port.ts`) a
+   *  recuentos en SQL. */
   visibleNotes(): Map<string, { folderId: string; tags: readonly string[] }> {
+    if (!this.library.isFull()) this.library.noteUnloaded();
     const result = new Map<string, { folderId: string; tags: readonly string[] }>();
     for (const [id, entry] of this.library.entries()) {
       if (this.isHiddenNote(id)) continue;

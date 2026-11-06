@@ -1027,6 +1027,22 @@ El dispositivo acumula tres secretos:
     plan de `hebra_replace_in_notes`. Límite: una ruta que nunca se resolvió con hebra-mcp en
     marcha (configurada con el proceso parado, y movida antes de la primera ronda) no tiene
     nada que recordar.
+- **Qué carga el filtro de cada llamada** (pieza A3 del plan de memoria, 6 nov 2026): el filtro
+  se rehace en cada llamada y nunca se guarda entre llamadas, pero cargar en él la visibilidad
+  de TODAS las notas vivas no es barato: a 30 000 notas son unos 40-50 MiB de JS y 0,2 s por
+  llamada, aunque la herramienta solo toque una nota (medido). Así que `PrivacyFilter.build`
+  solo lee lo que no crece con las notas (el árbol de carpetas; las etiquetas privadas y las
+  carpetas recordadas vienen con la configuración) y las notas se cargan a petición, en el
+  índice de esa llamada: `ensure(ids)` lee solo las de `ids` que falten
+  (`notesVisibilityIndexFor`, una consulta) y `ensureAll()` la biblioteca entera. **Falla
+  cerrando**: una nota por la que se pregunta sin haberla cargado se trata como oculta, nunca
+  como visible, y deja rastro en un contador que comprueban los tests; `visibleNotes` y
+  `hasHiddenLockedNote`, que recorren la biblioteca, sin `ensureAll` no cuentan lo no cargado y
+  dan «hay una bloqueada oculta», respectivamente. Transición: `resolveToolContext` llama a
+  `ensureAll()`, así que todas las herramientas se comportan igual que antes; las piezas A4 a
+  A8 las pasan una a una a `ensure` con sus ids, y los recuentos (`visibleNotes`) y
+  `hasHiddenLockedNote`, a SQL (A6/A7). La puerta final (abajo) construye su propio filtro con
+  lo leído en su transacción (`fromSnapshot`) y no depende de esta carga.
 - **Cuándo se evalúa**: al construir cada respuesta, a partir de los ids de carpeta y las etiquetas
   canónicas (`canonicalTag` de Hebra) del almacén, no del texto. El filtro de la llamada se
   construye al empezar y lo demás se lee después, y entre las dos cosas el sync (u otra llamada)

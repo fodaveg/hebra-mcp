@@ -44,11 +44,17 @@ export function withRememberedFolders(
 /** Lo que necesita del almacén: el filtro y la memoria. */
 export type PrivacyMemoryPort = Pick<
   HebraLibraryPort,
-  'foldersList' | 'notesVisibilityIndex' | 'rememberedPrivateFolders' | 'rememberPrivateFolders'
+  | 'foldersList'
+  | 'notesVisibilityIndex'
+  | 'notesVisibilityIndexFor'
+  | 'rememberedPrivateFolders'
+  | 'rememberPrivateFolders'
 >;
 
 /**
- * La configuración con `knownPrivateFolderIds` y el filtro construido con ella. Anota las
+ * La configuración con `knownPrivateFolderIds` y el filtro construido con ella, SIN notas
+ * cargadas (`PrivacyFilter.build` es perezoso desde A3: lo de aquí solo necesita carpetas;
+ * quien juzga notas llama después a `ensure`/`ensureAll`). Anota las
  * carpetas que la configuración resuelve ahora y no estaban, y olvida las de las rutas que
  * ya no están configuradas (en la tabla, solo si este proceso es el escritor).
  */

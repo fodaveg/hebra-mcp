@@ -693,7 +693,7 @@ describe('hebra_list_files sobre una biblioteca propia', () => {
     try {
       const ctx: ToolContext = {
         port,
-        privacy: await PrivacyFilter.build(port, NO_PRIVATE),
+        privacy: await (await PrivacyFilter.build(port, NO_PRIVATE)).ensureAll(),
         privacyConfig: NO_PRIVATE,
         status: new UnlinkedStatusSource()
       };

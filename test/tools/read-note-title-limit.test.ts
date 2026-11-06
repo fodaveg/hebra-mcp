@@ -38,7 +38,7 @@ async function addNote(test: TestContext, body: string): Promise<string> {
 
 /** El contexto con el filtro de privados reconstruido tras crear las notas. */
 async function refreshed(test: TestContext): Promise<ToolContext> {
-  const privacy = await PrivacyFilter.build(test.ctx.port, test.ctx.privacyConfig);
+  const privacy = await (await PrivacyFilter.build(test.ctx.port, test.ctx.privacyConfig)).ensureAll();
   return { ...test.ctx, privacy };
 }
 
