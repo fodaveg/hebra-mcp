@@ -94,7 +94,7 @@ describe('bases de planes al primer uso', () => {
     first.close();
     const second = await openNodeLibraryPort({ sqlitePath, dataDir: dir });
     expect((second as unknown as Internals).replacePlansDb).toBeNull();
-    await second.privacyRecheck({ notes: [], trash: false, files: false, blobs: [], operationTargets: ['nada'] });
+    await second.privacyRecheck({ notes: [], visibility: [], trash: false, files: false, blobs: [], operationTargets: ['nada'] });
     expect((second as unknown as Internals).replacePlansDb?.isOpen).toBe(true);
     second.close();
   });
