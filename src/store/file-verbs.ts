@@ -46,7 +46,8 @@
 import { createHash } from 'node:crypto';
 import { LibraryError } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
-import { FileFilter } from '../privacy/file-filter';
+import type { FileFilter } from '../privacy/file-filter';
+import type { PrivacyFilter } from '../privacy/filter';
 import { existingFileRejected, writeRejected } from './errors';
 import {
   createFileMime,
@@ -64,7 +65,8 @@ import type { FilesIndex } from './types';
 import {
   hiddenOperationTarget,
   priorOperation,
-  privacyInTurn,
+  looseFilesFilterInTurn,
+  privacyInTurnFor,
   type FileRow,
   type LocalWrite,
   type NoteWriteStore,
@@ -243,9 +245,15 @@ function verbRejection(error: unknown): unknown {
 interface Turn {
   store: NoteWriteStore;
   files: FileFilter;
-  live: ReturnType<typeof privacyInTurn>;
+  /** Con SOLO las notas que juzga `files` (`looseFilesFilterInTurn`, A8 del plan de memoria):
+   *  para las carpetas; otras notas se juzgan con `liveFor`. */
+  live: PrivacyFilter;
   /** Las filas tal como están guardadas, de las que sale `files`. */
   index: FilesIndex;
+  /** La configuración de quien pide, para rehacer los filtros con más notas en el turno. */
+  privacy: PrivacyConfig;
+  /** El filtro de privados del turno con solo esas notas (las que se reenlazan). */
+  liveFor(noteIds: readonly string[]): PrivacyFilter;
 }
 
 /** La carpeta de destino, viva y visible; si no, `not_found` (como `hebra_move_note`: una
@@ -282,10 +290,15 @@ function rejectVisibleHomonym(turn: Turn, folderId: string, name: string, self?:
 
 /** Paso 6 de la cabecera: ¿quedaría oculto un fichero con ese nombre y esos bytes? */
 function wouldHide(turn: Turn, name: string, sha256: string): boolean {
-  return turn.files.wouldHide(name, [
-    ...turn.store.notesLinkingFileName(name),
-    ...turn.store.notesLinkingBlob(sha256)
-  ]);
+  const refs = [...turn.store.notesLinkingFileName(name), ...turn.store.notesLinkingBlob(sha256)];
+  // Las notas de `refs` no tienen por qué estar en el filtro del turno (A8): se juzgan con uno
+  // que también las lleva, en el mismo turno. Sin referencias, el del turno basta (la variante
+  // de las bloqueadas ya va en él).
+  const files =
+    refs.length === 0
+      ? turn.files
+      : looseFilesFilterInTurn(turn.store, turn.privacy, turn.index, refs.map((ref) => ref.noteId)).files;
+  return files.wouldHide(name, refs);
 }
 
 /** La prueba de lo guardado de un fichero recién creado (crear, duplicar): el SHA-256 de la
@@ -349,8 +362,7 @@ export async function writeLooseFile(
     const fetchable = await target.writeExclusive(async (store) => {
       if (store.operations.lookup(input.operationId)?.state === 'done') return null;
       try {
-        const live = privacyInTurn(store, input.privacy);
-        const files = FileFilter.fromSnapshot(live, store.filesIndex(), input.privacy);
+        const { files } = looseFilesFilterInTurn(store, input.privacy, store.filesIndex());
         const content = requireVisibleLiveFile({ files }, input.id);
         const known = content.file.byteLength;
         if (known !== null && known > FILE_DUPLICATE_MAX_BYTES) return null;
@@ -365,7 +377,10 @@ export async function writeLooseFile(
   const outcome = await target.writeExclusive(async (store): Promise<LocalWrite<LooseFileSaved>> => {
     const now = Date.now();
     const log = store.operations;
-    const live = privacyInTurn(store, input.privacy);
+    // Solo las notas que juzga el filtro de los ficheros (A8); las demás, con `liveFor` y
+    // `wouldHide`, cuando hacen falta.
+    const index = store.filesIndex();
+    const { live, files } = looseFilesFilterInTurn(store, input.privacy, index);
     const previous = priorOperation(
       log,
       input.operationId,
@@ -373,9 +388,14 @@ export async function writeLooseFile(
       now,
       hiddenOperationTarget(store, live, input.privacy)
     );
-    const index = store.filesIndex();
-    const files = FileFilter.fromSnapshot(live, index, input.privacy);
-    const turn: Turn = { store, files, live, index };
+    const turn: Turn = {
+      store,
+      files,
+      live,
+      index,
+      privacy: input.privacy,
+      liveFor: (noteIds) => privacyInTurnFor(store, input.privacy, noteIds)
+    };
 
     if (previous?.state === 'done' && isLooseFileSaved(previous.result)) {
       // Lo que nombra (el fichero y la carpeta anotada) tiene que seguir viéndose: si no,

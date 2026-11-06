@@ -42,7 +42,7 @@
 import { createHash } from 'node:crypto';
 import { LibraryError } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
-import { FileFilter } from '../privacy/file-filter';
+import type { FileFilter } from '../privacy/file-filter';
 import { writeRejected } from './errors';
 import {
   detectFileType,
@@ -54,7 +54,8 @@ import { OPERATION_ID_MAX_LENGTH } from './operations';
 import {
   hiddenOperationTarget,
   priorOperation,
-  privacyInTurn,
+  looseFilesFilterInTurn,
+  privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -144,13 +145,15 @@ function newTextBytes(text: string): Uint8Array {
 }
 
 /** El fichero VISIBLE y vivo con el filtro de quien pide, sobre el almacén del turno; si
- *  no, `not_found` (oculto, inexistente, lápida o en la papelera, todo igual). */
+ *  no, `not_found` (oculto, inexistente, lápida o en la papelera, todo igual). El filtro de
+ *  privados lleva solo las notas que `FileFilter` juzga (`looseFilesFilterInTurn`, A8);
+ *  `index`, para rehacerlo con más notas. */
 function visibleLiveFile(store: NoteWriteStore, id: string, privacy: PrivacyConfig) {
-  const live = privacyInTurn(store, privacy);
-  const files = FileFilter.fromSnapshot(live, store.filesIndex(), privacy);
+  const index = store.filesIndex();
+  const { files } = looseFilesFilterInTurn(store, privacy, index);
   const content = files.contentOf(id);
   if (!content || content.file.trashedAt !== null) throw writeRejected('not_found');
-  return { files, content };
+  return { files, content, index };
 }
 
 const BOM = new Uint8Array([0xef, 0xbb, 0xbf]);
@@ -256,10 +259,10 @@ export async function replaceFileText(
         input.operationId,
         fingerprint,
         now,
-        hiddenOperationTarget(store, privacyInTurn(store, input.privacy), input.privacy)
+        hiddenOperationTarget(store, privacyInTurnFor(store, input.privacy, []), input.privacy)
       );
       store.looseFilePrevious.purgeExpired(now);
-      const { files, content } = visibleLiveFile(store, input.id, input.privacy);
+      const { files, content, index } = visibleLiveFile(store, input.id, input.privacy);
       const { file } = content;
 
       if (previous?.state === 'done' && isReplaceFileTextSaved(previous.result)) {
@@ -350,7 +353,14 @@ export async function replaceFileText(
 
       // Regla (b) de D10 sobre el contenido NUEVO: si una nota oculta enlaza esos bytes,
       // el fichero pasaría a oculto. No se escribe, y responde como uno inexistente.
-      if (store.notesLinkingBlob(newSha).some((ref) => files.isHiddenReference(ref))) {
+      // Las notas que enlazan esos bytes no estaban en el filtro del principio (A8): se juzgan
+      // con uno que también las lleva, en el mismo turno.
+      const linking = store.notesLinkingBlob(newSha);
+      const judge =
+        linking.length === 0
+          ? files
+          : looseFilesFilterInTurn(store, input.privacy, index, linking.map((ref) => ref.noteId)).files;
+      if (linking.some((ref) => judge.isHiddenReference(ref))) {
         throw writeRejected('not_found');
       }
 

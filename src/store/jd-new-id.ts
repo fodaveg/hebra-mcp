@@ -40,7 +40,6 @@ import {
   type PlannedTemplate
 } from '../jd';
 import type { PrivacyConfig } from '../privacy/config';
-import { FileFilter } from '../privacy/file-filter';
 import { StoreError, writeRejected, type JdRejectionCode } from './errors';
 import { planCreateFolder, validFolderName } from './folders';
 import { isJdexFolderCandidate, JdLibraryPort, type JdView, type JdWrites } from './jd-port';
@@ -49,9 +48,11 @@ import { OPERATION_ID_MAX_LENGTH } from './operations';
 import { privacyFingerprint } from './replace';
 import {
   CREATE_BODY_MAX_LENGTH,
+  looseFilesFilterInTurn,
   hiddenOperationTarget,
   priorOperation,
   privacyInTurn,
+  privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -151,7 +152,8 @@ export function turnView(store: NoteWriteStore, privacy: PrivacyConfig): JdView 
     noteTitles: (ids) => store.noteTitles(ids),
     files: () => {
       const index = store.filesIndex();
-      return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, privacy), index, privacy) };
+      // `FileFilter` solo juzga las notas que enlazan ficheros y las bloqueadas (A8).
+      return { index, filter: looseFilesFilterInTurn(store, privacy, index).files };
     }
   };
 }
@@ -227,7 +229,8 @@ export function isJdApplyReport(value: unknown): value is JdApplyReport {
  * etiquetas privadas (como `ensureNote`, con el título en el frontmatter).
  */
 function checkWrites(store: NoteWriteStore, privacy: PrivacyConfig, plan: NewIdPlan): void {
-  const filter = privacyInTurn(store, privacy);
+  // Carpetas y configuración: no juzga ninguna nota (A8).
+  const filter = privacyInTurnFor(store, privacy, []);
   for (const write of plan.writes) {
     if (write.kind === 'ensure_folder') {
       if (validFolderName(write.name) === null) throw jdRejected('invalid_title');
@@ -257,7 +260,7 @@ async function simulate(
   const port = turnPort(store, request.privacy);
   // Una carpeta cualquiera como JDex haría de `hasHidden` un oráculo de sus notas ocultas: solo
   // una `00.00` visible (si no, como sin JDex).
-  if (request.jdexFolderId !== undefined && !isJdexFolderCandidate(privacyInTurn(store, request.privacy), request.jdexFolderId)) {
+  if (request.jdexFolderId !== undefined && !isJdexFolderCandidate(privacyInTurnFor(store, request.privacy, []), request.jdexFolderId)) {
     throw jdRejected('jdex_not_found');
   }
   const resolved = await resolveSettings(port, {
@@ -287,7 +290,7 @@ async function simulate(
   const templateId = plan.template.noteId;
   const stored: StoredJdPlan = {
     plan,
-    templateSeal: templateId === undefined ? null : (privacyInTurn(store, request.privacy).sealOf(templateId) ?? null)
+    templateSeal: templateId === undefined ? null : (privacyInTurnFor(store, request.privacy, [templateId]).sealOf(templateId) ?? null)
   };
   store.jdPlans.insert({
     planId,
@@ -342,7 +345,7 @@ export async function runJdNewId(
           return { result: { mode: 'discard' }, wrote: false };
         case 'simulate':
           // Cerrado ante la duda: una configuración que no resuelve no simula nada.
-          privacyInTurn(store, request.privacy);
+          privacyInTurnFor(store, request.privacy, []);
           return { result: await simulate(store, request, now), wrote: false };
         case 'apply': {
           const filter = privacyInTurn(store, request.privacy);

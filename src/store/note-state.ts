@@ -37,7 +37,7 @@ import { writeRejected } from './errors';
 import { decodeRevision } from './revision';
 import {
   LOCKED_BODY_PREFIX,
-  privacyInTurn,
+  privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
   type NoteWriteTarget,
@@ -116,7 +116,8 @@ export async function writeNoteState(
   onWritten: () => void
 ): Promise<LocalWrite<NoteStateSaved>> {
   const outcome = await target.writeExclusive(async (store): Promise<LocalWrite<NoteStateSaved>> => {
-    const filter = privacyInTurn(store, input.privacy);
+    // Solo la nota de la acción (A8): todas las acciones juzgan `input.id` y nada más.
+    const filter = privacyInTurnFor(store, input.privacy, [input.id]);
     const unchanged = (row: NoteRow): LocalWrite<NoteStateSaved> => ({ result: savedOf(row, false), wrote: false });
     /** Viva y visible; oculta, en la papelera o inexistente, `not_found`, las tres igual. */
     const visibleLive = async (id: string): Promise<NoteRow> => {

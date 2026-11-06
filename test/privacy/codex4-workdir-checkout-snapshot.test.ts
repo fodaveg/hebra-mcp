@@ -18,7 +18,9 @@ async function checkoutAcrossFolderMove(moveDuringFreshFilter: boolean) {
   });
   const cwd = tempDir('codex4-wd-checkout-');
   const foldersList = h.port.foldersList.bind(h.port);
-  const notesVisibilityIndex = h.port.notesVisibilityIndex.bind(h.port);
+  // El filtro fresco de checkout lee solo las notas que juzga (A8 del plan de memoria): su
+  // lectura del índice es `notesVisibilityIndexFor`, ya no `notesVisibilityIndex`.
+  const notesVisibilityIndexFor = h.port.notesVisibilityIndexFor.bind(h.port);
   let folderReads = 0;
   let indexReads = 0;
   let moved = false;
@@ -34,10 +36,10 @@ async function checkoutAcrossFolderMove(moveDuringFreshFilter: boolean) {
     }
     return rows;
   });
-  const indexSpy = vi.spyOn(h.port, 'notesVisibilityIndex').mockImplementation(async () => {
+  const indexSpy = vi.spyOn(h.port, 'notesVisibilityIndexFor').mockImplementation(async (ids) => {
     indexReads += 1;
     if (moveDuringFreshFilter && indexReads === 2) await moveFinished;
-    return notesVisibilityIndex();
+    return notesVisibilityIndexFor(ids);
   });
   const open: OpenLibrary = async () => ({
     role: 'this', linked: true, port: h.port, privacyConfig: AUDIT_CONFIG,

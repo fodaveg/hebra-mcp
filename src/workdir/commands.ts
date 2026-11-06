@@ -210,7 +210,8 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
   try {
     const round = await syncRoundQuietly(lib);
     // Este y `selecting` (abajo) solo miran `unresolved` y carpetas: sin cargar notas (A3).
-    // `built`, que juzga notas (`canLeave`), carga la biblioteca entera con `ensureAll`.
+    // `built`, que juzga notas (`canLeave`), carga solo las que juzga: las leídas y las sacadas
+    // antes (A8 del plan de memoria; antes, la biblioteca entera con `ensureAll`).
     const filter = await PrivacyFilter.build(lib.port, lib.privacyConfig);
     if (filter.unresolved) {
       throw new WorkdirError(
@@ -290,7 +291,12 @@ async function checkoutLocked(io: CommandIo, open: OpenLibrary, args: CheckoutAr
       for (const entry of existing?.notas ?? []) {
         if (!seen.has(entry.id)) previous.set(entry.id, await lib.port.noteRead(entry.id));
       }
-      const built = await (await PrivacyFilter.build(lib.port, lib.privacyConfig)).ensureAll();
+      // Solo las que `canLeave` juzga abajo: las candidatas (`seen`, de donde sale `read`) y
+      // las sacadas antes que no se pidieron (`previous`). Otra nota sería desconocida: oculta.
+      const built = await (await PrivacyFilter.build(lib.port, lib.privacyConfig)).ensure([
+        ...seen,
+        ...previous.keys()
+      ]);
       if (built.unresolved) {
         throw new WorkdirError(
           'la configuración de privados no se puede aplicar (una carpeta privada configurada no existe): no se saca nada'

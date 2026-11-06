@@ -38,11 +38,11 @@
  */
 import { createHash } from 'node:crypto';
 import type { PrivacyConfig } from '../privacy/config';
-import type { PrivacyFilter } from '../privacy/filter';
+
 import { TrashFilter } from '../privacy/trash-filter';
 import {
   LOCKED_BODY_PREFIX,
-  privacyInTurn,
+  privacyInTurnFor,
   saveInputFor,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -117,14 +117,18 @@ function sha256Hex(text: string): string {
 
 /** Copia viva y VISIBLE de `originalId` con ese cuerpo, si la hay (para no crear otra). Una
  *  oculta (movida a una carpeta privada, o con una etiqueta privada) no se reutiliza ni se
- *  nombra (C4 de la revisión de Codex, 11 oct 2026): se crea otra, visible. */
+ *  nombra (C4 de la revisión de Codex, 11 oct 2026): se crea otra, visible. Las copias se
+ *  juzgan con un filtro de SOLO ellas, en el mismo turno (`privacyInTurnFor`, A8). */
 async function findCopy(
   store: NoteWriteStore,
-  filter: PrivacyFilter,
+  privacy: PrivacyConfig,
   originalId: string,
   bodySha256: string
 ): Promise<string | null> {
-  for (const copyId of store.conflictCopyIds(originalId)) {
+  const copyIds = store.conflictCopyIds(originalId);
+  if (copyIds.length === 0) return null;
+  const filter = privacyInTurnFor(store, privacy, copyIds);
+  for (const copyId of copyIds) {
     if (filter.isHiddenNote(copyId)) continue;
     const copy = await store.noteRead(copyId);
     if (copy && copy.trashedAt === null && copy.conflictOf === originalId && copy.bodySha256 === bodySha256) {
@@ -140,7 +144,8 @@ export async function replaceBodyInTurn(
   input: ReplaceBodyInput,
   hooks: ReplaceBodyTestHooks = {}
 ): Promise<{ result: ReplaceBodyResult; wrote: boolean }> {
-  const filter = privacyInTurn(store, input.privacy);
+  // Solo la nota que se escribe (A8); sus copias de conflicto, si hacen falta, en `findCopy`.
+  const filter = privacyInTurnFor(store, input.privacy, [input.id]);
   const note = await store.noteRead(input.id);
   if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
     return { result: { outcome: 'unavailable' }, wrote: false };
@@ -160,7 +165,7 @@ export async function replaceBodyInTurn(
     return { result: { outcome: 'conflict_rejected' }, wrote: false };
   }
   if (changedUnderneath) {
-    const existing = await findCopy(store, filter, note.id, editedSha);
+    const existing = await findCopy(store, input.privacy, note.id, editedSha);
     if (existing) return { result: { outcome: 'conflict_copy', copyId: existing, reused: true }, wrote: false };
   }
   // Base del guardado: la actual si el cuerpo sigue siendo la base (solo cambiaron
@@ -194,13 +199,14 @@ export async function trashConflictCopiesInTurn(
   store: NoteWriteStore,
   input: TrashConflictCopiesInput
 ): Promise<{ result: TrashConflictCopiesResult; wrote: boolean }> {
-  const filter = privacyInTurn(store, input.privacy);
+  const named = input.copyId !== undefined;
+  const ids = named ? [input.copyId!] : store.conflictCopyIds(input.originalId);
+  // Solo las copias que se miran (A8): ninguna otra nota se juzga aquí.
+  const filter = privacyInTurnFor(store, input.privacy, ids);
   // La papelera tiene su propio filtro (`isHiddenNote` solo conoce las notas vivas).
   const trash = TrashFilter.fromSnapshot(filter, store.trashIndex(), input.privacy);
   const result: TrashConflictCopiesResult = { trashed: 0, already: 0, changed: 0 };
-  const named = input.copyId !== undefined;
   const excluded = new Set(input.exclude ?? []);
-  const ids = named ? [input.copyId!] : store.conflictCopyIds(input.originalId);
   for (const id of ids) {
     const copy = await store.noteRead(id);
     // Solo copias de conflicto de ESA nota: con otra nota no hace nada.
