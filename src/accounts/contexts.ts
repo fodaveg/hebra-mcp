@@ -29,12 +29,13 @@ export interface AccountContextLease {
    */
   prepareSpaces(spaceIds: readonly string[], shouldStop?: () => boolean): Promise<void>;
   /**
-   * Antes de llegar a las herramientas: aparta en la compuerta de memoria lo que costarán las
-   * llamadas de la petición, una entrada por llamada con su destino (`'personal'` o el
-   * `spaceId`), `requestReserveBytes()` cada una sea cual sea el destino y sin contar sus notas,
-   * en la misma cola y con la misma espera que las aperturas. Lo apartado se
-   * suelta cuando la petición termina del todo: respuesta enviada o cortada y última
-   * herramienta acabada, también si lanzó. Al agotar la espera,
+   * Antes de llegar a las herramientas, con las llamadas de la petición (una entrada por llamada
+   * con su destino, `'personal'` o el `spaceId`): guarda `signal` para las esperas de cada
+   * llamada y, si hay alguna, aparta ya la memoria de UNA (`requestReserveBytes()`), en el turno
+   * de la cuenta. Así una petición que no cabe recibe 503 con `Retry-After` antes de empezar.
+   * Esa reserva la usa la primera herramienta que se ejecute; cada una de las demás aparta la
+   * suya al empezar (`trackInvocation`) y la suelta al terminar, también si lanza. Lo que nadie
+   * usó se suelta con la petición. Al agotar la espera,
    * `ContextUnavailableError('capacity_wait_timeout')`; con `signal` abortado, sale de la cola.
    */
   admitCalls(targets: readonly string[], signal?: AbortSignal): Promise<void>;
@@ -66,29 +67,78 @@ interface Entry {
   life: ResourceLifecycle<ServeContext>;
 }
 
+/** Aparta la memoria de una llamada en el turno de su cuenta. */
+type AdmitCall = (signal?: AbortSignal) => Promise<AdmissionTicket>;
+
 /**
  * El uso de una petición HTTP: su lease de cuenta, los de los espacios que toque y la memoria
- * que apartó para sus llamadas. Una herramienta sigue corriendo aunque el cliente se
- * desconecte, así que el fin de la respuesta no basta para soltarlos: hasta que no acaba la
- * última, la instancia no se puede cerrar ni su memoria se da por libre.
+ * de cada llamada en curso. Una herramienta sigue corriendo aunque el cliente se desconecte,
+ * así que el fin de la respuesta no basta para soltarlos: hasta que no acaba la última, la
+ * instancia no se puede cerrar. La memoria va por llamada: cada una la aparta al empezar y la
+ * suelta al terminar (SPEC.md §12.10).
  */
 class RequestUse {
   private invocations = 0;
   private released = false;
   private finished = false;
+  private signal: AbortSignal | undefined;
   private readonly spaceLeases: SpaceLease[] = [];
-  private readonly tickets: AdmissionTicket[] = [];
+  /** Reservas apartadas antes de llegar a las herramientas (`admitCalls`), aún sin herramienta. */
+  private readonly prepaid: AdmissionTicket[] = [];
 
-  constructor(private readonly finish: () => void) {}
+  constructor(
+    private readonly finish: () => void,
+    private readonly admitCall: AdmitCall
+  ) {}
 
+  /**
+   * Una llamada de herramienta: cuenta como uso desde que pide turno, aparta su memoria (la ya
+   * apartada por `admitCalls`, o espera la suya) y la suelta al terminar, bien o mal. Si el
+   * cliente se va mientras espera, sale de la cola sin apartar y la llamada no se ejecuta.
+   */
   async track<T>(run: () => Promise<T>): Promise<T> {
     if (this.finished) throw new Error('request_closed');
     this.invocations += 1;
+    let ticket: AdmissionTicket | undefined;
     try {
+      ticket = this.prepaid.shift();
+      if (!ticket) ticket = await this.admitWithLog();
       return await run();
     } finally {
+      ticket?.done();
       this.invocations -= 1;
       this.maybeFinish();
+    }
+  }
+
+  /** Lo que guarda `admitCalls`: la señal de corte del cliente para las esperas de cada llamada. */
+  watch(signal: AbortSignal | undefined): void {
+    this.signal = signal;
+  }
+
+  /** La reserva de una llamada antes de llegar a las herramientas: la usa la primera que corra. */
+  async prepay(): Promise<void> {
+    const ticket = await this.admitCall(this.signal);
+    if (this.finished) {
+      ticket.done();
+      throw new Error('request_closed');
+    }
+    this.prepaid.push(ticket);
+  }
+
+  /**
+   * Una llamada que no consigue turno dentro de una petición ya respondida con 200 no puede ser
+   * un 503: la herramienta falla con el motivo como texto (el SDK lo convierte en `isError`), y
+   * el log dice `mcp.unavailable` con `scope: 'call'`, sin datos de la persona.
+   */
+  private async admitWithLog(): Promise<AdmissionTicket> {
+    try {
+      return await this.admitCall(this.signal);
+    } catch (error) {
+      if (error instanceof ContextUnavailableError) {
+        logEvent({ event: 'mcp.unavailable', reason: error.reason, scope: 'call' });
+      }
+      throw error;
     }
   }
 
@@ -101,15 +151,6 @@ class RequestUse {
     return lease.value;
   }
 
-  /** La memoria apartada para las llamadas: se suelta con el último lease de la petición. */
-  holdTicket(ticket: AdmissionTicket): void {
-    if (this.finished) {
-      ticket.done();
-      throw new Error('request_closed');
-    }
-    this.tickets.push(ticket);
-  }
-
   release(): void {
     this.released = true;
     this.maybeFinish();
@@ -119,7 +160,8 @@ class RequestUse {
     if (this.finished || !this.released || this.invocations > 0) return;
     this.finished = true;
     for (const lease of this.spaceLeases.splice(0)) lease.release();
-    for (const ticket of this.tickets.splice(0)) ticket.done();
+    // Lo apartado para una llamada que no llegó a ejecutarse (el SDK la rechazó antes).
+    for (const ticket of this.prepaid.splice(0)) ticket.done();
     this.finish();
   }
 }
@@ -207,6 +249,16 @@ export class AccountContexts {
     });
   }
 
+  /** Lo apartado ahora en la compuerta de memoria (diagnóstico y pruebas). */
+  get reservedBytes(): number {
+    return this.gate.reservedBytes;
+  }
+
+  /** Aperturas y llamadas esperando turno de memoria (diagnóstico y pruebas). */
+  get waitingCount(): number {
+    return this.gate.waitingCount;
+  }
+
   async acquire(account: AuthorizedAccount): Promise<AccountContextLease> {
     for (;;) {
       if (this.closed) throw new Error('contexts_closed');
@@ -227,7 +279,11 @@ export class AccountContexts {
         lease.release();
         throw error;
       }
-      const use = new RequestUse(() => lease.release());
+      // Cada llamada aparta lo suyo en el turno de su cuenta (SPEC.md §12.10).
+      const use = new RequestUse(
+        () => lease.release(),
+        (signal) => this.gate.admit(signal, requestReserveBytes(), account.id)
+      );
       const lifecycle = lease.value.ctx.spaces?.lifecycle;
       return {
         ctx: guardedContext(lease.value.ctx, this.registry, account, use),
@@ -236,8 +292,8 @@ export class AccountContexts {
           for (const space of await lifecycle.prepare(spaceIds, shouldStop)) use.hold(space);
         },
         admitCalls: async (targets, signal) => {
-          if (targets.length === 0) return;
-          use.holdTicket(await this.gate.admit(signal, targets.length * requestReserveBytes()));
+          use.watch(signal);
+          if (targets.length > 0) await use.prepay();
         },
         release: () => use.release()
       };
@@ -363,11 +419,11 @@ export class AccountContexts {
         await waitForLock();
         continue;
       }
-      const ticket = await this.gate.admit(signal);
+      const ticket = await this.gate.admit(signal, undefined, account.id);
       try {
         this.registry.assertActive(account);
         const opened = await this.open(account);
-        this.prepareOpened(opened);
+        this.prepareOpened(opened, account);
         return opened;
       } catch (error) {
         if ((error as { code?: unknown } | null)?.code !== 'writer_lock_held') throw error;
@@ -378,13 +434,13 @@ export class AccountContexts {
     }
   }
 
-  private prepareOpened(opened: ServeContext): void {
+  private prepareOpened(opened: ServeContext, account: AuthorizedAccount): void {
     const lifecycle: SpaceLifecycleControl | undefined = opened.ctx.spaces?.lifecycle;
     lifecycle?.configure({
       idleMs: this.idleMs,
       openWaitMs: this.openWaitMs,
       clock: this.clock,
-      admit: (signal) => this.gate.admit(signal),
+      admit: (signal) => this.gate.admit(signal, undefined, account.id),
       onClosed: () => this.gate.recheck()
     });
     if (this.closed) this.shutDownOpened(opened);

@@ -403,11 +403,19 @@ ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
   biblioteca, porque cada herramienta carga solo las suyas en el filtro de privados (SPEC.md §6.3).
   Antes eran unos 3,5 KB por nota de la biblioteca, unos 100 MiB por llamada con 30 000 notas. Las
   tres herramientas del JDex (`hebra_jd_*`) aún cargan la biblioteca entera mientras no esté hecha
-  su pieza, y apartan lo mismo. Lo que no cabe espera en una sola cola, por orden de llegada, hasta
-  `HEBRA_MCP_OPEN_WAIT_MS`, y después recibe el 503 `capacity_wait_timeout`. Una ráfaga de
-  búsquedas ya no sube la memoria sin control: espera su turno. Muchos `capacity_wait_timeout` con
-  poca gente indican que el límite se queda corto para lo que hay abierto, no un fallo: se sube
-  `mem_limit`. Una sola petición que no cabe en el margen entra igual si no hay nada más en curso.
+  su pieza, y apartan lo mismo.
+- La memoria se aparta por llamada, cuando cada herramienta empieza, y se suelta cuando esa
+  herramienta acaba: un lote de 100 llamadas entra de una en una según quepa, no de golpe. Un lote
+  de más de 100 mensajes recibe 400 sin abrir nada. Lo que no cabe espera su turno hasta
+  `HEBRA_MCP_OPEN_WAIT_MS`; el turno rota por cuenta (la que lleva más sin entrar) y dentro de cada
+  cuenta va por orden de llegada, así que una persona con muchas llamadas no deja esperando a las
+  demás: cada una entra en el siguiente hueco. No hay cupo por persona; quien está sola usa todo el
+  margen. Al agotar la espera, la petición recibe el 503 `capacity_wait_timeout`; si era una llamada
+  de un lote ya en marcha, esa herramienta falla con ese texto y el log dice `mcp.unavailable` con
+  `scope: "call"`. Muchos `capacity_wait_timeout` con poca gente indican que el límite se queda corto
+  para lo que hay abierto, no un fallo: se sube `mem_limit`. Una sola llamada o apertura entra
+  aunque no quepa en el margen si no hay nada más en curso y lo medido está por debajo del límite;
+  nunca más de una a la vez por esa vía.
 - `control/server.lock` lo toma el servicio y lo ve cualquier proceso, también de otro contenedor
   sobre el mismo volumen. Un segundo `serve-http` no arranca. Es un fichero vacío que no se borra.
 - `control/pending-uploads-v1.json` es la lista de subidas que quedaron al cerrar una biblioteca.

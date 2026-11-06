@@ -38,6 +38,7 @@ import express, {
   type Response
 } from 'express';
 import type { Router } from 'express';
+import { MAX_BATCH_SIZE } from '@modelcontextprotocol/sdk/server/requestBody.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { logEvent } from '../log/logger';
 import { buildMcpServer } from '../server/build-server';
@@ -189,10 +190,23 @@ export function requestedSpaces(body: unknown): string[] {
 }
 
 /**
- * El destino de cada llamada de herramienta de este cuerpo, para apartar su memoria antes de
- * ejecutarla (SPEC.md §12.10): `'personal'` sin `space` o con ese literal, y si no, el valor de
- * `space` tal cual (si no es un espacio preparado, aparta el mínimo). Un cuerpo sin
- * `tools/call` (`initialize`, `tools/list`) no aparta nada.
+ * Mensajes de un lote JSON-RPC como mucho: el tope del SDK (`MAX_BATCH_SIZE`), que rechaza los
+ * lotes mayores dentro del transporte. Aquí se aplica antes de adquirir el contexto y de apartar
+ * memoria, para que un lote que no se va a ejecutar no espere turno ni vacíe lo que hay en curso.
+ */
+export const MAX_MCP_BATCH_MESSAGES = MAX_BATCH_SIZE;
+
+/** ¿Es un lote con más mensajes de los que admite el SDK? */
+export function isOversizedBatch(body: unknown): boolean {
+  return Array.isArray(body) && body.length > MAX_MCP_BATCH_MESSAGES;
+}
+
+/**
+ * El destino de cada llamada de herramienta de este cuerpo (SPEC.md §12.10): `'personal'` sin
+ * `space` o con ese literal, y si no, el valor de `space` tal cual. Si hay alguna, la memoria de
+ * una se aparta antes de llegar a las herramientas; cada llamada aparta la suya al empezar. Un
+ * cuerpo sin `tools/call` (`initialize`, `tools/list`) no aparta nada. Nunca ve un lote mayor que
+ * `MAX_MCP_BATCH_MESSAGES`: ese se rechaza antes.
  */
 export function requestedCalls(body: unknown): string[] {
   const targets: string[] = [];
@@ -255,6 +269,11 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
       sendJsonRpcError(res, 415, -32000, 'Content-Type debe ser application/json.');
       return;
     }
+    // Antes de abrir ni apartar nada: el SDK no ejecutaría ningún mensaje de este lote.
+    if (isOversizedBatch(req.body)) {
+      sendJsonRpcError(res, 400, -32600, `El lote supera ${MAX_MCP_BATCH_MESSAGES} mensajes.`);
+      return;
+    }
     const account = auth.account?.(req) ?? null;
     if (!account) {
       if (auth.account) { sendJsonRpcError(res, 401, -32000, 'Token no válido.'); return; }
@@ -270,8 +289,9 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
       try {
         await lease.prepareSpaces(requestedSpaces(req.body), () => res.destroyed);
         if (res.destroyed) return;
-        // Después de abrir: lo apartado mide lo que cuestan las llamadas, no la apertura. Se
-        // suelta con el último lease de la petición (`release` y la última herramienta).
+        // Después de abrir: aparta la memoria de UNA llamada, para responder 503 antes de empezar
+        // si no cabe; las demás apartan la suya al ejecutarse, cada una en el turno de la cuenta,
+        // y la sueltan al terminar. Con el cliente ido, la que espera sale de la cola.
         await lease.admitCalls(requestedCalls(req.body), gone.signal);
         if (res.destroyed) return;
         await handleMcp(lease.ctx, version, req, res);
