@@ -415,6 +415,59 @@ ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
   cierre del sync (47 s). No hace falta subir ese valor sin cambiar esos tiempos.
 - La vuelta atrás de los secretos globales (`control-secrets-rollback`) está en la sección siguiente.
 
+### Medir la memoria con el arnés de carga (`npm run mem:carga`)
+
+`mem_limit` no se adivina ni espera a que varias personas se conecten a la vez: se mide con
+bibliotecas sintéticas (sin datos personales) y el motor real. El arnés abre N contextos con
+`openServeContext({ writerOnly: true })`, como `serve-http`, llama a las herramientas con
+`buildMcpServer` y un cliente MCP en memoria, y mide dentro de un contenedor con `--memory` sobre la
+imagen base de este `Dockerfile` (la línea `FROM`). Necesita Docker y tarda minutos, así que no
+forma parte de `npm run check`. En el Mac de David se lanza por la cola de procesos pesados:
+
+```sh
+~/code/dashboard_agents/scripts/cola-pesada.sh --etiqueta "hebra-mcp mem:carga" -- \
+  npm run mem:carga -- --memory 512m --notas 30000 --contextos 20 --concurrentes 1,5,20
+```
+
+| Opción | Qué es |
+|---|---|
+| `--memory` | Límite del contenedor (`512m`, `1g`…). Defecto `512m` |
+| `--notas` | Notas por biblioteca. Defecto 5000. Se generan una vez por cifra y se reutilizan |
+| `--contextos` | Contextos abiertos a la vez (cuentas con la biblioteca abierta). Defecto 5 |
+| `--concurrentes` | Lista de K peticiones a la vez, cada una en un contexto distinto. Defecto `1,2,5` |
+| `--cache-dir` | Carpeta de bibliotecas generadas. Defecto `.cache/mem` (ignorada por git) |
+| `--salida`, `--etiqueta` | Carpeta de resultados (defecto `<cache-dir>/out`) y nombre de la corrida |
+| `--max-ctx-ocioso-mib`, `--max-pico-peticion-mib`, `--max-pico-concurrente-mib`, `--max-retenido-tras-cerrar-mib` | Umbrales opcionales. Si uno se supera, o hay OOM, el comando sale con código 1 |
+
+Deja `<etiqueta>.summary.json` (las cifras y los umbrales), `.jsonl` (una línea por fase) y `.log`, e
+imprime una tabla. El volumen de Docker de la corrida se borra al acabar. Las cifras, todas en MiB:
+
+- **Base del proceso**: `anon` del cgroup antes de abrir nada (Node con el servidor cargado).
+- **Coste por contexto ocioso**: lo que añade cada biblioteca abierta, sin peticiones.
+- **Pico por petición**: el mayor pico de RSS sobre el estado previo de una sola herramienta
+  (`hebra_list_notes`, `hebra_search`, `hebra_read_note`, `hebra_grep`, `hebra_list_tags`).
+- **Pico con peticiones a la vez**: el mayor pico con K peticiones simultáneas. Es el pico de K
+  peticiones juntas, no K veces el de una; sirve para comprobar que la suma por petición no se queda corta.
+- **Retenido tras cerrar**: `anon` que no vuelve a la base al cerrar todos los contextos. Sube con
+  cada ciclo si hay una fuga.
+
+El valor de `mem_limit` sale así, con las cifras de una corrida hecha con el tamaño de biblioteca real:
+
+```
+mem_limit = (base del proceso
+             + coste por contexto ocioso x contextos abiertos
+             + peticiones a la vez x pico por petición
+             + rondas de sync a la vez x pico de sync
+             + margen) / 0,8
+```
+
+El `/ 0,8` deja el 20 % libre para que `HEBRA_MCP_MEMORY_HIGH_WATER` (medido contra este límite) se
+active antes del OOM. Las peticiones a la vez y las rondas de sync a la vez son las que se
+quiere aguantar, no el número de cuentas. El pico de sync no lo da `npm run mem:carga` (`measure.ts`
+tiene una fase `--sync`, primera descarga desde un relé en memoria, que el script de npm no expone
+todavía): hasta tenerlo, se estima aparte y se suma como término propio. Con el resultado se comprueba
+subiendo a ese `--memory` y los umbrales: la corrida tiene que salir con código 0.
+
 ## Secretos globales en `control/secrets.json` (D22, SPEC.md §12.10)
 
 Los bearers de Lumbre de todas las cuentas, sus pendientes y la clave de refresh
