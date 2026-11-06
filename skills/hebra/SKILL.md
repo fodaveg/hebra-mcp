@@ -486,6 +486,22 @@ pregunta dónde, sin crear tú una carpeta para ellos. Lo que sigue es solo para
    que fijen las instrucciones del usuario; los audits, specs y guías, a la carpeta del ID del
    proyecto.
 
+## Informes que pide el usuario: para una persona
+
+Un audit, informe, análisis o lista de ideas que el usuario pide y que se guarda en Hebra se
+escribe para que lo lea una persona que no estuvo en la conversación. No se escribe como una
+nota de trabajo de un agente. No aplica a los relevos ni a los documentos efímeros del apartado
+anterior, ni a los audits internos que un agente hace para sí mismo.
+
+1. **Primero la conclusión**, en lenguaje llano. Cada término propio se explica la primera vez
+   que sale.
+2. **Tablas para comparar** opciones, hallazgos o ideas.
+3. **Las referencias técnicas van a un anexo final**: rutas `fichero:línea`, SHA, ids y
+   comandos. El cuerpo no las necesita para entenderse.
+4. **Sin jerga de agentes** (gate, worktree, lote, estados de tareas) salvo que se explique.
+
+Si las instrucciones del usuario o del repo fijan otro formato, mandan ellas.
+
 ## Ficheros de trabajo (checkout / apply)
 
 Para reestructurar una o varias notas grandes con herramientas de ficheros (`rg`, `sed`, Edit,
