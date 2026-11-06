@@ -9,6 +9,12 @@
  * si a alguna le queda algo; la que ya terminó sale vacía en las páginas siguientes.
  * `outgoing` no delata nada por su tamaño (lista todos los enlaces del cuerpo, resueltos
  * o no) y `backlinks` se rellena solo con notas visibles.
+ *
+ * Perezosa (A5 del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y
+ * carga en el filtro, página a página, solo lo que juzga: la nota pedida, las que resuelven
+ * los enlaces salientes de la página (por id, con el motor; por título, todas las homónimas)
+ * y cada página de backlinks que lee del almacén. Su equivalencia con `'all'` está en
+ * `test/tools/note-reads-lazy.test.ts`.
  */
 import { encodeCursor, parseLinkRef } from '../../hebra';
 import { ToolError } from '../errors';
@@ -80,6 +86,8 @@ async function visibleTitleTarget(
   targetPath: string | null
 ): Promise<{ id: string; title: string } | undefined> {
   const { items } = await ctx.port.notesByExactTitle(title);
+  // Todas las homónimas, visibles u ocultas, antes de juzgarlas (`privacyLoad: 'lazy'`).
+  await ctx.privacy.ensure(items.map((item) => item.id));
   let visible = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   // Todas las visibles deciden entre «resuelto» y «ambiguo» (y la ruta de cada una, el
   // desempate): la puerta final las vuelve a juzgar, solo por estar visibles, y si una ya no
@@ -107,6 +115,9 @@ export async function runLinks(
 ): Promise<{ outgoing: OutgoingLink[]; backlinks: BacklinkNote[]; nextCursor: string | null }> {
   const limit = effectiveLimit(input.limit, LIMITS.links);
   const position = parseCursor(input.cursor);
+  // `privacyLoad: 'lazy'` (A5): el filtro solo conoce las notas que se le piden; aquí la
+  // pedida, y abajo las que resuelve cada página y las que la enlazan, antes de juzgarlas.
+  await ctx.privacy.ensure([input.id]);
   const meta = ctx.privacy.visibleMeta(input.id);
   if (!meta) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(input.id);
@@ -131,6 +142,13 @@ export async function runLinks(
     const queries = page.items.map((ref) => parseLinkRef(ref));
     const byEngine = page.items.filter((_ref, index) => queries[index]?.targetKind !== 'title');
     const resolutions = await ctx.port.resolveLinks(byEngine);
+    // Las notas que resuelve el motor en esta página, en UNA lectura, antes de juzgarlas.
+    await ctx.privacy.ensure(
+      resolutions.flatMap((resolution) => {
+        const candidate = resolution.status === 'resolved' ? resolution.candidates[0] : undefined;
+        return candidate && candidate.kind === 'note' ? [candidate.id] : [];
+      })
+    );
     let engineIndex = 0;
     for (const [index, ref] of page.items.entries()) {
       const query = queries[index];
@@ -157,7 +175,12 @@ export async function runLinks(
     const page = await fillPage({
       limit,
       startCursor: position.b,
-      fetch: (cursor, want) => ctx.port.backlinks(input.id, cursor, storePageSize(want)),
+      // Cada página del almacén se carga en el filtro antes de que `accept` (síncrono) la juzgue.
+      fetch: async (cursor, want) => {
+        const page = await ctx.port.backlinks(input.id, cursor, storePageSize(want));
+        await ctx.privacy.ensure(page.items.map((item) => item.id));
+        return page;
+      },
       accept: (item) => {
         if (!ctx.privacy.visibleMeta(item.id)) return undefined;
         // También la de mirar por delante: decide si hay `nextCursor`.
