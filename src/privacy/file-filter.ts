@@ -123,7 +123,9 @@ export class FileFilter {
 
   /** `true` si la nota que enlaza (viva o de la papelera) no se ve: la que hace oculto al
    *  fichero por la regla (b). Cerrado ante la duda: una nota que el filtro de su estado
-   *  no conoce cuenta como oculta. */
+   *  no conoce cuenta como oculta. Con un `live` perezoso, quien pasa refs que no salen de
+   *  `FilesIndex.refs` (las de `notesLinkingBlobs`) carga antes sus notas vivas con
+   *  `live.ensure`. */
   isHiddenReference(ref: { noteId: string; noteTrashed: boolean }): boolean {
     return ref.noteTrashed ? !this.trash.isVisible(ref.noteId) : this.live.isHiddenNote(ref.noteId);
   }
@@ -140,13 +142,23 @@ export class FileFilter {
     return entry && file ? { file, sha256: entry.sha256.toLowerCase() } : undefined;
   }
 
-  /** Sobre el almacén de ahora; `live` es el filtro de esta misma llamada. */
+  /**
+   * Sobre el almacén de ahora; `live` es el filtro de esta misma llamada, con las notas que
+   * tenga cargadas o ninguna (A6 del plan de memoria): carga en él lo que este filtro va a
+   * preguntar, las notas VIVAS que enlazan cada fichero (`FilesIndex.refs`, regla b) y las
+   * bloqueadas vivas (`ensureLockedNotes`, variante de A1). Las de la papelera las juzga
+   * `TrashFilter`, que no usa el índice de notas vivas. Así sirve a una herramienta
+   * `privacyLoad: 'lazy'` sin más; con la biblioteca ya entera, las dos cargas no leen nada.
+   */
   static async build(
-    port: Pick<HebraLibraryPort, 'filesIndex'>,
+    port: Pick<HebraLibraryPort, 'filesIndex' | 'lockedLiveNoteIds'>,
     live: PrivacyFilter,
     config: PrivacyConfig
   ): Promise<FileFilter> {
-    return new FileFilter(live, await port.filesIndex(), config);
+    const index = await port.filesIndex();
+    await live.ensure(index.refs.filter((ref) => !ref.noteTrashed).map((ref) => ref.noteId));
+    await live.ensureLockedNotes(port);
+    return new FileFilter(live, index, config);
   }
 
   /** Sobre datos ya leídos DENTRO del turno de escritura (`src/store/writes.ts`). */

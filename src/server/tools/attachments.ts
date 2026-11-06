@@ -52,6 +52,11 @@
  *
  * Logs (§6.4): los de `runTool` (herramienta y código) y `attachment.fetch` del motor
  * (resultado). Nunca nombres, hashes ni contenido.
+ *
+ * Perezosas (A6 del plan de memoria, 6 nov 2026): las dos se registran con
+ * `privacyLoad: 'lazy'` y cargan en el filtro solo lo que juzgan: la nota pedida, las notas
+ * vivas que enlazan cada SHA-256 (`notesLinkingBlobs`) y lo que carga `FileFilter.build`.
+ * Equivalencia con `'all'` en `test/privacy/lazy-file-filter.test.ts`.
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { ToolContent, ToolError } from '../errors';
@@ -134,6 +139,8 @@ async function hiddenContent(ctx: ToolContext, sha256s: readonly string[]): Prom
     ctx.port.notesLinkingBlobs(sha256s),
     FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)
   ]);
+  // `privacyLoad: 'lazy'`: las vivas que enlazan estos bytes, antes de `isHiddenReference`.
+  await ctx.privacy.ensure(refs.flat().filter((ref) => !ref.noteTrashed).map((ref) => ref.noteId));
   for (const [index, sha256] of sha256s.entries()) {
     if (refs[index]!.some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256)) {
       hidden.add(sha256);
@@ -148,6 +155,7 @@ async function visibleNoteAttachments(
   ctx: ToolContext,
   id: string
 ): Promise<{ rows: NoteAttachmentRow[]; names: Map<string, string> }> {
+  await ctx.privacy.ensure([id]);
   requireVisibleNote(ctx, id);
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');

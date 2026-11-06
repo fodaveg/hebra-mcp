@@ -297,6 +297,10 @@ export interface HebraLibraryPort {
    *  repetido sale una vez. Para filtrar las notas que toca una llamada sin leer la
    *  biblioteca entera; una sola sentencia SQL para cualquier número de ids. */
   notesVisibilityIndexFor(ids: readonly string[]): Promise<NoteVisibilityEntry[]>;
+  /** Ids de las notas VIVAS bloqueadas (`lockedLiveNoteIds` de `./privacy-sql.ts`), solo ids:
+   *  los candidatos de `PrivacyFilter.hasHiddenLockedNote` sin cargar la biblioteca entera
+   *  (`PrivacyFilter.ensureLockedNotes`, A6 del plan de memoria). */
+  lockedLiveNoteIds(): Promise<string[]>;
   /** Lo que lee la puerta final antes de responder (`PrivacyRecheckSnapshot`): en UN turno
    *  de la cola y en una transacción de lectura, para que el filtro, la memoria de las
    *  carpetas privadas y los sellos sean del mismo instante del almacén. */

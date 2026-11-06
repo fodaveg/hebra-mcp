@@ -28,6 +28,11 @@
  * Logs (§6.4): `file.organize` con el id (opaco), la acción y el estado de sync, en cuanto
  * el escritor responde (también si la herramienta acaba después en error). Nunca el
  * nombre.
+ *
+ * Perezosas (A6 del plan de memoria, 6 nov 2026): las tres se registran con
+ * `privacyLoad: 'lazy'`; de notas solo preguntan `FileFilter`, y `FileFilter.build` carga lo
+ * que va a juzgar (las notas vivas que enlazan cada fichero y las bloqueadas vivas). De
+ * `ctx.privacy` usan además carpetas, que no dependen de las notas.
  */
 import { logEvent } from '../../log/logger';
 import { FileFilter, type VisibleFile } from '../../privacy/file-filter';
