@@ -63,6 +63,14 @@ export type PrivacySource = Pick<
   'foldersList' | 'notesVisibilityIndex' | 'notesVisibilityIndexFor'
 >;
 
+/** Los ids de las carpetas vivas de una lectura de `foldersList`, con la raíz aunque la lista no
+ *  la traiga (es la carpeta efectiva de lo que no tiene una viva). */
+function liveFolderIdsOf({ folders }: FoldersList): string[] {
+  const ids = new Set(folders.map((folder) => folder.id));
+  ids.add(ROOT_FOLDER_ID);
+  return [...ids];
+}
+
 export class PrivacyFilter implements LiveFolders {
   readonly unresolved: boolean;
   private readonly hiddenFolderIds: Set<string>;
@@ -89,6 +97,9 @@ export class PrivacyFilter implements LiveFolders {
 
   private constructor(
     private readonly folders: FolderIndex,
+    /** Los ids de las carpetas de `folders` (la misma lectura), para `notesScope`: una nota
+     *  cuya carpeta efectiva no está entre ellas se oculta también en SQL (B2). */
+    private readonly liveFolderIds: readonly string[],
     private readonly library: LibraryIndex,
     config: PrivacyConfig,
     /** De dónde cargar las notas (`ensure`/`ensureAll`); sin él (`fromSnapshot`), el índice
@@ -137,8 +148,8 @@ export class PrivacyFilter implements LiveFolders {
    * `ensureAll()` (comentario de cabecera). Nunca se guarda entre llamadas.
    */
   static async build(port: PrivacySource, config: PrivacyConfig): Promise<PrivacyFilter> {
-    const folders = await FolderIndex.build(port);
-    return new PrivacyFilter(folders, LibraryIndex.lazy(), config, port);
+    const list = await port.foldersList();
+    return new PrivacyFilter(FolderIndex.fromList(list), liveFolderIdsOf(list), LibraryIndex.lazy(), config, port);
   }
 
   /**
@@ -181,7 +192,12 @@ export class PrivacyFilter implements LiveFolders {
     config: PrivacyConfig
   ): PrivacyFilter {
     // `notes` es la biblioteca entera leída en el turno: el índice ya viene completo.
-    return new PrivacyFilter(FolderIndex.fromList(folders), LibraryIndex.fromRows(notes), config);
+    return new PrivacyFilter(
+      FolderIndex.fromList(folders),
+      liveFolderIdsOf(folders),
+      LibraryIndex.fromRows(notes),
+      config
+    );
   }
 
   /** ¿Alguna de estas etiquetas canónicas (con sus ancestros, como las da `deriveNote`)
@@ -209,6 +225,11 @@ export class PrivacyFilter implements LiveFolders {
     const entry = this.library.get(id);
     if (!entry) return true;
     if (entry.locked && this.privateTags.size > 0) return true;
+    // Una carpeta efectiva que no está en el índice de carpetas (B2 de la revisión del
+    // candidato de memoria, 6 nov 2026): las carpetas se leen al construir el filtro y la nota
+    // después (`ensure`), así que una subcarpeta creada entretanto dentro de una privada, con la
+    // nota movida ahí, no está en `hiddenFolderIds`. Cerrado ante la duda: oculta.
+    if (!this.isKnownFolder(entry.folderId)) return true;
     if (this.hiddenFolderIds.has(entry.folderId)) return true;
     if (
       entry.storedFolderId !== undefined &&
@@ -220,6 +241,12 @@ export class PrivacyFilter implements LiveFolders {
       if (this.privateTags.has(tag)) return true;
     }
     return false;
+  }
+
+  /** ¿Conoce el índice de carpetas de este filtro esa carpeta EFECTIVA? La raíz siempre (es
+   *  la carpeta efectiva de lo que no tiene una viva, `VISIBILITY_COLUMNS`). */
+  private isKnownFolder(folderId: string): boolean {
+    return folderId === ROOT_FOLDER_ID || this.folders.has(folderId);
   }
 
   /** Las filas de lápida de la subida de UNA nota, como mapa (ver `trails`). */
@@ -237,6 +264,19 @@ export class PrivacyFilter implements LiveFolders {
    *  (`src/server/privacy-gate.ts`). */
   sealOf(id: string): number | undefined {
     return this.library.get(id)?.localSeq;
+  }
+
+  /**
+   * El sello para la puerta final (`GateUsage.note`, `src/server/privacy-gate.ts`), distinguiendo
+   * por qué falta (B3 de la revisión del candidato de memoria, 6 nov 2026): `loaded: false` si la
+   * nota no está en el índice (no se cargó con `ensure` o no existía al cargarla), que la puerta
+   * cuenta como fallo de la comprobación en una lectura; `loaded: true` sin `seal` si la fila no
+   * trae `local_seq`, que sigue siendo «sin sello». Una sola consulta al índice (el rastro de
+   * `unloadedLookups` sube una vez, como con `sealOf`).
+   */
+  gateSealOf(id: string): { loaded: boolean; seal: number | undefined } {
+    const entry = this.library.get(id);
+    return entry === undefined ? { loaded: false, seal: undefined } : { loaded: true, seal: entry.localSeq };
   }
 
   /**
@@ -413,9 +453,13 @@ export class PrivacyFilter implements LiveFolders {
   }
 
   /** ¿Está bloqueada? Sin decir si se ve: una bloqueada visible no tiene propiedades, aunque
-   *  quede una fila de antes de bloquearla (D23). */
+   *  quede una fila de antes de bloquearla (D23). Una nota que no está en el índice (no se
+   *  cargó, o no existía al cargarla) cuenta como bloqueada (B3 de la revisión del candidato de
+   *  memoria, 6 nov 2026: cerrado ante la duda); si no se pidió, deja rastro en
+   *  `unloadedLookups`. De una cargada responde lo de su fila, como antes. */
   isLockedNote(id: string): boolean {
-    return this.library.get(id)?.locked === true;
+    const entry = this.library.get(id);
+    return entry === undefined || entry.locked;
   }
 
   /**
@@ -425,10 +469,13 @@ export class PrivacyFilter implements LiveFolders {
    * guardada que no está viva (A2, con `climbFolder` y las rutas privadas de este filtro). Lo
    * usan los recuentos y listados que antes recorrían `visibleNotes()` (pieza A7 del plan de
    * memoria): `hebra_list_tags`, `hebra_list_folders`, `hebra_list_properties` y
-   * `hebra_query_properties`. Solo crece con las carpetas ocultas y las etiquetas privadas.
+   * `hebra_query_properties`. Crece con las carpetas (las conocidas, para que una carpeta
+   * efectiva que el índice no conoce oculte la nota también en SQL, B2) y con las etiquetas
+   * privadas, no con las notas.
    */
   notesScope(): VisibleNotesScope {
     return {
+      knownFolderIds: this.liveFolderIds,
       hiddenFolderIds: [...this.hiddenFolderIds],
       privateTags: [...this.privateTags],
       hideLocked: this.privateTags.size > 0,
