@@ -10,6 +10,11 @@
  * ni en los resultados, ni en el tiempo que se gasta, ni en dónde se corta, ni en si hay
  * `nextCursor`. La respuesta no lleva ningún recuento.
  *
+ * Privados por tramos (`privacyLoad: 'lazy'`, A4 del plan de memoria, 6 nov 2026): el filtro
+ * no trae la biblioteca entera. Las notas se juzgan en orden de id, por tramos que se cargan
+ * con `ctx.privacy.ensure` (`PendingNotes`), y solo hasta donde llegue la página: el resultado,
+ * los cortes y el cursor son los mismos que juzgándolas todas antes de empezar.
+ *
  * Orden y cursor: por id de nota y número de línea, estable aunque las notas cambien. El
  * cursor (`g1`) es la posición por la que seguir: `[id, línea]` (la línea de esa nota por
  * la que empezar; 0, la nota ya está entera). No exige que esa nota siga existiendo o
@@ -21,7 +26,8 @@
  * tamaño de respuesta. Si se agota el plazo o el tamaño, sale lo que haya, `cutoff`
  * (`time` o `size`) y un `nextCursor` que sigue justo donde se quedó. El plazo cuenta
  * desde el primer cuerpo leído: lo de antes (qué notas mirar y el índice) no depende de
- * cuánto texto tengan las ocultas.
+ * cuánto texto tengan las ocultas. Juzgar un tramo nuevo a mitad del recorrido tampoco
+ * cuenta: el plazo se corre lo que tarde.
  *
  * Prefiltro: con un literal (o el trozo que toda coincidencia de la expresión contiene,
  * `requiredLiteral`) de al menos tres caracteres, el índice de subcadena de Hebra
@@ -165,6 +171,62 @@ function byId(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** Primer tramo de notas que se juzgan (`PendingNotes`): dos lotes de lectura. */
+const GREP_WINDOW_FIRST = GREP_BATCH_NOTES * 2;
+/** Tope del tramo: cada uno dobla al anterior hasta aquí. */
+const GREP_WINDOW_MAX = 8_192;
+
+/**
+ * Las notas que se miran, en orden de id, juzgadas por TRAMOS (`privacyLoad: 'lazy'`, A4 del
+ * plan de memoria, 6 nov 2026): el filtro de privados no trae la biblioteca entera, y cada
+ * tramo de `rows` (vivas, sin bloquear y desde el cursor, ya en orden) se carga con
+ * `ctx.privacy.ensure` antes de juzgarlo. De cada tramo quedan las visibles que pasan
+ * `accept` (carpeta y etiqueta) y, con prefiltro, las que el índice de subcadena da como
+ * candidatas: `grepCandidates` sigue recibiendo solo notas VISIBLES (lee el cuerpo de algunas,
+ * así que una oculta no puede entrar ahí, cabecera). `items` acaba siendo la misma lista que
+ * se calculaba de una vez, pero solo hasta donde se pida con `fillTo`: una página que se llena
+ * pronto no juzga el resto de la biblioteca. Los tramos doblan (de `GREP_WINDOW_FIRST` a
+ * `GREP_WINDOW_MAX`) para que un patrón raro no pida el prefiltro cientos de veces.
+ */
+class PendingNotes {
+  /** Las que se miran, en orden de id (crece con `fillTo`). */
+  readonly items: Pending[] = [];
+  /** Primera de `rows` aún sin juzgar. */
+  private next = 0;
+  private window = GREP_WINDOW_FIRST;
+
+  constructor(
+    private readonly ctx: ToolContext,
+    private readonly rows: readonly Pending[],
+    private readonly match: string | null,
+    private readonly accept: (row: Pending) => boolean
+  ) {}
+
+  /** ¿Hay que juzgar algún tramo más para tener `count` notas en `items`? */
+  needs(count: number): boolean {
+    return this.items.length < count && this.next < this.rows.length;
+  }
+
+  /** Juzga tramos hasta tener `count` notas en `items` o acabar `rows`. */
+  async fillTo(count: number): Promise<void> {
+    while (this.needs(count)) {
+      const slice = this.rows.slice(this.next, this.next + this.window);
+      this.next += slice.length;
+      this.window = Math.min(this.window * 2, GREP_WINDOW_MAX);
+      await this.ctx.privacy.ensure(slice.map((row) => row.id));
+      let accepted = slice.filter(this.accept);
+      if (this.match !== null && accepted.length > 0) {
+        const candidates = await this.ctx.port.grepCandidates(
+          this.match,
+          accepted.map((note) => note.rowid)
+        );
+        if (candidates) accepted = accepted.filter((note) => candidates.has(note.rowid));
+      }
+      this.items.push(...accepted);
+    }
+  }
+}
+
 /** Recorre un lote de notas con un literal en el hilo principal (es lineal): entre nota y
  *  nota mira el plazo, si ya se avanzó algo en esta llamada. */
 function scanLiteral(
@@ -228,32 +290,30 @@ export async function runGrep(
     }
   }
 
-  // Qué notas se miran, sin leer ningún cuerpo, en orden de id y desde el cursor.
-  let pending: Pending[] = [];
+  // Qué notas se miran, sin leer ningún cuerpo, en orden de id y desde el cursor. Lo que no
+  // depende de la privacidad (bloqueada, cursor) se aplica ya; la visibilidad, la carpeta, la
+  // etiqueta y el prefiltro, por tramos (`PendingNotes`).
+  const rows: Pending[] = [];
   for (const row of await ctx.port.grepNotes()) {
     if (row.locked) continue;
-    const meta = ctx.privacy.visibleMeta(row.id);
-    if (!meta) continue;
-    if (inFolder && !inFolder(meta.folderId)) continue;
-    if (tag !== undefined && !ctx.privacy.hasTag(row.id, tag)) continue;
     if (start) {
       const order = byId(row.id, start.id);
       if (order < 0 || (order === 0 && start.line === 0)) continue;
-      pending.push({ ...row, fromLine: order === 0 ? start.line : 1 });
+      rows.push({ ...row, fromLine: order === 0 ? start.line : 1 });
     } else {
-      pending.push({ ...row, fromLine: 1 });
+      rows.push({ ...row, fromLine: 1 });
     }
   }
-  pending.sort((left, right) => byId(left.id, right.id));
-
-  const match = trigramMatch(pattern.required, input.caseSensitive === true);
-  if (match !== null && pending.length > 0) {
-    const candidates = await ctx.port.grepCandidates(
-      match,
-      pending.map((note) => note.rowid)
-    );
-    if (candidates) pending = pending.filter((note) => candidates.has(note.rowid));
-  }
+  rows.sort((left, right) => byId(left.id, right.id));
+  const queue = new PendingNotes(ctx, rows, trigramMatch(pattern.required, input.caseSensitive === true), (row) => {
+    const meta = ctx.privacy.visibleMeta(row.id);
+    if (!meta) return false;
+    if (inFolder && !inFolder(meta.folderId)) return false;
+    return tag === undefined || ctx.privacy.hasTag(row.id, tag);
+  });
+  const pending = queue.items;
+  // Lo que decide el primer lote y si hay otro detrás, antes del plazo (como antes de A4).
+  await queue.fillTo(GREP_BATCH_NOTES + 1);
 
   const matches: GrepMatch[] = [];
   let responseChars = 0;
@@ -278,9 +338,20 @@ export async function runGrep(
   // Con expresión regular, primero un hueco para su hilo (`REGEX_WORKERS_MAX` en todo el
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
   const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re, ctx.port);
-  const deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
+  let deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
   try {
-    for (let first = 0; first < pending.length && !stop; first += GREP_BATCH_NOTES) {
+    for (let first = 0; !stop; first += GREP_BATCH_NOTES) {
+      // Este lote entero y una más (`pending.length > first + GREP_BATCH_NOTES` dice si hay
+      // otro lote detrás). Juzgar un tramo nuevo no cuenta para el plazo, como no contaba
+      // juzgarlas todas antes de empezar: el plazo se corre lo que tarde. Sin tramo que
+      // juzgar, ni se mira el reloj.
+      const wanted = first + GREP_BATCH_NOTES + 1;
+      if (queue.needs(wanted)) {
+        const fillStart = Date.now();
+        await queue.fillTo(wanted);
+        deadline += Date.now() - fillStart;
+      }
+      if (first >= pending.length) break;
       const batch = pending.slice(first, first + GREP_BATCH_NOTES);
       if (progressed && Date.now() >= deadline) {
         // Detrás de la última recorrida, no en la primera del lote que no se ha leído: esa

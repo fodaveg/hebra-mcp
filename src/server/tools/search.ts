@@ -28,6 +28,11 @@
  *
  * `props`, `linksTo` y `titleOnly` (D23, `./search-filters.ts`) pasan a `SearchFilters` del motor;
  * `linksTo`, con los destinos resueltos antes solo entre las visibles. Sin ellos, nada cambia.
+ *
+ * Privados por página (`privacyLoad: 'lazy'`, A4 del plan de memoria, 6 nov 2026): el filtro
+ * no trae la biblioteca entera; cada página que devuelve el motor se carga con
+ * `ctx.privacy.ensure` antes de juzgarla (también las que se piden de más para llenar la
+ * página o mirar por delante), y los destinos de `linksTo`, en `./search-filters.ts`.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
@@ -125,11 +130,16 @@ export async function runSearch(
   const page = await fillPage({
     limit,
     startCursor,
-    fetch: (cursor, want) =>
-      ctx.port.search(input.query, cursor, storePageSize(want), {
+    fetch: async (cursor, want) => {
+      const stored = await ctx.port.search(input.query, cursor, storePageSize(want), {
         ...(tagFilter ? { tags: [tagFilter] } : {}),
         ...extra.filters
-      }, scope, { embedded }),
+      }, scope, { embedded });
+      // `privacyLoad: 'lazy'` (A4): las notas de ESTA página del motor, antes de que `accept`
+      // las juzgue; si la página se queda corta, la siguiente pasa también por aquí.
+      await ctx.privacy.ensure(stored.items.map((hit) => hit.id));
+      return stored;
+    },
     accept: (hit) => {
       const meta = ctx.privacy.visibleMeta(hit.id);
       if (!meta) return undefined;

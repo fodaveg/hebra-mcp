@@ -634,7 +634,7 @@ export function registerTools(
       inputSchema: scoped(searchInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_search', (toolCtx, input) => runSearch(toolCtx, input))
+    gated('hebra_search', (toolCtx, input) => runSearch(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -646,7 +646,7 @@ export function registerTools(
       inputSchema: scoped(grepInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_grep', (toolCtx, input) => runGrep(toolCtx, input))
+    gated('hebra_grep', (toolCtx, input) => runGrep(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -657,7 +657,7 @@ export function registerTools(
       inputSchema: scoped(listNotesInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_notes', (toolCtx, input) => runListNotes(toolCtx, input))
+    gated('hebra_list_notes', (toolCtx, input) => runListNotes(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

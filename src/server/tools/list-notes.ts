@@ -25,6 +25,11 @@
  * `archived: true` cambia al ámbito `{kind: 'archive'}`, de la última archivada a la
  * primera; el motor no lo combina con carpeta ni etiqueta, así que con `folder` o `tag` es
  * `invalid_input` (y `subfolders` no tiene efecto sin `folder`).
+ *
+ * Privados por página (`privacyLoad: 'lazy'`, A4 del plan de memoria, 6 nov 2026): el filtro
+ * no trae la biblioteca entera; cada página que devuelve el motor se carga con
+ * `ctx.privacy.ensure` antes de juzgarla, también las que se piden de más para llenar la
+ * página o mirar por delante.
  */
 import { canonicalTag, encodeCursor, type NotesScope } from '../../hebra';
 import { usageOf, type ToolContext } from '../context';
@@ -138,6 +143,9 @@ export async function runListNotes(
     startCursor,
     fetch: async (cursor, want) => {
       const stored = await ctx.port.notesPage(cursor, storePageSize(want), scope);
+      // `privacyLoad: 'lazy'` (A4): las notas de ESTA página del motor, antes de juzgarlas
+      // (aquí y en `accept`); si la página se queda corta, la siguiente pasa también por aquí.
+      await ctx.privacy.ensure(stored.items.map((item) => item.id));
       if (needsState) {
         const visible = stored.items.filter((item) => ctx.privacy.visibleMeta(item.id));
         for (const [id, row] of await loadNoteStates(ctx.port, visible.map((item) => item.id))) {

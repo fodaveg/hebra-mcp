@@ -35,9 +35,10 @@ export interface SearchExtra {
 
 /** Las notas que enlazan a algún destino VISIBLE de `title`, o `null` si no tiene ninguno. */
 async function sourcesOfTitle(ctx: ToolContext, title: string): Promise<Set<string> | null> {
-  const targets = (await ctx.port.notesByFoldedTitle(title)).filter(
-    (id) => ctx.privacy.visibleMeta(id) !== undefined
-  );
+  const candidates = await ctx.port.notesByFoldedTitle(title);
+  // `privacyLoad: 'lazy'` (A4): las homónimas, antes de juzgarlas.
+  await ctx.privacy.ensure(candidates);
+  const targets = candidates.filter((id) => ctx.privacy.visibleMeta(id) !== undefined);
   if (targets.length === 0) return null;
   // Deciden el resultado por estar visibles, sin enseñar nada de su fila.
   for (const target of targets) usageOf(ctx).noteVisible(target);
