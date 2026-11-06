@@ -849,15 +849,19 @@ describe('lectura de memoria', () => {
   });
 
   it('lee y valida la configuración del entorno', () => {
-    expect(readCapacityConfig({})).toEqual({ idleMs: 120_000, openWaitMs: 20_000, highWater: { ratio: 0.8 } });
+    expect(readCapacityConfig({})).toEqual({ idleMs: 120_000, openWaitMs: 20_000, highWater: { ratio: 0.8 }, syncConcurrency: 2 });
     expect(readCapacityConfig({ HEBRA_MCP_CONTEXT_IDLE_MS: '5000', HEBRA_MCP_OPEN_WAIT_MS: '0',
-      HEBRA_MCP_MEMORY_HIGH_WATER: '75%' })).toEqual({ idleMs: 5000, openWaitMs: 0, highWater: { ratio: 0.75 } });
+      HEBRA_MCP_MEMORY_HIGH_WATER: '75%' })).toEqual({ idleMs: 5000, openWaitMs: 0, highWater: { ratio: 0.75 }, syncConcurrency: 2 });
     expect(readCapacityConfig({ HEBRA_MCP_MEMORY_HIGH_WATER: '0.5' }).highWater).toEqual({ ratio: 0.5 });
     expect(readCapacityConfig({ HEBRA_MCP_MEMORY_HIGH_WATER: '400000000' }).highWater).toEqual({ bytes: 400000000 });
     for (const bad of ['-1', 'mucho', '0%', '101%', '0']) {
       expect(() => readCapacityConfig({ HEBRA_MCP_MEMORY_HIGH_WATER: bad })).toThrow('HEBRA_MCP_MEMORY_HIGH_WATER');
     }
     expect(() => readCapacityConfig({ HEBRA_MCP_CONTEXT_IDLE_MS: 'x' })).toThrow('HEBRA_MCP_CONTEXT_IDLE_MS');
+    expect(readCapacityConfig({ HEBRA_MCP_SYNC_CONCURRENCY: '3' }).syncConcurrency).toBe(3);
+    for (const bad of ['0', '-1', 'dos', '1.5', '1000']) {
+      expect(() => readCapacityConfig({ HEBRA_MCP_SYNC_CONCURRENCY: bad })).toThrow('HEBRA_MCP_SYNC_CONCURRENCY');
+    }
   });
 });
 

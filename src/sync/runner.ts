@@ -40,6 +40,7 @@ import {
   type SyncRoundResult
 } from '../hebra';
 import type { SyncStorePort } from '../store/sync-port';
+import { BLOB_DOWNLOAD_CONCURRENCY, processSyncGates, type SyncGates } from './gates';
 
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
@@ -92,44 +93,13 @@ export function retryIsUseless(status: {
   );
 }
 
-/**
- * Descargas de adjuntos (`readBlob`) a la vez, como mucho; el resto espera en cola, por
- * orden de llegada (tarea de Lumbre 342a931c). El 5 oct 2026 mcp.hebra.pro lanzó unos 253
- * GET de Blob V2 en paralelo en 20 s y el relé respondió 429 a casi todos. La subida ya
- * tenía su tope en el motor (`BLOB_UPLOAD_CONCURRENCY = 3`, `sync-engine.ts` de Hebra).
- */
-export const BLOB_DOWNLOAD_CONCURRENCY = 4;
+export { BLOB_DOWNLOAD_CONCURRENCY };
 /** Reintentos de una descarga que recibe 429, después del primer intento. */
 export const BLOB_DOWNLOAD_RETRIES = 3;
 /** Espera antes de cada reintento si el 429 no trae `Retry-After`. */
 export const BLOB_DOWNLOAD_BACKOFF_MS: readonly number[] = [2_000, 4_000, 8_000];
 /** Tope de la espera que pide un `Retry-After`. */
 export const BLOB_RETRY_AFTER_MAX_MS = 30_000;
-
-/** Semáforo con cola FIFO: `acquire` resuelve con la función que libera la plaza. */
-class FifoSemaphore {
-  private active = 0;
-  private readonly waiting: Array<() => void> = [];
-
-  constructor(private readonly limit: number) {}
-
-  acquire(): Promise<() => void> {
-    return new Promise((resolve) => {
-      const grant = () => {
-        this.active += 1;
-        let released = false;
-        resolve(() => {
-          if (released) return;
-          released = true;
-          this.active -= 1;
-          this.waiting.shift()?.();
-        });
-      };
-      if (this.active < this.limit) grant();
-      else this.waiting.push(grant);
-    });
-  }
-}
 
 /** ¿El relé respondió 429 al bajar el objeto? El motor envuelve el fallo de `getObject`
  *  en `ReadBlobStageError` y el transporte lo da como `BlobRelayV2Error` con el estado HTTP
@@ -232,6 +202,11 @@ export interface SyncRunnerOptions {
   /** Plazo de `whenReady` y `finalRound`. Por defecto, un `setTimeout`; los tests lo sustituyen
    *  para comprobar la espera sin esperarla. */
   waitTimer?: (ms: number) => Promise<void>;
+  /**
+   * Topes de proceso (rondas y descargas simultáneas; `./gates`). Por defecto, los del proceso,
+   * que comparten todos los runners de `serve-http`; los tests inyectan los suyos.
+   */
+  gates?: SyncGates;
 }
 
 function isRevocation(result: LibrarySyncResultCode): boolean {
@@ -281,12 +256,15 @@ export class SyncRunner implements SyncStatusSource {
   private readonly firstRound: Promise<void>;
   private resolveFirstRound!: () => void;
   private readonly conflictListeners = new Set<(copy: SyncConflictCopy) => void>();
-  private readonly downloads = new FifoSemaphore(BLOB_DOWNLOAD_CONCURRENCY);
+  private readonly gates: SyncGates;
+  /** Se aborta en `stop()`: una ronda en cola de turno sale sin ejecutarse. */
+  private readonly closing = new AbortController();
 
   private constructor(
     private readonly engine: LibrarySyncEngine,
     private readonly options: SyncRunnerOptions
   ) {
+    this.gates = options.gates ?? processSyncGates();
     this.firstRound = new Promise((resolve) => {
       this.resolveFirstRound = resolve;
     });
@@ -445,7 +423,24 @@ export class SyncRunner implements SyncStatusSource {
     return this.queued;
   }
 
+  /**
+   * Una ronda, tras esperar turno en el semáforo de proceso (FIFO). Si el runner se para
+   * mientras espera, sale sin ejecutar nada ni coger plaza. El turno se suelta pase lo que pase.
+   */
   private async execute(): Promise<SyncRoundResult | null> {
+    const release = await this.gates.rounds.acquire(this.closing.signal);
+    if (!release) {
+      this.resolveFirstRound();
+      return null;
+    }
+    try {
+      return await this.executeRound();
+    } finally {
+      release();
+    }
+  }
+
+  private async executeRound(): Promise<SyncRoundResult | null> {
     let round: SyncRoundResult | null = null;
     try {
       await this.options.beforeRound?.();
@@ -489,7 +484,7 @@ export class SyncRunner implements SyncStatusSource {
    */
   async readBlob(sha256: string): Promise<boolean> {
     let outcome: 'ok' | 'missing' | 'error' | 'revoked' = 'revoked';
-    const release = await this.downloads.acquire();
+    const release = (await this.gates.downloads.acquire())!;
     try {
       for (let retry = 0; ; retry += 1) {
         if (this.stopped || this.revokedFlag) {
@@ -552,6 +547,7 @@ export class SyncRunner implements SyncStatusSource {
    */
   async stop(): Promise<void> {
     this.stopped = true;
+    this.closing.abort();
     this.stopTimer();
     this.resolveFirstRound();
     this.engine.stop();

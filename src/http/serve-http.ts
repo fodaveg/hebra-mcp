@@ -19,6 +19,7 @@ import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir
   type AccountControlServer, type RemotePairingRuntime,
   type WithAccountContext } from '../accounts';
 import { readCapacityConfig } from '../accounts/capacity';
+import { configureProcessSyncGates } from '../sync/gates';
 import { revokeAccountDevice } from '../accounts/revoke-device';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
@@ -239,6 +240,8 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
     if (registry) {
       const activeRegistry = registry;
       const pendingUploads = await PendingUploadList.open(accountControlDir(options.dataDir));
+      const capacity = readCapacityConfig();
+      configureProcessSyncGates(capacity.syncConcurrency);
       contexts = new AccountContexts(activeRegistry, async (account) => {
         const dataDir = accountDataDir(options.dataDir, account);
         const secrets = account.storage === 'legacy-root' ? options.secrets : openFileSecretStore(dataDir);
@@ -259,7 +262,7 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
         } };
         if (account.storage === 'legacy-root') serve = tracked;
         return tracked;
-      }, { ...readCapacityConfig(),
+      }, { ...capacity,
         classifyLock: (account) => classifyWriterLock(accountDataDir(options.dataDir, account)) });
       const oauth = 'provider' in auth && 'lumbreOrigin' in auth ? auth as OAuthHttpAuth : null;
       if (!oauth) throw new ServeHttpError('auth_not_configured', 'La autenticación multiusuario no está disponible.');

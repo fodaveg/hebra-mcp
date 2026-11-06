@@ -17,6 +17,7 @@ import { InMemoryLibraryRelay, LocalLibraryPort } from '../hebra-testing';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { NoteWriter } from '../../src/store/writes';
+import type { SyncGates } from '../../src/sync/gates';
 import { SyncRunner, type SyncLogEventName, type SyncLogFields } from '../../src/sync/runner';
 
 export const VAULT_KEY = crypto.getRandomValues(new Uint8Array(32));
@@ -37,7 +38,11 @@ export interface McpDevice {
  *  `serve`, A3 del audit de privacidad), con este puerto. */
 export async function mcpDevice(
   relay: InMemoryLibraryRelay,
-  options: { blobs?: boolean; beforeRound?: (port: NodeLibraryPort) => Promise<void> } = {}
+  options: {
+    blobs?: boolean;
+    beforeRound?: (port: NodeLibraryPort) => Promise<void>;
+    gates?: SyncGates;
+  } = {}
 ): Promise<McpDevice> {
   const port = await openNodeLibraryPort({ sqlitePath: ':memory:', deviceLabel: 'Claude' });
   const logged: McpDevice['logged'] = [];
@@ -49,6 +54,7 @@ export async function mcpDevice(
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
     intervalMs: null,
+    ...(options.gates ? { gates: options.gates } : {}),
     emit: (event, fields) => logged.push({ event, fields }),
     ...(beforeRound ? { beforeRound: () => beforeRound(port) } : {})
   });
