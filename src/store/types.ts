@@ -283,6 +283,11 @@ export interface HebraLibraryPort {
    *  recalcularse en cada llamada de herramienta sin caché (el sync cambia el almacén
    *  mientras el proceso vive). */
   notesVisibilityIndex(): Promise<NoteVisibilityEntry[]>;
+  /** Las filas de `notesVisibilityIndex()` solo de las notas de `ids` (en el orden que
+   *  devuelva SQLite, una por nota): un id desconocido, de la papelera o lápida no sale, y uno
+   *  repetido sale una vez. Para filtrar las notas que toca una llamada sin leer la
+   *  biblioteca entera; una sola sentencia SQL para cualquier número de ids. */
+  notesVisibilityIndexFor(ids: readonly string[]): Promise<NoteVisibilityEntry[]>;
   /** Lo que lee la puerta final antes de responder (`PrivacyRecheckSnapshot`): en UN turno
    *  de la cola y en una transacción de lectura, para que el filtro, la memoria de las
    *  carpetas privadas y los sellos sean del mismo instante del almacén. */

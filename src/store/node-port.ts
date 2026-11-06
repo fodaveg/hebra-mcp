@@ -100,6 +100,7 @@ import {
   ensurePrivacyEpochIndexes,
   noteStamps,
   noteVisibilityRows,
+  noteVisibilityRowsFor,
   privacyEpochOf,
   trashIndexRows
 } from './privacy-sql';
@@ -549,6 +550,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
    */
   async notesVisibilityIndex(): Promise<NoteVisibilityEntry[]> {
     return this.read(() => noteVisibilityRows(this.db));
+  }
+
+  /** `notesVisibilityIndex()` solo de las notas de `ids` (`noteVisibilityRowsFor`,
+   *  `./privacy-sql.ts`), por la cola serie como cualquier otra lectura. */
+  async notesVisibilityIndexFor(ids: readonly string[]): Promise<NoteVisibilityEntry[]> {
+    return this.read(() => noteVisibilityRowsFor(this.db, ids));
   }
 
   /** Lo que lee la puerta final (`src/server/privacy-gate.ts`): árbol de carpetas, índice

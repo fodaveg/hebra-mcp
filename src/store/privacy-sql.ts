@@ -121,6 +121,33 @@ export function noteVisibilityRows(db: DatabaseSync): NoteVisibilityEntry[] {
 }
 
 /**
+ * Las filas de `noteVisibilityRows` solo de las notas de `ids`: mismas columnas, mismas
+ * reglas (ni papelera ni lápida) y la misma subida por las lápidas (A2), para que quien
+ * filtra unas pocas notas no materialice la biblioteca entera en cada llamada (coste
+ * O(notas pedidas), no O(notas vivas)). Un id desconocido, de la papelera o lápida no sale;
+ * uno repetido sale una vez (`IN` es un conjunto: con un `JOIN` contra la lista, las
+ * etiquetas de una nota repetida saldrían dobles). Un ÚNICO texto SQL para cualquier número
+ * de ids (la lista va en JSON a `json_each(?)`, como `noteStamps`): un `IN (?, ?, …)` sería
+ * una sentencia distinta por cada longitud.
+ */
+export function noteVisibilityRowsFor(db: DatabaseSync, ids: readonly string[]): NoteVisibilityEntry[] {
+  if (ids.length === 0) return [];
+  const rows = db
+    .prepare(
+      `SELECT n.id AS id, ${VISIBILITY_COLUMNS},
+              GROUP_CONCAT(t.tag, char(10)) AS tags
+       FROM notes n
+       LEFT JOIN folders f ON f.id = n.folder_id
+       LEFT JOIN note_tags t ON t.note_id = n.id
+       WHERE n.id IN (SELECT value FROM json_each(?))
+         AND n.deleted = 0 AND n.trashed_at IS NULL
+       GROUP BY n.id`
+    )
+    .all(JSON.stringify([...new Set(ids)])) as unknown as VisibilityRow[];
+  return visibilityEntries(db, rows);
+}
+
+/**
  * El sello de cada nota de `ids` que no es lápida, viva o de la papelera: `local_seq`, que
  * sube con cada guardado de la fila (también los que trae el sync, y mover, bloquear o
  * mandar a la papelera), y si está en la papelera. Lo que mira la puerta final
