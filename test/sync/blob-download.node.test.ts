@@ -18,6 +18,7 @@ import {
   BLOB_DOWNLOAD_RETRIES,
   SyncRunner
 } from '../../src/sync/runner';
+import { createSyncGates } from '../../src/sync/gates';
 import { IDENTITY, InMemoryLibraryRelay, VAULT_KEY, appCreate, appDevice } from './devices';
 
 type Outcome = 'ok' | 'missing' | 'error' | 'revoked';
@@ -213,7 +214,7 @@ describe('SyncRunner.readBlob: tope de descargas y espera ante 429', () => {
     expect(await port.blobRead(sha)).toBeNull();
   });
 
-  it('la que espera tras un 429 conserva su plaza: la cola no pasa por el relé mientras tanto', async () => {
+  it('la que espera tras un 429 suelta su plaza y otra descarga puede entrar', async () => {
     const relay = new InMemoryLibraryRelay();
     const sha = await uploadedBlob(relay, 'compartido');
     // Las cuatro primeras peticiones reciben 429; las siguientes pasan.
@@ -225,15 +226,53 @@ describe('SyncRunner.readBlob: tope de descargas y espera ante 429', () => {
     const results: boolean[] = [];
     const total = BLOB_DOWNLOAD_CONCURRENCY + 2;
     for (let i = 0; i < total; i += 1) void runner.readBlob(sha).then((value) => results.push(value));
-    await until(() => blobs.calls === BLOB_DOWNLOAD_CONCURRENCY);
-    await vi.advanceTimersByTimeAsync(1_999);
-    await settle();
-    // Las dos de la cola siguen esperando turno: nadie más pidió nada al relé.
-    expect(blobs.calls).toBe(BLOB_DOWNLOAD_CONCURRENCY);
+    // Las cuatro primeras duermen su retroceso sin plaza: las dos de la cola pasan por el relé
+    // SIN esperar a que acabe el 1.er retroceso (2 s).
+    await until(() => blobs.calls >= total);
+    expect(blobs.calls).toBe(total);
+    await until(() => results.length === 2);
+    expect(results).toEqual([true, true]);
 
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(2_000);
     await until(() => results.length === total);
     expect(results).toEqual(Array.from({ length: total }, () => true));
     expect(blobs.maxActive).toBeLessThanOrEqual(BLOB_DOWNLOAD_CONCURRENCY);
+  });
+
+  it('la plaza se suelta tanto en el retroceso como al fallar y al cerrar', async () => {
+    const relay = new InMemoryLibraryRelay();
+    const sha = await uploadedBlob(relay, 'compartido');
+    const blobs = fakeBlobs(relay, () => null);
+    const gates = createSyncGates(2, BLOB_DOWNLOAD_CONCURRENCY);
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:', deviceLabel: 'Claude' });
+    closers.push(() => port.close());
+    const runner = await SyncRunner.create({
+      port: port.syncStorePort(),
+      transport: relay,
+      blobTransport: blobs.transport,
+      identity: IDENTITY,
+      vaultKey: VAULT_KEY,
+      intervalMs: null,
+      gates
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const pending = runner.readBlob(sha);
+    await until(() => blobs.calls === 1);
+    await settle();
+    // En retroceso: sin plaza.
+    expect(gates.downloads.inUse).toBe(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await pending).toBe(false);
+    // Agotados los reintentos (error): sin plaza.
+    expect(gates.downloads.inUse).toBe(0);
+
+    // Al cerrar el runner durante un retroceso, la descarga acaba y no deja plaza.
+    const closing = runner.readBlob(sha);
+    await until(() => blobs.calls === 5);
+    const stopping = runner.stop();
+    await vi.advanceTimersByTimeAsync(60_000);
+    await stopping;
+    expect(await closing).toBe(false);
+    expect(gates.downloads.inUse).toBe(0);
   });
 });

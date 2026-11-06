@@ -87,6 +87,79 @@ describe('FifoSemaphore', () => {
   });
 });
 
+describe('FifoSemaphore: turno rotatorio por cuenta', () => {
+  function asker(sem: FifoSemaphore) {
+    const order: string[] = [];
+    const held: Array<() => void> = [];
+    return {
+      order,
+      held,
+      ask(label: string, key?: string): void {
+        void sem.acquire(undefined, key).then((release) => {
+          order.push(label);
+          held.push(release!);
+        });
+      }
+    };
+  }
+
+  it('con A pidiendo 5 y B 1 después, B entra en el siguiente turno libre', async () => {
+    const sem = new FifoSemaphore(1);
+    const { order, held, ask } = asker(sem);
+    for (let i = 1; i <= 5; i += 1) ask(`A${i}`, 'A');
+    ask('B1', 'B');
+    await settle();
+    expect(order).toEqual(['A1']);
+    held.shift()!();
+    await settle();
+    expect(order).toEqual(['A1', 'B1']);
+    for (let i = 0; i < 5; i += 1) {
+      held.shift()!();
+      await settle();
+    }
+    expect(order).toEqual(['A1', 'B1', 'A2', 'A3', 'A4', 'A5']);
+  });
+
+  it('con tres cuentas rota entre ellas y la cuenta única es FIFO', async () => {
+    const sem = new FifoSemaphore(1);
+    const { order, held, ask } = asker(sem);
+    for (const [label, key] of [['A1', 'A'], ['A2', 'A'], ['A3', 'A'], ['B1', 'B'], ['B2', 'B'], ['C1', 'C']]) {
+      ask(label!, key);
+    }
+    for (let i = 0; i < 6; i += 1) {
+      await settle();
+      held.shift()?.();
+    }
+    await settle();
+    expect(order).toEqual(['A1', 'B1', 'C1', 'A2', 'B2', 'A3']);
+
+    const single = new FifoSemaphore(1);
+    const one = asker(single);
+    for (let i = 0; i < 4; i += 1) one.ask(String(i));
+    for (let i = 0; i < 4; i += 1) {
+      await settle();
+      one.held.shift()?.();
+    }
+    expect(one.order).toEqual(['0', '1', '2', '3']);
+  });
+
+  it('un abort de la cuenta que espera no deja plaza ni estado colgado', async () => {
+    const sem = new FifoSemaphore(1);
+    const first = (await sem.acquire(undefined, 'A'))!;
+    const abort = new AbortController();
+    const waiting = sem.acquire(abort.signal, 'B');
+    abort.abort();
+    expect(await waiting).toBeNull();
+    expect(sem.queued).toBe(0);
+    first();
+    expect(sem.inUse).toBe(0);
+    const again = await sem.acquire(undefined, 'B');
+    expect(again).not.toBeNull();
+    again!();
+    expect(sem.inUse).toBe(0);
+  });
+});
+
 describe('rondas de sync de proceso', () => {
   it('con 5 contextos pidiendo ronda solo corren 2 a la vez, en orden de llegada', async () => {
     const p = probe();
