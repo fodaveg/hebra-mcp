@@ -6,7 +6,7 @@
  * casi todas las líneas que tolera `scripts/check-no-hebra-code.mjs`. Lo usan el puerto (en
  * su cola y dentro del turno de escritura) y `hebra_grep` (`./grep-sql.ts`).
  */
-import type { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import type {
   FolderRowFact,
   NoteStamp,
@@ -128,23 +128,43 @@ export function noteVisibilityRows(db: DatabaseSync): NoteVisibilityEntry[] {
  * uno repetido sale una vez (`IN` es un conjunto: con un `JOIN` contra la lista, las
  * etiquetas de una nota repetida saldrían dobles). Un ÚNICO texto SQL para cualquier número
  * de ids (la lista va en JSON a `json_each(?)`, como `noteStamps`): un `IN (?, ?, …)` sería
- * una sentencia distinta por cada longitud.
+ * una sentencia distinta por cada longitud. `prepare`, si se da, es la caché de sentencias
+ * de quien llama (`NodeLibraryPort.prepared`), para no volver a prepararla en cada llamada.
  */
-export function noteVisibilityRowsFor(db: DatabaseSync, ids: readonly string[]): NoteVisibilityEntry[] {
+export function noteVisibilityRowsFor(
+  db: DatabaseSync,
+  ids: readonly string[],
+  prepare: (sql: string) => StatementSync = (sql) => db.prepare(sql)
+): NoteVisibilityEntry[] {
   if (ids.length === 0) return [];
-  const rows = db
-    .prepare(
-      `SELECT n.id AS id, ${VISIBILITY_COLUMNS},
-              GROUP_CONCAT(t.tag, char(10)) AS tags
-       FROM notes n
-       LEFT JOIN folders f ON f.id = n.folder_id
-       LEFT JOIN note_tags t ON t.note_id = n.id
-       WHERE n.id IN (SELECT value FROM json_each(?))
-         AND n.deleted = 0 AND n.trashed_at IS NULL
-       GROUP BY n.id`
-    )
-    .all(JSON.stringify([...new Set(ids)])) as unknown as VisibilityRow[];
+  const rows = prepare(
+    `SELECT n.id AS id, ${VISIBILITY_COLUMNS},
+            GROUP_CONCAT(t.tag, char(10)) AS tags
+     FROM notes n
+     LEFT JOIN folders f ON f.id = n.folder_id
+     LEFT JOIN note_tags t ON t.note_id = n.id
+     WHERE n.id IN (SELECT value FROM json_each(?))
+       AND n.deleted = 0 AND n.trashed_at IS NULL
+     GROUP BY n.id`
+  ).all(JSON.stringify([...new Set(ids)])) as unknown as VisibilityRow[];
   return visibilityEntries(db, rows);
+}
+
+/**
+ * Ids de las notas VIVAS bloqueadas (la misma regla de `locked` que `visibilityEntries`). Para
+ * la puerta final cuando juzga ficheros sueltos: `FileFilter` oculta los que se incrustan por
+ * nombre si hay ALGUNA bloqueada oculta (`PrivacyFilter.hasHiddenLockedNote`, variante de A1),
+ * así que su índice parcial tiene que llevarlas todas. Solo ids, sin etiquetas ni carpeta.
+ */
+export function lockedLiveNoteIds(
+  db: DatabaseSync,
+  prepare: (sql: string) => StatementSync = (sql) => db.prepare(sql)
+): string[] {
+  const rows = prepare(
+    `SELECT id FROM notes
+     WHERE deleted = 0 AND trashed_at IS NULL AND locked IS NOT NULL AND locked <> 0`
+  ).all() as Array<{ id: string }>;
+  return rows.map((row) => String(row.id));
 }
 
 /**

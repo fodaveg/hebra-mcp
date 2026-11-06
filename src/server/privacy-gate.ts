@@ -55,8 +55,9 @@
  *
  * Coste: dos lecturas de la huella de `config.json`, la época al empezar (tres sumas sobre
  * `notes`, `folders` y `files`) y una transacción de lectura con el árbol de carpetas, el
- * índice de visibilidad y la época (lo mismo que `PrivacyFilter.build`, más las sumas), más la
- * papelera o los ficheros solo cuando la respuesta los usa. Y repeticiones: cualquier
+ * índice de visibilidad SOLO de las notas que se juzgan (no el de la biblioteca entera, desde
+ * la pieza A2 del plan de memoria del 6 nov 2026) y la época, más la papelera o los ficheros
+ * solo cuando la respuesta los usa. Y repeticiones: cualquier
  * escritura de notas, carpetas o ficheros (una ronda de sync, otra llamada) a mitad de una
  * lectura la repite. Medido en SPEC.md §6.3 (`gateStats`).
  */
@@ -284,13 +285,19 @@ export async function passGate(
   // Siempre la transacción entera, aunque no haya nada declarado (R3-6 de la 3.ª revisión de
   // Codex): el filtro de ahora tiene que resolver, y la época tiene que ser la de la llamada.
   // Sellos solo de lo que lleva sello (una nota que solo cuenta por visible se juzga con el
-  // índice de visibilidad, que ya va entero), y si es nota la de un registro de operación.
+  // índice de visibilidad), y si es nota la de un registro de operación.
   const sealed = options.seals
     ? [...used.notes, ...used.trashed].filter(([, use]) => use.seal !== undefined).map(([id]) => id)
     : [];
   const needsTrash = used.trashed.size > 0 || used.anyState.size > 0 || used.operationTargets.size > 0;
+  // El índice de visibilidad, solo de las notas vivas que se juzgan abajo con `live` (pieza
+  // A2 del plan de memoria): las declaradas, las que valen en cualquier estado y lo que
+  // nombra un registro de operación. Las que dependen de lo que lee la transacción (notas de
+  // un plan, las que enlazan ficheros y adjuntos, las bloqueadas) las añade el puerto
+  // (`PrivacyRecheckRequest.visibility`). Una que no salga cuenta como oculta.
   const snapshot = await port.privacyRecheck({
     notes: [...sealed, ...used.operationTargets],
+    visibility: [...used.notes.keys(), ...used.anyState, ...used.operationTargets],
     trash: needsTrash,
     files: used.files.size > 0 || used.operationTargets.size > 0,
     blobs: [...used.blobs],

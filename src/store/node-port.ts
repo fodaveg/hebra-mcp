@@ -98,6 +98,7 @@ import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
 import { noteStateEngineOf } from './note-state-engine';
 import {
   ensurePrivacyEpochIndexes,
+  lockedLiveNoteIds,
   noteStamps,
   noteVisibilityRows,
   noteVisibilityRowsFor,
@@ -555,25 +556,39 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   /** `notesVisibilityIndex()` solo de las notas de `ids` (`noteVisibilityRowsFor`,
    *  `./privacy-sql.ts`), por la cola serie como cualquier otra lectura. */
   async notesVisibilityIndexFor(ids: readonly string[]): Promise<NoteVisibilityEntry[]> {
-    return this.read(() => noteVisibilityRowsFor(this.db, ids));
+    return this.read(() => noteVisibilityRowsFor(this.db, ids, (sql) => this.prepared(sql)));
   }
 
   /** Lo que lee la puerta final (`src/server/privacy-gate.ts`): árbol de carpetas, índice
    *  de visibilidad, memoria de las carpetas privadas (la tabla y lo que este proceso anotó
    *  sin poder escribirla), sellos y, si se piden, papelera, ficheros sueltos y quién enlaza
-   *  cada SHA-256, en una transacción de lectura dentro de un turno de la cola. */
+   *  cada SHA-256, en una transacción de lectura dentro de un turno de la cola.
+   *
+   *  El índice de visibilidad no es el de la biblioteca entera (pieza A2 del plan de memoria,
+   *  6 nov 2026: eran todas las notas vivas en cada llamada), sino el de las notas que la
+   *  puerta juzga: `request.visibility` y las que salen de lo leído aquí mismo, en la misma
+   *  transacción. De lo que se juzga con `PrivacyFilter`, solo eso depende de otras notas:
+   *  - las notas de cada plan de `operationTargets` (`passGate`, todas tienen que verse);
+   *  - las notas que enlazan cada fichero suelto (`FilesIndex.refs`) y cada SHA-256
+   *    (`blobRefs`), por la regla (b) de `FileFilter.isHiddenReference`;
+   *  - con ficheros, TODAS las bloqueadas vivas: `PrivacyFilter.hasHiddenLockedNote` las
+   *    recorre (variante de A1 de `FileFilter`).
+   *  El resto (carpetas, etiquetas, la subida por las lápidas de cada nota, que va en su
+   *  propia fila) no mira otras notas. Una nota que falte cuenta como oculta. */
   async privacyRecheck(request: PrivacyRecheckRequest): Promise<PrivacyRecheckSnapshot> {
     return this.read(() =>
       inReadTransaction(this.db, () => {
         const remembered = this.rememberedRows();
         const snapshot: PrivacyRecheckSnapshot = {
           folders: this.engine.foldersList(),
-          notes: noteVisibilityRows(this.db),
+          notes: [],
           remembered,
           epoch: this.epochRow(remembered),
           stamps: noteStamps(this.db, request.notes),
           check: request.check ? request.check() : true
         };
+        const visibility = new Set(request.visibility);
+        const prepare = (sql: string): StatementSync => this.prepared(sql);
         if (request.operationTargets?.length) {
           // Los planes viven en su propio fichero (`./replace-plans.ts`): el escritor usa su
           // conexión y un lector abre el fichero en solo lectura, sin tocar la biblioteca.
@@ -592,12 +607,18 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
             }
           }
           snapshot.operationPlans = plans;
+          for (const plan of plans.values()) for (const noteId of plan.noteIds) visibility.add(noteId);
         }
-        if (request.files || request.blobs.length > 0) snapshot.files = this.filesRows();
-        else if (request.trash) snapshot.trash = trashIndexRows(this.db);
+        if (request.files || request.blobs.length > 0) {
+          snapshot.files = this.filesRows();
+          for (const ref of snapshot.files.refs) visibility.add(ref.noteId);
+          for (const noteId of lockedLiveNoteIds(this.db, prepare)) visibility.add(noteId);
+        } else if (request.trash) snapshot.trash = trashIndexRows(this.db);
         if (request.blobs.length > 0) {
           snapshot.blobRefs = request.blobs.map((sha256) => blobNoteRefRows(this.db, sha256.toLowerCase()));
+          for (const refs of snapshot.blobRefs) for (const ref of refs) visibility.add(ref.noteId);
         }
+        snapshot.notes = noteVisibilityRowsFor(this.db, [...visibility], prepare);
         return snapshot;
       })
     );

@@ -86,7 +86,14 @@ export interface PortSearchOptions {
  *  solo si la respuesta usó algo de eso, la papelera, los ficheros sueltos y quién enlaza
  *  esos bytes. */
 export interface PrivacyRecheckRequest {
+  /** Notas de las que se quiere el sello (`PrivacyRecheckSnapshot.stamps`). */
   notes: readonly string[];
+  /** Notas vivas cuya visibilidad juzga la puerta: el índice de visibilidad del snapshot
+   *  (`PrivacyRecheckSnapshot.notes`) trae solo estas, más las que el puerto lee dentro de la
+   *  misma transacción (las de los planes de `operationTargets`, las que enlazan ficheros o
+   *  adjuntos y, si hay ficheros, todas las bloqueadas). Una nota que no sale cuenta como
+   *  oculta (`PrivacyFilter.isHiddenNote`): lo que falte cierra, nunca abre. */
+  visibility: readonly string[];
   trash: boolean;
   files: boolean;
   blobs: readonly string[];
@@ -105,6 +112,8 @@ export interface PrivacyRecheckRequest {
  *  SHA-256 (en el orden de `blobs`). */
 export interface PrivacyRecheckSnapshot {
   folders: FoldersList;
+  /** El índice de visibilidad SOLO de las notas que necesita la puerta (ver
+   *  `PrivacyRecheckRequest.visibility`), no el de la biblioteca entera. */
   notes: NoteVisibilityEntry[];
   remembered: RememberedPrivateFolder[];
   /** La época de privacidad del almacén en esta misma transacción (`privacyEpoch`). */
