@@ -13,6 +13,9 @@
  *   un id en la papelera o desconocido (oculto, sin contar como olvido);
  * - `ensureAll` da lo mismo que antes;
  * - `ensure` dos veces no vuelve a leer lo ya leído;
+ * - `forget` (M1 de la revisión de seguridad, 6 nov 2026) devuelve una nota a NO cargada (oculta y
+ *   con rastro, también su sello) hasta otro `ensure`, que la vuelve a leer; solo suelta lo
+ *   pedido y no toca un índice entero;
  * - las herramientas, por `resolveToolContext`, no dejan rastro (la transición las cubre).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -186,6 +189,62 @@ describe('PrivacyFilter perezoso (A3)', () => {
     expect(forIds).toHaveBeenCalledTimes(3);
     forIds.mockRestore();
     all.mockRestore();
+  });
+
+  it('forget (M1): la soltada vuelve a NO cargada (oculta y con rastro) y ensure la recupera', async () => {
+    const h = (open = await scenario());
+    const full = await fullFilter(h);
+    const forIds = vi.spyOn(h.port, 'notesVisibilityIndexFor');
+    for (const [name, id] of Object.entries(h.extra) as Array<[keyof Ids, string]>) {
+      const lazy = await (await PrivacyFilter.build(h.port, AUDIT_CONFIG)).ensure([id]);
+      expect(lazy.retainedNotes, name).toBe(1);
+      // Pedida (también la de la papelera, que no sale): una soltada.
+      expect(lazy.forget([id]), name).toBe(1);
+      expect(lazy.retainedNotes, name).toBe(0);
+      const totalBefore = unloadedLookupsTotal();
+      expect(lazy.isHiddenNote(id), name).toBe(true);
+      expect(lazy.visibleMeta(id), name).toBeUndefined();
+      expect(lazy.sealOf(id), name).toBeUndefined();
+      expect(lazy.unloadedLookups, name).toBeGreaterThanOrEqual(3);
+      expect(unloadedLookupsTotal(), name).toBeGreaterThan(totalBefore);
+      // `ensure` la vuelve a leer (no la da por pedida) y decide como el filtro entero.
+      forIds.mockClear();
+      await lazy.ensure([id]);
+      expect(forIds.mock.calls, name).toEqual([[[id]]]);
+      const lookups = lazy.unloadedLookups;
+      expect(verdict(lazy, id), name).toEqual(verdict(full, id));
+      expect(lazy.unloadedLookups, name).toBe(lookups);
+    }
+    forIds.mockRestore();
+  });
+
+  it('forget (M1) solo suelta lo pedido, deja las demás y no toca un índice entero', async () => {
+    const h = (open = await scenario());
+    const full = await fullFilter(h);
+    const lazy = await (await PrivacyFilter.build(h.port, AUDIT_CONFIG)).ensure([
+      h.extra.publicNote,
+      h.extra.underDeletedPublic,
+      h.extra.tagPrivate
+    ]);
+    expect(lazy.retainedNotes).toBe(3);
+    expect(lazy.forget([h.extra.publicNote, UNKNOWN])).toBe(1);
+    expect(lazy.retainedNotes).toBe(2);
+    // Las otras siguen cargadas, con su decisión (también la que sube por las lápidas).
+    expect(verdict(lazy, h.extra.underDeletedPublic)).toEqual(verdict(full, h.extra.underDeletedPublic));
+    expect(verdict(lazy, h.extra.tagPrivate)).toEqual(verdict(full, h.extra.tagPrivate));
+    expect(lazy.unloadedLookups).toBe(0);
+    expect(lazy.isHiddenNote(h.extra.publicNote)).toBe(true);
+    expect(lazy.unloadedLookups).toBe(1);
+
+    // Entero (`ensureAll`): sin efecto. Soltar de un índice entero dejaría la nota oculta para
+    // siempre (`ensure` ya no lee nada).
+    const entire = await (await PrivacyFilter.build(h.port, AUDIT_CONFIG)).ensureAll();
+    const size = entire.retainedNotes;
+    expect(entire.forget([h.extra.publicNote, h.extra.locked])).toBe(0);
+    expect(entire.retainedNotes).toBe(size);
+    expect(verdict(entire, h.extra.publicNote)).toEqual(verdict(full, h.extra.publicNote));
+    expect(verdict(entire, h.extra.locked)).toEqual(verdict(full, h.extra.locked));
+    expect(entire.unloadedLookups).toBe(0);
   });
 
   it('las herramientas, con la transición de resolveToolContext, no dejan rastro', async () => {

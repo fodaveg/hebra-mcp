@@ -13,7 +13,12 @@
  * Privados por tramos (`privacyLoad: 'lazy'`, A4 del plan de memoria, 6 nov 2026): el filtro
  * no trae la biblioteca entera. Las notas se juzgan en orden de id, por tramos que se cargan
  * con `ctx.privacy.ensure` (`PendingNotes`), y solo hasta donde llegue la página: el resultado,
- * los cortes y el cursor son los mismos que juzgándolas todas antes de empezar.
+ * los cortes y el cursor son los mismos que juzgándolas todas antes de empezar. Lo ya decidido
+ * se suelta del índice (`forget`, M1 de la revisión de seguridad, 6 nov 2026): las de un tramo que
+ * no se miran, al juzgarlo, y las de un lote, al recorrerlo. Con un patrón raro la llamada
+ * recorre la biblioteca entera en TIEMPO, pero su índice no pasa de un tramo (`GREP_WINDOW_MAX`)
+ * más un lote; lo que sí crece con la biblioteca son las filas de `grepNotes` (id, título y
+ * `rowid` de cada nota viva, unos 5 MiB a 30 000 notas, medido).
  *
  * Orden y cursor: por id de nota y número de línea, estable aunque las notas cambien. El
  * cursor (`g1`) es la posición por la que seguir: `[id, línea]` (la línea de esa nota por
@@ -180,7 +185,10 @@ const GREP_WINDOW_MAX = 8_192;
  * Las notas que se miran, en orden de id, juzgadas por TRAMOS (`privacyLoad: 'lazy'`, A4 del
  * plan de memoria, 6 nov 2026): el filtro de privados no trae la biblioteca entera, y cada
  * tramo de `rows` (vivas, sin bloquear y desde el cursor, ya en orden) se carga con
- * `ctx.privacy.ensure` antes de juzgarlo. De cada tramo quedan las visibles que pasan
+ * `ctx.privacy.ensure` antes de juzgarlo, y lo que de él no se va a mirar se suelta en cuanto se
+ * juzga (`forget`, M1 de la revisión de seguridad): con un patrón raro se recorren todos los
+ * tramos, y el índice de la llamada no puede acabar con la biblioteca entera dentro. De cada
+ * tramo quedan las visibles que pasan
  * `accept` (carpeta y etiqueta) y, con prefiltro, las que el índice de subcadena da como
  * candidatas: `grepCandidates` sigue recibiendo solo notas VISIBLES (lee el cuerpo de algunas,
  * así que una oculta no puede entrar ahí, cabecera). `items` acaba siendo la misma lista que
@@ -222,8 +230,18 @@ class PendingNotes {
         );
         if (candidates) accepted = accepted.filter((note) => candidates.has(note.rowid));
       }
+      // M1: las del tramo que no se van a mirar ya están decididas y nadie vuelve a preguntar
+      // por ellas: se sueltan del índice. Las que quedan en `items` siguen cargadas hasta
+      // recorrerlas (`release`), porque la puerta final toma su sello al declararlas.
+      const kept = new Set(accepted);
+      this.ctx.privacy.forget(slice.filter((row) => !kept.has(row)).map((row) => row.id));
       this.items.push(...accepted);
     }
+  }
+
+  /** Suelta del índice notas de `items` ya recorridas (M1): ver `runGrep`. */
+  release(ids: Iterable<string>): void {
+    this.ctx.privacy.forget(ids);
   }
 }
 
@@ -339,6 +357,9 @@ export async function runGrep(
   // proceso): la espera no cuenta para el plazo, que empieza con el hilo ya arrancado.
   const worker = pattern.literal ? null : await RegexScanWorker.start(pattern.re, ctx.port);
   let deadline = Date.now() + (options.timeBudgetMs ?? GREP_TIME_BUDGET_MS);
+  /** M1: notas ya recorridas que aún se guardan en el índice porque un corte posterior todavía
+   *  puede declararlas (`usedCursor`): la última recorrida y la de la última coincidencia. */
+  let held: string[] = [];
   try {
     for (let first = 0; !stop; first += GREP_BATCH_NOTES) {
       // Este lote entero y una más (`pending.length > first + GREP_BATCH_NOTES` dice si hay
@@ -479,6 +500,19 @@ export async function runGrep(
         throw new ToolError('pattern_too_slow', {
           nextCursor: usedCursor(stuck.id, stuck.fromLine, true)
         });
+      }
+      // M1: el lote está recorrido y lo que salió ya está declarado a la puerta final (con su
+      // sello), así que sus notas se sueltan del índice. Menos las dos que un corte de una
+      // vuelta posterior aún puede declarar: `lastScanned` (`afterLastScanned`) y la de la última
+      // coincidencia (`last` del corte por la de más o por tamaño). Así lo cargado lo acota el
+      // tramo (y el lote), no la biblioteca: un patrón raro recorre todos los tramos.
+      if (!stop) {
+        const keep = new Set<string>();
+        if (lastScanned !== null) keep.add(lastScanned);
+        const lastMatch = matches[matches.length - 1];
+        if (lastMatch) keep.add(lastMatch.id);
+        queue.release([...held, ...batch.map((note) => note.id)].filter((id) => !keep.has(id)));
+        held = [...keep];
       }
     }
   } finally {

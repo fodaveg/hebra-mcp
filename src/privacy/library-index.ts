@@ -23,6 +23,11 @@
  * índice) y en `unloadedLookupsTotal()` (del proceso), que los tests comprueban. Sin aviso por
  * stderr: los logs de §6.4 no llevan ids, y un contador no cuesta nada en producción.
  *
+ * Soltar (M1 de la revisión de seguridad, 6 nov 2026): `forget(ids)` devuelve a NO cargadas
+ * notas ya decididas, para que una herramienta que recorre la biblioteca por tramos no acumule
+ * en el índice una entrada por nota. Una soltada se trata igual que una no pedida (oculta y con
+ * rastro) hasta que otro `ensure` la vuelva a leer. Sin efecto en un índice entero.
+ *
  * Solo cubre notas VIVAS (ni papelera ni lápida): las dos consultas ya las excluyen en SQL
  * (SPEC.md §5: «las notas en la papelera nunca se devuelven»). Una nota pedida que no sale es
  * desconocida (oculta), pero no cuenta como olvido: se preguntó por ella.
@@ -143,6 +148,36 @@ export class LibraryIndex {
     for (const row of rows) this.notes.set(row.id, entryOf(row));
     this.full = true;
     return [...this.notes.values()];
+  }
+
+  /**
+   * Suelta las notas de `ids` ya decididas (M1 de la revisión de seguridad del plan de memoria,
+   * 6 nov 2026): vuelven a estar NO cargadas, como si nadie las hubiera pedido. Es lo que deja la
+   * memoria de una herramienta que recorre la biblioteca por tramos (`hebra_grep`) o por lotes
+   * (`hebra_replace_in_notes` sin `ids`) acotada por el tramo y no por la biblioteca.
+   *
+   * Falla cerrando, como lo no pedido: `get` de una nota soltada devuelve `undefined` (oculta) y
+   * suma en `unloadedLookups`; `ensure` la vuelve a leer. Quien suelta una nota ya no puede
+   * preguntar por ella, tampoco por su sello (`sealOf`), sin volver a cargarla.
+   *
+   * Sin efecto con la biblioteca entera (`fromRows`, `ensureAll`): esa memoria ya está gastada,
+   * y soltar de un índice entero dejaría la nota oculta para siempre (`ensure` no lee nada con
+   * el índice entero). Devuelve cuántas se soltaron.
+   */
+  forget(ids: Iterable<string>): number {
+    if (this.full) return 0;
+    let forgotten = 0;
+    for (const id of ids) {
+      const loaded = this.notes.delete(id);
+      if (this.requested.delete(id) || loaded) forgotten += 1;
+    }
+    return forgotten;
+  }
+
+  /** Cuántas notas guarda ahora el índice (cargadas o pedidas sin salir): lo que crece con
+   *  `ensure` y baja con `forget`. Para los tests de memoria. */
+  get retained(): number {
+    return this.full ? this.notes.size : this.requested.size;
   }
 
   /** La entrada de una nota, o `undefined` si no existe O NO SE CARGÓ (falla cerrando: quien

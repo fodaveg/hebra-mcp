@@ -37,6 +37,13 @@
  * reglas del filtro dentro de la consulta con `notesScope()` (`src/store/visible-sql.ts`);
  * `visibleNotes()` queda solo como oráculo de los tests.
  *
+ * Soltar lo ya decidido (M1 de la revisión de seguridad, 6 nov 2026): `forget(ids)` devuelve
+ * notas a NO cargadas (ocultas si se vuelve a preguntar, con rastro). Lo usan las dos
+ * herramientas que pueden recorrer la biblioteca entera en una llamada, `hebra_grep` (por
+ * tramos) y `hebra_replace_in_notes` sin `ids` (por lotes), para que su memoria la acote el
+ * tramo y no la biblioteca; antes de soltar una nota hay que haberla declarado ya a la puerta
+ * final si sale en la respuesta (`sealOf` necesita su fila).
+ *
  * Audit de privacidad adversarial del 10 oct 2026 (D16, `test/privacy/`): una nota
  * bloqueada se oculta mientras haya etiquetas privadas (A1), una nota viva cuya carpeta
  * guardada no está viva se juzga subiendo por las lápidas (A2, `./tombstones.ts`), y las
@@ -172,6 +179,25 @@ export class PrivacyFilter implements LiveFolders {
   async ensureAll(): Promise<this> {
     if (this.source) await this.library.ensureAll(this.source);
     return this;
+  }
+
+  /**
+   * Suelta las notas de `ids` ya decididas (M1 de la revisión de seguridad del plan de memoria,
+   * 6 nov 2026; `LibraryIndex.forget`): vuelven a NO estar cargadas, así que preguntar otra vez
+   * por ellas (`isHiddenNote`, `visibleMeta`, `sealOf`…) las da por OCULTAS y deja rastro, hasta
+   * otro `ensure`. Para las herramientas que recorren la biblioteca por tramos o lotes
+   * (`hebra_grep`, `hebra_replace_in_notes` sin `ids`): su memoria queda acotada por el tramo.
+   * Ojo con la puerta final: `GateUsage.note` toma el sello con `sealOf` al declarar, así que una
+   * nota que se va a declarar NO se suelta antes. Sin efecto con la biblioteca entera cargada
+   * (`ensureAll`, `fromSnapshot`). Devuelve cuántas se soltaron.
+   */
+  forget(ids: Iterable<string>): number {
+    return this.library.forget(ids);
+  }
+
+  /** Cuántas notas guarda ahora el índice de este filtro (para los tests de memoria). */
+  get retainedNotes(): number {
+    return this.library.retained;
   }
 
   /** Preguntas a ESTE filtro por notas que no se cargaron (tratadas como ocultas): el rastro
