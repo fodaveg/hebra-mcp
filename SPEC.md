@@ -2688,8 +2688,13 @@ de su límite por defecto).
   orden de llegada, de modo que una cuenta con muchas rondas o descargas no retrasa a otra más de
   un turno. La clave de cuenta es opaca (hash del directorio de la cuenta, el mismo para su
   biblioteca personal y sus espacios; `default` en stdio). Una descarga en retroceso por 429 no
-  ocupa plaza. No existe un tiempo máximo por ronda: una ronda cuelga su plaza mientras el motor
-  no responda (límite conocido, no inventado aquí).
+  ocupa plaza. Una ronda no puede retener su plaza para siempre: el transporte HTTP del
+  motor (`vendor/hebra`, `HttpLibraryTransport`) corta toda petición de registros a los 30 s sin
+  recibir nada y a los 15 min en total, y la de Blob V2 a los 15 min por objeto (60 s las de
+  control); la ronda acaba con `timeout` y el runner suelta la plaza
+  (`test/sync/request-timeout.node.test.ts`). El límite que queda es el peor caso de un relé
+  que gotea datos: hasta 15 min por petición. hebra-mcp no añade un plazo propio por encima, porque
+  uno más corto cortaría las descargas grandes que el motor sí admite.
   Una ronda que espera turno cuenta dentro de la espera de `whenReady` (10 s): si caduca, la
   herramienta responde con lo local y `hebra_status` no da aún `lastSyncAt`. Una ronda en cola de
   un contexto que se cierra sale de la cola sin ejecutarse ni coger el turno. En `serve` por stdio
