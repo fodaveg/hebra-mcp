@@ -1125,7 +1125,7 @@ export function registerTools(
       inputSchema: scoped(jdNewIdInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_jd_new_id', (toolCtx, input) => runJdNewId(toolCtx, input))
+    gated('hebra_jd_new_id', (toolCtx, input) => runJdNewId(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1137,7 +1137,7 @@ export function registerTools(
       inputSchema: scoped(jdAuditInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_jd_audit', (toolCtx, input) => runJdAuditTool(toolCtx, input))
+    gated('hebra_jd_audit', (toolCtx, input) => runJdAuditTool(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1149,6 +1149,6 @@ export function registerTools(
       inputSchema: scoped(jdMoveInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_jd_move', (toolCtx, input) => runJdMove(toolCtx, input))
+    gated('hebra_jd_move', (toolCtx, input) => runJdMove(toolCtx, input), { privacyLoad: 'lazy' })
   );
 }

@@ -26,9 +26,8 @@ import { registerTools } from '../../src/server/register-tools';
 import { localWriteContext } from '../../src/server/serve';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import { LibraryInstance, LIBRARY_SQLITE_FILE } from '../../src/sync/library-instance';
-import { FileFilter } from '../../src/privacy/file-filter';
+import { turnView } from '../../src/store/jd-new-id';
 import { JdLibraryPort } from '../../src/store/jd-port';
-import { privacyInTurn } from '../../src/store/writes';
 import { JD_DEFAULT_CONFIG, startJd, type JdHarness } from '../fixtures/jd-library';
 import { createNote } from '../fixtures/test-library';
 
@@ -161,20 +160,13 @@ describe('Johnny.Decimal (D18): privacidad', () => {
     });
     const reads: string[] = [];
     const answer = await h.port.writeExclusive(async (store) => {
+      // La vista del escritor (`turnView`), leyendo el cuerpo solo por `noteRead`.
       const port = new JdLibraryPort(
         {
-          folders: () => store.foldersList(),
-          notes: () => store.notesVisibilityIndex(),
+          ...turnView(store, JD_DEFAULT_CONFIG),
           noteRead: (id) => {
             reads.push(id);
             return store.noteRead(id);
-          },
-          folderNotes: (folderId) => store.titlesInFolder(folderId),
-          filter: () => privacyInTurn(store, JD_DEFAULT_CONFIG),
-          noteTitles: (ids) => store.noteTitles(ids),
-          files: () => {
-            const index = store.filesIndex();
-            return { index, filter: FileFilter.fromSnapshot(privacyInTurn(store, JD_DEFAULT_CONFIG), index, JD_DEFAULT_CONFIG) };
           }
         },
         null,

@@ -258,7 +258,6 @@ describe.each(CONFIGS)('A7 con %s', (_label, config) => {
     const jd = new JdLibraryPort(
       {
         folders: () => h.port.foldersList(),
-        notes: () => h.port.notesVisibilityIndex(),
         noteRead: (id) => {
           reads.push(id);
           return h.port.noteRead(id);

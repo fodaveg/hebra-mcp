@@ -25,7 +25,7 @@
  * estado de sync. Nunca ids, nombres ni rutas.
  */
 import { logEvent } from '../../log/logger';
-import { JD_MOVE_NAME_MAX_LENGTH, type JdMoveItem, type JdMoveKind, type JdMoveRequest } from '../../store/jd-move';
+import { JD_MOVE_NAME_MAX_LENGTH, type JdMoveKind, type JdMoveRequest } from '../../store/jd-move';
 import { afterGate, usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import type { JdMoveOutcome } from '../write-context';
@@ -97,19 +97,26 @@ function declarePiece(ctx: ToolContext, piece: { kind: JdMoveKind; id: string })
  * pieza, la carpeta de donde sale, la de destino si existe y el JDex (si algo de eso deja de
  * verse o cambia la biblioteca, se repite entera); al aplicar o deshacer, las piezas y las
  * carpetas del informe (si ya no se ven tras la ronda, la respuesta de algo que no existe).
+ *
+ * El sello por defecto de una nota sale del filtro de la llamada, que con `privacyLoad: 'lazy'`
+ * (pieza A9a del plan de memoria) no tiene ninguna cargada: antes de declararlas se cargan las
+ * notas que nombra la respuesta (`ensure`).
  */
-function declareUsage(ctx: ToolContext, outcome: Exclude<JdMoveOutcome, { mode: 'discard' }>): void {
+async function declareUsage(ctx: ToolContext, outcome: Exclude<JdMoveOutcome, { mode: 'discard' }>): Promise<void> {
   const used = usageOf(ctx);
+  const pieces: Array<{ kind: JdMoveKind; id: string }> =
+    outcome.mode === 'simulate'
+      ? [outcome.move]
+      : outcome.mode === 'apply'
+        ? [...outcome.moved, ...outcome.alreadyDone]
+        : [...outcome.restored, ...outcome.alreadyRestored, ...outcome.skipped];
+  await ctx.privacy.ensure(pieces.filter((piece) => piece.kind === 'note').map((piece) => piece.id));
   if (outcome.mode === 'simulate') {
     declarePiece(ctx, outcome.move);
     used.folder(outcome.jdex.id);
     for (const place of [outcome.move.from, outcome.move.to]) if (place.folderId !== null) used.folder(place.folderId);
     return;
   }
-  const pieces: JdMoveItem[] =
-    outcome.mode === 'apply'
-      ? [...outcome.moved, ...outcome.alreadyDone]
-      : [...outcome.restored, ...outcome.alreadyRestored, ...outcome.skipped];
   for (const piece of pieces) declarePiece(ctx, piece);
   if (outcome.mode === 'apply') for (const folder of [...outcome.created, ...outcome.existing]) used.folder(folder.id);
 }
@@ -128,7 +135,7 @@ export async function runJdMove(
     throw mapWriteError(error);
   }
   if (outcome.mode === 'discard') throw new ToolError('invalid_input');
-  declareUsage(ctx, outcome);
+  await declareUsage(ctx, outcome);
   if (outcome.mode === 'simulate') {
     // Se repite si la puerta final no pasa: su log, solo del intento que sale.
     afterGate(ctx, () => logEvent({ event: 'jd.move', mode: 'simulate', kind: outcome.move.kind }));

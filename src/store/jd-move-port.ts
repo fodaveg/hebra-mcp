@@ -34,18 +34,30 @@
  *   necesita una ruta privada configurada por debajo de la de la carpeta, y eso la rechaza.
  * Las comprobaciones de privacidad se hacen igual en la simulación (`preflight`), para no
  * dejar carpetas creadas antes de un rechazo, y otra vez al mover.
+ *
+ * Ningún filtro del turno lleva la biblioteca entera (pieza A9a del plan de memoria, 6 nov 2026):
+ * el de privados, solo las carpetas, la configuración y la nota que se mueve (`privacyInTurnFor`);
+ * el de ficheros, las notas que enlazan ficheros y las bloqueadas (`looseFilesFilterInTurn`), más
+ * las que enlazan el nombre o los bytes de lo que se mueve cuando se mira si quedaría oculto.
  */
 import { bodyWithFrontmatterTitle, deriveNote, LibraryError, ROOT_FOLDER_ID } from '../hebra';
 import type { EnsureResult, LibraryMovePort, MoveParent, MovePlan, PlanWrite } from '../jd';
 import type { PrivacyConfig } from '../privacy/config';
-import { FileFilter } from '../privacy/file-filter';
+import type { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { StoreError, writeRejected } from './errors';
 import { nameExtension, validFileName } from './file-content';
 import { folderNameKey, planCreateFolder, validFolderName } from './folders';
 import { JdLibraryPort } from './jd-port';
 import { jdRejected, turnView, turnWrites } from './jd-new-id';
-import { LOCKED_BODY_PREFIX, privacyInTurn, saveInputFor, type NoteWriteStore } from './writes';
+import type { FilesIndex } from './types';
+import {
+  LOCKED_BODY_PREFIX,
+  looseFilesFilterInTurn,
+  privacyInTurnFor,
+  saveInputFor,
+  type NoteWriteStore
+} from './writes';
 
 const NOT_OK = { ok: false } as const;
 const OK = { ok: true } as const;
@@ -110,12 +122,17 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     super(turnView(store, privacy), turnWrites(store), options);
   }
 
-  private live(): PrivacyFilter {
-    return privacyInTurn(this.store, this.privacy);
+  /** El filtro del turno con las carpetas, la configuración y SOLO las notas de `ids` (pieza A9a
+   *  del plan de memoria): sin `ids`, solo carpetas y configuración. */
+  private live(ids: readonly string[] = []): PrivacyFilter {
+    return privacyInTurnFor(this.store, this.privacy, ids);
   }
 
-  private filesFilter(live: PrivacyFilter): FileFilter {
-    return FileFilter.fromSnapshot(live, this.store.filesIndex(), this.privacy);
+  /** El filtro de los ficheros del turno, con un filtro de privados que lleva las notas que
+   *  juzga (`looseFilesFilterInTurn`, A8), y el índice del que sale. */
+  private filesFilter(): { index: FilesIndex; files: FileFilter } {
+    const index = this.store.filesIndex();
+    return { index, files: looseFilesFilterInTurn(this.store, this.privacy, index).files };
   }
 
   /** La subcarpeta y la carpeta de un ID que crea el plan, como `hebra_create_folder`: un
@@ -133,8 +150,8 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
   async listFiles(folderId: string): Promise<{ id: string; name: string }[]> {
     const live = this.live();
     if (!visibleFolder(live, folderId)) return [];
-    return this.filesFilter(live)
-      .visibleFiles()
+    return this.filesFilter()
+      .files.visibleFiles()
       .filter((file) => file.trashedAt === null && file.folderId === folderId)
       .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map((file) => ({ id: file.id, name: file.name }));
@@ -152,7 +169,7 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     expected: { folderId: string; title: string },
     to: { folderId: string; title?: string }
   ): Promise<{ ok: boolean }> {
-    const live = this.live();
+    const live = this.live([id]);
     const meta = live.visibleMeta(id);
     if (!meta || meta.folderId !== expected.folderId || !visibleFolder(live, to.folderId)) return NOT_OK;
     const row = await this.store.noteRead(id);
@@ -187,7 +204,7 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     to: { folderId: string; name?: string }
   ): Promise<{ ok: boolean }> {
     const live = this.live();
-    const files = this.filesFilter(live);
+    const { index, files } = this.filesFilter();
     const content = files.contentOf(id);
     if (
       !content ||
@@ -209,7 +226,7 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
     ) {
       return NOT_OK;
     }
-    if (wouldHideFile(this.store, files, name, content.sha256)) throw unavailable();
+    if (wouldHideFile(this.store, this.privacy, index, files, name, content.sha256)) throw unavailable();
     try {
       if (to.folderId !== content.file.folderId) {
         await this.store.fileMove(id, to.folderId);
@@ -308,7 +325,7 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
         throw folderUnavailable();
       }
     }
-    const files = this.filesFilter(live);
+    const { index, files } = this.filesFilter();
     for (const move of plan.moves) {
       const parentSegments = parentSegmentsOf(live, move.to.parentId, segmentsOf);
       const renamed = move.to.name !== move.from.name;
@@ -329,7 +346,7 @@ export class JdMovePort extends JdLibraryPort implements LibraryMovePort {
         const content = files.contentOf(move.id);
         if (!content) continue; // el motor ya lo comprobó; si cambió, plan_stale al aplicar.
         const name = renamed ? checkFileName(content.file.name, move.to.name) : content.file.name;
-        if (wouldHideFile(this.store, files, name, content.sha256)) throw unavailable();
+        if (wouldHideFile(this.store, this.privacy, index, files, name, content.sha256)) throw unavailable();
       } else if (renamed) {
         const row = await this.store.noteRead(move.id);
         if (row) renamedNoteBody(live, row.body, move.to.name);
@@ -381,9 +398,21 @@ function folderTargetRejects(live: PrivacyFilter, id: string, parentSegments: re
 }
 
 /** ¿Quedaría oculto un fichero con ese nombre y esos bytes? (regla (b) de D10 y la variante
- *  de las bloqueadas de D16, como `./file-verbs.ts`). */
-function wouldHideFile(store: NoteWriteStore, files: FileFilter, name: string, sha256: string): boolean {
-  return files.wouldHide(name, [...store.notesLinkingFileName(name), ...store.notesLinkingBlob(sha256)]);
+ *  de las bloqueadas de D16, como `wouldHide` de `./file-verbs.ts`). Las notas de las
+ *  referencias no tienen por qué estar en el filtro de `files` (A8): se juzgan con uno que
+ *  también las lleva, sobre el mismo `index` y en el mismo turno. */
+function wouldHideFile(
+  store: NoteWriteStore,
+  privacy: PrivacyConfig,
+  index: FilesIndex,
+  files: FileFilter,
+  name: string,
+  sha256: string
+): boolean {
+  const refs = [...store.notesLinkingFileName(name), ...store.notesLinkingBlob(sha256)];
+  const judge =
+    refs.length === 0 ? files : looseFilesFilterInTurn(store, privacy, index, refs.map((ref) => ref.noteId)).files;
+  return judge.wouldHide(name, refs);
 }
 
 /** Los segmentos de ruta de cada carpeta que crea el plan (las que cuelgan de otra que crea

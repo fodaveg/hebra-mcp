@@ -73,6 +73,7 @@ import {
 } from './props-sql';
 import {
   titlesInFolderRows,
+  titlesInFoldersRows,
   visibleFolderCounts,
   visibleTagCounts,
   type FolderNoteTitle,
@@ -962,19 +963,6 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     });
   }
 
-  /** El título de cada nota de `ids` que no es lápida, sin leer `body` (SQL propio sobre
-   *  `notes` de `schema.sql`). Sin cola: solo dentro de un turno. */
-  private noteTitleRows(ids: readonly string[]): Map<string, string> {
-    const titles = new Map<string, string>();
-    if (ids.length === 0) return titles;
-    const rows = this.prepared(
-      `SELECT n.id AS id, n.title AS title FROM json_each(?) AS wanted
-       JOIN notes AS n ON n.id = wanted.value WHERE n.deleted = 0`
-    ).all(JSON.stringify([...new Set(ids)])) as Array<{ id: string; title: string | null }>;
-    for (const row of rows) titles.set(String(row.id), String(row.title ?? ''));
-    return titles;
-  }
-
   /**
    * Ejecuta `operation` en UN turno de la cola, con acceso directo (sin cola) al motor:
    * las operaciones de nota, lo que lee el filtro de privados y el registro de
@@ -992,10 +980,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
-        // D18: solo los títulos, sin el cuerpo (`./jd-port.ts`, `hasHidden`).
-        noteTitles: (ids) => this.noteTitleRows(ids),
         // A7: las notas de una carpeta, sin cuerpo (`./jd-port.ts`, `listNotes`).
         titlesInFolder: (folderId) => titlesInFolderRows(this.db, folderId),
+        // D18 y A9a: las candidatas de `hasHidden`, solo títulos (`./jd-port.ts`).
+        titlesInFolders: (folderIds) => titlesInFoldersRows(this.db, folderIds),
         // D23: ocultar, quitar la marca de conflicto, guardas y renombrar con los enlaces.
         ...noteStateEngineOf(this.engine, this.db),
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.

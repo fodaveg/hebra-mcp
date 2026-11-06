@@ -5,9 +5,15 @@
  * escribir, las mismas puertas que el resto de hebra-mcp.
  *
  * Se construye por turno (`JdView`): en el escritor, sobre el almacén de ESE turno de la
- * cola (`./jd-new-id.ts`), con el filtro recalculado en cada llamada (`privacyInTurn`), de
+ * cola (`./jd-new-id.ts`), con el filtro recalculado en cada llamada (`privacyInTurnFor`), de
  * modo que un `ensureFolder` ve la carpeta que acaba de crear el anterior; en un lector, sobre
  * el puerto de la llamada y su filtro (`hebra_jd_audit`, que no escribe).
+ *
+ * Ninguna pregunta carga la biblioteca entera (pieza A9a del plan de memoria, 6 nov 2026):
+ * `JdView.filter(ids)` da un filtro que conoce las carpetas, la configuración y SOLO las notas de
+ * `ids`, y cada método pide las que decide (las candidatas de una carpeta, la nota que lee, las
+ * de `hasHidden`). Antes, cada llamada del escritor leía la visibilidad de todas las notas vivas
+ * y `hasHidden` las recorría en JS: a 30 000 notas, simular un ID nuevo asignaba 366 MiB.
  *
  * Reglas del contrato cerrado con la sesión de jdex-manager:
  * - `parentId: null` del motor es `ROOT_FOLDER_ID` de Hebra, en los dos sentidos.
@@ -48,25 +54,33 @@ import type { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { writeRejected } from './errors';
 import { planCreateFolder } from './folders';
-import type { FilesIndex, NoteVisibilityEntry } from './types';
+import type { FilesIndex } from './types';
 import type { FolderNoteTitle } from './visible-sql';
 import { folderRejection, LOCKED_BODY_PREFIX, saveInputFor, type FolderRow } from './writes';
 
-/** Lo que el puerto lee: el árbol y el índice de visibilidad SIN filtrar, las filas de las
- *  notas y el filtro de privados de quien pide sobre ese mismo estado. */
+/** Lo que el puerto lee: el árbol SIN filtrar, las notas candidatas de unas carpetas (sin
+ *  filtrar ni leer el cuerpo), las filas de las notas y el filtro de privados de quien pide
+ *  sobre ese mismo estado. */
 export interface JdView {
   folders(): FoldersList | Promise<FoldersList>;
-  notes(): readonly NoteVisibilityEntry[] | Promise<readonly NoteVisibilityEntry[]>;
   noteRead(id: string): Promise<NoteRow | null>;
   /** Las notas vivas (ni papelera ni lápida) de una carpeta EFECTIVA, con su título y SIN
    *  filtrar ni leer el cuerpo (`titlesInFolderRows` de `./visible-sql.ts`): las candidatas de
    *  `listNotes`. */
   folderNotes(folderId: string): readonly FolderNoteTitle[] | Promise<readonly FolderNoteTitle[]>;
-  filter(): PrivacyFilter | Promise<PrivacyFilter>;
-  /** Solo los TÍTULOS de unas notas, sin cargar su cuerpo (los de las ocultas, para
-   *  `hasHidden`: el tiempo de respuesta no puede depender del tamaño de lo oculto). Sin él,
-   *  `hasHidden` responde `true` (cerrado ante la duda). */
-  noteTitles?(ids: readonly string[]): Map<string, string> | Promise<Map<string, string>>;
+  /**
+   * El filtro de privados de quien pide: las carpetas y la configuración siempre, y de las notas
+   * al menos las de `ids` (sin `ids`, ninguna). Una nota que no está en `ids` puede ser
+   * desconocida para él, y desconocida es OCULTA: cada método pasa todas las que va a juzgar. En
+   * el escritor, `privacyInTurnFor` (rehecho en cada llamada); en un lector, `ensure(ids)` del
+   * filtro de la llamada.
+   */
+  filter(ids?: readonly string[]): PrivacyFilter | Promise<PrivacyFilter>;
+  /** Las notas vivas cuya carpeta EFECTIVA es una de `folderIds`, con su título y SIN filtrar ni
+   *  leer el cuerpo (`titlesInFoldersRows` de `./visible-sql.ts`): las candidatas de `hasHidden`
+   *  (el tiempo de respuesta no puede depender del tamaño de lo oculto). Sin él, `hasHidden`
+   *  responde `true` (cerrado ante la duda). */
+  notesInFolders?(folderIds: readonly string[]): readonly FolderNoteTitle[] | Promise<readonly FolderNoteTitle[]>;
   /** Los ficheros sueltos sin filtrar y su filtro, para `hasHidden`. Sin él, `true`. */
   files?(): { index: FilesIndex; filter: FileFilter } | Promise<{ index: FilesIndex; filter: FileFilter }>;
 }
@@ -148,15 +162,14 @@ export class JdLibraryPort implements LibraryPort {
    * cada una la juzga el filtro de quien pide, que además tiene que verla en esa misma carpeta.
    * Coste O(notas de la carpeta) (pieza A7 del plan de memoria, 6 nov 2026): antes copiaba todas
    * las visibles de la biblioteca (`visibleNotes()`) y leía la fila entera, con el cuerpo, de cada
-   * nota de la carpeta.
+   * nota de la carpeta. El filtro que las juzga conoce solo esas notas (A9a).
    */
   async listNotes(folderId: string): Promise<PortNote[]> {
-    const filter = await this.view.filter();
+    const folders = await this.view.filter();
     const wanted = folderId;
-    if (wanted !== ROOT_FOLDER_ID && (!filter.folderExists(wanted) || filter.isFolderHidden(wanted))) return [];
+    if (wanted !== ROOT_FOLDER_ID && (!folders.folderExists(wanted) || folders.isFolderHidden(wanted))) return [];
     const candidates = await this.view.folderNotes(wanted);
-    // Sin efecto con un filtro ya entero (el del turno del escritor, el de una llamada `'all'`).
-    await filter.ensure(candidates.map((note) => note.id));
+    const filter = await this.view.filter(candidates.map((note) => note.id));
     return candidates
       .filter((note) => filter.visibleMeta(note.id)?.folderId === wanted)
       .map((note) => ({ id: note.id, title: note.title }))
@@ -164,7 +177,7 @@ export class JdLibraryPort implements LibraryPort {
   }
 
   async readNote(id: string): Promise<{ body: string | null }> {
-    const filter = await this.view.filter();
+    const filter = await this.view.filter([id]);
     // `visibleMeta` es `undefined` también para una nota que el filtro no conoce.
     if (!filter.visibleMeta(id)) return { body: null };
     const row = await this.view.noteRead(id);
@@ -230,13 +243,22 @@ export class JdLibraryPort implements LibraryPort {
    *     JDex, hay alguna carpeta `00.00` oculta: entonces lo es para todas las categorías. Sin
    *     mirar el orden de las carpetas: una `00.00` oculta duplicada no decide nada si el JDex
    *     que se usa es otro, visible.
-   * De las notas ocultas solo se leen los TÍTULOS (`JdView.noteTitles`, sin el cuerpo), para
-   * que el tiempo de respuesta no dependa del tamaño de lo oculto. Nunca dice qué ni cuántos:
-   * el motor solo recibe el booleano.
+   * De las notas solo se leen los TÍTULOS (`JdView.notesInFolders`, sin el cuerpo), para que el
+   * tiempo de respuesta no dependa del tamaño de lo oculto. Nunca dice qué ni cuántos: el motor
+   * solo recibe el booleano.
+   *
+   * Sin recorrer la biblioteca (pieza A9a del plan de memoria, 6 nov 2026): antes juzgaba con el
+   * filtro TODAS las notas vivas para quedarse con las de esas carpetas. Ahora las candidatas son
+   * las notas vivas de las carpetas de (a) y (c) (una consulta por el índice de carpeta), y de
+   * ellas solo las que tienen el prefijo de la categoría en el título pasan por el filtro
+   * (`JdView.filter(ids)`), con las mismas reglas que cualquier otra nota (`isHiddenNote`:
+   * carpetas privadas y recordadas, lápidas, bloqueadas y etiquetas privadas). «Oculta y con el
+   * prefijo» no depende del orden en que se miren las dos cosas. Coste O(notas de esas carpetas).
+   * Equivalencia con el recorrido entero en `test/privacy/jd-lazy.test.ts`.
    */
   async hasHidden(category: string): Promise<boolean> {
     const [list, filter] = await Promise.all([this.view.folders(), this.view.filter()]);
-    if (!this.view.noteTitles || !this.view.files) return true;
+    if (!this.view.notesInFolders || !this.view.files) return true;
     const hidden = (id: string): boolean => !filter.folderExists(id) || filter.isFolderHidden(id);
     const isJdexName = (name: string): boolean => {
       const prefix = extractJdPrefix(name);
@@ -269,13 +291,13 @@ export class JdLibraryPort implements LibraryPort {
       if (!files.filter.isVisible(file.id) && categoryOfName(file.name) === category) return true;
     }
     // (a) y (c): notas ocultas del árbol de la categoría o del JDex, por su título.
-    const candidates: string[] = [];
-    for (const entry of await this.view.notes()) {
-      const inScope = categoryTrees.has(entry.folderId) || entry.folderId === this.jdexFolderId;
-      if (inScope && filter.isHiddenNote(entry.id)) candidates.push(entry.id);
-    }
-    if (candidates.length === 0) return false;
-    const titles = await this.view.noteTitles(candidates);
-    return candidates.some((id) => categoryOfName(titles.get(id) ?? '') === category);
+    const scope = [...categoryTrees];
+    if (this.jdexFolderId !== undefined) scope.push(this.jdexFolderId);
+    const prefixed = (await this.view.notesInFolders(scope))
+      .filter((note) => categoryOfName(note.title) === category)
+      .map((note) => note.id);
+    if (prefixed.length === 0) return false;
+    const judged = await this.view.filter(prefixed);
+    return prefixed.some((id) => judged.isHiddenNote(id));
   }
 }

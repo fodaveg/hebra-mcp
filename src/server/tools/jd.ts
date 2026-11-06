@@ -83,9 +83,20 @@ function requestOf(input: JdNewIdInput, ctx: ToolContext): JdNewIdRequest {
  * va a escribir (si algo de eso deja de verse, o cambia la biblioteca, se repite entera); al
  * aplicar, la nota y la carpeta que dice el informe (si ya no se ven tras la ronda, la
  * respuesta de algo que no existe).
+ *
+ * El sello por defecto de una nota sale del filtro de la llamada, que con `privacyLoad: 'lazy'`
+ * (pieza A9a del plan de memoria) no tiene ninguna cargada: antes de declararlas se cargan las
+ * notas que nombra la respuesta (`ensure`).
  */
-function declareUsage(ctx: ToolContext, outcome: Exclude<JdNewIdOutcome, { mode: 'discard' }>): void {
+async function declareUsage(ctx: ToolContext, outcome: Exclude<JdNewIdOutcome, { mode: 'discard' }>): Promise<void> {
   const used = usageOf(ctx);
+  const notes =
+    outcome.mode === 'apply'
+      ? [...outcome.created, ...outcome.existing].filter((item) => item.kind === 'note').map((item) => item.id)
+      : outcome.template.noteId !== undefined
+        ? [outcome.template.noteId]
+        : [];
+  await ctx.privacy.ensure(notes);
   if (outcome.mode === 'apply') {
     for (const item of [...outcome.created, ...outcome.existing]) {
       if (item.kind === 'note') used.note(item.id);
@@ -117,7 +128,7 @@ export async function runJdNewId(
     throw mapWriteError(error);
   }
   if (outcome.mode === 'discard') throw new ToolError('invalid_input');
-  declareUsage(ctx, outcome);
+  await declareUsage(ctx, outcome);
   if (outcome.mode === 'simulate') {
     // Una simulación se repite si la puerta final no pasa: su log, solo del intento que sale.
     afterGate(ctx, () => logEvent({ event: 'jd.new_id', mode: 'simulate' }));

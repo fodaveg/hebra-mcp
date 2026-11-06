@@ -117,12 +117,12 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../hebra';
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). D23, en
  *  `NoteStateEngine`. */
 export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRead' | 'noteSave'>, NoteStateEngine {
-  /** Solo el título de unas notas (no lápidas), sin leer su cuerpo: lo que `hasHidden` de un
-   *  ID nuevo del JDex (D18, `./jd-port.ts`) mira de las ocultas. */
-  noteTitles(ids: readonly string[]): Map<string, string>;
   /** Las notas vivas de una carpeta efectiva con su título, sin leer su cuerpo ni filtrar:
    *  `listNotes` del puerto del motor JD (`./jd-port.ts`, `titlesInFolderRows`). */
   titlesInFolder(folderId: string): FolderNoteTitle[];
+  /** Lo mismo para varias carpetas efectivas a la vez (`titlesInFoldersRows`): las candidatas de
+   *  `hasHidden` del JDex (D18, `./jd-port.ts`; pieza A9a del plan de memoria), solo títulos. */
+  titlesInFolders(folderIds: readonly string[]): FolderNoteTitle[];
   /** Carpetas (D9, 3 oct 2026): crear y renombrar, solo desde `NoteWriter` y con el plan
    *  de `./folders.ts` rehecho en el turno. Mover y borrar carpetas (`folderMove`,
    *  `folderTrash`) NO están, ni aquí ni en ningún sitio de hebra-mcp
@@ -193,7 +193,8 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
   /** Lo que lee el filtro de privados, en este mismo turno. */
   foldersList(): FoldersList;
   /** La visibilidad de TODAS las notas vivas: solo para quien recorre la biblioteca
-   *  (`privacyInTurn`, el JDex). Quien decide sobre unas notas concretas usa
+   *  (`privacyInTurn`, que desde la pieza A9a del plan de memoria ya no usa ningún escritor: el
+   *  JDex también decide sobre notas concretas). Quien decide sobre unas notas concretas usa
    *  `notesVisibilityIndexFor` (`privacyInTurnFor`, pieza A8 del plan de memoria). */
   notesVisibilityIndex(): NoteVisibilityEntry[];
   /** Las filas de `notesVisibilityIndex()` solo de las notas de `ids` (`noteVisibilityRowsFor`
@@ -808,7 +809,8 @@ export function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): Pri
  * FALLA CERRANDO: una nota que no está en `ids` es desconocida para este filtro, y
  * desconocida es OCULTA (`isHiddenNote`, `visibleMeta`). Por eso quien lo usa tiene que pasar
  * TODAS las notas que va a juzgar, y nunca puede dárselo a quien recorre la biblioteca:
- * - `visibleNotes()` devolvería solo las de `ids` (el JDex sigue con `privacyInTurn`);
+ * - `visibleNotes()` devolvería solo las de `ids` (el JDex ya no recorre: `hasHidden` lee las
+ *   candidatas de sus carpetas y juzga solo esas, pieza A9a);
  * - `FileFilter` pregunta `hasHiddenLockedNote()`, que recorre las bloqueadas: con él, `ids`
  *   tiene que llevar `looseFilesNoteIds` (las que enlazan ficheros y TODAS las bloqueadas),
  *   el mismo criterio que la puerta final (`privacyRecheck` de `./node-port.ts`).

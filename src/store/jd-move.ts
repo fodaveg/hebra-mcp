@@ -40,7 +40,6 @@ import {
 } from '../jd';
 import { ROOT_FOLDER_ID } from '../hebra';
 import type { PrivacyConfig } from '../privacy/config';
-import { FileFilter } from '../privacy/file-filter';
 import type { PrivacyFilter } from '../privacy/filter';
 import { writeRejected } from './errors';
 import { configRejects, JdMovePort } from './jd-move-port';
@@ -51,8 +50,8 @@ import { OPERATION_ID_MAX_LENGTH } from './operations';
 import { privacyFingerprint } from './replace';
 import {
   hiddenOperationTarget,
+  looseFilesFilterInTurn,
   priorOperation,
-  privacyInTurn,
   privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
@@ -202,15 +201,18 @@ export function isJdMoveReport(value: unknown): value is JdMoveApplyReport | JdM
   return false;
 }
 
-/** ¿Se ve todavía la pieza? (para servir un informe del registro). */
+/** ¿Se ve todavía la pieza? (para servir un informe del registro). `live` tiene que llevar la
+ *  nota, si la pieza es una nota (`privacyInTurnFor`); un fichero se juzga con un filtro de
+ *  ficheros que lleva lo suyo (`looseFilesFilterInTurn`, A8). */
 function pieceVisible(store: NoteWriteStore, live: PrivacyFilter, privacy: PrivacyConfig, kind: JdMoveKind, id: string): boolean {
   if (kind === 'note') return live.visibleMeta(id) !== undefined;
   if (kind === 'folder') return live.folderExists(id) && !live.isFolderHidden(id);
-  return FileFilter.fromSnapshot(live, store.filesIndex(), privacy).visibleMeta(id) !== undefined;
+  return looseFilesFilterInTurn(store, privacy, store.filesIndex()).files.visibleMeta(id) !== undefined;
 }
 
 /** La pieza que pide el agente, con la carpeta donde está para quien pide (la pone el
- *  servidor). Oculta, inexistente o de la papelera: `source_not_found`, todo igual. */
+ *  servidor). Oculta, inexistente o de la papelera: `source_not_found`, todo igual. `live`
+ *  tiene que llevar la nota, si la pieza es una nota (`privacyInTurnFor`, A9a). */
 function sourceOf(store: NoteWriteStore, live: PrivacyFilter, privacy: PrivacyConfig, source: { kind: JdMoveKind; id: string }): MoveSource {
   if (source.kind === 'folder') {
     // Oculta, inexistente o de primer nivel (que el motor tampoco mueve): todo igual.
@@ -233,7 +235,7 @@ function sourceOf(store: NoteWriteStore, live: PrivacyFilter, privacy: PrivacyCo
     if (!meta) throw jdRejected('source_not_found');
     return { kind: 'note', id: source.id, folderId: meta.folderId };
   }
-  const file = FileFilter.fromSnapshot(live, store.filesIndex(), privacy).visibleMeta(source.id);
+  const file = looseFilesFilterInTurn(store, privacy, store.filesIndex()).files.visibleMeta(source.id);
   if (!file || file.trashedAt !== null) throw jdRejected('source_not_found');
   return { kind: 'file', id: source.id, folderId: file.folderId };
 }
@@ -258,7 +260,9 @@ async function simulate(
   request: Extract<JdMoveRequest, { mode: 'simulate' }>,
   now: number
 ): Promise<JdMoveSimulation> {
-  const live = privacyInTurn(store, request.privacy);
+  // Carpetas, configuración y, si la pieza es una nota, esa nota (A9a): de lo demás solo se
+  // miran carpetas (el JDex indicado, las rutas del plan).
+  const live = privacyInTurnFor(store, request.privacy, request.source.kind === 'note' ? [request.source.id] : []);
   // Como en D18: solo una `00.00` visible vale como JDex indicado.
   if (request.jdexFolderId !== undefined && !isJdexFolderCandidate(live, request.jdexFolderId)) {
     throw jdRejected('jdex_not_found');
@@ -343,7 +347,9 @@ export async function runJdMove(
         privacyInTurnFor(store, request.privacy, []);
         return { result: await simulate(store, request, now), wrote: false };
       }
-      const live = privacyInTurn(store, request.privacy);
+      // Carpetas y configuración (A9a): `hiddenOperationTarget` carga lo suyo, y las notas de un
+      // informe del registro van con un filtro que las lleva.
+      const live = privacyInTurnFor(store, request.privacy, []);
       const fingerprint = sha256Hex(JSON.stringify(['jdMove', request.mode, request.planId]));
       const log = store.operations;
       const previous = priorOperation(
@@ -358,11 +364,16 @@ export async function runJdMove(
         const report = previous.result;
         const pieces = report.mode === 'apply' ? [...report.moved, ...report.alreadyDone] : [...report.restored, ...report.alreadyRestored, ...report.skipped];
         const folders = report.mode === 'apply' ? [...report.created, ...report.existing] : [];
+        const named = privacyInTurnFor(
+          store,
+          request.privacy,
+          pieces.filter((piece) => piece.kind === 'note').map((piece) => piece.id)
+        );
         for (const piece of pieces) {
-          if (!pieceVisible(store, live, request.privacy, piece.kind, piece.id)) throw writeRejected('not_found');
+          if (!pieceVisible(store, named, request.privacy, piece.kind, piece.id)) throw writeRejected('not_found');
         }
         for (const folder of folders) {
-          if (!pieceVisible(store, live, request.privacy, 'folder', folder.id)) throw writeRejected('not_found');
+          if (!pieceVisible(store, named, request.privacy, 'folder', folder.id)) throw writeRejected('not_found');
         }
         return { result: { ...report, replayed: true }, wrote: false };
       }
