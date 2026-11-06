@@ -1044,13 +1044,15 @@ El dispositivo acumula tres secretos:
   pedida, la página leída, las homónimas…), o ninguna si no pregunta por notas
   (`hebra_list_spaces`, `hebra_list_organizations`, `hebra_status` y crear o renombrar carpetas,
   que solo miran carpetas y configuración); los recuentos y listados aplican las reglas del filtro
-  dentro de la consulta (A6/A7). La excepción, mientras no esté hecha su pieza, son las tres del
-  JDex (`hebra_jd_*`), que aún cargan la biblioteca entera. `ensureAll()` queda solo para los tests
-  (el oráculo `visibleNotes`, la equivalencia `'lazy'`/`'all'`) y para esa transición: lo llama
-  `resolveToolContext` únicamente con `privacyLoad: 'all'`, que es todavía el valor por defecto
-  del registro; un test (`test/tools/privacy-load-default.test.ts`) falla si otra herramienta se
-  queda en `'all'`. La puerta final (abajo) construye su propio filtro con lo leído en su
-  transacción (`fromSnapshot`) y no depende de esta carga.
+  dentro de la consulta (A6/A7). Desde A9a (6 nov 2026) también las tres del JDex (`hebra_jd_*`):
+  ninguna herramienta carga la biblioteca entera. `ensureAll()` queda solo para los tests (el
+  oráculo `visibleNotes`, la equivalencia `'lazy'`/`'all'`): lo llama `resolveToolContext`
+  únicamente con `privacyLoad: 'all'`, que desde M2 (6 nov 2026) ya no es el valor por defecto
+  del registro (`gated`, ahora `'lazy'`) ni lo puede declarar una herramienta: solo lo fuerza un
+  test (`forcePrivacyLoad`) o lo pide a `resolveToolContext` (`loadAll`). Un test
+  (`test/tools/privacy-load-default.test.ts`) falla si alguna herramienta anunciada no está en
+  `'lazy'`. La puerta final (abajo) construye su propio filtro con lo leído en su transacción
+  (`fromSnapshot`) y no depende de esta carga.
 - **Las que recorren la biblioteca en una llamada** (M1 de la revisión de seguridad del plan de
   memoria, 6 nov 2026): «solo sus notas» no siempre es poco. Dos herramientas pueden juzgar TODAS
   las notas vivas en una sola llamada: `hebra_grep` con un patrón raro (el prefiltro descarta casi
@@ -1059,21 +1061,33 @@ El dispositivo acumula tres secretos:
   pero su memoria la acota el tramo o el lote, no la biblioteca: lo ya decidido se suelta del
   filtro (`PrivacyFilter.forget`, `LibraryIndex.forget`), que lo devuelve a NO cargado (oculto y
   con rastro si alguien vuelve a preguntar, hasta otro `ensure`; sin efecto con la biblioteca
-  entera cargada). `hebra_grep` suelta las de cada tramo (de 128 filas, doblando hasta 8 192) que
-  no se van a mirar en cuanto lo juzga, y las de cada lote de 64 al recorrerlo, menos la última
-  recorrida y la de la última coincidencia, que un corte posterior todavía declara a la puerta
-  final con su sello (`sealOf` necesita la fila cargada): en el índice nunca hay más de un tramo y
-  un lote. La simulación sin `ids` juzga por lotes de 500 (`SIMULATE_JUDGE_NOTES`), cada uno
+  entera cargada). `hebra_grep` suelta las de cada tramo (de 128 filas, doblando hasta 2 048
+  desde M2) que no se van a mirar en cuanto lo juzga, y las de cada lote de 64 al recorrerlo,
+  menos la última recorrida y la de la última coincidencia, que un corte posterior todavía
+  declara a la puerta final con su sello (`sealOf` necesita la fila cargada): en el índice nunca
+  hay más de un tramo y un lote. La simulación sin `ids` juzga por lotes de 500 (`SIMULATE_JUDGE_NOTES`), cada uno
   cargado con `ensure` y soltado al decidirlo (antes, `ensureAll()`). Cada tramo o lote es una
   lectura aparte, como ya lo era en `hebra_grep`: lo que cambie entre dos lecturas se juzga con su
   fila de ese momento, y lo que sale se vuelve a juzgar igual (en el turno que lee los cuerpos, en
-  el que guarda el plan y en la puerta final). Lo que sí crece con la biblioteca en las dos son las
-  filas de `grepNotes` (id, título y `rowid` de cada nota viva). Medido a 30 000 notas (6 nov 2026,
-  heap vivo máximo de la llamada): `hebra_grep` con un patrón que no está en ninguna nota, de
-  32,9 MiB a 13,5 MiB (unos 4,8 de las filas y el resto, el tramo de 8 192); la simulación sobre la
-  biblioteca entera, de 31,0 MiB a 5,6 MiB; el tiempo, igual (unos 0,55-0,6 s cada una). Lo
-  comprueban `test/tools/grep-forget.test.ts` y `test/replace/simulate-por-lotes.node.test.ts`
-  (mismas respuestas, cursores, planes y recuentos que cargando todo, y el índice acotado).
+  el que guarda el plan y en la puerta final). Desde M2 (6 nov 2026) tampoco crecen con la
+  biblioteca las filas de las notas vivas (id, título y `rowid`), que antes se leían todas de una
+  vez (`grepNotes`, unos 4,8 MiB a 30 000 notas): las dos las leen por páginas de 512
+  (`grepNotesPage`, paginación por clave sobre el índice de `notes.id`, recorridas con
+  `NoteRowsById`, `src/store/grep-notes.ts`) en el mismo orden de id que antes, juzgan y prefiltran
+  por tramos que doblan de 128 a 2 048 (`GREP_WINDOW_MAX`, `SIMULATE_WINDOW_MAX`) solo hasta donde
+  llegue la llamada, y tiran lo ya recorrido. Leer una página o juzgar un tramo a mitad del
+  recorrido no cuenta para el plazo (se le devuelve lo que tarda), así que las filas de las ocultas
+  no lo gastan. Los informes de un plan (`preview`, `apply`, `undo`) leen por id solo las filas de
+  sus notas (`grepNotesFor`). Una id con unidades UTF-16 desde U+D800 se ordena igual que antes: los
+  bytes de SQLite y las unidades UTF-16 solo discrepan entre dos ids así, y `NoteRowsById` reordena
+  cada racha seguida de ellas. Medido a 30 000 notas (6 nov 2026, heap vivo máximo de la llamada):
+  `hebra_grep` con un patrón que no está en ninguna nota, de 32,9 MiB (antes de M1) a 13,5 MiB
+  (M1) y a 2,4 MiB (M2); la simulación sobre la biblioteca entera, de 31,0 a 5,6 y a 0,9 MiB; el
+  tiempo, igual o algo menor (de 0,53 a 0,50 s cada una). Lo comprueban
+  `test/tools/grep-forget.test.ts`, `test/replace/simulate-por-lotes.node.test.ts` y
+  `test/tools/grep-pages.test.ts` (mismas respuestas, cursores, planes y recuentos que cargando
+  todo y que leyendo la biblioteca en una sola página, ninguna lectura de más de una página, y el
+  plazo sin las páginas), y `test/store/grep-notes.test.ts` (el orden).
 - **Cuándo se evalúa**: al construir cada respuesta, a partir de los ids de carpeta y las etiquetas
   canónicas (`canonicalTag` de Hebra) del almacén, no del texto. El filtro de la llamada se
   construye al empezar y lo demás se lee después, y entre las dos cosas el sync (u otra llamada)
@@ -2691,14 +2705,12 @@ de su límite por defecto).
   Dos herramientas pueden recorrer la biblioteca entera en una llamada, en TIEMPO: `hebra_grep`
   con un patrón raro o sin prefiltro y `hebra_replace_in_notes` al simular sin `ids` (§6.3, «Las
   que recorren la biblioteca en una llamada»). Su memoria no crece con eso: sueltan del filtro lo
-  ya decidido y en él nunca hay más de un tramo de `hebra_grep` (8 192 notas como mucho, más un
-  lote de 64) o un lote de la simulación (500). Lo que sí crece con la biblioteca son las filas
-  de `grepNotes` (id, título y `rowid` de cada nota viva). Medido a 30 000 notas (6 nov 2026,
-  heap vivo máximo): la simulación sobre la biblioteca entera, 5,6 MiB, dentro de los 8 MiB;
-  `hebra_grep` con un patrón que no está en ninguna nota, 13,5 MiB (unos 4,8 de las filas y el
-  resto del tramo de 8 192), por ENCIMA de lo que aparta. Límite conocido: a esa escala una
-  `hebra_grep` así gasta unos 5 MiB más de lo apartado; bajarlo pide un tramo máximo menor o no
-  guardar las filas de toda la biblioteca, y queda fuera de esta pieza.
+  ya decidido y en él nunca hay más de un tramo de `hebra_grep` (2 048 notas como mucho, más un
+  lote de 64) o un lote de la simulación (500), y desde M2 (6 nov 2026) leen las filas de las
+  notas vivas por páginas de 512 en vez de todas de una vez. Medido a 30 000 notas (6 nov 2026,
+  heap vivo máximo): `hebra_grep` con un patrón que no está en ninguna nota, 2,4 MiB (antes de M2,
+  13,5 MiB, unos 5 MiB más de lo apartado); la simulación sobre la biblioteca entera, 0,9 MiB
+  (antes, 5,6). Las dos quedan dentro de los 8 MiB que aparta la llamada, con margen.
 - **Por llamada, no por petición** (H1 de la revisión de seguridad del 6 nov 2026). Un lote
   JSON-RPC con más de 100 mensajes (`MAX_BATCH_SIZE` del SDK, que no ejecutaría ninguno) recibe 400
   antes de abrir el contexto ni pedir turno. En una petición con llamadas, después de abrir su

@@ -133,16 +133,19 @@ export function afterGate(ctx: ToolContext, run: () => void): void {
 /**
  * Qué notas carga el filtro de privados de una llamada antes de que corra la herramienta
  * (A4.0 del plan de memoria, 6 nov 2026):
- * - `'all'` (por defecto): la biblioteca entera (`filter.ensureAll()`), como antes de A3.
- * - `'lazy'`: ninguna; la herramienta pide las suyas con `await ctx.privacy.ensure(ids)`
- *   antes de preguntar por ellas (cabecera de `../privacy/filter.ts`).
- * Cada herramienta declara la suya al registrarse (`gated(nombre, run, { privacyLoad })` en
- * `./register-tools.ts`).
+ * - `'lazy'` (por defecto desde M2, 6 nov 2026): ninguna; la herramienta pide las suyas con
+ *   `await ctx.privacy.ensure(ids)` antes de preguntar por ellas (cabecera de
+ *   `../privacy/filter.ts`). Es la de todas las herramientas (`gated(nombre, run, { privacyLoad })`
+ *   en `./register-tools.ts`, que no admite otra).
+ * - `'all'`: la biblioteca entera (`filter.ensureAll()`), como antes de A3. Solo la piden los
+ *   tests, siempre de forma explícita (`forcePrivacyLoad` del registro, `loadAll` de
+ *   `resolveToolContext`): el oráculo y la equivalencia `'lazy'`/`'all'`.
  */
 export type ToolPrivacyLoad = 'all' | 'lazy';
 
 export interface ResolveToolContextOptions {
-  /** `true` (por defecto): cargar todas las notas en el filtro (`ToolPrivacyLoad` `'all'`). */
+  /** `true`: cargar todas las notas en el filtro (`ToolPrivacyLoad` `'all'`, solo tests). Por
+   *  defecto, `false` (`'lazy'`) desde M2; `runTool` lo pasa siempre. */
   loadAll?: boolean;
 }
 
@@ -151,12 +154,12 @@ export interface ResolveToolContextOptions {
  *  TODAS no es barato: a 30 000 notas, unos 40-50 MiB y 0,2 s por llamada aunque la
  *  herramienta toque una sola nota (medido, A3 del plan de memoria, 6 nov 2026).
  *
- *  TRANSICIÓN (A3): con `loadAll` (el valor por defecto, `privacyLoad: 'all'`) aquí se llama a
- *  `filter.ensureAll()`, para que las herramientas no adaptadas sigan exactamente igual. Las
- *  piezas A4-A8 las pasan una a una a `privacyLoad: 'lazy'` (`loadAll: false`), y piden solo
- *  sus notas con `await ctx.privacy.ensure(ids)` (patrón en la cabecera de
- *  `../privacy/filter.ts`); cuando no quede ninguna con `'all'`, esta llamada se quita. Antes, la
- *  configuración vigente (M5: un
+ *  Con `loadAll` aquí se llama a `filter.ensureAll()`: lo que hacían todas las herramientas en la
+ *  transición de A3, que las piezas A4-A9 pasaron una a una a `privacyLoad: 'lazy'`. Desde M2
+ *  (6 nov 2026) ninguna lo pide y no es el valor por defecto: queda solo para los tests que lo
+ *  piden a propósito (el oráculo de la biblioteca entera y la equivalencia `'lazy'`/`'all'`).
+ *  Las herramientas piden solo sus notas con `await ctx.privacy.ensure(ids)` (patrón en la
+ *  cabecera de `../privacy/filter.ts`). Antes, la configuración vigente (M5: un
  *  `stat` de `config.json`; si no se puede aplicar, `PrivacyConfigUnreadable`) y la memoria
  *  de las carpetas privadas (A3, `privacyWithMemory`: una lectura más, y una escritura solo
  *  cuando una ruta resuelve a una carpeta nueva). La `privacyConfig` que sale lleva esa
@@ -177,9 +180,8 @@ export async function resolveToolContext(
     resolved = await privacyWithMemory(ctx.port, current);
   }
   const { config, filter } = resolved;
-  // Transición A3: la biblioteca entera, como antes, salvo con `privacyLoad: 'lazy'`
-  // (comentario de arriba).
-  if (options.loadAll ?? true) await filter.ensureAll();
+  // La biblioteca entera solo si se pide (`'all'`, tests; comentario de arriba).
+  if (options.loadAll === true) await filter.ensureAll();
   return {
     port: ctx.port,
     privacy: filter,

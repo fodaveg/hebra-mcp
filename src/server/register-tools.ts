@@ -1,5 +1,5 @@
 /**
- * Registro de las 43 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 46 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
@@ -17,11 +17,12 @@
  *   política (`GATE_POLICIES`) y anota la herramienta: `gatedTools` es lo que compara
  *   `test/privacy/gate-registration.test.ts` con lo que anuncia el servidor, así que una
  *   herramienta registrada sin la puerta hace fallar ese test.
- * - Qué notas carga el filtro de privados antes de correr (A4.0 del plan de memoria): la
- *   biblioteca entera por defecto, o solo las que pida la herramienta si se registra con
- *   `gated(nombre, run, { privacyLoad: 'lazy' })` (`ToolPrivacyLoad`, `./context.ts`). Todas
- *   están ya en `'lazy'` salvo las del JDex (`hebra_jd_*`), y
- *   `test/tools/privacy-load-default.test.ts` falla si otra se queda en `'all'`.
+ * - Qué notas carga el filtro de privados antes de correr (A4.0 del plan de memoria): solo las
+ *   que pida la herramienta (`privacyLoad: 'lazy'`, `ToolPrivacyLoad`, `./context.ts`). Todas
+ *   lo declaran en su `gated(nombre, run, { privacyLoad: 'lazy' })`, y desde M2 (6 nov 2026)
+ *   es también el valor por defecto: ninguna puede declarar `'all'` (la biblioteca entera), que
+ *   solo fuerzan los tests (`forcePrivacyLoad`). `test/tools/privacy-load-default.test.ts`
+ *   falla si alguna herramienta anunciada no está en `'lazy'`.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, borra carpetas ni las mueve fuera de `hebra_jd_move`, ni cambia ni borra
@@ -529,9 +530,9 @@ export function gatedTools(server: McpServer): ReadonlySet<string> {
 const privacyLoadByServer = new WeakMap<McpServer, Map<string, ToolPrivacyLoad>>();
 
 /** La `privacyLoad` con la que se registró `name` en `server` (`undefined` si no se
- *  registró por `gated`). La declarada, también con `forcePrivacyLoad`: lo que mira el
- *  helper de equivalencia (`test/fixtures/privacy-load.ts`) para no dar por perezosa una
- *  herramienta que nadie marcó. */
+ *  registró por `gated`; por `gated`, `'lazy'` desde M2). La declarada, también con
+ *  `forcePrivacyLoad`: lo que miran el helper de equivalencia (`test/fixtures/privacy-load.ts`)
+ *  y `test/tools/privacy-load-default.test.ts`, que así cazan una registrada a pelo. */
 export function toolPrivacyLoad(server: McpServer, name: string): ToolPrivacyLoad | undefined {
   return privacyLoadByServer.get(server)?.get(name);
 }
@@ -539,13 +540,14 @@ export function toolPrivacyLoad(server: McpServer, name: string): ToolPrivacyLoa
 /** Opciones de registro de UNA herramienta (tercer argumento de `gated`). */
 interface GatedOptions {
   /**
-   * Qué notas carga el filtro de privados antes de correr (`ToolPrivacyLoad`; por defecto
-   * `'all'`). Una herramienta que pide sus notas con `await ctx.privacy.ensure(ids)` antes de
-   * preguntar por ellas se marca con `{ privacyLoad: 'lazy' }` en SU llamada a `gated`, sin
-   * tocar ninguna lista común (A4-A8 del plan de memoria marcan cada una la suya en paralelo),
-   * y lo demuestra con `expectLazyEquivalent` (`test/fixtures/privacy-load.ts`).
+   * Qué notas carga el filtro de privados antes de correr: `'lazy'`, solo las que pida la
+   * herramienta con `await ctx.privacy.ensure(ids)` antes de preguntar por ellas, que lo
+   * demuestra con `expectLazyEquivalent` (`test/fixtures/privacy-load.ts`). Es lo único que se
+   * puede declarar y, desde M2 del plan de memoria (6 nov 2026, con todas ya en `'lazy'`), el
+   * valor por defecto. `'all'` (la biblioteca entera) solo lo fuerzan los tests, con
+   * `forcePrivacyLoad`.
    */
-  privacyLoad?: ToolPrivacyLoad;
+  privacyLoad?: Extract<ToolPrivacyLoad, 'lazy'>;
 }
 
 export interface RegisterToolsOptions {
@@ -577,7 +579,7 @@ export function registerTools(
     const policy = GATE_POLICIES[name];
     if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
     gatedNames.add(name);
-    const declaredLoad = toolOptions.privacyLoad ?? 'all';
+    const declaredLoad: ToolPrivacyLoad = toolOptions.privacyLoad ?? 'lazy';
     declaredLoads.set(name, declaredLoad);
     const privacyLoad = options.forcePrivacyLoad ?? declaredLoad;
     const invoke = async (input: Input): Promise<ReturnType<typeof toOkResult>> => {

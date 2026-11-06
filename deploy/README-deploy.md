@@ -402,8 +402,8 @@ ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
   de la biblioteca o del espacio al que va: su coste ya depende de las notas que toca, no de la
   biblioteca, porque cada herramienta carga solo las suyas en el filtro de privados (SPEC.md §6.3).
   Antes eran unos 3,5 KB por nota de la biblioteca, unos 100 MiB por llamada con 30 000 notas. Las
-  tres herramientas del JDex (`hebra_jd_*`) aún cargan la biblioteca entera mientras no esté hecha
-  su pieza, y apartan lo mismo.
+  que recorren la biblioteca entera en una llamada (`hebra_grep` con un patrón raro, simular
+  `hebra_replace_in_notes` sin `ids`) también caben: con 30 000 notas, unos 2,4 MiB como mucho.
 - La memoria se aparta por llamada, cuando cada herramienta empieza, y se suelta cuando esa
   herramienta acaba: un lote de 100 llamadas entra de una en una según quepa, no de golpe. Un lote
   de más de 100 mensajes recibe 400 sin abrir nada. Lo que no cabe espera su turno hasta

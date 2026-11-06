@@ -19,6 +19,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { PrivacyFilter } from '../../src/privacy/filter';
 import { LibraryIndex, type LibraryIndexSource } from '../../src/privacy/library-index';
 import { expectLazyEquivalent } from '../fixtures/privacy-load';
+import { liveNoteRows } from '../fixtures/grep-rows';
 import { forgetLibraryHarness, LOTE_VISIBLE, RARE, type ForgetLibrary } from '../fixtures/forget-library';
 import { decodeCursor, type AuditHarness } from '../privacy/audit-harness';
 
@@ -130,7 +131,7 @@ describe('hebra_grep suelta lo decidido y responde igual (M1)', () => {
     });
     const { ids } = await walk({ pattern: RARE });
     expect(ids).toEqual([h.extra.rareVisible]);
-    const live = (await h.port.grepNotes()).filter((row) => !row.locked).length;
+    const live = (await liveNoteRows(h.port)).filter((row) => !row.locked).length;
     // Se juzgaron todas las vivas sin bloquear (en tramos), una vez.
     expect(slices.reduce((sum, size) => sum + size, 0)).toBe(live);
     expect(slices.length).toBeGreaterThanOrEqual(3);

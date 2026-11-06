@@ -249,7 +249,8 @@ describe('PrivacyFilter perezoso (A3)', () => {
 
   it('las herramientas, con la transición de resolveToolContext, no dejan rastro', async () => {
     const h = (open = await scenario());
-    const ctx = await resolveToolContext(h.serverContext);
+    // La biblioteca entera, pedida a propósito (desde M2 ya no es el valor por defecto).
+    const ctx = await resolveToolContext(h.serverContext, { loadAll: true });
     expect(ctx.privacy.visibleNotes().has(h.extra.publicNote)).toBe(true);
     expect(ctx.privacy.unloadedLookups).toBe(0);
 

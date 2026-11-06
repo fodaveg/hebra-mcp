@@ -76,7 +76,7 @@ import {
   type JdTestHooks
 } from '../store/jd-new-id';
 import { runJdMove, type JdMoveRequest, type JdMoveResult, type JdMoveTestHooks } from '../store/jd-move';
-import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from '../store/grep-sql';
+import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow, GrepNotesFrom } from '../store/grep-sql';
 import {
   ReplaceBatch,
   type ReplaceLocal,
@@ -961,7 +961,9 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     noteStates: (ids: readonly string[]) => current().noteStates(ids),
     foldersTrash: () => current().foldersTrash(),
     noteAuthors: (id: string) => current().noteAuthors(id),
-    grepNotes: (): Promise<GrepNoteRow[]> => current().grepNotes(),
+    grepNotesPage: (from: GrepNotesFrom | null, limit: number): Promise<GrepNoteRow[]> =>
+      current().grepNotesPage(from, limit),
+    grepNotesFor: (ids: readonly string[]): Promise<GrepNoteRow[]> => current().grepNotesFor(ids),
     grepCandidates: (match: string, rowids: readonly number[]): Promise<Set<number> | null> =>
       current().grepCandidates(match, rowids),
     grepBodies: (

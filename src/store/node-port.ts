@@ -82,14 +82,16 @@ import {
 import { hasValuedProps, safeTextSearch, searchCheckingValues } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
-  grepNoteRows,
+  grepNotePage,
+  grepNoteRowsFor,
   grepSubstringCandidates,
   grepVisibleBodies,
   inReadTransaction,
   substringFillPageSize,
   type GrepBodiesResult,
   type GrepBodiesSession,
-  type GrepNoteRow
+  type GrepNoteRow,
+  type GrepNotesFrom
 } from './grep-sql';
 import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance, StoreError } from './errors';
@@ -920,8 +922,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   }
 
   /** `hebra_grep` (D13): SQL propio en `./grep-sql.ts`, cada uno en un turno de la cola. */
-  async grepNotes(): Promise<GrepNoteRow[]> {
-    return this.read(() => grepNoteRows(this.db));
+  async grepNotesPage(from: GrepNotesFrom | null, limit: number): Promise<GrepNoteRow[]> {
+    return this.read(() => grepNotePage(this.db, from, limit));
+  }
+
+  async grepNotesFor(ids: readonly string[]): Promise<GrepNoteRow[]> {
+    return this.read(() => grepNoteRowsFor(this.db, ids));
   }
 
   /** El prefiltro de subcadena (`grepSubstringCandidates`): el índice, y también el cuerpo

@@ -111,7 +111,7 @@ const CONFIGS: Array<[string, PrivacyConfig]> = [
 
 /** El filtro de la biblioteca entera, como lo usaba el código de antes de A7. */
 async function fullFilter(h: AuditHarness<Extra>): Promise<PrivacyFilter> {
-  return (await resolveToolContext(h.serverContext)).privacy;
+  return (await resolveToolContext(h.serverContext, { loadAll: true })).privacy;
 }
 
 /** Las filas de `note_props`, leídas aparte (el oráculo no pasa por el puerto). */

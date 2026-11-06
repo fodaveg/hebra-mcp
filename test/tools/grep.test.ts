@@ -17,6 +17,7 @@ import { trigramMatch } from '../../src/store/grep';
 import { RegexScanWorker, regexWorkersInUse } from '../../src/store/regex-worker';
 import type { PrivacyConfig } from '../../src/privacy/config';
 import { createNote } from '../fixtures/test-library';
+import { liveNoteRows } from '../fixtures/grep-rows';
 import { deriveNote, SqliteLibraryEngine } from '../../src/hebra';
 import { openNodeSqliteConn } from '../../src/store/sqlite-conn-node';
 import {
@@ -103,7 +104,7 @@ describe('hebra_grep: privacidad (D3)', () => {
 
   it('nunca lee el cuerpo de una oculta, bloqueada o de la papelera, ni la pasa al índice', async () => {
     const asked: number[] = [];
-    const rows = await withPrivate.port.grepNotes();
+    const rows = await liveNoteRows(withPrivate.port);
     const hiddenRowids = rows.filter((row) => pair.privateIds.includes(row.id)).map((row) => row.rowid);
     expect(hiddenRowids.length).toBeGreaterThan(0);
     const port = withPrivate.port;
@@ -138,7 +139,7 @@ describe('hebra_grep: privacidad (D3)', () => {
     const engine = await SqliteLibraryEngine.open(other.conn, 'grep-sync', { journalMode: 'WAL' });
     try {
       // Las tres últimas por id caen en el segundo lote (64 por lote).
-      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const ids = (await liveNoteRows(port)).map((row) => row.id).sort();
       const [moved, tagged, nested] = ids.slice(-3) as [string, string, string];
       let calls = 0;
       const spy: ToolContext = {
@@ -420,7 +421,7 @@ describe('hebra_grep: una nota que la expresión no termina', () => {
     const path = await buildOrderedLibrary(['# Antes\naaa\n', TRAP, '# Después\naaaa\n']);
     const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
     try {
-      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const ids = (await liveNoteRows(port)).map((row) => row.id).sort();
       const first = await page(ctx);
       expect(first.matches.map((match) => match.id)).toEqual([ids[0]]);
       expect(first.cutoff).toBe('time');
@@ -439,7 +440,7 @@ describe('hebra_grep: una nota que la expresión no termina', () => {
     const path = await buildOrderedLibrary([TRAP, '# Después\naaaa\n']);
     const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
     try {
-      const ids = (await port.grepNotes()).map((row) => row.id).sort();
+      const ids = (await liveNoteRows(port)).map((row) => row.id).sort();
       const error = (await page(ctx).catch((caught: unknown) => caught)) as ToolError;
       expect(error).toBeInstanceOf(ToolError);
       expect(error.code).toBe('pattern_too_slow');
@@ -584,7 +585,7 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     const { port } = await grepContext(path, { privateFolders: [], privateTags: [] });
     try {
       const byBody = new Map<string, number>();
-      for (const row of await port.grepNotes()) {
+      for (const row of await liveNoteRows(port)) {
         const body = (await port.noteRead(row.id))!.body;
         byBody.set(body, row.rowid);
       }
@@ -627,7 +628,7 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
   });
 
   it('una nota aún en la cola del índice se mira igual', async () => {
-    const rowid = (await withoutPrivate.port.grepNotes()).find(
+    const rowid = (await liveNoteRows(withoutPrivate.port)).find(
       (row) => row.id === pair.visibleIds.cocina
     )!.rowid;
     const before = await runGrep(withoutPrivate.ctx, { pattern: 'Garbanzos con' });
@@ -659,7 +660,7 @@ describe('hebra_grep: prefiltro de subcadena (H5)', () => {
     ]);
     const { ctx, port } = await grepContext(path, { privateFolders: [], privateTags: [] });
     try {
-      const rows = (await port.grepNotes()).sort((left, right) => left.rowid - right.rowid);
+      const rows = (await liveNoteRows(port)).sort((left, right) => left.rowid - right.rowid);
       const rowids = rows.map((row) => row.rowid);
       const [first, second] = [rows[0]!.id, rows[1]!.id];
       // El índice guarda el cuerpo sin los comentarios: «berenjena» no está en él.

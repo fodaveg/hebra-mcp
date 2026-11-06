@@ -37,10 +37,10 @@ export const OPENING_RESERVE_BYTES = 8 * MIB;
  * cada llamada cargaba en el filtro de privados la visibilidad de la biblioteca entera. Desde
  * A9b del plan de memoria cada herramienta carga solo las notas que decide
  * (`privacyLoad: 'lazy'`, SPEC.md §6.3): su coste ya depende de las notas que toca, no de la
- * biblioteca, y basta una cantidad fija.
- *
- * Límite de la transición: las tres `hebra_jd_*` aún cargan la biblioteca entera hasta que su
- * pieza las pase a `'lazy'`, y apartan lo mismo que las demás.
+ * biblioteca, y basta una cantidad fija. Las tres `hebra_jd_*` también (A9a), y las dos que
+ * recorren la biblioteca en una llamada (`hebra_grep` con un patrón raro y la simulación de
+ * `hebra_replace_in_notes`) leen sus filas por páginas y juzgan por tramos acotados (M2): medido a
+ * 30 000 notas, 2,4 MiB y 0,9 MiB de heap vivo máximo (6 nov 2026), dentro de lo apartado.
  */
 export const REQUEST_RESERVE_BYTES = 8 * MIB;
 

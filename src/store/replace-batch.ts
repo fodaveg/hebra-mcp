@@ -40,6 +40,7 @@ import { replaceBodyInTurn, trashConflictCopiesInTurn, type ReplaceBodyTestHooks
 import { StoreError, writeRejected } from './errors';
 import { compileGrepPattern, trigramMatch } from './grep';
 import type { GrepBodiesSession, GrepNoteRow } from './grep-sql';
+import { byId, NoteRowsById } from './grep-notes';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import {
   compileReplacement,
@@ -102,6 +103,13 @@ const SIMULATE_BATCH_NOTES = 64;
  *  plan de memoria, 6 nov 2026): se cargan en el filtro, se deciden y se sueltan, así que lo
  *  cargado a la vez no pasa de este lote aunque el ámbito sea la biblioteca entera. */
 export const SIMULATE_JUDGE_NOTES = 500;
+/** Tramos de la simulación (M2 del plan de memoria, 6 nov 2026), como en `hebra_grep`: las
+ *  candidatas se leen del almacén por páginas y se juzgan y se prefiltran por tramos que doblan
+ *  de `SIMULATE_WINDOW_FIRST` a `SIMULATE_WINDOW_MAX` (cada tramo, en lotes de privacidad de
+ *  `SIMULATE_JUDGE_NOTES`), solo hasta donde llegue la simulación. Doblan para no pedir el
+ *  prefiltro de subcadena cientos de veces con un patrón raro. */
+const SIMULATE_WINDOW_FIRST = SIMULATE_BATCH_NOTES * 2;
+export const SIMULATE_WINDOW_MAX = 2_048;
 /** Tope de un id que llega en el ámbito o en un cursor. */
 const ID_MAX_LENGTH = 200;
 /** Tope de un `planId` (son UUID). */
@@ -307,12 +315,15 @@ export interface ReplaceBatchOptions {
   maxStoredPlanChars?: number;
   /** Tests: otro lote de privacidad de la simulación sin `ids` (`SIMULATE_JUDGE_NOTES`). */
   judgeNotes?: number;
+  /** Tests: otras filas por página del almacén (`GREP_NOTES_PAGE`). */
+  notesPage?: number;
 }
 
 /** Lo que la simulación lee del almacén (fuera del turno de escritura). */
 export type ReplaceReadPort = Pick<
   HebraLibraryPort,
-  | 'grepNotes'
+  | 'grepNotesPage'
+  | 'grepNotesFor'
   | 'grepCandidates'
   | 'grepBodies'
   | 'foldersList'
@@ -320,6 +331,73 @@ export type ReplaceReadPort = Pick<
   | 'notesVisibilityIndexFor'
   | 'trashIndex'
 >;
+
+/**
+ * Las notas que la simulación mira, en orden de id, juzgadas y prefiltradas por TRAMOS (M2 del
+ * plan de memoria, 6 nov 2026; como `PendingNotes` de `hebra_grep`): `take` da las candidatas por
+ * tandas (sin bloquear, del ámbito y desde `after`, leídas por páginas), `judge` deja de cada tramo
+ * las visibles del ámbito (cargando y soltando el filtro por lotes) y, con `match`, el índice de
+ * subcadena deja las que pueden casar. Es la misma lista que antes se calculaba entera antes de
+ * leer ningún cuerpo (juzgarla a trozos da lo mismo: cada nota se decide sola), pero solo hasta
+ * donde llegue la simulación, y sin guardar lo ya recorrido (`drop`). Se numeran desde 0.
+ */
+class SimulatePending {
+  private items: GrepNoteRow[] = [];
+  private base = 0;
+  private done = false;
+  private window = SIMULATE_WINDOW_FIRST;
+
+  constructor(
+    private readonly take: (max: number) => Promise<GrepNoteRow[]>,
+    private readonly judge: (window: GrepNoteRow[]) => Promise<GrepNoteRow[]>,
+    private readonly match: string | null,
+    private readonly port: Pick<HebraLibraryPort, 'grepCandidates'>
+  ) {}
+
+  /** Cuántas se miran hasta ahora, contando las ya tiradas. */
+  get length(): number {
+    return this.base + this.items.length;
+  }
+
+  /** La número `index`, si ya está juzgada. */
+  at(index: number): GrepNoteRow | undefined {
+    return this.items[index - this.base];
+  }
+
+  /** De la número `from` a la `to` (sin ella). */
+  slice(from: number, to: number): GrepNoteRow[] {
+    return this.items.slice(from - this.base, to - this.base);
+  }
+
+  /** Tira las anteriores a la número `before` (ya miradas). */
+  drop(before: number): void {
+    const count = before - this.base;
+    if (count <= 0) return;
+    this.items.splice(0, count);
+    this.base = before;
+  }
+
+  /** ¿Hay que juzgar algún tramo más para tener `count`? */
+  needs(count: number): boolean {
+    return this.length < count && !this.done;
+  }
+
+  /** Juzga tramos hasta tener `count` o acabar las candidatas. */
+  async fillTo(count: number): Promise<void> {
+    while (this.needs(count)) {
+      const window = await this.take(this.window);
+      if (window.length < this.window) this.done = true;
+      if (window.length === 0) break;
+      this.window = Math.min(this.window * 2, SIMULATE_WINDOW_MAX);
+      let accepted = await this.judge(window);
+      if (this.match !== null && accepted.length > 0) {
+        const candidates = await this.port.grepCandidates(this.match, accepted.map((note) => note.rowid));
+        if (candidates) accepted = accepted.filter((note) => candidates.has(note.rowid));
+      }
+      this.items.push(...accepted);
+    }
+  }
+}
 
 /** Una nota que la simulación metería en el plan. */
 interface Candidate {
@@ -331,10 +409,6 @@ interface Candidate {
   resultTags: string[];
   matches: number;
   changes: ReplaceChange[];
-}
-
-function byId(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function isId(value: unknown): value is string {
@@ -531,17 +605,17 @@ export class ReplaceBatch {
    *  un filtro de privados recién hecho: lo que necesita cualquier salida, para no nombrar una
    *  que ya es oculta. `ids` son todas las que la salida puede nombrar o contar (las del plan y
    *  sus copias de conflicto): el filtro carga solo esas (A8 del plan de memoria; antes, la
-   *  biblioteca entera), y una que no esté en `ids` no sale en `rows`. */
+   *  biblioteca entera), y sus filas se leen por id (`grepNotesFor`, M2; antes, las de toda la
+   *  biblioteca), así que una que no esté en `ids` no sale en `rows`. */
   private async visibleNow(privacy: PrivacyConfig, ids: readonly string[]): Promise<{
     filter: PrivacyFilter;
     rows: Map<string, GrepNoteRow>;
   }> {
     const filter = await (await PrivacyFilter.build(this.port, privacy)).ensure(ids);
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
-    const wanted = new Set(ids);
     const rows = new Map<string, GrepNoteRow>();
-    for (const row of await this.port.grepNotes()) {
-      if (wanted.has(row.id) && filter.visibleMeta(row.id)) rows.set(row.id, row);
+    for (const row of await this.port.grepNotesFor(ids)) {
+      if (filter.visibleMeta(row.id)) rows.set(row.id, row);
     }
     return { filter, rows };
   }
@@ -608,21 +682,30 @@ export class ReplaceBatch {
         inFolder = (folderId) => folderId === resolved;
       }
     }
-    const ids = scope.ids === undefined ? null : new Set(scope.ids);
-
     // Qué notas se miran, sin leer ningún cuerpo, en orden de id y desde `after`. Lo que no
     // depende de la privacidad (bloqueada, `ids`, `after`) se aplica antes que el filtro: con
     // `ids`, el filtro solo conoce esas (las demás, ocultas); sin `ids`, así no se carga lo que
-    // no se va a juzgar.
-    const candidates: GrepNoteRow[] = [];
-    for (const row of await this.port.grepNotes()) {
-      if (row.locked) continue;
-      if (ids && !ids.has(row.id)) continue;
-      if (after) {
-        const order = byId(row.id, after.id);
-        if (order < 0 || (order === 0 && !after.inclusive)) continue;
-      }
-      candidates.push(row);
+    // no se va a juzgar. Con `ids`, sus filas se leen por id (`grepNotesFor`); sin `ids`, las de
+    // la biblioteca por páginas (`NoteRowsById`, M2 del plan de memoria): nunca todas de golpe.
+    let rows: { take(max: number): Promise<GrepNoteRow[]> };
+    if (scope.ids !== undefined) {
+      const listed = (await this.port.grepNotesFor(scope.ids))
+        .filter((row) => {
+          if (after === null) return true;
+          const order = byId(row.id, after.id);
+          return order > 0 || (order === 0 && after.inclusive);
+        })
+        .sort((left, right) => byId(left.id, right.id));
+      let next = 0;
+      rows = {
+        take: async (max) => {
+          const out = listed.slice(next, next + max);
+          next += out.length;
+          return out;
+        }
+      };
+    } else {
+      rows = new NoteRowsById(this.port, after, this.options.notesPage);
     }
     const visibleInScope = (row: GrepNoteRow): boolean => {
       const meta = filter.visibleMeta(row.id);
@@ -630,28 +713,35 @@ export class ReplaceBatch {
       if (inFolder && !inFolder(meta.folderId)) return false;
       return tag === undefined || filter.hasTag(row.id, tag);
     };
-    let pending: GrepNoteRow[] = [];
-    if (ids) {
-      pending = candidates.filter(visibleInScope);
-    } else {
-      // M1: sin `ids`, por lotes acotados: cargar, decidir y soltar. Después solo se usa del
-      // filtro `hidesAnyTag` (configuración), y el plan se vuelve a juzgar en su turno
-      // (`privacyInTurnFor`), así que nada vuelve a preguntar por una nota soltada.
-      const judgeNotes = this.options.judgeNotes ?? SIMULATE_JUDGE_NOTES;
-      for (let first = 0; first < candidates.length; first += judgeNotes) {
-        const chunk = candidates.slice(first, first + judgeNotes);
-        const chunkIds = chunk.map((row) => row.id);
-        await filter.ensure(chunkIds);
-        for (const row of chunk) if (visibleInScope(row)) pending.push(row);
-        filter.forget(chunkIds);
-      }
-    }
-    pending.sort((left, right) => byId(left.id, right.id));
-    const match = trigramMatch(pattern.required, request.caseSensitive);
-    if (match !== null && pending.length > 0) {
-      const candidates = await this.port.grepCandidates(match, pending.map((note) => note.rowid));
-      if (candidates) pending = pending.filter((note) => candidates.has(note.rowid));
-    }
+    const judgeNotes = this.options.judgeNotes ?? SIMULATE_JUDGE_NOTES;
+    const pending = new SimulatePending(
+      async (max) => {
+        const out: GrepNoteRow[] = [];
+        while (out.length < max) {
+          const page = await rows.take(max - out.length);
+          if (page.length === 0) break;
+          for (const row of page) if (!row.locked) out.push(row);
+        }
+        return out;
+      },
+      async (window) => {
+        if (scope.ids !== undefined) return window.filter(visibleInScope);
+        // M1: sin `ids`, por lotes acotados: cargar, decidir y soltar. Después solo se usa del
+        // filtro `hidesAnyTag` (configuración), y el plan se vuelve a juzgar en su turno
+        // (`privacyInTurnFor`), así que nada vuelve a preguntar por una nota soltada.
+        const accepted: GrepNoteRow[] = [];
+        for (let first = 0; first < window.length; first += judgeNotes) {
+          const chunk = window.slice(first, first + judgeNotes);
+          const chunkIds = chunk.map((row) => row.id);
+          await filter.ensure(chunkIds);
+          for (const row of chunk) if (visibleInScope(row)) accepted.push(row);
+          filter.forget(chunkIds);
+        }
+        return accepted;
+      },
+      trigramMatch(pattern.required, request.caseSensitive),
+      this.port
+    );
 
     const re = globalPattern(pattern);
     const entries: Candidate[] = [];
@@ -668,11 +758,24 @@ export class ReplaceBatch {
     const afterLastDone = (fallback: { id: string; inclusive: boolean }): { id: string; inclusive: boolean } =>
       lastDone === null ? fallback : { id: lastDone, inclusive: false };
     let session: GrepBodiesSession | null = null;
+    // El primer lote y si hay otro detrás, antes de pedir hueco para el hilo de la expresión
+    // (como en `hebra_grep`): juzgar no retiene uno de los `REGEX_WORKERS_MAX`.
+    await pending.fillTo(SIMULATE_BATCH_NOTES + 1);
     const worker = pattern.literal ? null : await RegexReplaceWorker.start(re, parts, this.port);
     // El plazo cuenta desde el primer cuerpo leído, como en `hebra_grep`.
     let deadline = Infinity;
     try {
-      for (let first = 0; first < pending.length && cutoff === null; first += SIMULATE_BATCH_NOTES) {
+      for (let first = 0; cutoff === null; first += SIMULATE_BATCH_NOTES) {
+        // Este lote entero y una más (`nextAfterBatch`). Juzgar y prefiltrar un tramo nuevo no
+        // cuenta para el plazo, como no contaba hacerlo con todas antes de empezar (M2): el plazo
+        // se corre lo que tarde, y no depende de cuántas notas ocultas haya que juzgar.
+        const wanted = first + SIMULATE_BATCH_NOTES + 1;
+        if (pending.needs(wanted)) {
+          const fillStart = Date.now();
+          await pending.fillTo(wanted);
+          deadline += Date.now() - fillStart;
+        }
+        if (first >= pending.length) break;
         const batch = pending.slice(first, first + SIMULATE_BATCH_NOTES);
         if (progressed && Date.now() >= deadline) {
           cutoff = 'time';
@@ -691,7 +794,7 @@ export class ReplaceBatch {
         // turno de la lectura) se salta.
         const notes = batch.filter((note) => read.bodies.has(note.rowid));
         const bodies = notes.map((note) => read.bodies.get(note.rowid)!);
-        const nextAfterBatch = pending[first + SIMULATE_BATCH_NOTES];
+        const nextAfterBatch = pending.at(first + SIMULATE_BATCH_NOTES);
 
         const judge = (index: number, result: ReplaceLinesResult): boolean => {
           progressed = true;
@@ -784,6 +887,8 @@ export class ReplaceBatch {
           }
           break;
         }
+        // M2: el lote está mirado; la cola guarda un tramo y un lote, no lo ya recorrido.
+        pending.drop(first + SIMULATE_BATCH_NOTES);
       }
     } finally {
       await worker?.close();

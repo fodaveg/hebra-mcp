@@ -5,8 +5,8 @@
  *
  * Sobre `test/fixtures/forget-library.ts` (públicas, privadas por carpeta y por etiqueta,
  * bloqueadas, papelera y lápidas):
- * 1. con lotes de 7 (muchos lotes) y con un lote que cabe todo (una sola lectura, como el
- *    `ensureAll` de antes), los planes, las páginas, los cortes (`continueAfter`) y los recuentos
+ * 1. con lotes de 7 (muchos lotes) y con un lote que cabe en cada tramo (desde M2 la simulación
+ *    juzga por tramos de como mucho `SIMULATE_WINDOW_MAX`), los planes, las páginas, los cortes (`continueAfter`) y los recuentos
  *    son IDÉNTICOS, en la biblioteca entera, por carpeta (con y sin subcarpetas) y por etiqueta;
  * 2. lo que entra en los planes es exactamente lo visible del ámbito según el filtro de la
  *    biblioteca entera (`fromSnapshot`);
@@ -22,7 +22,8 @@ import {
   type ReplaceResult,
   type ReplaceScope
 } from '../../src/store/replace-batch';
-import { forgetLibraryHarness, type ForgetLibrary } from '../fixtures/forget-library';
+import { forgetLibraryHarness, RARE, type ForgetLibrary } from '../fixtures/forget-library';
+import { liveNoteRows } from '../fixtures/grep-rows';
 import { AUDIT_CONFIG, type AuditHarness } from '../privacy/audit-harness';
 
 let h: AuditHarness<ForgetLibrary>;
@@ -137,7 +138,8 @@ describe('simulación sin ids, por lotes de privacidad (M1)', () => {
   it('no lee la biblioteca entera y lo cargado a la vez no pasa del lote', { timeout: 60_000 }, async () => {
     const all = vi.spyOn(h.port, 'notesVisibilityIndex');
     let peak = 0;
-    let loads = 0;
+    let judged = 0;
+    let largest = 0;
     const ensure = LibraryIndex.prototype.ensure;
     vi.spyOn(LibraryIndex.prototype, 'ensure').mockImplementation(async function (
       this: LibraryIndex,
@@ -145,7 +147,8 @@ describe('simulación sin ids, por lotes de privacidad (M1)', () => {
       ids: readonly string[]
     ) {
       const loaded = await ensure.call(this, source, ids);
-      loads += 1;
+      judged += ids.length;
+      largest = Math.max(largest, ids.length);
       peak = Math.max(peak, this.retained);
       return loaded;
     });
@@ -154,7 +157,7 @@ describe('simulación sin ids, por lotes de privacidad (M1)', () => {
     const plan = (
       await batchWith(7).run({
         mode: 'simulate',
-        pattern: 'remolacha',
+        pattern: RARE,
         regex: false,
         caseSensitive: false,
         replacement: 'CAMBIO',
@@ -164,11 +167,14 @@ describe('simulación sin ids, por lotes de privacidad (M1)', () => {
         privacy: AUDIT_CONFIG
       })
     ).result as ReplacePlanView;
-    // 200, el tope del plan; el juicio de privacidad ya pasó por todas las candidatas.
-    expect(plan.planNotes).toBe(200);
+    // El patrón raro: una sola nota en el plan, y el juicio de privacidad pasó por todas las
+    // candidatas, una vez cada una y de 7 en 7 como mucho (desde M2, por tramos que se leen y
+    // se juzgan según avanza la simulación).
+    expect(plan.planNotes).toBe(1);
     expect(all).not.toHaveBeenCalled();
-    const candidates = (await h.port.grepNotes()).filter((row) => !row.locked).length;
-    expect(loads).toBe(Math.ceil(candidates / 7));
+    const candidates = (await liveNoteRows(h.port)).filter((row) => !row.locked).length;
+    expect(judged).toBe(candidates);
+    expect(largest).toBeLessThanOrEqual(7);
     expect(peak).toBeLessThanOrEqual(7);
   });
 });

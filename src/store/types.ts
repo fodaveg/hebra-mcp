@@ -27,7 +27,7 @@ import type {
   TagsList,
   TitleCandidates
 } from '../hebra';
-import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
+import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow, GrepNotesFrom } from './grep-sql';
 import type {
   NotePropValues,
   NoteValuesRequest,
@@ -381,9 +381,14 @@ export interface HebraLibraryPort {
    *  es una lápida. Solo lee. No se llama `fileDirty` para que ningún método del puerto
    *  case con los `file*` del motor (`test/store/surface.node.test.ts`). */
   looseFileDirty(id: string): Promise<boolean | null>;
-  /** `hebra_grep` (D13): las notas vivas sin su cuerpo (id, título, si está bloqueada y
-   *  su `rowid`), en un turno de la cola. Sin filtro: lo aplica la herramienta. */
-  grepNotes(): Promise<GrepNoteRow[]>;
+  /** `hebra_grep` (D13): una página de las notas vivas sin su cuerpo (id, título, si está
+   *  bloqueada y su `rowid`), en orden de id desde `from` y como mucho `limit`
+   *  (`grepNotePage` de `./grep-sql.ts`), en un turno de la cola. Sin filtro: lo aplica la
+   *  herramienta. Se recorre con `NoteRowsById` (`./grep-notes.ts`), nunca entera de golpe
+   *  (M2 del plan de memoria). */
+  grepNotesPage(from: GrepNotesFrom | null, limit: number): Promise<GrepNoteRow[]>;
+  /** Las mismas filas, de las notas de `ids` que siguen vivas (`grepNoteRowsFor`). */
+  grepNotesFor(ids: readonly string[]): Promise<GrepNoteRow[]>;
   /** `hebra_grep` (D13): de `rowids`, las que pueden casar según el índice de subcadena
    *  (`grepSubstringCandidates` de `./grep-sql.ts`; desde TRA-18, el índice no guarda el
    *  texto de los comentarios `%%…%%`, así que también mira el cuerpo en bruto de esas

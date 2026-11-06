@@ -233,8 +233,9 @@ describe('hebra_rename_file arregla las notas (D23)', () => {
       const { rawFiles, test, withEngine } = harness;
       const id = test.library.files.inventario;
       const noteId = await note(harness, `# Cruza\n\n![[${FILE_NAMES.inventario}]]\n`);
-      // Un filtro de ANTES de que cruce: la herramienta ve el fichero y llega al escritor.
-      const ctx = await resolveToolContext(test.serverContext);
+      // Un filtro de ANTES de que cruce, con la biblioteca entera ya cargada (si no, la herramienta
+      // juzgaría la nota al pedirla, ya privada): la herramienta ve el fichero y llega al escritor.
+      const ctx = await resolveToolContext(test.serverContext, { loadAll: true });
       await withEngine((engine) => engine.noteMove(noteId, test.library.folders.diario));
       const reached = vi.spyOn(ctx.write!, 'looseFileWrite');
       const before = rawFiles();

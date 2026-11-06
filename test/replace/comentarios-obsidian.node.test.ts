@@ -16,6 +16,7 @@ import { runGrep } from '../../src/server/tools/grep';
 import { trigramMatch } from '../../src/store/grep';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { LibraryInstance } from '../../src/sync/library-instance';
+import { liveNoteRows } from '../fixtures/grep-rows';
 import { createNote, noteState, OPEN, openWriter, query, removeTempDirs, tempDir } from './helpers';
 
 const instances: LibraryInstance[] = [];
@@ -45,7 +46,7 @@ describe('TRA-C01: el texto dentro de %% se encuentra con el índice completo', 
     await createNote(writer.instance, MULTILINE);
     await createNote(writer.instance, PLAIN);
     // Con la marca vigente `grepCandidates` devuelve un conjunto (con otra, `null`).
-    const rows = await writer.instance.port.grepNotes();
+    const rows = await liveNoteRows(writer.instance.port);
     const rowid = rows.find((row) => row.id === id)!.rowid;
     const match = trigramMatch('zanahoriaoculta', false)!;
     const candidates = await writer.instance.port.grepCandidates(match, rows.map((row) => row.rowid));

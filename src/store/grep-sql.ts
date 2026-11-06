@@ -18,7 +18,8 @@ import { lowerFoldSafeLiteral, trigramMatchLiteral } from './grep';
 import { VISIBILITY_COLUMNS, visibilityEntries } from './privacy-sql';
 
 /** Una nota viva (ni papelera ni lápida), sin su cuerpo: lo que `hebra_grep` necesita para
- *  decidir qué recorre. `rowid` es la clave del índice de subcadena. */
+ *  decidir qué recorre. `rowid` es la clave del índice de subcadena. Se leen por páginas
+ *  (`grepNotePage`) o por ids (`grepNoteRowsFor`), nunca todas de golpe. */
 export interface GrepNoteRow {
   rowid: number;
   id: string;
@@ -28,26 +29,72 @@ export interface GrepNoteRow {
   conflict: boolean;
 }
 
-export function grepNoteRows(db: DatabaseSync): GrepNoteRow[] {
-  const rows = db
-    .prepare(
-      `SELECT rowid AS rid, id, title, locked, conflict_of IS NOT NULL AS conflict FROM notes
-       WHERE deleted = 0 AND trashed_at IS NULL`
-    )
-    .all() as Array<{
-      rid: number | bigint;
-      id: string;
-      title: string | null;
-      locked: number | bigint;
-      conflict: number | bigint;
-    }>;
-  return rows.map((row) => ({
+/** Dónde empieza una página de `grepNotePage`: el id de nota y si ese id entra. */
+export interface GrepNotesFrom {
+  id: string;
+  inclusive: boolean;
+}
+
+const GREP_NOTE_COLUMNS = 'rowid AS rid, id, title, locked, conflict_of IS NOT NULL AS conflict';
+
+type GrepNoteSqlRow = {
+  rid: number | bigint;
+  id: string;
+  title: string | null;
+  locked: number | bigint;
+  conflict: number | bigint;
+};
+
+function toGrepNoteRows(rows: unknown[]): GrepNoteRow[] {
+  return (rows as GrepNoteSqlRow[]).map((row) => ({
     rowid: Number(row.rid),
     id: String(row.id),
     title: String(row.title ?? ''),
     locked: Number(row.locked) !== 0,
     conflict: Number(row.conflict) !== 0
   }));
+}
+
+/**
+ * Una página de las notas vivas (ni papelera ni lápida), sin su cuerpo, en orden de id
+ * (`ORDER BY id`, comparación BINARY de SQLite: los bytes UTF-8, que es el orden de los puntos
+ * de código), desde `from` y como mucho `limit` (M2 del plan de memoria, 6 nov 2026). Paginación
+ * por clave: la página siguiente empieza detrás del id de la última fila de esta
+ * (`{ id, inclusive: false }`), así que ninguna llamada guarda las filas de la biblioteca entera.
+ * El índice único de `notes.id` (y `notes_not_deleted`) da el orden sin ordenar en memoria. El
+ * orden de `hebra_grep` y de la simulación es el de las unidades UTF-16: lo reconstruye
+ * `NoteRowsById` (`./grep-notes.ts`), que es quien llama a esto.
+ */
+export function grepNotePage(db: DatabaseSync, from: GrepNotesFrom | null, limit: number): GrepNoteRow[] {
+  const live = 'deleted = 0 AND trashed_at IS NULL';
+  if (from === null) {
+    return toGrepNoteRows(
+      db.prepare(`SELECT ${GREP_NOTE_COLUMNS} FROM notes WHERE ${live} ORDER BY id LIMIT ?`).all(limit)
+    );
+  }
+  return toGrepNoteRows(
+    db
+      .prepare(
+        `SELECT ${GREP_NOTE_COLUMNS} FROM notes WHERE ${live} AND id ${from.inclusive ? '>=' : '>'} ?
+         ORDER BY id LIMIT ?`
+      )
+      .all(from.id, limit)
+  );
+}
+
+/** Las filas de `grepNotePage` de las notas de `ids` que siguen vivas, una vez cada una y sin
+ *  orden: lo que la simulación con `ids` y los informes de un plan necesitan, sin recorrer la
+ *  biblioteca (M2 del plan de memoria). */
+export function grepNoteRowsFor(db: DatabaseSync, ids: readonly string[]): GrepNoteRow[] {
+  if (ids.length === 0) return [];
+  return toGrepNoteRows(
+    db
+      .prepare(
+        `SELECT ${GREP_NOTE_COLUMNS} FROM notes
+         WHERE deleted = 0 AND trashed_at IS NULL AND id IN (SELECT value FROM json_each(?))`
+      )
+      .all(JSON.stringify(ids))
+  );
 }
 
 /**
