@@ -9,6 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { HttpConfigError } from '../http/config';
+import { DEFAULT_SYNC_CONCURRENCY } from '../sync/gates';
 import type { Clock } from './lifecycle';
 
 export const DEFAULT_CONTEXT_IDLE_MS = 120_000;
@@ -56,12 +57,22 @@ export interface CapacityConfig {
   idleMs: number;
   openWaitMs: number;
   highWater: HighWater;
+  /** Rondas de sync simultáneas de todo el proceso (`HEBRA_MCP_SYNC_CONCURRENCY`). */
+  syncConcurrency: number;
 }
 
 function parseMs(env: NodeJS.ProcessEnv, variable: string, fallback: number): number {
   const raw = env[variable];
   if (raw === undefined || raw === '') return fallback;
   if (!/^\d{1,10}$/.test(raw)) throw new HttpConfigError(variable);
+  return Number(raw);
+}
+
+/** Entero >= 1; otra cosa impide arrancar. */
+export function parseSyncConcurrency(env: NodeJS.ProcessEnv): number {
+  const raw = env.HEBRA_MCP_SYNC_CONCURRENCY;
+  if (raw === undefined || raw === '') return DEFAULT_SYNC_CONCURRENCY;
+  if (!/^\d{1,3}$/.test(raw) || Number(raw) < 1) throw new HttpConfigError('HEBRA_MCP_SYNC_CONCURRENCY');
   return Number(raw);
 }
 
@@ -88,7 +99,8 @@ export function readCapacityConfig(env: NodeJS.ProcessEnv = process.env): Capaci
   return {
     idleMs: parseMs(env, 'HEBRA_MCP_CONTEXT_IDLE_MS', DEFAULT_CONTEXT_IDLE_MS),
     openWaitMs: parseMs(env, 'HEBRA_MCP_OPEN_WAIT_MS', DEFAULT_OPEN_WAIT_MS),
-    highWater: parseHighWater(env.HEBRA_MCP_MEMORY_HIGH_WATER)
+    highWater: parseHighWater(env.HEBRA_MCP_MEMORY_HIGH_WATER),
+    syncConcurrency: parseSyncConcurrency(env)
   };
 }
 

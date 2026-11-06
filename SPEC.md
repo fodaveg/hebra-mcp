@@ -2650,6 +2650,15 @@ cada SQLite y suben al volver a abrirla. Los temporales que deje un corte se bor
   hayan agotado su espera. Solo acorta esa espera: no afecta a quien tiene una petición en curso.
 - Si no basta, la apertura espera en orden de llegada hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por
   defecto). Quien ya tiene su contexto abierto no espera.
+- **El sync al abrir no crece con las bibliotecas abiertas.** Medido el 6 nov 2026: una primera
+  descarga de 5 000 notas sube +38 MiB y cinco a la vez, +152 MiB. Por eso las rondas de sync
+  (`SyncRunner.execute`, incluida la ronda final de `close_round`) pasan por un semáforo FIFO de
+  PROCESO, 2 simultáneas por defecto (`HEBRA_MCP_SYNC_CONCURRENCY`, entero >= 1; uno inválido
+  impide arrancar), y las descargas de adjuntos comparten un único tope de 4 en todo el proceso.
+  Una ronda que espera turno cuenta dentro de la espera de `whenReady` (10 s): si caduca, la
+  herramienta responde con lo local y `hebra_status` no da aún `lastSyncAt`. Una ronda en cola de
+  un contexto que se cierra sale de la cola sin ejecutarse ni coger el turno. En `serve` por stdio
+  hay un solo runner y no cambia nada visible.
 - Al agotar la espera: 503 con `Retry-After`, sin distinguir quién conectó antes.
 - `/mcp` registra el motivo de cada 503 (`capacity_wait_timeout`, `open_failed`, `lock_held`), sin
   `sub`, email ni títulos.
