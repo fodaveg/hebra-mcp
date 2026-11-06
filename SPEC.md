@@ -2643,13 +2643,30 @@ cada SQLite y suben al volver a abrirla. Los temporales que deje un corte se bor
 - Lo que no llegó a subirse se reintenta abriendo el contexto por la vía normal, y quien lo abre es
   quien lo cierra. Lo que sube sale de la lista; lo que no, se conserva.
 
-**Memoria real, no recuento.** Antes de abrir se mira la memoria en uso del contenedor frente a
-`HEBRA_MCP_MEMORY_HIGH_WATER` (80 % de su límite por defecto).
+**Memoria real, no recuento.** Antes de abrir, y antes de que una petición llegue a sus
+herramientas, se mira la memoria en uso del contenedor frente a `HEBRA_MCP_MEMORY_HIGH_WATER` (80 %
+de su límite por defecto).
 
+- Cada apertura y cada petición en curso apartan memoria mientras duran, porque la lectura del
+  contenedor aún no ve lo que están gastando. Una apertura aparta 8 MiB (el pico medido al abrir un
+  contexto es de unos 6 MiB, 6 nov 2026). Una petición con llamadas de herramienta aparta, por cada
+  llamada, unos 3,5 KB por nota de la biblioteca o del espacio al que va, con un mínimo de 4 MiB;
+  las notas se cuentan con un `COUNT(*)` sobre el índice de notas vivas, sin leer filas. Una
+  petición sin llamadas (`initialize`, `tools/list`) no aparta nada. Ese tamaño sale de una sola
+  función (`requestReserveBytes`, `src/accounts/capacity.ts`) porque hoy una petición cuesta según
+  las notas de la biblioteca entera: cuando cueste según las notas que toca, pasará a una cantidad
+  fija de unos 8 MiB.
+- Se entra si lo medido más lo apartado, con lo propio, no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`.
+  Quien llega sin nada apartado en curso entra con que lo medido esté por debajo: una petición sola
+  más grande que el margen no espera para siempre.
+- La petición aparta después de abrir su biblioteca y sus espacios, y suelta cuando termina del
+  todo: respuesta enviada o cortada y última herramienta acabada, también si falla. Si el cliente
+  se va mientras espera turno, sale de la cola sin apartar nada.
 - Por encima, se cierran antes los contextos sin peticiones en curso ni subidas pendientes, aunque no
   hayan agotado su espera. Solo acorta esa espera: no afecta a quien tiene una petición en curso.
-- Si no basta, la apertura espera en orden de llegada hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por
-  defecto). Quien ya tiene su contexto abierto no espera.
+- Si no basta, la apertura o la petición espera hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por defecto) en
+  una sola cola, por orden de llegada: una pequeña no adelanta a una grande que llegó antes. Quien ya
+  tiene su contexto abierto no espera a abrirlo, pero sus llamadas sí esperan su turno de memoria.
 - **El sync al abrir no crece con las bibliotecas abiertas.** Medido el 6 nov 2026: una primera
   descarga de 5 000 notas sube +38 MiB y cinco a la vez, +152 MiB. Por eso las rondas de sync
   (`SyncRunner.execute`, incluida la ronda final de `close_round`) pasan por un semáforo FIFO de
@@ -2659,7 +2676,12 @@ cada SQLite y suben al volver a abrirla. Los temporales que deje un corte se bor
   herramienta responde con lo local y `hebra_status` no da aún `lastSyncAt`. Una ronda en cola de
   un contexto que se cierra sale de la cola sin ejecutarse ni coger el turno. En `serve` por stdio
   hay un solo runner y no cambia nada visible.
-- Al agotar la espera: 503 con `Retry-After`, sin distinguir quién conectó antes.
+- Al agotar la espera: 503 con `Retry-After` y motivo `capacity_wait_timeout`, sin distinguir quién
+  conectó antes.
+- Límite conocido: una herramienta que abre un espacio que no se preparó antes (un espacio que falló
+  al prepararse, o más de los cuatro que se preparan por petición) pide esa apertura con su petición
+  ya dentro, y espera en la misma cola. Si delante hay peticiones que esperan a que la suya suelte,
+  la apertura acaba en su plazo como un error de esa herramienta, no en un bloqueo sin fin.
 - `/mcp` registra el motivo de cada 503 (`capacity_wait_timeout`, `open_failed`, `lock_held`), sin
   `sub`, email ni títulos.
 - `mem_limit` del contenedor sigue existiendo como barrera de la máquina compartida. Su valor sale de

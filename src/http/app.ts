@@ -44,6 +44,7 @@ import { buildMcpServer } from '../server/build-server';
 import type { ServerContext } from '../server/context';
 import type { AccountContexts, AuthorizedAccount } from '../accounts';
 import { ContextUnavailableError } from '../accounts/capacity';
+import { PERSONAL_TARGET } from '../accounts/contexts';
 import { MAX_WRITE_MESSAGE_BYTES } from '../store/writes';
 import { isLoopbackHostname, MCP_PATH, type HttpConfig } from './config';
 
@@ -187,6 +188,23 @@ export function requestedSpaces(body: unknown): string[] {
   return [...spaces];
 }
 
+/**
+ * El destino de cada llamada de herramienta de este cuerpo, para apartar su memoria antes de
+ * ejecutarla (SPEC.md §12.10): `'personal'` sin `space` o con ese literal, y si no, el valor de
+ * `space` tal cual (si no es un espacio preparado, aparta el mínimo). Un cuerpo sin
+ * `tools/call` (`initialize`, `tools/list`) no aparta nada.
+ */
+export function requestedCalls(body: unknown): string[] {
+  const targets: string[] = [];
+  for (const message of Array.isArray(body) ? body : [body]) {
+    const call = message as { method?: unknown; params?: { arguments?: { space?: unknown } } } | null;
+    if (call?.method !== 'tools/call') continue;
+    const space = call.params?.arguments?.space;
+    targets.push(space === undefined ? PERSONAL_TARGET : typeof space === 'string' ? space : '');
+  }
+  return targets;
+}
+
 export function createHttpApp(options: CreateHttpAppOptions): Express {
   const { ctx, version, config, auth } = options;
   const nullOriginPostPaths = new Set(auth.nullOriginPostPaths ?? []);
@@ -245,14 +263,21 @@ export function createHttpApp(options: CreateHttpAppOptions): Express {
       return;
     }
     if (!options.contexts) { sendUnavailable(res, new Error('no_contexts')); return; }
+    // El cliente que se va mientras espera memoria sale de la cola sin apartar nada.
+    const gone = new AbortController();
+    res.once('close', () => gone.abort());
     void options.contexts.acquire(account).then(async (lease) => {
       try {
         await lease.prepareSpaces(requestedSpaces(req.body), () => res.destroyed);
         if (res.destroyed) return;
+        // Después de abrir: lo apartado mide lo que cuestan las llamadas, no la apertura. Se
+        // suelta con el último lease de la petición (`release` y la última herramienta).
+        await lease.admitCalls(requestedCalls(req.body), gone.signal);
+        if (res.destroyed) return;
         await handleMcp(lease.ctx, version, req, res);
       } finally { lease.release(); }
     }).catch((error: unknown) => {
-      if (res.headersSent) return;
+      if (res.headersSent || (gone.signal.aborted && error === gone.signal.reason)) return;
       if (error instanceof Error && error.message === 'account_inactive') {
         sendJsonRpcError(res, 401, -32000, 'Token no válido.');
       } else {
