@@ -1010,6 +1010,11 @@ El dispositivo acumula tres secretos:
     regla de la papelera (abajo): oculta si llega a una carpeta privada, si alguna ruta
     intermedia es privada o si la subida no resuelve (fila que falta, sin nombre o en ciclo).
     Coste asumido: una nota cuya carpeta todavía no ha llegado no se ve hasta que llegue.
+  - **Una carpeta efectiva que el filtro no conoce** (B2 de la revisión del candidato de memoria,
+    6 nov 2026) oculta la nota, en JS (`isHiddenNote`) y en SQL (`src/store/visible-sql.ts`), y
+    eso incluye una nota viva dentro de una subcarpeta que está en la papelera (un estado que
+    puede dejar el sync), porque esa carpeta no sale en `foldersList`
+    (`test/privacy/lazy-fail-closed.test.ts`).
   - **Memoria de las rutas privadas** (A3): `privateFolders` son rutas, y una ruta se resuelve a
     carpetas con el almacén de cada momento; mover la carpeta privada dentro de otra y crear
     una nueva con su nombre destapaba la vieja. hebra-mcp recuerda a qué carpetas resolvió
@@ -2737,7 +2742,16 @@ de su límite por defecto).
   esperando y llega la B con una, la de B entra en el siguiente hueco que se libere. No hay tope por
   cuenta (D22): una cuenta sola usa todo lo que quepa; el turno solo decide el orden cuando varias
   esperan. Nadie adelanta a quien tiene el turno: si su reserva no cabe, esperan todos. Una cuenta
-  sin esperas ni nada apartado se olvida, y si vuelve empieza como recién llegada. Quien ya tiene su
+  sin esperas ni nada apartado deja de tener turno, pero se recuerda cuándo entró por última vez y,
+  si vuelve, lo recupera: un cliente MCP normal espera cada respuesta antes de mandar la siguiente
+  llamada, así que entre dos llamadas no tiene nada en curso, y si volviera como recién llegada
+  ganaría siempre (revisión de seguridad del 6 nov 2026: dos cuentas así se llevaban 2 652 plazas
+  frente a 6 de una con cinco llamadas en paralelo, cuyas esperas acababan en 503). Ese recuerdo se
+  poda al guardarlo: se quitan los de antes de la última entrada más antigua de las cuentas que
+  siguen con turno, y todos si no queda ninguna. Podar uno no cambia el orden frente a las que
+  siguen (con él o sin él, esa cuenta lleva más sin entrar y va antes); frente a una que aún no ha
+  entrado nunca, decide el orden de llegada. Queda como mucho uno por cuenta, y solo de las que
+  entraron después de la entrada más antigua de alguna cuenta con turno. Quien ya tiene su
   contexto abierto no espera a abrirlo, pero sus llamadas sí esperan su turno de memoria.
 - **El sync al abrir no crece con las bibliotecas abiertas.** Medido el 6 nov 2026: una primera
   descarga de 5 000 notas sube +38 MiB y cinco a la vez, +152 MiB. Por eso las rondas de sync
@@ -2747,8 +2761,12 @@ de su límite por defecto).
   Ambos topes reparten el turno POR CUENTA (B4, 6 nov 2026): al liberarse una plaza la recibe la
   cuenta con peticiones en espera que lleva más tiempo sin turno, y dentro de cada cuenta rige el
   orden de llegada, de modo que una cuenta con muchas rondas o descargas no retrasa a otra más de
-  un turno. La clave de cuenta es opaca (hash del directorio de la cuenta, el mismo para su
-  biblioteca personal y sus espacios; `default` en stdio). Una descarga en retroceso por 429 no
+  un turno, con el mismo recuerdo de la última entrada y la misma poda que la compuerta de memoria.
+  La clave de cuenta es opaca: un hash del id interno de la cuenta en el registro (nunca el `sub` ni
+  el email) que calcula `serve-http` al abrir el contexto y pasa a su biblioteca personal y a todos
+  sus espacios, sea cual sea el directorio en que vivan; no se deduce de la ruta, que separaba de
+  sus espacios una instalación legacy cuya raíz colgara de un directorio llamado `spaces`.
+  `default` en stdio. Una descarga en retroceso por 429 no
   ocupa plaza. Una ronda no puede retener su plaza para siempre: el transporte HTTP del
   motor (`vendor/hebra`, `HttpLibraryTransport`) corta toda petición de registros a los 30 s sin
   recibir nada y a los 15 min en total, y la de Blob V2 a los 15 min por objeto (60 s las de

@@ -19,7 +19,7 @@ import { AccountContexts, AccountRegistry, AccountRemovalService, accountDataDir
   type AccountControlServer, type RemotePairingRuntime,
   type WithAccountContext } from '../accounts';
 import { readCapacityConfig } from '../accounts/capacity';
-import { configureProcessSyncGates } from '../sync/gates';
+import { accountTurnKey, configureProcessSyncGates } from '../sync/gates';
 import { revokeAccountDevice } from '../accounts/revoke-device';
 import type { OAuthHttpAuth } from '../oauth/http-auth';
 import { PairingRevocation, PairingStatusSource } from '../status/pairing-revocation';
@@ -250,7 +250,10 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           instance: options.instance, syncIntervalMs: options.syncIntervalMs,
           writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
           assertActive: () => { activeRegistry.assertActive(account); },
-          uploadLedger: pendingUploads.ledger(account) });
+          uploadLedger: pendingUploads.ledger(account),
+          // El turno de los topes de sync es por cuenta: la clave sale del id de la cuenta (un
+          // hash, sin `sub` ni email), no del directorio, y la comparten personal y espacios.
+          accountKey: accountTurnKey(account.id) });
         opened.instance.deferSignalRelease();
         const bound = bindPairingRevocation(opened, pairing, account.binding.pairedCredentialId);
         const tracked: ServeContext = { ...bound, close: async () => {

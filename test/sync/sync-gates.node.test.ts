@@ -143,6 +143,83 @@ describe('FifoSemaphore: turno rotatorio por cuenta', () => {
     expect(one.order).toEqual(['0', '1', '2', '3']);
   });
 
+  /**
+   * Reparte `steps` plazas de un semáforo de una entre cuentas que piden sin parar, cada una con
+   * `clients[cuenta]` peticiones en vuelo. Con 1 es un cliente secuencial, como uno MCP normal:
+   * pide la siguiente en cuanto suelta la anterior, sin nada en curso entre medias. En cada paso
+   * el test suelta la plaza que está cogida; sin tiempos reales. Devuelve el orden de entrada.
+   */
+  async function shareOf(sem: FifoSemaphore, clients: Record<string, number>, steps: number): Promise<string[]> {
+    const order: string[] = [];
+    const held: Array<() => void> = [];
+    let stop = false;
+    const worker = async (key: string): Promise<void> => {
+      while (!stop) {
+        const release = (await sem.acquire(undefined, key))!;
+        order.push(key);
+        await new Promise<void>((resolve) => held.push(resolve));
+        release();
+      }
+    };
+    const workers = Object.entries(clients).flatMap(([key, count]) => Array.from({ length: count }, () => worker(key)));
+    for (let step = 0; step < steps; step += 1) {
+      await settle();
+      held.shift()!();
+    }
+    const counted = order.slice(0, steps);
+    stop = true;
+    for (await settle(); held.length > 0; await settle()) held.shift()!();
+    await Promise.all(workers);
+    expect(sem.inUse).toBe(0);
+    expect(sem.queued).toBe(0);
+    return counted;
+  }
+
+  const countOf = (order: string[], key: string): number => order.filter((entry) => entry === key).length;
+
+  /** Cuántas plazas seguidas pasan, como mucho, sin que entre `key`. */
+  function longestGap(order: string[], key: string): number {
+    let gap = 0;
+    let longest = 0;
+    for (const entry of order) {
+      gap = entry === key ? 0 : gap + 1;
+      longest = Math.max(longest, gap);
+    }
+    return longest;
+  }
+
+  it('dos cuentas secuenciales y una con 5 en paralelo reparten por igual', async () => {
+    // Antes, X e Y volvían como recién llegadas tras cada petición y ganaban siempre: B, nada.
+    const order = await shareOf(new FifoSemaphore(1), { B: 5, X: 1, Y: 1 }, 300);
+    for (const key of ['B', 'X', 'Y']) expect(Math.abs(countOf(order, key) - 100)).toBeLessThanOrEqual(1);
+    expect(longestGap(order, 'B')).toBeLessThanOrEqual(2);
+  });
+
+  it('una cuenta secuencial frente a cinco con peticiones en paralelo recibe 1/6', async () => {
+    const order = await shareOf(new FifoSemaphore(1), { X: 1, B1: 3, B2: 3, B3: 3, B4: 3, B5: 3 }, 600);
+    for (const key of ['X', 'B1', 'B2', 'B3', 'B4', 'B5']) expect(Math.abs(countOf(order, key) - 100)).toBeLessThanOrEqual(1);
+  });
+
+  it('el historial de turnos queda acotado: se poda frente a los vivos y se vacía sin nadie', async () => {
+    const sem = new FifoSemaphore(1);
+    const held = (await sem.acquire(undefined, 'B'))!;
+    let releaseB = held;
+    let maxRemembered = 0;
+    // 500 cuentas distintas, de una en una, mientras B pide sin parar: cada una entra una vez y
+    // su turno se olvida. Sin poda, el historial acabaría con las 500.
+    for (let i = 0; i < 500; i += 1) {
+      const nextB = sem.acquire(undefined, 'B');
+      const visitor = sem.acquire(undefined, `cuenta-${i}`);
+      releaseB();
+      (await visitor)!();
+      releaseB = (await nextB)!;
+      maxRemembered = Math.max(maxRemembered, sem.remembered);
+    }
+    expect(maxRemembered).toBeLessThanOrEqual(1);
+    releaseB();
+    expect(sem.remembered).toBe(0);
+  });
+
   it('un abort de la cuenta que espera no deja plaza ni estado colgado', async () => {
     const sem = new FifoSemaphore(1);
     const first = (await sem.acquire(undefined, 'A'))!;

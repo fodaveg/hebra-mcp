@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { AccountRegistry, accountDataDir, type AccountRecord } from '../../src/accounts';
 import { encodeRecoveryCode, type LumbreConnection } from '../../src/hebra';
 import { httpConfigFor } from '../../src/http/config';
@@ -21,6 +21,7 @@ import type { ActiveGrant } from '../../src/oauth/backchannel';
 import { GrantSecrets } from '../../src/oauth/grants';
 import { TokenStore, type IssuedTokens } from '../../src/oauth/token-store';
 import { MemorySecretStore, openFileSecretStore, writePairedSecrets } from '../../src/secrets';
+import { accountTurnKey, processSyncGates } from '../../src/sync/gates';
 import { connectHttpClient, textOf } from '../fixtures/http-app';
 import { startJd, type JdHarness } from '../fixtures/jd-library';
 import { writePrivacyConfigFile } from '../fixtures/test-context';
@@ -346,6 +347,29 @@ describe('acceptance multiusuario por HTTP, con bibliotecas reales y relÃ© sintÃ
       expect(await rejected.json()).not.toHaveProperty('access_token');
       expect((await call('mikel', 'hebra_read_note', { id })).value.body).toContain('B_DURANTE_REFRESH');
     } finally { release(); await pending; }
+  });
+
+  it('el turno de los topes de sync va por la clave opaca de cada cuenta, no por su directorio', async () => {
+    const keys: string[] = [];
+    const rounds = processSyncGates().rounds;
+    const acquire = rounds.acquire.bind(rounds);
+    const spy = vi.spyOn(rounds, 'acquire').mockImplementation((signal, accountKey) => {
+      keys.push(String(accountKey));
+      return acquire(signal, accountKey);
+    });
+    onTestFinished(() => spy.mockRestore());
+    const expected = { david: accountTurnKey(records.david.id), mikel: accountTurnKey(records.mikel.id) };
+    for (const who of ['david', 'mikel'] as const) {
+      // Cada escritura pide una ronda de sync de la biblioteca de su cuenta.
+      expect((await call(who, 'hebra_create_note', { body: `# TURNO_${who}`, operationId: `turn-${who}` })).isError).toBe(false);
+      await vi.waitFor(() => expect(keys).toContain(expected[who]));
+    }
+    expect(new Set(keys)).toEqual(new Set([expected.david, expected.mikel]));
+    expect(expected.david).not.toBe(expected.mikel);
+    for (const who of ['david', 'mikel'] as const) {
+      expect(expected[who]).not.toContain(records[who].sub);
+      expect(expected[who]).not.toContain(records[who].id.slice(0, 8));
+    }
   });
 
   it('sin peticiones no queda ninguna biblioteca abierta, y la siguiente llamada reabre la misma (D22)', async () => {

@@ -943,6 +943,84 @@ describe('memoria de las peticiones en curso', () => {
     expect(clock.pending).toBe(0);
   });
 
+  /**
+   * Reparte `steps` plazas de una compuerta con hueco para UNA llamada entre cuentas que llaman
+   * sin parar, cada una con `clients[cuenta]` llamadas en vuelo. Con 1 es un cliente MCP normal:
+   * manda la siguiente en cuanto recibe la respuesta, sin nada en curso entre medias. Cada paso
+   * son 100 ms del reloj falso y acaba la llamada que está dentro, así que en 600 pasos una espera
+   * de más de `WAIT_MS` (20 s) se agota: va a `timeouts` y la cuenta vuelve a llamar.
+   */
+  async function shareOf(clients: Record<string, number>, steps: number) {
+    const clock = new FakeClock();
+    const gate = gateAt({ usedBytes: 799 * MIB, limitBytes: 1000 * MIB }, clock); // cabe una
+    const order: string[] = [];
+    const timeouts: string[] = [];
+    const held: Array<() => void> = [];
+    let stop = false;
+    const worker = async (key: string): Promise<void> => {
+      while (!stop) {
+        let ticket;
+        try {
+          ticket = await gate.admit(undefined, REQUEST_RESERVE_BYTES, key);
+        } catch (error) {
+          if (error instanceof ContextUnavailableError) timeouts.push(key);
+          continue;
+        }
+        order.push(key);
+        await new Promise<void>((resolve) => held.push(resolve));
+        ticket.done();
+      }
+    };
+    const workers = Object.entries(clients).flatMap(([key, count]) => Array.from({ length: count }, () => worker(key)));
+    for (let step = 0; step < steps; step += 1) {
+      await clock.advance(100);
+      held.shift()?.();
+    }
+    const counted = order.slice(0, steps);
+    stop = true;
+    gate.shutdown();
+    for (await settled(); held.length > 0; await settled()) held.shift()!();
+    await Promise.all(workers);
+    expect(gate.reservedBytes).toBe(0);
+    return { order: counted, timeouts };
+  }
+
+  const countOf = (order: string[], key: string): number => order.filter((entry) => entry === key).length;
+
+  it('turno por cuenta: dos cuentas secuenciales y una con 5 llamadas en paralelo reparten por igual, sin agotar esperas', async () => {
+    // Antes, X e Y volvían como recién llegadas tras cada llamada (su turno se borraba entre
+    // medias) y ganaban siempre: B no entraba y sus esperas acababan en 503.
+    const { order, timeouts } = await shareOf({ B: 5, X: 1, Y: 1 }, 600);    for (const key of ['B', 'X', 'Y']) expect(Math.abs(countOf(order, key) - 200)).toBeLessThanOrEqual(1);
+    expect(timeouts).toEqual([]);
+  });
+
+  it('turno por cuenta: una secuencial frente a cinco con llamadas en paralelo recibe 1/6', async () => {
+    const { order, timeouts } = await shareOf({ X: 1, B1: 3, B2: 3, B3: 3, B4: 3, B5: 3 }, 600);
+    for (const key of ['X', 'B1', 'B2', 'B3', 'B4', 'B5']) expect(Math.abs(countOf(order, key) - 100)).toBeLessThanOrEqual(1);
+    expect(timeouts).toEqual([]);
+  });
+
+  it('el historial de turnos de la compuerta queda acotado y se vacía sin nadie dentro', async () => {
+    const clock = new FakeClock();
+    const gate = gateAt({ usedBytes: 799 * MIB, limitBytes: 1000 * MIB }, clock); // cabe una
+    let holderB = await gate.admit(undefined, REQUEST_RESERVE_BYTES, 'B');
+    let maxRemembered = 0;
+    // 500 cuentas distintas, de una en una, mientras B llama sin parar: cada una entra una vez
+    // y su turno se borra. Sin poda, el historial acabaría con las 500.
+    for (let i = 0; i < 500; i += 1) {
+      const nextB = gate.admit(undefined, REQUEST_RESERVE_BYTES, 'B');
+      const visitor = gate.admit(undefined, REQUEST_RESERVE_BYTES, `cuenta-${i}`);
+      holderB.done();
+      (await visitor).done();
+      holderB = await nextB;
+      maxRemembered = Math.max(maxRemembered, gate.rememberedTurns);
+    }
+    expect(maxRemembered).toBeLessThanOrEqual(1);
+    holderB.done();
+    expect(gate.rememberedTurns).toBe(0);
+    expect(clock.pending).toBe(0);
+  });
+
   it('las aperturas de una cuenta no quedan detrás de las llamadas de otra', async () => {
     const { memory, libraries, contexts } = harness();
     const lease = await contexts.acquire(account('a'));

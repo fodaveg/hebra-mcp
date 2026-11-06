@@ -163,7 +163,9 @@ export class AgentSpaceManager implements SpaceRouter {
     private readonly dataDir: string,
     private readonly fetcher: typeof fetch = globalThis.fetch.bind(globalThis),
     private readonly intervalMs?: number | null,
-    private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs'>,
+    /** Lo que comparten todas las bibliotecas de esta cuenta; `accountKey`, la clave del turno de
+     *  los topes de sync, es la misma que la de la biblioteca personal. */
+    private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs' | 'accountKey'>,
     private readonly assertAccountActive?: () => void,
     private readonly now: () => number = () => Date.now()
   ) {}

@@ -64,6 +64,12 @@ export interface OpenServeOptions {
    * no suba, de la biblioteca personal y de cada espacio abierto.
    */
   uploadLedger?: AccountUploadLedger;
+  /**
+   * `serve-http` multiusuario: la clave opaca de la cuenta (`accountTurnKey`) para el turno de los
+   * topes de sync. La reciben la biblioteca personal y todos los espacios de este contexto. Sin
+   * ella, la clave por defecto (stdio: una sola cuenta por proceso).
+   */
+  accountKey?: string;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -174,10 +180,14 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
   // red y con un relé sin la API de H-L7, como antes de los espacios.
   const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive) : null;
-  const { uploadLedger } = options;
-  // El gestor abre cada espacio con estas opciones tal cual, así que la lista llega también a
-  // sus bibliotecas sin que el gestor sepa de ella.
-  const spaceInstance = uploadLedger ? { ...options.instance, uploadLedger } : options.instance;
+  const { uploadLedger, accountKey } = options;
+  // El gestor abre cada espacio con estas opciones tal cual, así que la lista y la clave de cuenta
+  // llegan también a sus bibliotecas sin que el gestor sepa de ellas.
+  const spaceInstance = {
+    ...options.instance,
+    ...(uploadLedger ? { uploadLedger } : {}),
+    ...(accountKey === undefined ? {} : { accountKey })
+  };
   const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive) : undefined;
   const directory = spaces ? () => spaces.directory() : undefined;
   const linked = paired
@@ -215,6 +225,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     },
     ...options.instance,
     ...(uploadLedger ? { uploadLedger } : {}),
+    ...(accountKey === undefined ? {} : { accountKey }),
     assertActive
   });
   // §8 y §12.10: la ronda de abrir ya está en marcha, y las lecturas la esperan como mucho 10 s

@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { HttpConfigError } from '../http/config';
-import { DEFAULT_SYNC_CONCURRENCY } from '../sync/gates';
+import { DEFAULT_SYNC_CONCURRENCY, TurnHistory } from '../sync/gates';
 import type { Clock } from './lifecycle';
 
 export const DEFAULT_CONTEXT_IDLE_MS = 120_000;
@@ -211,14 +211,15 @@ export const ANONYMOUS_TURN = '';
 
 /**
  * El turno de una cuenta: sus esperas en orden de llegada y cuándo entró por última vez. Vive
- * mientras la cuenta tenga esperas o algo apartado; sin ninguna de las dos se olvida, y si
- * vuelve empieza como recién llegada.
+ * mientras la cuenta tenga esperas o algo apartado; sin ninguna de las dos se borra, pero su
+ * última entrada queda en el historial de la compuerta (`TurnHistory`), y si vuelve la recupera.
  */
 interface Turn {
   readonly waiters: Waiter[];
   /** Reservas suyas ya dentro y aún sin soltar. */
   active: number;
-  /** Secuencia de su última entrada; 0 si aún no entró desde que existe el turno. */
+  /** Secuencia de su última entrada, también la de antes de borrarse su turno; 0 si no entró
+   *  nunca (o si el historial la podó, ver `TurnHistory`). */
   lastServed: number;
   /** Secuencia de su llegada, para desempatar entre las que no han entrado. */
   readonly since: number;
@@ -233,11 +234,15 @@ interface Turn {
  *
  * El turno rota por cuenta (`key`): el siguiente es el de la cuenta que lleva más sin entrar, y
  * dentro de cada cuenta, en orden de llegada. Una cuenta con muchas esperas no retrasa a otra
- * más de una plaza. No hay tope por cuenta (D22): solo el orden en que se reparte lo que cabe.
- * Nadie adelanta a quien tiene el turno: si su reserva no cabe, esperan todos.
+ * más de una plaza, y una que llama de una en una (sin nada en curso entre llamadas) conserva su
+ * última entrada al volver (`TurnHistory`), así que no gana siempre como recién llegada. No hay
+ * tope por cuenta (D22): solo el orden en que se reparte lo que cabe. Nadie adelanta a quien
+ * tiene el turno: si su reserva no cabe, esperan todos.
  */
 export class CapacityGate {
   private readonly turns = new Map<string, Turn>();
+  /** La última entrada de las cuentas cuyo turno se borró (`TurnHistory`, con su poda). */
+  private readonly history = new TurnHistory();
   private waiting = 0;
   private sequence = 0;
   private reserved = 0;
@@ -255,6 +260,11 @@ export class CapacityGate {
   /** Cuántos esperan turno ahora (diagnóstico y pruebas). */
   get waitingCount(): number {
     return this.waiting;
+  }
+
+  /** Cuántas cuentas sin turno vivo se recuerdan ahora (diagnóstico y pruebas). */
+  get rememberedTurns(): number {
+    return this.history.size;
   }
 
   /**
@@ -311,6 +321,7 @@ export class CapacityGate {
       }
       this.forgetIfIdle(key, turn);
     }
+    this.history.clear();
     this.syncPoll();
   }
 
@@ -376,16 +387,19 @@ export class CapacityGate {
     let turn = this.turns.get(key);
     if (!turn) {
       this.sequence += 1;
-      turn = { waiters: [], active: 0, lastServed: 0, since: this.sequence };
+      // Una cuenta que vuelve recupera su última entrada: una secuencial no gana siempre.
+      turn = { waiters: [], active: 0, lastServed: this.history.take(key), since: this.sequence };
       this.turns.set(key, turn);
     }
     return turn;
   }
 
-  /** Sin esperas ni nada apartado, la cuenta se olvida: el mapa no crece con las que pasaron. */
+  /** Sin esperas ni nada apartado, el turno se borra (el mapa no crece con las cuentas que
+   *  pasaron), pero su última entrada pasa al historial, que se poda frente a los vivos. */
   private forgetIfIdle(key: string, turn: Turn): void {
     if (turn.waiters.length === 0 && turn.active === 0 && this.turns.get(key) === turn) {
       this.turns.delete(key);
+      this.history.remember(key, turn.lastServed, [...this.turns.values()].map((live) => live.lastServed));
     }
   }
 

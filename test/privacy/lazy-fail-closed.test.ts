@@ -152,6 +152,41 @@ describe('B2: una carpeta efectiva que el filtro no conoce oculta la nota', () =
       db.close();
     }
   });
+
+  it('una nota viva en una subcarpeta de la papelera (estado que puede dejar el sync) sale oculta en JS y en SQL', async () => {
+    // La carpeta de la papelera sigue viva para `VISIBILITY_COLUMNS` (no es lápida), así que es la
+    // carpeta efectiva de la nota, pero no sale en `foldersList`: el filtro no la conoce y cierra.
+    const h = await scenario();
+    let subId = '';
+    await h.mutate(async (engine, library) => {
+      const sub = await engine.folderCreate(library.folders.proyectos, 'B2 papelera');
+      subId = sub.id;
+      await engine.noteMove(h.extra.movable, sub.id);
+    });
+    const db = new DatabaseSync(h.sqlitePath);
+    try {
+      // Control: en la subcarpeta pública viva, se ve en JS y cuenta en SQL.
+      const before = await resolveToolContext(h.serverContext, { loadAll: false });
+      await before.privacy.ensure([h.extra.movable]);
+      expect(before.privacy.isHiddenNote(h.extra.movable)).toBe(false);
+      expect(visibleTagCounts(db, before.privacy.notesScope()).get('b2-marca')).toBe(1);
+      // Solo la carpeta va a la papelera; la nota sigue viva dentro, como puede dejarla el sync.
+      db.prepare('UPDATE folders SET trashed_at = ?, local_seq = local_seq + 1 WHERE id = ?').run(Date.now(), subId);
+      const row = db.prepare('SELECT trashed_at FROM notes WHERE id = ?').get(h.extra.movable) as { trashed_at: unknown };
+      expect(row.trashed_at).toBeNull();
+      const ctx = await resolveToolContext(h.serverContext, { loadAll: false });
+      await ctx.privacy.ensure([h.extra.movable, h.extra.rootNote]);
+      expect(ctx.privacy.isHiddenNote(h.extra.movable), 'la nota de una carpeta en la papelera quedó visible').toBe(true);
+      expect(ctx.privacy.visibleMeta(h.extra.movable)).toBeUndefined();
+      const scope = ctx.privacy.notesScope();
+      expect(visibleTagCounts(db, scope).get('b2-marca'), 'la nota de una carpeta en la papelera contó en SQL').toBeUndefined();
+      expect(visibleFolderCounts(db, scope).has(subId)).toBe(false);
+      // Control: lo de la raíz se sigue viendo.
+      expect(ctx.privacy.isHiddenNote(h.extra.rootNote)).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe('B3: una nota no cargada no se toma por desbloqueada ni por «sin sello»', () => {
