@@ -9,6 +9,8 @@ import {
   DEFAULT_HIGH_WATER,
   DEFAULT_OPEN_WAIT_MS,
   readMemoryUsage,
+  requestReserveBytes,
+  type AdmissionTicket,
   type HighWater,
   type MemoryReader
 } from './capacity';
@@ -26,8 +28,34 @@ export interface AccountContextLease {
    * la herramienta sigue validando el catálogo en cada invocación.
    */
   prepareSpaces(spaceIds: readonly string[], shouldStop?: () => boolean): Promise<void>;
+  /**
+   * Antes de llegar a las herramientas: aparta en la compuerta de memoria lo que costarán las
+   * llamadas de la petición, una por destino (`'personal'` o el `spaceId`; uno no preparado
+   * aparta el mínimo), en la misma cola y con la misma espera que las aperturas. Lo apartado se
+   * suelta cuando la petición termina del todo: respuesta enviada o cortada y última
+   * herramienta acabada, también si lanzó. Al agotar la espera,
+   * `ContextUnavailableError('capacity_wait_timeout')`; con `signal` abortado, sale de la cola.
+   */
+  admitCalls(targets: readonly string[], signal?: AbortSignal): Promise<void>;
   /** La respuesta terminó. El lease dura hasta que acabe la última herramienta en curso. */
   release(): void;
+}
+
+/** El destino de una llamada sin `space`, o con `space: "personal"`. */
+export const PERSONAL_TARGET = 'personal';
+
+/**
+ * Cuántas notas tiene la biblioteca de `ctx`, con el `COUNT(*)` de `libraryOpen` (va por el
+ * índice parcial de notas vivas, sin leer filas). Sin puerto o si falla, `null`: un recuento
+ * roto no niega el acceso, solo deja la reserva en su mínimo.
+ */
+async function countNotes(ctx: ServerContext | undefined): Promise<number | null> {
+  if (!ctx?.port) return null;
+  try {
+    return (await ctx.port.libraryOpen()).notesCount;
+  } catch {
+    return null;
+  }
 }
 
 type OpenAccount = (account: AuthorizedAccount) => Promise<ServeContext>;
@@ -52,15 +80,17 @@ interface Entry {
 }
 
 /**
- * El uso de una petición HTTP: su lease de cuenta y los de los espacios que toque. Una
- * herramienta sigue corriendo aunque el cliente se desconecte, así que el fin de la respuesta
- * no basta para soltarlos: hasta que no acaba la última, la instancia no se puede cerrar.
+ * El uso de una petición HTTP: su lease de cuenta, los de los espacios que toque y la memoria
+ * que apartó para sus llamadas. Una herramienta sigue corriendo aunque el cliente se
+ * desconecte, así que el fin de la respuesta no basta para soltarlos: hasta que no acaba la
+ * última, la instancia no se puede cerrar ni su memoria se da por libre.
  */
 class RequestUse {
   private invocations = 0;
   private released = false;
   private finished = false;
   private readonly spaceLeases: SpaceLease[] = [];
+  private readonly tickets: AdmissionTicket[] = [];
 
   constructor(private readonly finish: () => void) {}
 
@@ -84,6 +114,15 @@ class RequestUse {
     return lease.value;
   }
 
+  /** La memoria apartada para las llamadas: se suelta con el último lease de la petición. */
+  holdTicket(ticket: AdmissionTicket): void {
+    if (this.finished) {
+      ticket.done();
+      throw new Error('request_closed');
+    }
+    this.tickets.push(ticket);
+  }
+
   release(): void {
     this.released = true;
     this.maybeFinish();
@@ -93,6 +132,7 @@ class RequestUse {
     if (this.finished || !this.released || this.invocations > 0) return;
     this.finished = true;
     for (const lease of this.spaceLeases.splice(0)) lease.release();
+    for (const ticket of this.tickets.splice(0)) ticket.done();
     this.finish();
   }
 }
@@ -202,11 +242,31 @@ export class AccountContexts {
       }
       const use = new RequestUse(() => lease.release());
       const lifecycle = lease.value.ctx.spaces?.lifecycle;
+      const personal = lease.value.ctx;
+      const prepared = new Map<string, ServerContext>();
       return {
         ctx: guardedContext(lease.value.ctx, this.registry, account, use),
         prepareSpaces: async (spaceIds, shouldStop) => {
           if (!lifecycle || spaceIds.length === 0) return;
-          for (const prepared of await lifecycle.prepare(spaceIds, shouldStop)) use.hold(prepared);
+          for (const space of await lifecycle.prepare(spaceIds, shouldStop)) {
+            const value = use.hold(space);
+            if (value.spaceId) prepared.set(value.spaceId, value);
+          }
+        },
+        admitCalls: async (targets, signal) => {
+          if (targets.length === 0) return;
+          const notes = new Map<string, Promise<number | null>>();
+          const countOf = (target: string): Promise<number | null> => {
+            let count = notes.get(target);
+            if (!count) {
+              count = countNotes(target === PERSONAL_TARGET ? personal : prepared.get(target));
+              notes.set(target, count);
+            }
+            return count;
+          };
+          let bytes = 0;
+          for (const target of targets) bytes += requestReserveBytes(await countOf(target));
+          use.holdTicket(await this.gate.admit(signal, bytes));
         },
         release: () => use.release()
       };

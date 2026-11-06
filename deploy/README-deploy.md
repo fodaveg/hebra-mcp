@@ -53,8 +53,8 @@ no prueban publicación, login real ni acceso a la biblioteca en producción.
 | `HEBRA_MCP_HTTP_PORT` | Puerto de escucha | `8787` | `src/http/config.ts` |
 | `HEBRA_MCP_PUBLIC_URL` | Origen público: issuer OAuth y base del recurso (`<origen>/mcp`) | `https://mcp.hebra.pro` | `src/http/config.ts` |
 | `HEBRA_MCP_CONTEXT_IDLE_MS` | Tiempo sin peticiones en curso tras el que se cierra una biblioteca o un espacio abiertos (D22, SPEC.md §12.10). Un valor inválido impide arrancar | `120000` | `src/accounts/capacity.ts` |
-| `HEBRA_MCP_OPEN_WAIT_MS` | Cuánto espera una apertura, en orden de llegada, por memoria o por un `writer.lock` ajeno antes del 503 con `Retry-After`. Un valor inválido impide arrancar | `20000` | `src/accounts/capacity.ts` |
-| `HEBRA_MCP_MEMORY_HIGH_WATER` | Memoria en uso del contenedor por encima de la cual se cierra antes lo que no tiene peticiones en curso y las aperturas esperan: `0.8`, `80%` o bytes. Un valor inválido impide arrancar | `80%` del límite del contenedor | `src/accounts/capacity.ts` |
+| `HEBRA_MCP_OPEN_WAIT_MS` | Cuánto espera una apertura o una llamada de herramienta, en orden de llegada, por memoria (o una apertura por un `writer.lock` ajeno) antes del 503 con `Retry-After`. Un valor inválido impide arrancar | `20000` | `src/accounts/capacity.ts` |
+| `HEBRA_MCP_MEMORY_HIGH_WATER` | Memoria en uso del contenedor por encima de la cual se cierra antes lo que no tiene peticiones en curso, y tope de lo medido más lo apartado por aperturas y llamadas en curso; lo que no cabe espera: `0.8`, `80%` o bytes. Un valor inválido impide arrancar | `80%` del límite del contenedor | `src/accounts/capacity.ts` |
 | `LUMBRE_APP_ORIGIN` | Origen de Lumbre: destino del backchannel y único origen admitido en la URL de consentimiento. Tiene que ser el mismo que Lumbre usa para construirla (`ORIGIN` o uno de `LUMBRE_PUBLIC_ORIGINS`); `https` sin ruta, query ni credenciales (`http` solo en loopback). Uno inválido impide arrancar | `https://app.lumbre.pro` | `src/oauth/backchannel.ts` |
 | `HEBRA_MCP_LOGIN_PROVIDER` | Quién identifica a la persona en `/authorize` (D20/D21, SPEC.md §§12.9–12.10): `sumego` es el modo de producción multiusuario; `lumbre` conserva la compatibilidad anterior. Otro valor impide arrancar; con `sumego` y el cliente incompleto tampoco arranca, nunca vuelve en silencio a `lumbre` | `lumbre` en código; producción fija `sumego` | `src/oauth/login-config.ts` |
 | `HEBRA_MCP_OIDC_ISSUER` | Issuer de Sumego; su discovery (`/.well-known/openid-configuration`) da los endpoints y el JWKS. Solo admite, escrito exactamente así, `https://id.lumbre.pro` o `https://id.sumego.es` (transición de §13.6 de la SPEC de Sumego); otro valor, también con barra final, mayúsculas, puerto o ruta, impide arrancar. El servidor acepta solo el configurado y no sigue redirecciones; las URI de callback y de logout no cambian con él | `https://id.lumbre.pro` | `src/oauth/login-config.ts` |
@@ -396,6 +396,14 @@ ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
   o se añade máquina. `HEBRA_MCP_MEMORY_HIGH_WATER` se mide contra ese límite. Un 503 de `/mcp` lleva
   `Retry-After` y su motivo en el log (`mcp.unavailable`): `capacity_wait_timeout`, `open_failed` o
   `lock_held`.
+- Lo que hay en curso no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`. Cada apertura aparta 8 MiB mientras
+  abre y cada llamada de herramienta aparta, mientras corre, unos 3,5 KB por nota de la biblioteca o
+  el espacio al que va (4 MiB como mínimo; unos 100 MiB con 30 000 notas). Lo que no cabe espera en
+  una sola cola, por orden de llegada, hasta `HEBRA_MCP_OPEN_WAIT_MS`, y después recibe el 503
+  `capacity_wait_timeout`. Una ráfaga de búsquedas sobre bibliotecas grandes ya no sube la memoria
+  sin control: espera su turno. Muchos `capacity_wait_timeout` con poca gente indican que el límite
+  se queda corto para el tamaño de las bibliotecas, no un fallo: se sube `mem_limit`. Una sola
+  petición que no cabe en el margen entra igual si no hay nada más en curso.
 - `control/server.lock` lo toma el servicio y lo ve cualquier proceso, también de otro contenedor
   sobre el mismo volumen. Un segundo `serve-http` no arranca. Es un fichero vacío que no se borra.
 - `control/pending-uploads-v1.json` es la lista de subidas que quedaron al cerrar una biblioteca.

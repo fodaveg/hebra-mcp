@@ -1,13 +1,22 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CapacityGate, ContextUnavailableError, readCapacityConfig, readMemoryUsage } from '../../src/accounts/capacity';
+import {
+  CapacityGate,
+  ContextUnavailableError,
+  MIN_REQUEST_RESERVE_BYTES,
+  OPENING_RESERVE_BYTES,
+  readCapacityConfig,
+  readMemoryUsage,
+  REQUEST_BYTES_PER_NOTE,
+  requestReserveBytes
+} from '../../src/accounts/capacity';
 import { AccountContexts, type AccountContextsOptions } from '../../src/accounts/contexts';
 import type { WriterLockOwner } from '../../src/lock';
 import { WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../../src/accounts/lifecycle';
 import type { AccountRegistry } from '../../src/accounts/registry';
 import type { AuthorizedAccount } from '../../src/accounts/types';
-import { createHttpApp } from '../../src/http/app';
+import { createHttpApp, requestedCalls } from '../../src/http/app';
 import { httpConfigFor } from '../../src/http/config';
 import { bindPairingRevocation } from '../../src/http/serve-http';
 import type { SpaceLifecycleControl } from '../../src/server/context';
@@ -808,8 +817,188 @@ describe('memoria real, no recuento', () => {
   });
 });
 
+/** Un contexto cuya biblioteca tiene `notesCount` notas (`libraryOpen`), contando cuántas veces se pregunta. */
+function withNotes(notesCount: number, asked: string[] = []) {
+  return (context: ServeContext, id: string): ServeContext => ({
+    ...context,
+    ctx: { port: { libraryOpen: async () => { asked.push(id); return { notesCount }; } } } as never
+  });
+}
+
+describe('memoria de las peticiones en curso', () => {
+  function gateAt(memory: { usedBytes: number; limitBytes: number }, clock = new FakeClock()) {
+    return new CapacityGate({ readMemory: () => memory, highWater: { ratio: 0.8 }, waitMs: WAIT_MS,
+      clock, reclaim: async () => undefined });
+  }
+
+  it('el tamaño de la reserva: unos 3,5 KB por nota, nunca menos de 4 MiB; una apertura, 8 MiB', () => {
+    expect(requestReserveBytes(null)).toBe(MIN_REQUEST_RESERVE_BYTES);
+    expect(requestReserveBytes(0)).toBe(4 * MIB);
+    expect(requestReserveBytes(1_000)).toBe(4 * MIB);
+    expect(requestReserveBytes(30_000)).toBe(30_000 * REQUEST_BYTES_PER_NOTE);
+    // Lo medido el 6 nov 2026 a 30 000 notas: de 78 a 104 MiB por petición.
+    expect(requestReserveBytes(30_000) / MIB).toBeGreaterThan(100);
+    expect(requestReserveBytes(30_000) / MIB).toBeLessThan(105);
+    expect(OPENING_RESERVE_BYTES).toBe(8 * MIB);
+  });
+
+  it('una petición que cabe entra; la que no cabe espera y entra en cuanto otra suelta lo suyo', async () => {
+    const clock = new FakeClock();
+    const memory = { usedBytes: 500 * MIB, limitBytes: 1000 * MIB };
+    const gate = gateAt(memory, clock);
+    const big = await gate.admit(undefined, 200 * MIB);
+    const fits = await gate.admit(undefined, 100 * MIB); // 500 + 200 + 100 = 800: cabe justo
+    expect(gate.reservedBytes).toBe(300 * MIB);
+    let entered = false;
+    const waiting = gate.admit(undefined, 50 * MIB).then((ticket) => { entered = true; return ticket; });
+    await clock.advance(WAIT_MS - 1);
+    expect(entered).toBe(false);
+    big.done();
+    big.done(); // idempotente: no suelta dos veces
+    await settled();
+    expect(entered).toBe(true);
+    expect(gate.reservedBytes).toBe(150 * MIB);
+    fits.done();
+    (await waiting).done();
+    expect(gate.reservedBytes).toBe(0);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('sola, una petición mayor que el margen entra si la lectura está por debajo del límite', async () => {
+    const clock = new FakeClock();
+    const gate = gateAt({ usedBytes: 700 * MIB, limitBytes: 1000 * MIB }, clock);
+    const alone = await gate.admit(undefined, 300 * MIB);
+    let entered = false;
+    const next = gate.admit(undefined, 4 * MIB).then((ticket) => { entered = true; return ticket; });
+    await settled();
+    expect(entered).toBe(false);
+    alone.done();
+    (await next).done();
+    expect(gate.reservedBytes).toBe(0);
+  });
+
+  it('aperturas y peticiones comparten una cola en orden de llegada: la pequeña no adelanta a la grande', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    libraries.decorate = withNotes(14_629); // unos 50 MiB por llamada
+    const order: string[] = [];
+    const holder = await contexts.acquire(account('a'));
+    await holder.admitCalls(['personal']);
+    memory.usedBytes = 760 * MIB;
+    const opening = deferred();
+    libraries.beforeOpen = async (id) => {
+      order.push(`abre-${id}`);
+      if (id === 'b') await opening.promise;
+    };
+    const b = contexts.acquire(account('b')); // 760 + 50 + 8 > 800: espera
+    await settled();
+    const second = await contexts.acquire(account('a')); // ya abierta: no espera a abrir
+    const call = second.admitCalls(['personal']).then(() => { order.push('llamada-a'); });
+    await settled();
+    const c = contexts.acquire(account('c'));
+    await settled();
+    expect(order).toEqual([]);
+    holder.release(); // suelta sus 50 MiB: entra la apertura de b, que aparta 8 MiB mientras abre
+    await settled();
+    expect(order).toEqual(['abre-b']);
+    // La llamada de a (760 + 8 + 50) no cabe; la apertura de c (760 + 8 + 8) sí, pero no adelanta.
+    await clock.advance(500);
+    expect(order).toEqual(['abre-b']);
+    opening.resolve();
+    await settled();
+    expect(order).toEqual(['abre-b', 'llamada-a']);
+    await clock.advance(500);
+    expect(order).toEqual(['abre-b', 'llamada-a']); // c: 760 + 50 + 8 > 800
+    second.release();
+    await settled();
+    expect(order).toEqual(['abre-b', 'llamada-a', 'abre-c']);
+    (await b).release();
+    (await c).release();
+    await call;
+    await contexts.close();
+  });
+
+  it('cada llamada aparta según las notas de su destino, contadas una vez; uno no preparado, el mínimo', async () => {
+    const { memory, libraries, contexts } = harness();
+    const asked: string[] = [];
+    const control = spaceControl({
+      prepare: async (spaceIds) => spaceIds.map((spaceId) => ({
+        value: { spaceId, port: { libraryOpen: async () => { asked.push(spaceId); return { notesCount: 100_000 }; } } } as never,
+        release() {}
+      }))
+    });
+    libraries.decorate = (context) => ({
+      ...context,
+      ctx: { spaces: { lifecycle: control, list: async () => [], resolve: async () => { throw new Error('unused'); } } } as never
+    });
+    const lease = await contexts.acquire(account('a'));
+    await lease.prepareSpaces(['s1']);
+    // s1 dos veces (100 000 notas), personal sin puerto y un espacio sin preparar: el mínimo.
+    await lease.admitCalls(['s1', 'personal', 'otro', 's1']);
+    expect(asked).toEqual(['s1']);
+    // Apartado: 2 × 100 000 × 3,5 KB + 2 × 4 MiB = 691,6 MiB. Con 100 MiB medidos (límite 800)
+    // cabe otra llamada de 4 MiB (795,6) y ya no una apertura de 8 MiB (803,6).
+    memory.usedBytes = 100 * MIB;
+    const again = await contexts.acquire(account('a'));
+    await again.admitCalls(['otro']);
+    let entered = false;
+    const next = contexts.acquire(account('c')).then((other) => { entered = true; return other; });
+    await settled();
+    expect(entered).toBe(false);
+    lease.release();
+    again.release();
+    (await next).release();
+    await contexts.close();
+  });
+
+  it('se suelta aunque la herramienta lance, y no antes de que acabe aunque la respuesta ya terminara', async () => {
+    const { memory, contexts } = harness();
+    memory.usedBytes = 790 * MIB; // con algo apartado no cabe ni una apertura
+    const lease = await contexts.acquire(account('a'));
+    await lease.admitCalls(['personal']); // sin puerto: el mínimo, 4 MiB
+    const tool = deferred();
+    const running = lease.ctx.trackInvocation!(async () => {
+      await tool.promise;
+      throw new Error('falla');
+    }).catch((error: unknown) => error);
+    lease.release(); // la respuesta terminó o el cliente cortó; la herramienta sigue
+    let entered = false;
+    const other = contexts.acquire(account('b')).then((next) => { entered = true; return next; });
+    await settled();
+    expect(entered).toBe(false); // 790 + 4 + 8 > 800
+    tool.resolve();
+    expect(await running).toMatchObject({ message: 'falla' });
+    await settled();
+    expect(entered).toBe(true);
+    (await other).release();
+    await contexts.close();
+  });
+
+  it('ninguna reserva queda colgada: al cerrar el contexto no queda nada apartado, y el apagado saca a quien espera', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    libraries.decorate = withNotes(30_000);
+    const lease = await contexts.acquire(account('a'));
+    await lease.admitCalls(['personal', 'personal']);
+    await lease.ctx.trackInvocation!(async () => undefined);
+    lease.release();
+    await clock.advance(IDLE_MS);
+    expect(libraries.closed).toEqual(['a']);
+    memory.usedBytes = 790 * MIB; // solo entra algo si no queda nada apartado
+    const holder = await Promise.race([contexts.acquire(account('b')), settled().then(() => null)]);
+    expect(holder).not.toBeNull();
+    await holder!.admitCalls(['personal']);
+    const waiting = await contexts.acquire(account('b'));
+    const call = waiting.admitCalls(['personal']).catch((error: unknown) => error);
+    await settled();
+    contexts.beginShutdown();
+    expect(await call).toMatchObject({ message: 'contexts_closed' });
+    waiting.release();
+    holder!.release();
+    await contexts.close();
+  });
+});
+
 describe('lectura de memoria', () => {
-  const files = (entries: Record<string, string>) => (path: string): string | null => entries[path] ?? null;
+  const files =(entries: Record<string, string>) => (path: string): string | null => entries[path] ?? null;
 
   it('cgroup v2 descuenta la caché de disco recuperable', () => {
     const reading = readMemoryUsage(files({
@@ -984,6 +1173,87 @@ describe('/mcp sobre AccountContexts', () => {
     await settled();
     await clock.advance(IDLE_MS);
     expect(libraries.closed).toEqual(['sub-secreto']);
+    await contexts.close();
+  });
+
+  /** Una biblioteca de 50 000 notas (unos 171 MiB por llamada) cuya herramienta espera a `tool`. */
+  function bigLibraryWithBlockingTool(libraries: FakeLibraries) {
+    const entered = deferred();
+    const tool = deferred();
+    libraries.decorate = (context) => ({
+      ...context,
+      ctx: {
+        port: { libraryOpen: async () => ({ notesCount: 50_000 }) },
+        privacyConfigSource: { current: async () => {
+          entered.resolve();
+          await tool.promise;
+          throw new Error('fin');
+        } },
+        status: { getStatus: () => ({}) }
+      } as never
+    });
+    return { entered, tool };
+  }
+
+  it('qué aparta cada cuerpo: una entrada por llamada de herramienta y su destino', () => {
+    const space = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const call = (args: object) => ({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'hebra_search', arguments: args } });
+    expect(requestedCalls(LIST_TOOLS)).toEqual([]);
+    expect(requestedCalls({ jsonrpc: '2.0', id: 0, method: 'initialize', params: {} })).toEqual([]);
+    expect(requestedCalls(STATUS_CALL)).toEqual(['personal']);
+    expect(requestedCalls(call({ space: 'personal' }))).toEqual(['personal']);
+    expect(requestedCalls(call({ space }))).toEqual([space]);
+    expect(requestedCalls(call({ space: 7 }))).toEqual(['']);
+    expect(requestedCalls([call({}), LIST_TOOLS, call({ space })])).toEqual(['personal', space]);
+    expect(requestedCalls(null)).toEqual([]);
+  });
+
+  it('una llamada que no cabe espera a que otra suelte su memoria; si no llega, 503 capacity_wait_timeout', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    const { entered, tool } = bigLibraryWithBlockingTool(libraries);
+    memory.usedBytes = 600 * MIB; // 600 + 171 cabe; 600 + 171 + 171 no
+    const { post, logged } = await serve(contexts);
+    const first = post(STATUS_CALL);
+    await entered.promise;
+    const second = post(STATUS_CALL);
+    await vi.waitFor(() => expect(clock.pending).toBe(2)); // su plazo y la medición
+    await clock.advance(WAIT_MS);
+    const refused = await second;
+    expect(refused.status).toBe(503);
+    expect(refused.headers.get('retry-after')).toBe('20');
+    expect(logged()).toContain('"event":"mcp.unavailable","reason":"capacity_wait_timeout"');
+    expect(logged()).not.toContain('sub-secreto');
+    // La siguiente espera y entra en cuanto la primera termina, antes del plazo.
+    const third = post(STATUS_CALL);
+    await vi.waitFor(() => expect(clock.pending).toBe(2));
+    tool.resolve();
+    expect((await first).status).toBe(200);
+    expect((await third).status).toBe(200);
+    await contexts.close();
+  });
+
+  it('el cliente que se va mientras espera memoria sale de la cola sin apartar nada ni dejar un 503 en el log', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    const { entered, tool } = bigLibraryWithBlockingTool(libraries);
+    memory.usedBytes = 600 * MIB;
+    const { post, logged } = await serve(contexts);
+    const first = post(STATUS_CALL);
+    await entered.promise;
+    const abort = new AbortController();
+    const second = post(STATUS_CALL, abort.signal).catch(() => null);
+    await vi.waitFor(() => expect(clock.pending).toBe(2));
+    abort.abort();
+    await second;
+    await vi.waitFor(() => expect(clock.pending).toBe(0)); // ni plazo ni medición
+    tool.resolve();
+    expect((await first).status).toBe(200);
+    expect(logged()).not.toContain('mcp.unavailable');
+    // Nada colgado: con 790 MiB medidos, otra cuenta solo abre si no queda nada apartado.
+    memory.usedBytes = 790 * MIB;
+    await vi.waitFor(() => expect(clock.pending).toBe(1)); // la espera de inactividad de la cuenta
+    const other = await Promise.race([contexts.acquire(account('otra')), settled().then(() => null)]);
+    expect(other).not.toBeNull();
+    other!.release();
     await contexts.close();
   });
 

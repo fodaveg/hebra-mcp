@@ -217,8 +217,9 @@ hebra-mcp oauth-revoke-all      # corta localmente todos los tokens OAuth
   por memoria real, sin máximo de cuentas (D22): `HEBRA_MCP_CONTEXT_IDLE_MS` (120000),
   `HEBRA_MCP_OPEN_WAIT_MS` (20000) y `HEBRA_MCP_MEMORY_HIGH_WATER` (`80%` del límite del
   contenedor; admite `0.8`, `80%` o bytes). Las dos primeras dicen cuánto tarda en cerrarse una
-  biblioteca sin uso y cuánto espera una apertura antes del 503 con `Retry-After`; la tercera, a
-  partir de qué memoria se cierra antes lo que no se usa. `mem_limit` de `deploy/compose.yml` no
+  biblioteca sin uso y cuánto espera una apertura o una llamada antes del 503 con `Retry-After`; la
+  tercera, a partir de qué memoria se cierra antes lo que no se usa y hasta dónde llega lo que hay
+  en curso (aperturas y llamadas apartan memoria mientras duran). `mem_limit` de `deploy/compose.yml` no
   cuenta personas: es la barrera de la máquina compartida y su valor sale de la medición de
   aceptación. Para más capacidad se sube ese límite o se añade máquina.
 - Para volver a una imagen anterior a los secretos globales (`control/secrets.json`), con el
