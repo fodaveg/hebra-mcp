@@ -107,6 +107,7 @@ export async function runJdAudit(
         }
         return row;
       },
+      folderNotes: (folderId) => port.titlesInFolder(folderId),
       filter: () => filter
     },
     null

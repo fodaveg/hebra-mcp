@@ -692,7 +692,7 @@ export function registerTools(
       inputSchema: scoped(listTagsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_tags', (toolCtx, input) => runListTags(toolCtx, input))
+    gated('hebra_list_tags', (toolCtx, input) => runListTags(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -703,7 +703,7 @@ export function registerTools(
       inputSchema: scoped(listPropertiesInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_properties', (toolCtx, input) => runListProperties(toolCtx, input))
+    gated('hebra_list_properties', (toolCtx, input) => runListProperties(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -714,7 +714,7 @@ export function registerTools(
       inputSchema: scoped(queryPropertiesInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_query_properties', (toolCtx, input) => runQueryProperties(toolCtx, input))
+    gated('hebra_query_properties', (toolCtx, input) => runQueryProperties(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -725,7 +725,7 @@ export function registerTools(
       inputSchema: scoped(listFoldersInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_folders', (toolCtx, input) => runListFolders(toolCtx, input))
+    gated('hebra_list_folders', (toolCtx, input) => runListFolders(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

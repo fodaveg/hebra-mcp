@@ -4,6 +4,12 @@
  * biblioteca): una etiqueta privada, o que solo tienen notas ocultas por carpeta o por
  * otra etiqueta, sale con recuento 0 y se omite. `limit`/`cursor` paginan esa lista ya
  * filtrada (cursor = la última etiqueta devuelta); sin `limit`, todas.
+ *
+ * Los recuentos se agrupan en SQLite con las reglas del filtro de la llamada
+ * (`visibleTagCounts`, `src/store/visible-sql.ts`; pieza A7 del plan de memoria, 6 nov 2026):
+ * a JS llega una fila por etiqueta, no una por nota, y el filtro no carga ninguna nota
+ * (`privacyLoad: 'lazy'`). Antes recorría `visibleNotes()`, con la biblioteca entera cargada:
+ * 104 MiB y 1,1 s por llamada a 30 000 notas.
  */
 import { usageOf, type ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
@@ -18,14 +24,11 @@ export async function runListTags(
   input: { limit?: number; cursor?: string } = {}
 ): Promise<{ tags: TagCount[]; nextCursor: string | null }> {
   const { tags } = await ctx.port.tagsList();
-  const visibleCounts = new Map<string, number>();
-  const visible = ctx.privacy.visibleNotes();
-  for (const { tags: noteTags } of visible.values()) {
-    for (const tag of noteTags) visibleCounts.set(tag, (visibleCounts.get(tag) ?? 0) + 1);
-  }
-  // Los recuentos salen de todas las visibles: la puerta final (`../privacy-gate.ts`) las
-  // vuelve a juzgar, y si una ya no se ve (la única de una etiqueta), repite la llamada.
-  usageOf(ctx).visibleNotes(visible.keys());
+  const visibleCounts = await ctx.port.visibleTagCounts(ctx.privacy.notesScope());
+  // Los recuentos no declaran sus notas a la puerta final (`../privacy-gate.ts`): serían todas
+  // las visibles, y juzgarlas allí volvería a cargar la biblioteca entera. Los cubre la época de
+  // privacidad, que la llamada toma antes de su filtro: cualquier cambio de notas, carpetas o
+  // memoria de carpetas privadas desde entonces hace que la puerta repita la llamada.
   const result: TagCount[] = [];
   const used = usageOf(ctx);
   for (const entry of tags) {

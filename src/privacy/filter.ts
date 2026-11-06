@@ -29,11 +29,13 @@
  * `isLockedNote`, `sealOf`), se hace `await ctx.privacy.ensure(idsQueVaATocar)` con todos los
  * ids que decidirá (los de la página leída, la nota pedida, las homónimas…). Se puede llamar
  * más de una vez (solo lee los que falten). Su test comprueba que `unloadedLookupsTotal()` no
- * sube al llamarla. `visibleNotes` recorre la biblioteca y sigue necesitando `ensureAll()`
- * hasta que pase a SQL (A7). `hasHiddenLockedNote` ya no (A6): basta `ensureLockedNotes(port)`,
- * que lee los ids de las bloqueadas vivas y carga solo esas; `FileFilter.build` lo hace solo,
- * junto con las notas que enlazan cada fichero. `TrashFilter` no pregunta por notas vivas: se
- * construye sobre un filtro sin nada cargado (cabecera de `./trash-filter.ts`).
+ * sube al llamarla. `hasHiddenLockedNote` ya no necesita `ensureAll()` (A6): basta
+ * `ensureLockedNotes(port)`, que lee los ids de las bloqueadas vivas y carga solo esas;
+ * `FileFilter.build` lo hace solo, junto con las notas que enlazan cada fichero. `TrashFilter` no
+ * pregunta por notas vivas: se construye sobre un filtro sin nada cargado (cabecera de
+ * `./trash-filter.ts`). Los recuentos y listados (A7) ya no recorren nada en JS: aplican las
+ * reglas del filtro dentro de la consulta con `notesScope()` (`src/store/visible-sql.ts`);
+ * `visibleNotes()` queda solo como oráculo de los tests.
  *
  * Audit de privacidad adversarial del 10 oct 2026 (D16, `test/privacy/`): una nota
  * bloqueada se oculta mientras haya etiquetas privadas (A1), una nota viva cuya carpeta
@@ -48,6 +50,7 @@ import type {
   NoteVisibilityEntry,
   RememberedPrivateFolder
 } from '../store/types';
+import type { VisibleNotesScope } from '../store/visible-sql';
 import type { PrivacyConfig } from './config';
 import { FolderIndex, privacyPathKey } from './folder-index';
 import { LibraryIndex, type NoteIndexEntry } from './library-index';
@@ -152,8 +155,8 @@ export class PrivacyFilter implements LiveFolders {
   /**
    * TRANSICIÓN (A3 del plan de memoria): carga la biblioteca entera como antes de A3. Lo
    * llama `resolveToolContext` para que todas las herramientas sigan igual mientras A4-A8 las
-   * pasan, una a una, a `ensure(ids)`; y quien recorre la biblioteca (`visibleNotes`;
-   * `hasHiddenLockedNote` ya se arregla con `ensureLockedNotes`). Devuelve el propio filtro.
+   * pasan, una a una, a `ensure(ids)`; y `visibleNotes` en los tests (`hasHiddenLockedNote` ya se
+   * arregla con `ensureLockedNotes`). Devuelve el propio filtro.
    */
   async ensureAll(): Promise<this> {
     if (this.source) await this.library.ensureAll(this.source);
@@ -415,16 +418,33 @@ export class PrivacyFilter implements LiveFolders {
     return this.library.get(id)?.locked === true;
   }
 
-  /** Notas visibles con su carpeta y etiquetas, para recalcular recuentos (SPEC.md §6.3:
-   *  «Recuentos de `hebra_list_tags` y `hebra_list_folders`… las etiquetas privadas o
-   *  solo presentes en notas ocultas tampoco» — y por la aceptación #5, una nota oculta
-   *  por ETIQUETA tampoco cuenta en el recuento de una CARPETA visible).
+  /**
+   * Las reglas de `isHiddenNote` para aplicarlas DENTRO de una consulta, sin cargar ninguna nota
+   * (`VisibleNotesScope`, `src/store/visible-sql.ts`): las carpetas ocultas, las etiquetas
+   * privadas, si se ocultan las bloqueadas (A1) y la subida por las lápidas de una carpeta
+   * guardada que no está viva (A2, con `climbFolder` y las rutas privadas de este filtro). Lo
+   * usan los recuentos y listados que antes recorrían `visibleNotes()` (pieza A7 del plan de
+   * memoria): `hebra_list_tags`, `hebra_list_folders`, `hebra_list_properties` y
+   * `hebra_query_properties`. Solo crece con las carpetas ocultas y las etiquetas privadas.
+   */
+  notesScope(): VisibleNotesScope {
+    return {
+      hiddenFolderIds: [...this.hiddenFolderIds],
+      privateTags: [...this.privateTags],
+      hideLocked: this.privateTags.size > 0,
+      storedFolderVisible: (storedFolderId, trail) =>
+        climbFolder(storedFolderId, new Map(trail.map((row) => [row.id, row])), this, this.privatePathKeys) !==
+        undefined
+    };
+  }
+
+  /** SOLO PARA TESTS: notas visibles con su carpeta y etiquetas, el oráculo con el que se
+   *  comparan los recuentos en SQL (`notesScope`). Ningún código de producción lo usa desde la
+   *  pieza A7 del plan de memoria (6 nov 2026): copiaba la biblioteca entera en cada llamada.
    *
    *  Recorre la biblioteca entera: necesita `ensureAll()`. Sin él solo devuelve las visibles
    *  de las cargadas con `ensure` (falla cerrando: lo no cargado no cuenta, nunca se enseña de
-   *  más) y deja rastro. A6/A7 pasarán sus consumidores (`hebra_list_tags`,
-   *  `hebra_list_folders`, `hebra_list_properties`, `hebra_query_properties`, `jd-port.ts`) a
-   *  recuentos en SQL. */
+   *  más) y deja rastro. */
   visibleNotes(): Map<string, { folderId: string; tags: readonly string[] }> {
     if (!this.library.isFull()) this.library.noteUnloaded();
     const result = new Map<string, { folderId: string; tags: readonly string[] }>();

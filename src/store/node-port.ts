@@ -49,7 +49,6 @@ import {
   type NoteSaveResult,
   type NotesPage,
   type NotesScope,
-  type PropsQueryFilters,
   type SearchFilters,
   type SearchPage,
   type SqliteConn,
@@ -69,8 +68,16 @@ import {
   type NoteValuesRequest,
   type PropCountsPage,
   type PropCountsRequest,
-  type PropsMatch
+  type PropsMatch,
+  type PropsMatchesRequest
 } from './props-sql';
+import {
+  titlesInFolderRows,
+  visibleFolderCounts,
+  visibleTagCounts,
+  type FolderNoteTitle,
+  type VisibleNotesScope
+} from './visible-sql';
 import { hasValuedProps, safeTextSearch, searchCheckingValues } from './search-safe';
 import { FsBlobStore } from './blob-store-fs';
 import {
@@ -524,20 +531,38 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     });
   }
 
-  /** Propiedades del frontmatter, sin filtro de privados salvo lo que se pase: SQL propio en
-   *  `./props-sql.ts`. */
+  /** Propiedades del frontmatter, solo de las notas visibles de las reglas que se pasan: SQL
+   *  propio en `./props-sql.ts` y `./visible-sql.ts`. */
   async propCounts(request: PropCountsRequest): Promise<PropCountsPage> {
     return this.read(() => readPropCounts(this.db, request));
   }
 
-  async propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]> {
+  async propsMatches(request: PropsMatchesRequest): Promise<PropsMatch[]> {
     const conn = this.conn;
     if (!conn) throw new Error('propsMatches: puerto sin conexión del motor');
-    return this.read(() => readPropsMatches(this.db, conn, filters));
+    return this.read(() => readPropsMatches(this.db, conn, request));
   }
 
-  async visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void> {
-    return this.read(() => visitPropValues(this.db, key, visit));
+  async visitPropValues(
+    key: string,
+    scope: VisibleNotesScope,
+    visit: (noteId: string, value: string) => void
+  ): Promise<void> {
+    return this.read(() => visitPropValues(this.db, key, scope, visit));
+  }
+
+  /** Recuentos sobre visibles de `hebra_list_tags` y `hebra_list_folders`, y las notas de una
+   *  carpeta para el motor JD: SQL propio en `./visible-sql.ts`. */
+  async visibleTagCounts(scope: VisibleNotesScope): Promise<Map<string, number>> {
+    return this.read(() => visibleTagCounts(this.db, scope));
+  }
+
+  async visibleFolderCounts(scope: VisibleNotesScope): Promise<Map<string, number>> {
+    return this.read(() => visibleFolderCounts(this.db, scope));
+  }
+
+  async titlesInFolder(folderId: string): Promise<FolderNoteTitle[]> {
+    return this.read(() => titlesInFolderRows(this.db, folderId));
   }
 
   async propValuesOfNotes(notes: readonly NoteValuesRequest[], keys: readonly string[], maxChars: number): Promise<NotePropValues> {
@@ -969,6 +994,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteSave: (input) => this.engine.noteSave(input),
         // D18: solo los títulos, sin el cuerpo (`./jd-port.ts`, `hasHidden`).
         noteTitles: (ids) => this.noteTitleRows(ids),
+        // A7: las notas de una carpeta, sin cuerpo (`./jd-port.ts`, `listNotes`).
+        titlesInFolder: (folderId) => titlesInFolderRows(this.db, folderId),
         // D23: ocultar, quitar la marca de conflicto, guardas y renombrar con los enlaces.
         ...noteStateEngineOf(this.engine, this.db),
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.

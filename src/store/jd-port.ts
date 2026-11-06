@@ -49,6 +49,7 @@ import type { PrivacyFilter } from '../privacy/filter';
 import { writeRejected } from './errors';
 import { planCreateFolder } from './folders';
 import type { FilesIndex, NoteVisibilityEntry } from './types';
+import type { FolderNoteTitle } from './visible-sql';
 import { folderRejection, LOCKED_BODY_PREFIX, saveInputFor, type FolderRow } from './writes';
 
 /** Lo que el puerto lee: el árbol y el índice de visibilidad SIN filtrar, las filas de las
@@ -57,6 +58,10 @@ export interface JdView {
   folders(): FoldersList | Promise<FoldersList>;
   notes(): readonly NoteVisibilityEntry[] | Promise<readonly NoteVisibilityEntry[]>;
   noteRead(id: string): Promise<NoteRow | null>;
+  /** Las notas vivas (ni papelera ni lápida) de una carpeta EFECTIVA, con su título y SIN
+   *  filtrar ni leer el cuerpo (`titlesInFolderRows` de `./visible-sql.ts`): las candidatas de
+   *  `listNotes`. */
+  folderNotes(folderId: string): readonly FolderNoteTitle[] | Promise<readonly FolderNoteTitle[]>;
   filter(): PrivacyFilter | Promise<PrivacyFilter>;
   /** Solo los TÍTULOS de unas notas, sin cargar su cuerpo (los de las ocultas, para
    *  `hasHidden`: el tiempo de respuesta no puede depender del tamaño de lo oculto). Sin él,
@@ -137,22 +142,25 @@ export class JdLibraryPort implements LibraryPort {
       .map((folder) => ({ id: folder.id, parentId: portParent(folder.parentId), name: folder.name }));
   }
 
-  /** Las notas visibles y vivas de la carpeta, con su título, por id. */
+  /**
+   * Las notas visibles y vivas de la carpeta, con su título, por id. Las candidatas son las notas
+   * vivas de esa carpeta, con su título y sin el cuerpo (`JdView.folderNotes`, una consulta), y
+   * cada una la juzga el filtro de quien pide, que además tiene que verla en esa misma carpeta.
+   * Coste O(notas de la carpeta) (pieza A7 del plan de memoria, 6 nov 2026): antes copiaba todas
+   * las visibles de la biblioteca (`visibleNotes()`) y leía la fila entera, con el cuerpo, de cada
+   * nota de la carpeta.
+   */
   async listNotes(folderId: string): Promise<PortNote[]> {
     const filter = await this.view.filter();
     const wanted = folderId;
     if (wanted !== ROOT_FOLDER_ID && (!filter.folderExists(wanted) || filter.isFolderHidden(wanted))) return [];
-    const ids = [...filter.visibleNotes()]
-      .filter(([, meta]) => meta.folderId === wanted)
-      .map(([id]) => id)
-      .sort();
-    const notes: PortNote[] = [];
-    for (const id of ids) {
-      const row = await this.view.noteRead(id);
-      if (!row || row.trashedAt !== null) continue;
-      notes.push({ id, title: row.title });
-    }
-    return notes;
+    const candidates = await this.view.folderNotes(wanted);
+    // Sin efecto con un filtro ya entero (el del turno del escritor, el de una llamada `'all'`).
+    await filter.ensure(candidates.map((note) => note.id));
+    return candidates
+      .filter((note) => filter.visibleMeta(note.id)?.folderId === wanted)
+      .map((note) => ({ id: note.id, title: note.title }))
+      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
   }
 
   async readNote(id: string): Promise<{ body: string | null }> {

@@ -147,6 +147,7 @@ export function turnView(store: NoteWriteStore, privacy: PrivacyConfig): JdView 
     folders: () => store.foldersList(),
     notes: () => store.notesVisibilityIndex(),
     noteRead: (id) => store.noteRead(id),
+    folderNotes: (folderId) => store.titlesInFolder(folderId),
     filter: () => privacyInTurn(store, privacy),
     noteTitles: (ids) => store.noteTitles(ids),
     files: () => {

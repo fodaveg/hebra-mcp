@@ -5,6 +5,11 @@
  * aceptación #5, una nota oculta por etiqueta tampoco cuenta en una carpeta visible).
  * `limit`/`cursor` paginan la lista ya filtrada (cursor = el id de la última carpeta
  * devuelta); sin `limit`, todas.
+ *
+ * Los recuentos se agrupan en SQLite con las reglas del filtro de la llamada
+ * (`visibleFolderCounts`, `src/store/visible-sql.ts`; pieza A7 del plan de memoria, 6 nov
+ * 2026): a JS llega una fila por carpeta, no una por nota, y el filtro no carga ninguna nota
+ * (`privacyLoad: 'lazy'`).
  */
 import { usageOf, type ToolContext } from '../context';
 import { LIMITS, effectiveLimit, slicePage } from '../pagination';
@@ -20,17 +25,13 @@ export async function runListFolders(
   input: { limit?: number; cursor?: string } = {}
 ): Promise<{ folders: FolderCount[]; nextCursor: string | null }> {
   const { folders } = await ctx.port.foldersList();
-  const visibleCounts = new Map<string, number>();
-  const visible = ctx.privacy.visibleNotes();
-  for (const { folderId } of visible.values()) {
-    visibleCounts.set(folderId, (visibleCounts.get(folderId) ?? 0) + 1);
-  }
-  // Los recuentos y cada carpeta con la ruta que sale: la puerta final
-  // (`../privacy-gate.ts`) los vuelve a juzgar con el árbol de ahora, y si una carpeta ya es
-  // privada (también una que nació dentro de una privada después del filtro de la llamada)
-  // o cambió de ruta, repite la llamada.
+  const visibleCounts = await ctx.port.visibleFolderCounts(ctx.privacy.notesScope());
+  // Cada carpeta con la ruta que sale: la puerta final (`../privacy-gate.ts`) la vuelve a juzgar
+  // con el árbol de ahora, y si una carpeta ya es privada (también una que nació dentro de una
+  // privada después del filtro de la llamada) o cambió de ruta, repite la llamada. Los recuentos
+  // no declaran sus notas (serían todas las visibles): los cubre la época de privacidad, que la
+  // llamada toma antes de su filtro (como en `hebra_list_tags`).
   const used = usageOf(ctx);
-  used.visibleNotes(visible.keys());
   const result: FolderCount[] = [];
   for (const folder of folders) {
     if (ctx.privacy.isFolderHidden(folder.id)) continue;

@@ -21,7 +21,6 @@ import type {
   NoteSaveResult,
   NotesPage,
   NotesScope,
-  PropsQueryFilters,
   SearchFilters,
   SearchPage,
   SqliteLibraryEngine,
@@ -29,7 +28,15 @@ import type {
   TitleCandidates
 } from '../hebra';
 import type { GrepBodiesResult, GrepBodiesSession, GrepNoteRow } from './grep-sql';
-import type { NotePropValues, NoteValuesRequest, PropCountsPage, PropCountsRequest, PropsMatch } from './props-sql';
+import type {
+  NotePropValues,
+  NoteValuesRequest,
+  PropCountsPage,
+  PropCountsRequest,
+  PropsMatch,
+  PropsMatchesRequest
+} from './props-sql';
+import type { FolderNoteTitle, VisibleNotesScope } from './visible-sql';
 import type { PrivacyConfig } from '../privacy/config';
 import type { FolderTrashEntry, NoteStateRow } from './state-reads';
 
@@ -266,15 +273,29 @@ export interface HebraLibraryPort {
   /** TODAS las notas vivas con ese título normalizado exacto, por id (sin el corte de 50
    *  de `notesByTitlePrefix`). */
   notesByExactTitle(title: string): Promise<TitleCandidates>;
-  /** Una página de claves o valores con su recuento sobre `noteIds`, agrupada en SQLite
-   *  (`hebra_list_properties`). Lo oculto queda fuera porque no está en `noteIds`. */
+  /** Una página de claves o valores con su recuento sobre las notas visibles y sin bloquear
+   *  (`request.scope`), agrupada en SQLite (`hebra_list_properties`). */
   propCounts(request: PropCountsRequest): Promise<PropCountsPage>;
-  /** Las notas que cumplen los filtros (`hebra_query_properties`), una bloqueada como una nota
-   *  sin propiedades. Sin orden ni filtro de privados: los pone la herramienta. */
-  propsMatches(filters: PropsQueryFilters): Promise<PropsMatch[]>;
-  /** Cada valor no vacío de una clave, de uno en uno y sin guardarlos, en un turno de la cola.
-   *  `visit` no puede esperar a nada. Sin filtro de privados: lo aplica `visit`. */
-  visitPropValues(key: string, visit: (noteId: string, value: string) => void): Promise<void>;
+  /** Las notas VISIBLES (`request.scope`) que cumplen los filtros (`hebra_query_properties`),
+   *  con su carpeta efectiva, una bloqueada como una nota sin propiedades. Sin orden: lo pone la
+   *  herramienta. */
+  propsMatches(request: PropsMatchesRequest): Promise<PropsMatch[]>;
+  /** Cada valor no vacío de una clave en las notas visibles y sin bloquear (`scope`), de uno en
+   *  uno y sin guardarlos, en un turno de la cola. `visit` no puede esperar a nada. */
+  visitPropValues(
+    key: string,
+    scope: VisibleNotesScope,
+    visit: (noteId: string, value: string) => void
+  ): Promise<void>;
+  /** Cuántas notas visibles (`scope`) lleva cada etiqueta canónica, agrupado en SQLite
+   *  (`hebra_list_tags`, `./visible-sql.ts`): una entrada por etiqueta con alguna. */
+  visibleTagCounts(scope: VisibleNotesScope): Promise<Map<string, number>>;
+  /** Cuántas notas visibles (`scope`) hay en cada carpeta efectiva, agrupado en SQLite
+   *  (`hebra_list_folders`): una entrada por carpeta con alguna. */
+  visibleFolderCounts(scope: VisibleNotesScope): Promise<Map<string, number>>;
+  /** Las notas vivas de una carpeta efectiva con su título, por id y SIN filtro de privados
+   *  (`listNotes` del puerto del motor JD, `./jd-port.ts`). */
+  titlesInFolder(folderId: string): Promise<FolderNoteTitle[]>;
   /** Los valores de esas claves en esas notas, nota a nota hasta `maxChars` contando cada nota
    *  entera: una que no cabe y las de detrás no salen, salvo la primera. Quien llama pasa solo
    *  notas visibles. */

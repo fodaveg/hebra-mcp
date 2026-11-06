@@ -17,14 +17,17 @@
  *   Por eso de ella solo se usa el filtro (`propsFilterSql`): el orden es de hebra-mcp, sobre
  *   lo visible (`src/server/tools/props-order.ts`).
  *
- * El filtro de visibles entra en la consulta de recuentos como una lista de ids (`json_each`), de
- * las visibles y no de las ocultas: una nota que el filtro de la llamada no conoce no cuenta, y
- * un grupo que solo tienen ocultas no llega a existir. Coste asumido: el recorrido pasa también
- * por las filas de las notas ocultas (solo clave, valor e id), que nunca salen de aquí.
+ * El filtro de visibles entra en las consultas como una subconsulta de `./visible-sql.ts`
+ * (`withVisibleNotes`), con las reglas del filtro de la llamada (`VisibleNotesScope`, pieza A7 del
+ * plan de memoria, 6 nov 2026; antes era una lista con los ids de TODAS las visibles, que obligaba a cargar la biblioteca
+ * entera en el filtro): un grupo que solo tienen ocultas no llega a existir. Coste asumido: el
+ * recorrido pasa también por las filas de las notas ocultas (solo clave, valor e id), que nunca
+ * salen de aquí.
  *
  * Notas bloqueadas: no derivan propiedades (`lockedDerived`), así que una fila de `note_props` de
- * una bloqueada es un resto anterior al bloqueo y no cuenta en ningún sitio: quien llama no las
- * pasa en sus listas de visibles, y `readPropsMatches` las juzga como notas sin propiedades.
+ * una bloqueada es un resto anterior al bloqueo y no cuenta en ningún sitio: los recuentos y el
+ * recorrido de valores solo miran visibles sin bloquear (`is_locked` de esa subconsulta), y
+ * `readPropsMatches` las juzga como notas sin propiedades.
  */
 import type { DatabaseSync } from 'node:sqlite';
 import {
@@ -35,10 +38,15 @@ import {
   type SqliteConn
 } from '../hebra';
 import { SORT_TEXT_SQL_CHARS } from './props-limits';
+import { withVisibleNotes, type VisibleNotesScope } from './visible-sql';
 
-/** Una nota viva que cumple los filtros de una consulta de propiedades. */
+/** Una nota VISIBLE que cumple los filtros de una consulta de propiedades. */
 export interface PropsMatch {
   id: string;
+  /** Carpeta efectiva (la de `VISIBILITY_COLUMNS`). */
+  folderId: string;
+  /** Bloqueada: no tiene propiedades, aunque quede alguna fila de antes de bloquearla. */
+  locked: boolean;
   title: string;
   /** `notes.title_norm`, la clave de orden por título del motor, en sus primeros caracteres:
    *  el orden no mira más allá, y un título no tiene tope. */
@@ -51,8 +59,8 @@ export interface PropsMatch {
 export interface PropCountsRequest {
   /** Con clave, sus valores no vacíos. Sin ella, las claves. */
   key?: string;
-  /** Las notas que cuentan: visibles y sin bloquear. */
-  noteIds: readonly string[];
+  /** Las reglas del filtro de la llamada: cuentan las notas visibles y sin bloquear. */
+  scope: VisibleNotesScope;
   offset: number;
   limit: number;
   /** Tope de caracteres de la página. El primer elemento sale siempre. */
@@ -75,59 +83,66 @@ function itemChars(name: string, count: number, isValue: boolean): number {
  * Una página de claves o de valores con su recuento, agrupada y ordenada en SQLite. `+p.note_id`
  * no deja usar la clave primaria para el filtro: la consulta recorre `note_props_by_key_value` en
  * orden, sin ordenar nada aparte, y para en cuanto tiene la página. Orden binario, el de la
- * columna. El cursor es una posición (`OFFSET`), que sigue contando solo grupos con notas de
- * `noteIds`: una posición lejana recorre lo anterior, en SQLite y sin traerlo a JS.
+ * columna. El cursor es una posición (`OFFSET`), que sigue contando solo grupos con notas visibles
+ * y sin bloquear: una posición lejana recorre lo anterior, en SQLite y sin traerlo a JS.
  */
 export function readPropCounts(db: DatabaseSync, request: PropCountsRequest): PropCountsPage {
-  const visible = JSON.stringify(request.noteIds);
-  const statement =
-    request.key === undefined
-      ? db.prepare(
-          `SELECT p.key AS name, COUNT(DISTINCT p.note_id) AS count
-           FROM note_props p
-           WHERE +p.note_id IN (SELECT value FROM json_each(?))
-           GROUP BY p.key ORDER BY p.key LIMIT ? OFFSET ?`
-        )
-      : db.prepare(
-          `SELECT p.value AS name, COUNT(*) AS count
-           FROM note_props p
-           WHERE p.key = ? AND p.value <> '' AND +p.note_id IN (SELECT value FROM json_each(?))
-           GROUP BY p.value ORDER BY p.value LIMIT ? OFFSET ?`
-        );
-  const bind = request.key === undefined ? [visible] : [request.key, visible];
-  const items: PropCountsPage['items'] = [];
-  let chars = 0;
-  let more = false;
-  for (const row of statement.iterate(...bind, request.limit + 1, request.offset) as Iterable<Record<string, unknown>>) {
-    const name = String(row.name);
-    const count = Number(row.count);
-    const size = itemChars(name, count, request.key !== undefined);
-    if (items.length >= request.limit || (items.length > 0 && chars + size > request.maxChars)) {
-      more = true;
-      break;
+  return withVisibleNotes(db, request.scope, ({ table, params }) => {
+    const counted = `+p.note_id IN (SELECT id FROM ${table} WHERE NOT is_locked)`;
+    const statement =
+      request.key === undefined
+        ? db.prepare(
+            `SELECT p.key AS name, COUNT(DISTINCT p.note_id) AS count
+             FROM note_props p
+             WHERE ${counted}
+             GROUP BY p.key ORDER BY p.key LIMIT ? OFFSET ?`
+          )
+        : db.prepare(
+            `SELECT p.value AS name, COUNT(*) AS count
+             FROM note_props p
+             WHERE p.key = ? AND p.value <> '' AND ${counted}
+             GROUP BY p.value ORDER BY p.value LIMIT ? OFFSET ?`
+          );
+    // Los parámetros en el orden del texto: la clave (si la hay) antes que los de las visibles.
+    const bind = request.key === undefined ? params : [request.key, ...params];
+    const items: PropCountsPage['items'] = [];
+    let chars = 0;
+    let more = false;
+    for (const row of statement.iterate(...bind, request.limit + 1, request.offset) as Iterable<Record<string, unknown>>) {
+      const name = String(row.name);
+      const count = Number(row.count);
+      const size = itemChars(name, count, request.key !== undefined);
+      if (items.length >= request.limit || (items.length > 0 && chars + size > request.maxChars)) {
+        more = true;
+        break;
+      }
+      chars += size;
+      items.push({ name, count });
     }
-    chars += size;
-    items.push({ name, count });
-  }
-  return { items, more };
+    return { items, more };
+  });
 }
 
 /**
- * Cada fila no vacía de una clave, de una en una y sin guardarlas: lo que necesita el orden de
- * `hebra_query_properties`, que se queda con un valor por nota. Sin filtro de privados: lo aplica
- * `visit`. La recorre el índice de la clave, en orden de valor.
+ * Cada fila no vacía de una clave en una nota visible y sin bloquear (`scope`), de una en una y
+ * sin guardarlas: lo que necesita el orden de `hebra_query_properties`, que se queda con un valor
+ * por nota. La recorre el índice de la clave, en orden de valor.
  */
 export function visitPropValues(
   db: DatabaseSync,
   key: string,
+  scope: VisibleNotesScope,
   visit: (noteId: string, value: string) => void
 ): void {
-  const statement = db.prepare(
-    "SELECT p.note_id AS note_id, p.value AS prop_value FROM note_props p WHERE p.key = ? AND p.value <> ''"
-  );
-  for (const row of statement.iterate(key) as Iterable<Record<string, unknown>>) {
-    visit(String(row.note_id), String(row.prop_value));
-  }
+  withVisibleNotes(db, scope, ({ table, params }) => {
+    const statement = db.prepare(
+      `SELECT p.note_id AS note_id, p.value AS prop_value FROM note_props p
+       WHERE p.key = ? AND p.value <> '' AND +p.note_id IN (SELECT id FROM ${table} WHERE NOT is_locked)`
+    );
+    for (const row of statement.iterate(key, ...params) as Iterable<Record<string, unknown>>) {
+      visit(String(row.note_id), String(row.prop_value));
+    }
+  });
 }
 
 /** Una nota de una página de `hebra_query_properties`, lo que ya ocupa y si tiene valores que leer. */
@@ -191,9 +206,14 @@ function isTitleFilter(filter: PropsQueryFilter): boolean {
   return filter.key.trim().toLocaleLowerCase('es') === 'note.title';
 }
 
+/** Los filtros de `hebra_query_properties` y las reglas del filtro de privados de la llamada. */
+export interface PropsMatchesRequest extends PropsQueryFilters {
+  scope: VisibleNotesScope;
+}
+
 /**
- * Las notas vivas que cumplen `filters`, con el filtro del motor, sin orden: cada comparación mira
- * solo la fila de la nota, nunca el resto de la biblioteca. Sin filtro de privados.
+ * Las notas VISIBLES (`scope`) que cumplen los filtros, con el filtro del motor, sin orden: cada
+ * comparación mira solo la fila de la nota, nunca el resto de la biblioteca.
  *
  * Una bloqueada se juzga como una nota sin propiedades, tenga las filas que tenga: un filtro que
  * pide un valor no la encuentra (lo contrario confirmaría ese valor), `missing` sí, y los de título
@@ -203,8 +223,9 @@ function isTitleFilter(filter: PropsQueryFilter): boolean {
 export function readPropsMatches(
   db: DatabaseSync,
   conn: SqliteConn,
-  filters: PropsQueryFilters
+  request: PropsMatchesRequest
 ): PropsMatch[] {
+  const { scope: visibleScope, ...filters } = request;
   const props = filters.props ?? [];
   const unlocked = propsFilterSql(conn, filters);
   const needsValue = props.some((filter) => !isTitleFilter(filter) && filter.op !== 'missing');
@@ -212,19 +233,27 @@ export function readPropsMatches(
   const scope = locked
     ? `((n.locked = 0${unlocked.sql}) OR (n.locked <> 0${locked.sql}))`
     : `n.locked = 0${unlocked.sql}`;
-  const rows = db
-    .prepare(
-      `SELECT n.id AS id, n.title AS title, substr(n.title_norm, 1, ${SORT_TEXT_SQL_CHARS}) AS title_norm,
-              n.local_seq AS local_seq
-       FROM notes n WHERE n.deleted = 0 AND n.trashed_at IS NULL AND ${scope}`
-    )
-    .all(...(unlocked.bind as string[]), ...((locked?.bind ?? []) as string[])) as Array<Record<string, unknown>>;
-  return rows.map((row) => ({
-    id: String(row.id),
-    title: String(row.title ?? ''),
-    titleNorm: String(row.title_norm ?? ''),
-    localSeq: Number(row.local_seq)
-  }));
+  return withVisibleNotes(db, visibleScope, ({ table, params }) => {
+    // Los parámetros en el orden del texto: los de las visibles (en el `JOIN`) y después los filtros.
+    const rows = db
+      .prepare(
+        `SELECT n.id AS id, n.title AS title, substr(n.title_norm, 1, ${SORT_TEXT_SQL_CHARS}) AS title_norm,
+                n.local_seq AS local_seq, vn.folder_id AS folder_id, vn.is_locked AS is_locked
+         FROM notes n JOIN ${table} vn ON vn.id = n.id
+         WHERE n.deleted = 0 AND n.trashed_at IS NULL AND ${scope}`
+      )
+      .all(...params, ...(unlocked.bind as string[]), ...((locked?.bind ?? []) as string[])) as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => ({
+      id: String(row.id),
+      folderId: String(row.folder_id),
+      locked: Number(row.is_locked) !== 0,
+      title: String(row.title ?? ''),
+      titleNorm: String(row.title_norm ?? ''),
+      localSeq: Number(row.local_seq)
+    }));
+  });
 }
 
 /** Un destino de `SearchFilters.linksTo`: una nota viva con su `title_norm`. */
