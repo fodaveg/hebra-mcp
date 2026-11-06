@@ -169,6 +169,7 @@ describe('Johnny.Decimal (D18): privacidad', () => {
             reads.push(id);
             return store.noteRead(id);
           },
+          folderNotes: (folderId) => store.titlesInFolder(folderId),
           filter: () => privacyInTurn(store, JD_DEFAULT_CONFIG),
           noteTitles: (ids) => store.noteTitles(ids),
           files: () => {

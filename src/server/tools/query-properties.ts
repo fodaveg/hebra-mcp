@@ -6,10 +6,15 @@
  * SQL (`propsFilterSql`), que solo mira la fila de cada nota. El orden no es el del motor, que
  * mira toda la biblioteca para decidir si una clave es numérica: es `./props-order.ts`, sobre lo
  * visible. Por eso esta es una LISTA CALCULADA, como `hebra_list_files`: se leen todas las notas
- * que cumplen los filtros, se quitan las ocultas, se ordena y se corta. Así el contenido de una
- * página, su tamaño, su orden y su cursor solo dependen de lo visible. Coste asumido: cada página
- * lee todas las que cumplen los filtros (una consulta, sin cuerpos), no solo las suyas, y recorre
+ * visibles que cumplen los filtros, se ordena y se corta. Así el contenido de una página, su
+ * tamaño, su orden y su cursor solo dependen de lo visible. Coste asumido: cada página lee todas
+ * las visibles que cumplen los filtros (una consulta, sin cuerpos), no solo las suyas, y recorre
  * los valores de la clave de orden sin guardarlos.
+ *
+ * Lo oculto se quita en la propia consulta, con las reglas del filtro de la llamada (`notesScope`,
+ * `src/store/visible-sql.ts`; pieza A7 del plan de memoria, 6 nov 2026), y el filtro solo carga
+ * las notas de la página (`privacyLoad: 'lazy'`): antes cargaba la biblioteca entera y la copiaba
+ * con `visibleNotes()` aunque los filtros dejaran tres notas.
  *
  * `properties` de cada nota: los valores de las claves pedidas (por defecto, las de los filtros y
  * la del orden), en orden binario como las da el motor. Una clave sin valor sale `[]`. Se leen solo
@@ -111,24 +116,23 @@ export async function runQueryProperties(
           )
     )
   ];
-  const matches = await ctx.port.propsMatches({ props: filters });
+  // Solo las VISIBLES, con las reglas del filtro dentro de la consulta (pieza A7 del plan de
+  // memoria, 6 nov 2026): el filtro no carga la biblioteca entera, y cada coincidencia trae su
+  // carpeta efectiva y si está bloqueada.
+  const scope = ctx.privacy.notesScope();
+  const matches = await ctx.port.propsMatches({ props: filters, scope });
 
-  // Toda la respuesta sale de las visibles (también el modo del orden, y si hay `nextCursor`):
-  // las declara todas, como un recuento. La puerta final las vuelve a juzgar.
-  const visible = ctx.privacy.visibleNotes();
+  // Toda la respuesta sale de las visibles (también el modo del orden, y si hay `nextCursor`). No
+  // se declaran todas a la puerta final (volvería a cargarlas allí): si una deja de verse durante
+  // la llamada, la época de privacidad cambia y la puerta la repite, como en un recuento.
   const used = usageOf(ctx);
-  used.visibleNotes(visible.keys());
 
-  const selected = matches.filter((match) => {
-    const note = visible.get(match.id);
-    return note !== undefined && (folderIds === null || folderIds.has(note.folderId));
-  });
+  const selected = matches.filter((match) => folderIds === null || folderIds.has(match.folderId));
   const collector = new SortKeysCollector(sort, new Set(selected.map((match) => match.id)));
   if (sort.key !== null) {
-    await ctx.port.visitPropValues(sort.key, (noteId, value) => {
-      // Una bloqueada no tiene propiedades, aunque quede una fila de antes de bloquearla.
-      if (visible.has(noteId) && !ctx.privacy.isLockedNote(noteId)) collector.add(noteId, value);
-    });
+    // Solo valores de visibles sin bloquear: una bloqueada no tiene propiedades, aunque quede una
+    // fila de antes de bloquearla.
+    await ctx.port.visitPropValues(sort.key, scope, (noteId, value) => collector.add(noteId, value));
   }
   if (after) assertCursorMode(after, collector.mode);
 
@@ -147,7 +151,7 @@ export async function runQueryProperties(
   const wantsProperties = !input.fields || input.fields.includes('properties');
   const fields = input.fields as ReadonlyArray<keyof QueryPropertiesNote & string> | undefined;
   const element = (match: PropsMatch, values?: ReadonlyMap<string, string[]>) => {
-    const folderPath = ctx.privacy.folderPath(visible.get(match.id)!.folderId);
+    const folderPath = ctx.privacy.folderPath(match.folderId);
     const properties = Object.fromEntries(shown.map((key) => [key, values?.get(key) ?? []]));
     const note: QueryPropertiesNote = { id: match.id, title: match.title, folderPath, properties };
     return pickFields(note, fields);
@@ -158,7 +162,7 @@ export async function runQueryProperties(
     page.items.map(({ match }) => ({
       id: match.id,
       chars: JSON.stringify(element(match)).length + 1,
-      readValues: wantsProperties && shown.length > 0 && !ctx.privacy.isLockedNote(match.id)
+      readValues: wantsProperties && shown.length > 0 && !match.locked
     })),
     shown,
     PROPERTIES_RESPONSE_MAX_CHARS
@@ -166,8 +170,11 @@ export async function runQueryProperties(
   const cut = read.length < page.items.length;
   const items = page.items.slice(0, read.length);
 
+  // Las de la página sí se declaran, con su sello: se cargan en el filtro solo ellas, para que
+  // `used.note` tome también el sello del filtro (`sealOf`) sin preguntar por una no cargada.
+  await ctx.privacy.ensure(items.map(({ match }) => match.id));
   const notes = items.map(({ match }, index) => {
-    const folderId = visible.get(match.id)!.folderId;
+    const folderId = match.folderId;
     used.note(match.id, match.localSeq);
     used.folder(folderId, ctx.privacy.folderPath(folderId));
     return element(match, read[index]!.values);

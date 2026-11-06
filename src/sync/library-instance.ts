@@ -905,8 +905,11 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
     notesByExactTitle: (title: string): Promise<TitleCandidates> =>
       current().notesByExactTitle(title),
     propCounts: (request) => current().propCounts(request),
-    propsMatches: (filters) => current().propsMatches(filters),
-    visitPropValues: (key, visit) => current().visitPropValues(key, visit),
+    propsMatches: (request) => current().propsMatches(request),
+    visitPropValues: (key, scope, visit) => current().visitPropValues(key, scope, visit),
+    visibleTagCounts: (scope) => current().visibleTagCounts(scope),
+    visibleFolderCounts: (scope) => current().visibleFolderCounts(scope),
+    titlesInFolder: (folderId) => current().titlesInFolder(folderId),
     propValuesOfNotes: (notes, keys, maxChars) => current().propValuesOfNotes(notes, keys, maxChars),
     notesByFoldedTitle: (title) => current().notesByFoldedTitle(title),
     linkSources: (noteIds) => current().linkSources(noteIds),

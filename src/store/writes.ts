@@ -92,6 +92,7 @@ import {
 } from './sections';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from './file-content';
 import type { FilePreviousStore } from './file-previous';
+import type { FolderNoteTitle } from './visible-sql';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -119,6 +120,9 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
   /** Solo el título de unas notas (no lápidas), sin leer su cuerpo: lo que `hasHidden` de un
    *  ID nuevo del JDex (D18, `./jd-port.ts`) mira de las ocultas. */
   noteTitles(ids: readonly string[]): Map<string, string>;
+  /** Las notas vivas de una carpeta efectiva con su título, sin leer su cuerpo ni filtrar:
+   *  `listNotes` del puerto del motor JD (`./jd-port.ts`, `titlesInFolderRows`). */
+  titlesInFolder(folderId: string): FolderNoteTitle[];
   /** Carpetas (D9, 3 oct 2026): crear y renombrar, solo desde `NoteWriter` y con el plan
    *  de `./folders.ts` rehecho en el turno. Mover y borrar carpetas (`folderMove`,
    *  `folderTrash`) NO están, ni aquí ni en ningún sitio de hebra-mcp

@@ -35,9 +35,10 @@ export function folderRowFacts(db: DatabaseSync): FolderRowFact[] {
  * Las filas de carpeta desde `storedFolderId` hacia arriba hasta la primera viva (sin
  * ella): lo que necesita el filtro para subir por las lápidas (`climbFolder`,
  * `src/privacy/tombstones.ts`). Se corta, sin error, donde falta una fila o se repite una
- * (ciclo): el filtro no llega a una carpeta viva y la nota queda oculta.
+ * (ciclo): el filtro no llega a una carpeta viva y la nota queda oculta. También lo usan los
+ * recuentos sobre visibles (`./visible-sql.ts`), con la misma subida para cada carpeta guardada.
  */
-function trailOf(storedFolderId: string, rows: ReadonlyMap<string, FolderRowFact>): FolderRowFact[] {
+export function folderTrailOf(storedFolderId: string, rows: ReadonlyMap<string, FolderRowFact>): FolderRowFact[] {
   const trail: FolderRowFact[] = [];
   const seen = new Set<string>();
   let current: string | null = storedFolderId;
@@ -79,7 +80,7 @@ export function visibilityEntries(db: DatabaseSync, rows: readonly VisibilityRow
     if (row.stored_folder_id !== null) {
       folders ??= new Map(folderRowFacts(db).map((folder) => [folder.id, folder]));
       entry.storedFolderId = String(row.stored_folder_id);
-      entry.folderTrail = trailOf(entry.storedFolderId, folders);
+      entry.folderTrail = folderTrailOf(entry.storedFolderId, folders);
     }
     return entry;
   });

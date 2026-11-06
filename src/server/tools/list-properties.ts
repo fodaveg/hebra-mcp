@@ -5,17 +5,19 @@
  *
  * El patrón de `hebra_list_tags`, con los recuentos solo sobre notas VISIBLES, pero agrupados en
  * SQLite: el frontmatter no tiene tope de claves y traer todas las filas a JS agotaba la memoria
- * (`src/store/props-sql.ts` explica también por qué no sirven los recuentos del motor). Las notas
- * que cuentan entran en la consulta como una lista: una clave o un valor que solo tienen notas
- * ocultas no llega a formar grupo. Una clave definida sin valor (`clave:`) cuenta para la clave y
- * no da ningún valor. El tipo de la clave no sale: el del motor se calcula con las ocultas.
+ * (`src/store/props-sql.ts` explica también por qué no sirven los recuentos del motor). Las
+ * reglas del filtro de privados entran en la propia consulta (`notesScope`, con la subconsulta de
+ * visibles de `src/store/visible-sql.ts`; pieza A7 del plan de memoria, 6 nov 2026): una clave o
+ * un valor que solo tienen notas ocultas no llega a formar grupo, y el filtro no carga ninguna
+ * nota (`privacyLoad: 'lazy'`). Una clave definida sin valor (`clave:`) cuenta para la clave y no
+ * da ningún valor. El tipo de la clave no sale: el del motor se calcula con las ocultas.
  *
  * Orden binario (estable, sin depender de los recuentos). El cursor es la posición en esa lista ya
  * filtrada: no lleva ningún valor, que puede ser más largo que el tope de un cursor. La página se
  * corta antes de `PROPERTIES_RESPONSE_MAX_CHARS`, con `nextCursor`, y siempre lleva un elemento.
  */
 import { PROPERTIES_RESPONSE_MAX_CHARS } from '../../store/props-limits';
-import { usageOf, type ToolContext } from '../context';
+import type { ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 
@@ -48,13 +50,13 @@ export async function runListProperties(
   const key = input.key?.toLowerCase();
   const kind = key === undefined ? 'pk1' : 'pv1';
   const offset = positionOf(kind, input.cursor);
-  const visible = ctx.privacy.visibleNotes();
-  // Los recuentos salen de todas las visibles: la puerta final las vuelve a juzgar, y si una ya
-  // no se ve (la única de un valor), repite la llamada. Como `hebra_list_tags`.
-  usageOf(ctx).visibleNotes(visible.keys());
+  // Los recuentos salen de todas las visibles sin bloquear, con las reglas del filtro dentro de
+  // la consulta (pieza A7 del plan de memoria): el filtro no carga ninguna nota. No las declaran
+  // a la puerta final (serían todas): si una deja de verse durante la llamada, la época de
+  // privacidad cambia y la puerta la repite. Como `hebra_list_tags`.
   const page = await ctx.port.propCounts({
     ...(key === undefined ? {} : { key }),
-    noteIds: [...visible.keys()].filter((id) => !ctx.privacy.isLockedNote(id)),
+    scope: ctx.privacy.notesScope(),
     offset,
     limit,
     maxChars: PROPERTIES_RESPONSE_MAX_CHARS
