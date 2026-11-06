@@ -56,7 +56,8 @@ import {
   type TagsList,
   type TitleCandidates
 } from '../hebra';
-import { openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
+import { existsSync } from 'node:fs';
+import { applyConnectionMemoryPragmas, LIBRARY_CACHE_SIZE_KIB, openNodeSqliteConn, type NodeSqliteMode } from './sqlite-conn-node';
 import {
   readFoldedTitleTargets,
   readLinkSources,
@@ -86,8 +87,10 @@ import type { PrivacyConfig } from '../privacy/config';
 import { busyOtherInstance, StoreError } from './errors';
 import { ensureOperationsTable, sqliteOperationStore, type OperationStore } from './operations';
 import {
+  hasLegacyReplacePlans,
   migrateReplacePlansFromLibrary,
   openReplacePlansDatabase,
+  replacePlansPathOf,
   readReplacePlanTargets,
   sqliteReplacePlanStore,
   type ReplacePlanStore
@@ -214,6 +217,10 @@ export async function openNodeLibraryPort(
     db.close();
     throw error;
   }
+  // Caché de páginas pequeña (por defecto SQLite da 2 MB a cada conexión) y sin `mmap`: las
+  // páginas mapeadas contarían en el cgroup. Medido el 6 nov: un contexto ocioso baja de ~3,0
+  // a ~1,6 MiB. Se aplica también al lector.
+  applyConnectionMemoryPragmas(db, LIBRARY_CACHE_SIZE_KIB);
   try {
     const savedSpace = db.prepare("SELECT value FROM meta WHERE key = 'space_id'").get() as { value: string } | undefined;
     const savedScope = db.prepare("SELECT value FROM meta WHERE key = 'mcp_agent_scope'").get() as { value: string } | undefined;
@@ -244,23 +251,25 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensurePrivacyEpochIndexes(db);
   // Planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor, y en su propio
   // fichero, para no mover la época de privacidad de un lector al simular.
-  let jdPlansDb: DatabaseSync | null = null;
-  // Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): igual, solo el escritor y
-  // en su propio fichero. Los que una versión anterior dejó en `library.sqlite` pasan aquí.
+  // Las dos bases de planes (también los de `hebra_replace_in_notes`, D14, `./replace-plans.ts`)
+  // se abren AL PRIMER USO (`jdPlansHandle`, `replacePlansHandle`), no aquí: cada conexión
+  // ociosa cuesta memoria y la mayoría de los contextos no usan planes. Única excepción: si
+  // `library.sqlite` aún guarda los planes de replace de una versión anterior, se abre y se
+  // migra ya (solo el escritor), como antes.
   let replacePlansDb: DatabaseSync | null = null;
   if (mode === 'readWrite') {
     try {
-      jdPlansDb = openJdPlansDatabase(options.sqlitePath);
-      replacePlansDb = openReplacePlansDatabase(options.sqlitePath);
-      migrateReplacePlansFromLibrary(db, replacePlansDb, options.sqlitePath);
+      if (hasLegacyReplacePlans(db)) {
+        replacePlansDb = openReplacePlansDatabase(options.sqlitePath);
+        migrateReplacePlansFromLibrary(db, replacePlansDb, options.sqlitePath);
+      }
     } catch (error) {
-      jdPlansDb?.close();
       replacePlansDb?.close();
       db.close();
       throw error;
     }
   }
-  return new NodeLibraryPort(engine, db, mode, conn, jdPlansDb, replacePlansDb, options.sqlitePath, options.spaceAccess, options.assertActive);
+  return new NodeLibraryPort(engine, db, mode, conn, null, replacePlansDb, options.sqlitePath, options.spaceAccess, options.assertActive);
 }
 
 /**
@@ -319,9 +328,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     readonly mode: NodeSqliteMode = 'readWrite',
     private readonly conn?: SqliteConn,
     /** La base de los planes de `hebra_jd_new_id` (D18, `./jd-plans.ts`): solo el escritor. */
-    private readonly jdPlansDb: DatabaseSync | null = null,
+    private jdPlansDb: DatabaseSync | null = null,
     /** La base de los planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo el escritor. */
-    private readonly replacePlansDb: DatabaseSync | null = null,
+    private replacePlansDb: DatabaseSync | null = null,
     /** Ruta de `library.sqlite` (o `:memory:`): de ella cuelga el fichero de los planes que lee un lector. */
     private readonly librarySqlitePath: string = ':memory:',
     private readonly spaceAccess?: SpaceStoreAccess,
@@ -571,8 +580,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           // Los planes viven en su propio fichero (`./replace-plans.ts`): el escritor usa su
           // conexión y un lector abre el fichero en solo lectura, sin tocar la biblioteca.
           const plans = new Map<string, { privacySha256: string; noteIds: string[] }>();
-          if (this.replacePlansDb) {
-            const store = this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb);
+          // Un escritor sin la base abierta solo la abre si el fichero ya existe: sin él no hay planes.
+          const plansDb = this.replacePlansDb ?? this.replacePlansHandleIfExists();
+          if (plansDb) {
+            const store = this.replacePlanStore ??= sqliteReplacePlanStore(plansDb);
             for (const id of request.operationTargets) {
               const plan = store.plan(id);
               if (plan && plan.libraryId === this.libraryIdSync() && plan.state !== 'expired') {
@@ -916,6 +927,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       // H-L7: dentro del mismo turno que la mutación, también tras reiniciar o al
       // recibir una escritura por writer.sock. No basta con parar la subida.
       this.assertSpaceUserWrite();
+      const replacePlans = () => (this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansHandle() ?? this.db));
+      const jdPlans = () => (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansHandle() ?? this.db));
       const store: NoteWriteStore = {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
@@ -967,9 +980,10 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db)),
-        replacePlans: (this.replacePlanStore ??= sqliteReplacePlanStore(this.replacePlansDb ?? this.db)),
+        // Con getters: la base de cada registro se abre cuando alguien lo toca, no en cada turno.
+        get replacePlans() { return replacePlans(); },
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
-        jdPlans: (this.jdPlanStore ??= sqliteJdPlanStore(this.jdPlansDb ?? this.db))
+        get jdPlans() { return jdPlans(); }
       };
       // Revalidación (local, sin red) al ejecutar cada mutación, también si el turno esperó
       // bytes de un blob. Los cuatro registros propios del MCP (idempotencia, planes de
@@ -1070,6 +1084,24 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       await this.queue.whenIdle();
     } while (this.walks > 0);
     this.close();
+  }
+
+  /** Base de los planes de JD: se abre la primera vez que se pide (solo el escritor). */
+  private jdPlansHandle(): DatabaseSync | null {
+    if (!this.jdPlansDb && this.mode === 'readWrite' && !this.closed) this.jdPlansDb = openJdPlansDatabase(this.librarySqlitePath);
+    return this.jdPlansDb;
+  }
+
+  /** Base de los planes de replace: se abre la primera vez que se pide (solo el escritor). */
+  private replacePlansHandle(): DatabaseSync | null {
+    if (!this.replacePlansDb && this.mode === 'readWrite' && !this.closed) this.replacePlansDb = openReplacePlansDatabase(this.librarySqlitePath);
+    return this.replacePlansDb;
+  }
+
+  /** Como `replacePlansHandle`, pero sin crear el fichero: solo abre uno que ya exista. */
+  private replacePlansHandleIfExists(): DatabaseSync | null {
+    const path = replacePlansPathOf(this.librarySqlitePath);
+    return path && existsSync(path) ? this.replacePlansHandle() : null;
   }
 
   /** Cierra la conexión SQLite ya (sin esperar a la cola). */

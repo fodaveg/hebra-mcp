@@ -58,6 +58,19 @@ export type NodeSqliteMode = 'readWrite' | 'readOnly';
  */
 export const SQLITE_BUSY_TIMEOUT_MS = 2_000;
 
+/** Caché de páginas de la biblioteca, en KiB (SQLite da 2 MB por defecto a cada conexión). */
+export const LIBRARY_CACHE_SIZE_KIB = 256;
+/** Caché de páginas de las bases de planes (JD y replace), en KiB: casi no leen. */
+export const PLANS_CACHE_SIZE_KIB = 64;
+
+/**
+ * Fija la memoria de una conexión: `cache_size` negativo son KiB. `mmap_size` se deja
+ * EXPLÍCITAMENTE en 0: las páginas mapeadas contarían en el cgroup del contenedor.
+ */
+export function applyConnectionMemoryPragmas(db: DatabaseSync, cacheSizeKib: number): void {
+  db.exec(`PRAGMA cache_size=-${cacheSizeKib}; PRAGMA mmap_size=0`);
+}
+
 export type NodeSqliteBindValue = string | number | bigint | boolean | null | undefined;
 
 function toBoundValue(value: unknown): string | number | bigint | null {
