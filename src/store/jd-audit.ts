@@ -21,6 +21,11 @@
  * - Fuera también `inbox-stale` (la fecha de cada fichero del inbox) y `missing-folder` (las
  *   carpetas configuradas del plugin: aquí se detectan, siempre existen).
  * Los arreglos (`fix`) no salen: el MCP no los aplica.
+ *
+ * Sin la biblioteca entera (pieza A9a del plan de memoria, 6 nov 2026): `filter` puede venir sin
+ * notas cargadas (`privacyLoad: 'lazy'`). El puerto del motor pide las que juzga (las de cada
+ * carpeta que lista, la nota que lee) con `filter.ensure`, y los ficheros sueltos se juzgan con
+ * `FileFilter.build`, que carga lo suyo (A6).
  */
 import { deriveNote } from '../hebra';
 import {
@@ -98,7 +103,6 @@ export async function runJdAudit(
   const jd = new JdLibraryPort(
     {
       folders: () => port.foldersList(),
-      notes: () => port.notesVisibilityIndex(),
       noteRead: (id) => {
         let row = rows.get(id);
         if (!row) {
@@ -108,7 +112,9 @@ export async function runJdAudit(
         return row;
       },
       folderNotes: (folderId) => port.titlesInFolder(folderId),
-      filter: () => filter
+      // El filtro de la llamada carga las notas que pide cada método (A9a); sin efecto si ya
+      // está entero (`privacyLoad: 'all'`).
+      filter: (ids = []) => filter.ensure(ids)
     },
     null
   );

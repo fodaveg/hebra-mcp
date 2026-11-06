@@ -187,3 +187,36 @@ export function titlesInFolderRows(db: DatabaseSync, folderId: string): FolderNo
   }>;
   return rows.map((row) => ({ id: String(row.id), title: String(row.title ?? '') }));
 }
+
+/**
+ * `titlesInFolderRows` para varias carpetas EFECTIVAS a la vez, en una consulta (y otra para la
+ * raíz, solo si está entre ellas), por id y sin repetir: las candidatas de `hasHidden` del puerto
+ * del motor JD (`./jd-port.ts`, el árbol de una categoría y la carpeta del JDex), SIN filtro de
+ * privados. Pieza A9a del plan de memoria (6 nov 2026): antes `hasHidden` recorría en JS la
+ * visibilidad de todas las notas vivas para quedarse con las de esas carpetas. Fuera de la raíz
+ * va por el índice de `folder_id`, así que el coste crece con las notas de esas carpetas, no con
+ * la biblioteca.
+ */
+export function titlesInFoldersRows(db: DatabaseSync, folderIds: readonly string[]): FolderNoteTitle[] {
+  const wanted = [...new Set(folderIds)];
+  const live = wanted.filter((id) => id !== 'root');
+  const rows =
+    live.length === 0
+      ? []
+      : (db
+          .prepare(
+            `SELECT n.id AS id, n.title AS title
+             FROM notes n JOIN folders f ON f.id = n.folder_id
+             WHERE n.folder_id IN (SELECT value FROM json_each(?))
+               AND f.deleted = 0 AND n.deleted = 0 AND n.trashed_at IS NULL
+             ORDER BY n.id`
+          )
+          .all(JSON.stringify(live)) as Array<{ id: string; title: string | null }>).map((row) => ({
+          id: String(row.id),
+          title: String(row.title ?? '')
+        }));
+  if (live.length === wanted.length) return rows;
+  return [...rows, ...titlesInFolderRows(db, 'root')].sort((left, right) =>
+    left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  );
+}

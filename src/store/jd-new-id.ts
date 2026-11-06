@@ -51,7 +51,6 @@ import {
   looseFilesFilterInTurn,
   hiddenOperationTarget,
   priorOperation,
-  privacyInTurn,
   privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
@@ -141,16 +140,16 @@ function applyFingerprint(planId: string): string {
 }
 
 /** Lo que lee el puerto del motor sobre el almacén de este turno, con el filtro de quien pide
- *  rehecho en cada llamada (lo que crea un `ensure*` lo ve el siguiente). También lo usa el
+ *  rehecho en cada llamada (lo que crea un `ensure*` lo ve el siguiente) y con SOLO las notas
+ *  que pide cada llamada (`privacyInTurnFor`, pieza A9a del plan de memoria). También lo usa el
  *  de mover (`./jd-move-port.ts`, D19). */
 export function turnView(store: NoteWriteStore, privacy: PrivacyConfig): JdView {
   return {
     folders: () => store.foldersList(),
-    notes: () => store.notesVisibilityIndex(),
     noteRead: (id) => store.noteRead(id),
     folderNotes: (folderId) => store.titlesInFolder(folderId),
-    filter: () => privacyInTurn(store, privacy),
-    noteTitles: (ids) => store.noteTitles(ids),
+    filter: (ids = []) => privacyInTurnFor(store, privacy, ids),
+    notesInFolders: (folderIds) => store.titlesInFolders(folderIds),
     files: () => {
       const index = store.filesIndex();
       // `FileFilter` solo juzga las notas que enlazan ficheros y las bloqueadas (A8).
@@ -349,7 +348,9 @@ export async function runJdNewId(
           privacyInTurnFor(store, request.privacy, []);
           return { result: await simulate(store, request, now), wrote: false };
         case 'apply': {
-          const filter = privacyInTurn(store, request.privacy);
+          // Carpetas y configuración (A9a): `hiddenOperationTarget` carga lo suyo, y las notas que
+          // se juzgan abajo (las del registro, la plantilla) van con un filtro que las lleva.
+          const filter = privacyInTurnFor(store, request.privacy, []);
           const fingerprint = applyFingerprint(request.planId);
           const log = store.operations;
           const previous = priorOperation(
@@ -361,11 +362,17 @@ export async function runJdNewId(
           );
           if (previous?.state === 'done' && isJdApplyReport(previous.result)) {
             // Lo que nombra tiene que seguir viéndose: si no, como algo que no existe.
-            for (const item of [...previous.result.created, ...previous.result.existing]) {
+            const items = [...previous.result.created, ...previous.result.existing];
+            const named = privacyInTurnFor(
+              store,
+              request.privacy,
+              items.filter((item) => item.kind === 'note').map((item) => item.id)
+            );
+            for (const item of items) {
               const visible =
                 item.kind === 'note'
-                  ? filter.visibleMeta(item.id) !== undefined
-                  : filter.folderExists(item.id) && !filter.isFolderHidden(item.id);
+                  ? named.visibleMeta(item.id) !== undefined
+                  : named.folderExists(item.id) && !named.isFolderHidden(item.id);
               if (!visible) throw writeRejected('not_found');
             }
             return { result: { ...previous.result, replayed: true }, wrote: false };
@@ -386,7 +393,8 @@ export async function runJdNewId(
           // simulado ya no es el de la plantilla de ahora (o la delataría oculta).
           const templateId = plan.template.noteId;
           if (templateId !== undefined) {
-            const seal = filter.visibleMeta(templateId) ? filter.sealOf(templateId) : undefined;
+            const template = privacyInTurnFor(store, request.privacy, [templateId]);
+            const seal = template.visibleMeta(templateId) ? template.sealOf(templateId) : undefined;
             if (seal === undefined || templateSeal === null || seal !== templateSeal) throw jdRejected('plan_stale');
           }
           const port = turnPort(store, request.privacy, plan.resolved.jdex.id);
