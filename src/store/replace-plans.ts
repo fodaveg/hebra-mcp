@@ -44,6 +44,7 @@
 import { chmodSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { applyConnectionMemoryPragmas, PLANS_CACHE_SIZE_KIB } from './sqlite-conn-node';
 
 /** Un plan simulado se puede aplicar durante una hora (y un `apply` cortado se puede
  *  reanudar durante una hora desde que empezó). */
@@ -228,7 +229,7 @@ export function ensureReplacePlanTables(db: DatabaseSync): void {
 /** El fichero de los planes, junto al de la biblioteca. */
 export const REPLACE_PLANS_SQLITE_FILE = 'replace-plans.sqlite';
 
-function replacePlansPathOf(librarySqlitePath: string): string | null {
+export function replacePlansPathOf(librarySqlitePath: string): string | null {
   return librarySqlitePath === ':memory:' ? null : join(dirname(librarySqlitePath), REPLACE_PLANS_SQLITE_FILE);
 }
 
@@ -241,6 +242,7 @@ export function openReplacePlansDatabase(librarySqlitePath: string): DatabaseSyn
   const path = replacePlansPathOf(librarySqlitePath) ?? ':memory:';
   const db = new DatabaseSync(path);
   try {
+    applyConnectionMemoryPragmas(db, PLANS_CACHE_SIZE_KIB);
     if (path !== ':memory:') chmodSync(path, 0o600);
     ensureReplacePlanTables(db);
   } catch (error) {
@@ -258,6 +260,13 @@ const PLAN_NOTE_COLUMNS = [
   'plan_id', 'position', 'note_id', 'base_sha256', 'result_sha256', 'result_body', 'matches', 'preview', 'base_body',
   'outcome', 'copy_id', 'proof', 'undo_outcome', 'undo_copy', 'undo_proof', 'attempt_at', 'copy_owned'
 ];
+
+/** `true` si `library.sqlite` aún guarda planes de replace de una versión anterior (hay que migrarlos). */
+export function hasLegacyReplacePlans(libraryDb: DatabaseSync): boolean {
+  return libraryDb
+    .prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name IN ('hebra_mcp_replace_plans', 'hebra_mcp_replace_plan_notes')")
+    .get() !== undefined;
+}
 
 /**
  * Pasa a `plansDb` los planes que una versión anterior guardó en `library.sqlite` y quita

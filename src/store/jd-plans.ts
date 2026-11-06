@@ -26,6 +26,7 @@
 import { chmodSync, closeSync, openSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
+import { applyConnectionMemoryPragmas, PLANS_CACHE_SIZE_KIB } from './sqlite-conn-node';
 
 /** Un plan se aplica en la hora siguiente a simularlo. */
 export const JD_PLAN_APPLY_TTL_MS = 60 * 60 * 1000;
@@ -97,6 +98,7 @@ export function openJdPlansDatabase(librarySqlitePath: string): DatabaseSync {
   }
   const db = new DatabaseSync(path);
   try {
+    applyConnectionMemoryPragmas(db, PLANS_CACHE_SIZE_KIB);
     db.exec(TABLE_SQL);
     ensureColumns(db);
   } catch (error) {
