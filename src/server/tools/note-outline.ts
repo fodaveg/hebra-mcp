@@ -16,6 +16,10 @@
  *
  * Paginación: cursor propio (`o1`) atado a la `revision` de la nota. Si la nota cambió
  * entre dos páginas, `invalid_input`: las posiciones ya no valen.
+ *
+ * Perezosa (A5 del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y
+ * carga en el filtro solo la nota pedida (y, por título, sus homónimas, en `./note-ref.ts`).
+ * Su equivalencia con `'all'` está en `test/tools/note-reads-lazy.test.ts`.
  */
 import { encodeRevision } from '../../store/revision';
 import { parseHeadings } from '../../store/sections';
@@ -67,6 +71,9 @@ export async function runNoteOutline(
   }
   const limit = effectiveLimit(input.limit, LIMITS.noteOutline);
   const id = await resolveNoteId(ctx, input);
+  // `privacyLoad: 'lazy'` (A5): el filtro solo conoce las notas que se le piden. Por título,
+  // `resolveNoteId` ya cargó la elegida con sus homónimas; esto no vuelve a leerla.
+  await ctx.privacy.ensure([id]);
   if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');

@@ -681,7 +681,7 @@ export function registerTools(
       inputSchema: scoped(noteOutlineInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_note_outline', (toolCtx, input) => runNoteOutline(toolCtx, input))
+    gated('hebra_note_outline', (toolCtx, input) => runNoteOutline(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -736,7 +736,7 @@ export function registerTools(
       inputSchema: scoped(linksInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_links', (toolCtx, input) => runLinks(toolCtx, input))
+    gated('hebra_links', (toolCtx, input) => runLinks(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -760,7 +760,7 @@ export function registerTools(
       inputSchema: scoped(createNoteInputShape),
       annotations: WRITE_NON_IDEMPOTENT
     },
-    gated('hebra_create_note', (toolCtx, input) => runCreateNote(toolCtx, input))
+    gated('hebra_create_note', (toolCtx, input) => runCreateNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -890,8 +890,10 @@ export function registerTools(
       inputSchema: scoped(noteAuthorsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_note_authors', (toolCtx, input, selected) =>
-      runNoteAuthors(toolCtx, input, ctx.directory, selected.spaceId)
+    gated(
+      'hebra_note_authors',
+      (toolCtx, input, selected) => runNoteAuthors(toolCtx, input, ctx.directory, selected.spaceId),
+      { privacyLoad: 'lazy' }
     )
   );
 

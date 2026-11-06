@@ -19,6 +19,9 @@
  * Privacidad (SPEC.md §6.3): se juzga con el mismo filtro que `hebra_read_note`
  * (`ctx.privacy.visibleMeta`). Una nota oculta, en la papelera o inexistente responde igual,
  * `not_found`, y el directorio solo se pide si la nota se ve.
+ *
+ * Perezosa (A5 del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y
+ * carga en el filtro solo la nota pedida (`test/tools/note-reads-lazy.test.ts`).
  */
 import { usageOf, type DirectoryView, type ToolContext } from '../context';
 import { ToolError } from '../errors';
@@ -52,6 +55,8 @@ export async function runNoteAuthors(
   directory?: () => Promise<DirectoryView>,
   spaceId?: string
 ): Promise<NoteAuthorsOutput> {
+  // `privacyLoad: 'lazy'` (A5): solo decide la nota pedida.
+  await ctx.privacy.ensure([input.id]);
   const meta = ctx.privacy.visibleMeta(input.id);
   if (!meta) throw new ToolError('not_found');
   const authors = await ctx.port.noteAuthors(input.id);

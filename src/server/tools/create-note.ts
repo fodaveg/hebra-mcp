@@ -14,6 +14,13 @@
  * nota. Un cuerpo con una etiqueta privada (o descendiente) se rechaza sin crear nada,
  * con `not_found`, como una carpeta privada o inexistente. Antes de esa decisión la nota
  * se creaba y la salida decía `hidden: true`.
+ *
+ * Perezosa (A5 del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` sin
+ * cargar ninguna nota en el filtro, porque no juzga ninguna: decide solo con carpetas
+ * (`folderIdForPath`, `isFolderHidden`, `folderPath`), la etiqueta privada la rechaza el
+ * escritor con su propia instantánea (`fromSnapshot`) y la nota nueva la juzga la puerta final.
+ * Su equivalencia con `'all'`, sobre dos copias de la biblioteca, está en
+ * `test/tools/note-reads-lazy.test.ts`.
  */
 import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
@@ -57,7 +64,11 @@ export async function runCreateNote(
   // (C3 de la revisión de Codex). La carpeta es la que dice el escritor, visible al pedirla.
   const folderPath = ctx.privacy.folderPath(result.folderId);
   const used = usageOf(ctx);
-  used.note(result.id);
+  // Solo por estar visible: el filtro de la llamada se hizo ANTES de crearla y no tiene su
+  // fila, así que con `note` el sello por defecto (`sealOf`) era siempre `undefined`, lo mismo
+  // que `noteVisible`; y con `privacyLoad: 'lazy'` esa pregunta por una nota no cargada dejaría
+  // rastro (A5).
+  used.noteVisible(result.id);
   used.folder(result.folderId, folderPath);
   return { id: result.id, title: result.title, folderPath };
 }
