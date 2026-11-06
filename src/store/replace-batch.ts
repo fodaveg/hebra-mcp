@@ -98,6 +98,10 @@ export const REPLACE_PAGE_MAX = REPLACE_MAX_NOTES;
 const SKIPPED_MAX = 50;
 /** Notas por lote de lectura en la simulación, como `hebra_grep`. */
 const SIMULATE_BATCH_NOTES = 64;
+/** Notas por lote de PRIVACIDAD en una simulación sin `ids` (M1 de la revisión de seguridad del
+ *  plan de memoria, 6 nov 2026): se cargan en el filtro, se deciden y se sueltan, así que lo
+ *  cargado a la vez no pasa de este lote aunque el ámbito sea la biblioteca entera. */
+export const SIMULATE_JUDGE_NOTES = 500;
 /** Tope de un id que llega en el ámbito o en un cursor. */
 const ID_MAX_LENGTH = 200;
 /** Tope de un `planId` (son UUID). */
@@ -301,6 +305,8 @@ export interface ReplaceBatchOptions {
    *  `STORED_PLAN_CHARS_MAX`). */
   maxStoredPlans?: number;
   maxStoredPlanChars?: number;
+  /** Tests: otro lote de privacidad de la simulación sin `ids` (`SIMULATE_JUDGE_NOTES`). */
+  judgeNotes?: number;
 }
 
 /** Lo que la simulación lee del almacén (fuera del turno de escritura). */
@@ -561,9 +567,11 @@ export class ReplaceBatch {
 
     // Con `ids` en el ámbito solo se pueden mirar esas notas: el filtro carga solo ellas (A8).
     // Sin `ids`, el ámbito es la biblioteca entera (o una carpeta o una etiqueta, que se
-    // deciden con la carpeta efectiva y las etiquetas de cada nota) y se carga entera.
+    // deciden con la carpeta efectiva y las etiquetas de cada nota): se juzga por lotes de
+    // `SIMULATE_JUDGE_NOTES`, cada uno cargado con `ensure` y soltado al decidirlo (M1 de la
+    // revisión de seguridad del plan de memoria, 6 nov 2026; antes, `ensureAll()`).
     const built = await PrivacyFilter.build(this.port, request.privacy);
-    const filter = scope.ids !== undefined ? await built.ensure(scope.ids) : await built.ensureAll();
+    const filter = scope.ids !== undefined ? await built.ensure(scope.ids) : built;
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
     const nothing = (extra: Partial<ReplacePlanView> = {}): ReplaceLocal => ({
       result: {
@@ -602,21 +610,41 @@ export class ReplaceBatch {
     }
     const ids = scope.ids === undefined ? null : new Set(scope.ids);
 
-    // Qué notas se miran, sin leer ningún cuerpo, en orden de id y desde `after`.
-    let pending: GrepNoteRow[] = [];
+    // Qué notas se miran, sin leer ningún cuerpo, en orden de id y desde `after`. Lo que no
+    // depende de la privacidad (bloqueada, `ids`, `after`) se aplica antes que el filtro: con
+    // `ids`, el filtro solo conoce esas (las demás, ocultas); sin `ids`, así no se carga lo que
+    // no se va a juzgar.
+    const candidates: GrepNoteRow[] = [];
     for (const row of await this.port.grepNotes()) {
       if (row.locked) continue;
-      // Antes que el filtro: con `ids`, el filtro solo conoce esas (las demás, ocultas).
       if (ids && !ids.has(row.id)) continue;
-      const meta = filter.visibleMeta(row.id);
-      if (!meta) continue;
-      if (inFolder && !inFolder(meta.folderId)) continue;
-      if (tag !== undefined && !filter.hasTag(row.id, tag)) continue;
       if (after) {
         const order = byId(row.id, after.id);
         if (order < 0 || (order === 0 && !after.inclusive)) continue;
       }
-      pending.push(row);
+      candidates.push(row);
+    }
+    const visibleInScope = (row: GrepNoteRow): boolean => {
+      const meta = filter.visibleMeta(row.id);
+      if (!meta) return false;
+      if (inFolder && !inFolder(meta.folderId)) return false;
+      return tag === undefined || filter.hasTag(row.id, tag);
+    };
+    let pending: GrepNoteRow[] = [];
+    if (ids) {
+      pending = candidates.filter(visibleInScope);
+    } else {
+      // M1: sin `ids`, por lotes acotados: cargar, decidir y soltar. Después solo se usa del
+      // filtro `hidesAnyTag` (configuración), y el plan se vuelve a juzgar en su turno
+      // (`privacyInTurnFor`), así que nada vuelve a preguntar por una nota soltada.
+      const judgeNotes = this.options.judgeNotes ?? SIMULATE_JUDGE_NOTES;
+      for (let first = 0; first < candidates.length; first += judgeNotes) {
+        const chunk = candidates.slice(first, first + judgeNotes);
+        const chunkIds = chunk.map((row) => row.id);
+        await filter.ensure(chunkIds);
+        for (const row of chunk) if (visibleInScope(row)) pending.push(row);
+        filter.forget(chunkIds);
+      }
     }
     pending.sort((left, right) => byId(left.id, right.id));
     const match = trigramMatch(pattern.required, request.caseSensitive);

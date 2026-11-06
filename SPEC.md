@@ -1051,6 +1051,29 @@ El dispositivo acumula tres secretos:
   del registro; un test (`test/tools/privacy-load-default.test.ts`) falla si otra herramienta se
   queda en `'all'`. La puerta final (abajo) construye su propio filtro con lo leído en su
   transacción (`fromSnapshot`) y no depende de esta carga.
+- **Las que recorren la biblioteca en una llamada** (M1 de la revisión de seguridad del plan de
+  memoria, 6 nov 2026): «solo sus notas» no siempre es poco. Dos herramientas pueden juzgar TODAS
+  las notas vivas en una sola llamada: `hebra_grep` con un patrón raro (el prefiltro descarta casi
+  todo y se juzgan tramos hasta acabar la biblioteca) o sin prefiltro, y `hebra_replace_in_notes`
+  al simular sin `ids` (biblioteca entera, una carpeta o una etiqueta). Las dos lo hacen en TIEMPO,
+  pero su memoria la acota el tramo o el lote, no la biblioteca: lo ya decidido se suelta del
+  filtro (`PrivacyFilter.forget`, `LibraryIndex.forget`), que lo devuelve a NO cargado (oculto y
+  con rastro si alguien vuelve a preguntar, hasta otro `ensure`; sin efecto con la biblioteca
+  entera cargada). `hebra_grep` suelta las de cada tramo (de 128 filas, doblando hasta 8 192) que
+  no se van a mirar en cuanto lo juzga, y las de cada lote de 64 al recorrerlo, menos la última
+  recorrida y la de la última coincidencia, que un corte posterior todavía declara a la puerta
+  final con su sello (`sealOf` necesita la fila cargada): en el índice nunca hay más de un tramo y
+  un lote. La simulación sin `ids` juzga por lotes de 500 (`SIMULATE_JUDGE_NOTES`), cada uno
+  cargado con `ensure` y soltado al decidirlo (antes, `ensureAll()`). Cada tramo o lote es una
+  lectura aparte, como ya lo era en `hebra_grep`: lo que cambie entre dos lecturas se juzga con su
+  fila de ese momento, y lo que sale se vuelve a juzgar igual (en el turno que lee los cuerpos, en
+  el que guarda el plan y en la puerta final). Lo que sí crece con la biblioteca en las dos son las
+  filas de `grepNotes` (id, título y `rowid` de cada nota viva). Medido a 30 000 notas (6 nov 2026,
+  heap vivo máximo de la llamada): `hebra_grep` con un patrón que no está en ninguna nota, de
+  32,9 MiB a 13,5 MiB (unos 4,8 de las filas y el resto, el tramo de 8 192); la simulación sobre la
+  biblioteca entera, de 31,0 MiB a 5,6 MiB; el tiempo, igual (unos 0,55-0,6 s cada una). Lo
+  comprueban `test/tools/grep-forget.test.ts` y `test/replace/simulate-por-lotes.node.test.ts`
+  (mismas respuestas, cursores, planes y recuentos que cargando todo, y el índice acotado).
 - **Cuándo se evalúa**: al construir cada respuesta, a partir de los ids de carpeta y las etiquetas
   canónicas (`canonicalTag` de Hebra) del almacén, no del texto. El filtro de la llamada se
   construye al empezar y lo demás se lee después, y entre las dos cosas el sync (u otra llamada)
@@ -2666,6 +2689,17 @@ de su límite por defecto).
   (`initialize`, `tools/list`) no aparta nada. Ese tamaño sale de una sola función
   (`requestReserveBytes`, `src/accounts/capacity.ts`). Límite de la transición: las tres
   `hebra_jd_*` aún cargan la biblioteca entera y apartan lo mismo que las demás.
+  Dos herramientas pueden recorrer la biblioteca entera en una llamada, en TIEMPO: `hebra_grep`
+  con un patrón raro o sin prefiltro y `hebra_replace_in_notes` al simular sin `ids` (§6.3, «Las
+  que recorren la biblioteca en una llamada»). Su memoria no crece con eso: sueltan del filtro lo
+  ya decidido y en él nunca hay más de un tramo de `hebra_grep` (8 192 notas como mucho, más un
+  lote de 64) o un lote de la simulación (500). Lo que sí crece con la biblioteca son las filas
+  de `grepNotes` (id, título y `rowid` de cada nota viva). Medido a 30 000 notas (6 nov 2026,
+  heap vivo máximo): la simulación sobre la biblioteca entera, 5,6 MiB, dentro de los 8 MiB;
+  `hebra_grep` con un patrón que no está en ninguna nota, 13,5 MiB (unos 4,8 de las filas y el
+  resto del tramo de 8 192), por ENCIMA de lo que aparta. Límite conocido: a esa escala una
+  `hebra_grep` así gasta unos 5 MiB más de lo apartado; bajarlo pide un tramo máximo menor o no
+  guardar las filas de toda la biblioteca, y queda fuera de esta pieza.
 - Se entra si lo medido más lo apartado, con lo propio, no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`.
   Quien llega sin nada apartado en curso entra con que lo medido esté por debajo: una petición sola
   más grande que el margen no espera para siempre.
