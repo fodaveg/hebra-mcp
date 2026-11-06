@@ -33,6 +33,11 @@
  * Logs (§6.4): `file.create`, `file.rename`, `file.move` y `file.duplicate` con el id
  * (opaco), el resultado y el estado de sync. Nunca el nombre, la ruta, el texto ni los
  * hashes.
+ *
+ * Perezosas (A6 del plan de memoria, 6 nov 2026): las cuatro se registran con
+ * `privacyLoad: 'lazy'`. El origen lo juzga `FileFilter`, cuyo `build` carga sus notas; el
+ * destino es una carpeta, y lo que decide si el resultado quedaría oculto lo juzga el
+ * escritor en su turno, con su propio filtro.
  */
 import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';

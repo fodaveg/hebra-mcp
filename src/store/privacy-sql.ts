@@ -155,6 +155,9 @@ export function noteVisibilityRowsFor(
  * la puerta final cuando juzga ficheros sueltos: `FileFilter` oculta los que se incrustan por
  * nombre si hay ALGUNA bloqueada oculta (`PrivacyFilter.hasHiddenLockedNote`, variante de A1),
  * así que su índice parcial tiene que llevarlas todas. Solo ids, sin etiquetas ni carpeta.
+ * También la lee, por el puerto (`HebraLibraryPort.lockedLiveNoteIds`), el filtro de una
+ * llamada perezosa (`PrivacyFilter.ensureLockedNotes`, A6 del plan de memoria): son los
+ * candidatos de esa pregunta, y se juzgan con las mismas reglas que el resto de notas.
  */
 export function lockedLiveNoteIds(
   db: DatabaseSync,

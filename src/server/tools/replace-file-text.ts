@@ -22,6 +22,9 @@
  *
  * Logs (§6.4): `file.replace` con el id (opaco), el resultado y el estado de sync. Nunca
  * el nombre, el texto ni los hashes.
+ *
+ * Perezosa (A6 del plan de memoria, 6 nov 2026): `privacyLoad: 'lazy'`; `FileFilter.build`
+ * carga en el filtro las notas que juzga, y el contenido nuevo lo juzga el escritor.
  */
 import { logEvent } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';

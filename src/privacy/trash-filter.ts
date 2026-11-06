@@ -25,6 +25,16 @@
  *
  * Igual que `PrivacyFilter`, es una instantánea del almacén: se construye en cada
  * llamada (`build`) o dentro del turno del escritor (`fromSnapshot`), nunca se guarda.
+ *
+ * Perezoso (A6 del plan de memoria, 6 nov 2026): de `live` solo usa lo que no depende de las
+ * notas vivas (las carpetas y su subida, `hidesAnyTag`, `hasPrivateTags`), nunca su índice de
+ * notas. Así que `TrashFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)` funciona igual
+ * en una herramienta `privacyLoad: 'lazy'` sin ningún `ensure`, y no deja rastro en
+ * `unloadedLookupsTotal()` (`test/privacy/lazy-file-filter.test.ts`). Lo que sí necesita
+ * `ensure` es lo que la herramienta pregunte a `ctx.privacy` sobre una nota VIVA: p. ej., al
+ * mandar a la papelera, `await ctx.privacy.ensure([id])` antes de `isHiddenNote(id)` o
+ * `visibleMeta(id)` (lo que hará `organize.ts`); las notas de la papelera las juzga este
+ * filtro con su propio índice (`trashIndex`).
  */
 import type { HebraLibraryPort, TrashIndex, TrashedNoteEntry, FolderRowFact } from '../store/types';
 import type { PrivacyConfig } from './config';
@@ -56,7 +66,8 @@ export class TrashFilter {
     this.privatePaths = new Set(config.privateFolders.map((segments) => privacyPathKey(segments)));
   }
 
-  /** Sobre el almacén de ahora; `live` es el filtro de esta misma llamada. */
+  /** Sobre el almacén de ahora; `live` es el filtro de esta misma llamada, con notas cargadas
+   *  o sin ninguna (no las usa: cabecera). */
   static async build(
     port: Pick<HebraLibraryPort, 'trashIndex'>,
     live: PrivacyFilter,

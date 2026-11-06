@@ -29,8 +29,11 @@
  * `isLockedNote`, `sealOf`), se hace `await ctx.privacy.ensure(idsQueVaATocar)` con todos los
  * ids que decidirá (los de la página leída, la nota pedida, las homónimas…). Se puede llamar
  * más de una vez (solo lee los que falten). Su test comprueba que `unloadedLookupsTotal()` no
- * sube al llamarla. Las que recorren la biblioteca (`visibleNotes`, `hasHiddenLockedNote`)
- * siguen necesitando `ensureAll()` hasta que pasen a SQL (A6/A7).
+ * sube al llamarla. `visibleNotes` recorre la biblioteca y sigue necesitando `ensureAll()`
+ * hasta que pase a SQL (A7). `hasHiddenLockedNote` ya no (A6): basta `ensureLockedNotes(port)`,
+ * que lee los ids de las bloqueadas vivas y carga solo esas; `FileFilter.build` lo hace solo,
+ * junto con las notas que enlazan cada fichero. `TrashFilter` no pregunta por notas vivas: se
+ * construye sobre un filtro sin nada cargado (cabecera de `./trash-filter.ts`).
  *
  * Audit de privacidad adversarial del 10 oct 2026 (D16, `test/privacy/`): una nota
  * bloqueada se oculta mientras haya etiquetas privadas (A1), una nota viva cuya carpeta
@@ -77,6 +80,9 @@ export class PrivacyFilter implements LiveFolders {
    *  en momentos distintos (`ensure`), una fila vieja de otra nota podría continuar una subida
    *  que la suya corta. */
   private readonly trails = new WeakMap<NoteIndexEntry, ReadonlyMap<string, FolderRowFact>>();
+  /** Ids de las notas vivas bloqueadas que leyó `ensureLockedNotes` (`undefined` si no se
+   *  llamó): los candidatos de `hasHiddenLockedNote` sin la biblioteca entera. */
+  private lockedCandidates: readonly string[] | undefined;
 
   private constructor(
     private readonly folders: FolderIndex,
@@ -146,8 +152,8 @@ export class PrivacyFilter implements LiveFolders {
   /**
    * TRANSICIÓN (A3 del plan de memoria): carga la biblioteca entera como antes de A3. Lo
    * llama `resolveToolContext` para que todas las herramientas sigan igual mientras A4-A8 las
-   * pasan, una a una, a `ensure(ids)`; y quien recorre la biblioteca (`visibleNotes`,
-   * `hasHiddenLockedNote`). Devuelve el propio filtro.
+   * pasan, una a una, a `ensure(ids)`; y quien recorre la biblioteca (`visibleNotes`;
+   * `hasHiddenLockedNote` ya se arregla con `ensureLockedNotes`). Devuelve el propio filtro.
    */
   async ensureAll(): Promise<this> {
     if (this.source) await this.library.ensureAll(this.source);
@@ -230,22 +236,50 @@ export class PrivacyFilter implements LiveFolders {
     return this.library.get(id)?.localSeq;
   }
 
+  /**
+   * Carga lo que necesita `hasHiddenLockedNote` sin cargar la biblioteca entera (A6 del plan de
+   * memoria): los ids de las notas vivas bloqueadas (`lockedLiveNoteIds` del puerto, una
+   * lectura) y, solo si no hay etiquetas privadas, sus filas (`ensure`, otra). Con etiquetas
+   * privadas no hace falta la segunda: toda bloqueada viva está oculta (A1), así que basta con
+   * saber si hay alguna. Lo llama `FileFilter.build`. Sin efecto con la biblioteca entera ya
+   * cargada o si ya se llamó en este filtro. Devuelve el propio filtro.
+   */
+  async ensureLockedNotes(port: Pick<HebraLibraryPort, 'lockedLiveNoteIds'>): Promise<this> {
+    if (this.library.isFull() || this.lockedCandidates !== undefined) return this;
+    const ids = await port.lockedLiveNoteIds();
+    if (this.privateTags.size === 0) await this.ensure(ids);
+    this.lockedCandidates = ids;
+    return this;
+  }
+
   /** ¿Hay alguna nota viva BLOQUEADA y oculta? Para la variante de A1 de los ficheros
    *  sueltos (`FileFilter`): lo que incrustaba por nombre va cifrado.
    *
-   *  Recorre la biblioteca entera: necesita `ensureAll()`. Sin él responde `true` (falla
-   *  cerrando: se ocultan los ficheros que se pueden incrustar por nombre) y deja rastro.
-   *  A6/A7 lo pasarán a SQL (una consulta de «existe una bloqueada oculta») y dejará de
-   *  depender del índice. */
+   *  Con la biblioteca entera (`ensureAll`, `fromSnapshot`) recorre sus bloqueadas. Si no,
+   *  juzga los candidatos que leyó `ensureLockedNotes` con las mismas reglas
+   *  (`isHiddenNote`: carpetas privadas, también recordadas, lápidas y etiquetas privadas de
+   *  la configuración); equivalencia en `test/privacy/lazy-file-filter.test.ts`. Sin ninguna
+   *  de las dos responde `true` (falla cerrando: se ocultan los ficheros que se pueden
+   *  incrustar por nombre) y deja rastro. */
   hasHiddenLockedNote(): boolean {
-    if (!this.library.isFull()) {
+    if (this.library.isFull()) {
+      for (const [id, entry] of this.library.entries()) {
+        if (entry.locked && this.isHiddenNote(id)) return true;
+      }
+      return false;
+    }
+    if (this.lockedCandidates === undefined) {
       this.library.noteUnloaded();
       return true;
     }
-    for (const [id, entry] of this.library.entries()) {
-      if (entry.locked && this.isHiddenNote(id)) return true;
-    }
-    return false;
+    // A1: con etiquetas privadas, toda bloqueada viva está oculta.
+    if (this.privateTags.size > 0) return this.lockedCandidates.length > 0;
+    return this.lockedCandidates.some((id) => {
+      const entry = this.library.get(id);
+      // Desaparecida entre las dos lecturas de `ensureLockedNotes`: cerrado ante la duda.
+      if (entry === undefined) return true;
+      return entry.locked && this.isHiddenNote(id);
+    });
   }
 
   isFolderHidden(folderId: string): boolean {

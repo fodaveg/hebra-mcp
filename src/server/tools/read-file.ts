@@ -29,6 +29,9 @@
  * `hebra_replace_file_text`. Es el hash de un fichero que se ve y cuyo contenido sale
  * entero, así que no dice nada que el contenido no diga; `hebra_list_files` sigue sin
  * darlo (D10).
+ *
+ * Perezosa (A6 del plan de memoria, 6 nov 2026): `privacyLoad: 'lazy'`; `FileFilter.build`
+ * carga en el filtro las notas que juzga.
  */
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { FileFilter } from '../../privacy/file-filter';

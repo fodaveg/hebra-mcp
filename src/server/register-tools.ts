@@ -878,7 +878,7 @@ export function registerTools(
       inputSchema: scoped(listTrashInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_trash', (toolCtx, input) => runListTrash(toolCtx, input))
+    gated('hebra_list_trash', (toolCtx, input) => runListTrash(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -906,7 +906,7 @@ export function registerTools(
       inputSchema: scoped(listFilesInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_files', (toolCtx, input) => runListFiles(toolCtx, input))
+    gated('hebra_list_files', (toolCtx, input) => runListFiles(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -918,7 +918,7 @@ export function registerTools(
       inputSchema: scoped(trashFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_trash_file', (toolCtx, input) => runTrashFile(toolCtx, input))
+    gated('hebra_trash_file', (toolCtx, input) => runTrashFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -930,7 +930,7 @@ export function registerTools(
       inputSchema: scoped(restoreFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_restore_file', (toolCtx, input) => runRestoreFile(toolCtx, input))
+    gated('hebra_restore_file', (toolCtx, input) => runRestoreFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -942,7 +942,7 @@ export function registerTools(
       inputSchema: scoped(readFileInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_read_file', (toolCtx, input) => runReadFile(toolCtx, input))
+    gated('hebra_read_file', (toolCtx, input) => runReadFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -956,7 +956,7 @@ export function registerTools(
       // la vuelta atrás solo vive en una tabla local de este dispositivo, 7 días.
       annotations: WRITE_DESTRUCTIVE_IDEMPOTENT
     },
-    gated('hebra_replace_file_text', (toolCtx, input) => runReplaceFileText(toolCtx, input))
+    gated('hebra_replace_file_text', (toolCtx, input) => runReplaceFileText(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   // D17 (12 oct 2026): crear, renombrar, mover y duplicar ficheros sueltos. Idempotentes por
@@ -970,7 +970,7 @@ export function registerTools(
       inputSchema: scoped(createFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_create_file', (toolCtx, input) => runCreateFile(toolCtx, input))
+    gated('hebra_create_file', (toolCtx, input) => runCreateFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -982,7 +982,7 @@ export function registerTools(
       inputSchema: scoped(renameFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_rename_file', (toolCtx, input) => runRenameFile(toolCtx, input))
+    gated('hebra_rename_file', (toolCtx, input) => runRenameFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -994,7 +994,7 @@ export function registerTools(
       inputSchema: scoped(moveFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_move_file', (toolCtx, input) => runMoveFile(toolCtx, input))
+    gated('hebra_move_file', (toolCtx, input) => runMoveFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1006,7 +1006,7 @@ export function registerTools(
       inputSchema: scoped(duplicateFileInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_duplicate_file', (toolCtx, input) => runDuplicateFile(toolCtx, input))
+    gated('hebra_duplicate_file', (toolCtx, input) => runDuplicateFile(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1053,7 +1053,7 @@ export function registerTools(
       inputSchema: scoped(listAttachmentsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_attachments', (toolCtx, input) => runListAttachments(toolCtx, input))
+    gated('hebra_list_attachments', (toolCtx, input) => runListAttachments(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1065,7 +1065,7 @@ export function registerTools(
       inputSchema: scoped(readAttachmentInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_read_attachment', (toolCtx, input) => runReadAttachment(toolCtx, input))
+    gated('hebra_read_attachment', (toolCtx, input) => runReadAttachment(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

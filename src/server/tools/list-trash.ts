@@ -15,6 +15,10 @@
  *
  * `kind: "folders"` (D23, 5 nov 2026) lista las carpetas de la papelera en vez de las notas
  * (`./list-trash-folders.ts`); sin `kind`, o con `"notes"`, todo sigue igual.
+ *
+ * Perezosa (A6 del plan de memoria, 6 nov 2026): `privacyLoad: 'lazy'` sin ningún `ensure`.
+ * Las notas de la papelera las juzga `TrashFilter` con su propio índice, y de `ctx.privacy`
+ * solo usa carpetas y configuración (cabecera de `../../privacy/trash-filter.ts`).
  */
 import { encodeCursor } from '../../hebra';
 import { TrashFilter } from '../../privacy/trash-filter';

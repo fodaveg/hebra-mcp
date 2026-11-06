@@ -18,6 +18,9 @@
  * La puerta final (`../privacy-gate.ts`) no tiene una declaración para carpetas de la
  * papelera; las protege la ÉPOCA de privacidad (carpetas incluidas), que repite la llamada si
  * algo cambió entre el principio y la respuesta.
+ *
+ * Perezosa (A6 del plan de memoria, 6 nov 2026), con `hebra_list_trash`: `TrashFilter` no usa
+ * el índice de notas vivas, así que no hace falta ningún `ensure`.
  */
 import { TrashFilter } from '../../privacy/trash-filter';
 import type { FolderTrashEntry } from '../../store/state-reads';

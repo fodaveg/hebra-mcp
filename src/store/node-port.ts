@@ -559,6 +559,12 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     return this.read(() => noteVisibilityRowsFor(this.db, ids, (sql) => this.prepared(sql)));
   }
 
+  /** Ids de las notas vivas bloqueadas (`lockedLiveNoteIds`, `./privacy-sql.ts`), por la cola
+   *  serie como cualquier otra lectura. */
+  async lockedLiveNoteIds(): Promise<string[]> {
+    return this.read(() => lockedLiveNoteIds(this.db, (sql) => this.prepared(sql)));
+  }
+
   /** Lo que lee la puerta final (`src/server/privacy-gate.ts`): árbol de carpetas, índice
    *  de visibilidad, memoria de las carpetas privadas (la tabla y lo que este proceso anotó
    *  sin poder escribirla), sellos y, si se piden, papelera, ficheros sueltos y quién enlaza
