@@ -24,6 +24,11 @@
  *
  * Logs (§6.4): `replace.batch` con el modo y números (notas, si terminó, estado de sync).
  * Nunca el patrón, el reemplazo, títulos ni ids.
+ *
+ * Perezosa (A5b del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'`. Aquí
+ * no se juzga ninguna nota (lo hace el escritor con su propia lectura); solo hay que cargar en
+ * el filtro las que nombra la respuesta, de las que la puerta final toma el sello
+ * (`noteIdsOf`). Equivalencia con `'all'` en `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
 import { compileGrepPattern } from '../../store/grep';
@@ -150,6 +155,7 @@ export async function runReplaceInNotes(
     throw mapWriteError(error);
   }
   if (outcome.mode === 'discard') throw new ToolError('invalid_input');
+  await ctx.privacy.ensure(noteIdsOf(outcome));
   const result = declareUsage(ctx, outcome);
   const event: Record<string, unknown> = { event: 'replace.batch', mode: result.mode, notes: result.notes.length };
   if (result.mode === 'apply') {
@@ -162,6 +168,26 @@ export async function runReplaceInNotes(
   if (result.mode === 'simulate' || result.mode === 'preview') afterGate(ctx, () => logEvent(event as { event: string }));
   else logEvent(event as { event: string });
   return result;
+}
+
+/**
+ * Las notas vivas que `declareUsage` declara con `used.note` (las de la respuesta, `gateNotes`,
+ * las saltadas y la de `continueAfter`): la puerta final toma su sello del filtro de la llamada
+ * (`GateUsage.note`), así que con `privacyLoad: 'lazy'` se cargan antes. Las copias de conflicto
+ * no: van por `noteInAnyState`, sin sello. Cargadas tras la simulación, el sello es el de ese
+ * momento y no el del principio de la llamada (con `'all'`); lo que cambie una nota entre medias
+ * cambia también la época, y la puerta repite la llamada igual (paso 4 de `../privacy-gate.ts`).
+ */
+function noteIdsOf(outcome: Exclude<ReplaceOutcome, { mode: 'discard' }>): string[] {
+  const ids = outcome.notes.map((note) => note.id);
+  if (outcome.mode !== 'simulate' && outcome.mode !== 'preview') return ids;
+  ids.push(...(outcome.gateNotes ?? []));
+  if (outcome.mode === 'simulate') {
+    for (const skipped of outcome.skipped ?? []) ids.push(skipped.id);
+    const after = outcome.continueAfter ? continueAfterId(outcome.continueAfter) : null;
+    if (after !== null) ids.push(after);
+  }
+  return ids;
 }
 
 /**

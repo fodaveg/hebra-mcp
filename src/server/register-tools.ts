@@ -772,7 +772,7 @@ export function registerTools(
       inputSchema: scoped(appendToNoteInputShape),
       annotations: WRITE_NON_IDEMPOTENT
     },
-    gated('hebra_append_to_note', (toolCtx, input) => runAppendToNote(toolCtx, input))
+    gated('hebra_append_to_note', (toolCtx, input) => runAppendToNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -784,7 +784,7 @@ export function registerTools(
       inputSchema: scoped(editNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_edit_note', (toolCtx, input) => runEditNote(toolCtx, input))
+    gated('hebra_edit_note', (toolCtx, input) => runEditNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -796,7 +796,7 @@ export function registerTools(
       inputSchema: scoped(moveNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_move_note', (toolCtx, input) => runMoveNote(toolCtx, input))
+    gated('hebra_move_note', (toolCtx, input) => runMoveNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -807,7 +807,7 @@ export function registerTools(
       inputSchema: scoped(setFavoriteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_set_favorite', (toolCtx, input) => runSetFavorite(toolCtx, input))
+    gated('hebra_set_favorite', (toolCtx, input) => runSetFavorite(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -818,7 +818,7 @@ export function registerTools(
       inputSchema: scoped(setArchivedInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_set_archived', (toolCtx, input) => runSetArchived(toolCtx, input))
+    gated('hebra_set_archived', (toolCtx, input) => runSetArchived(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -830,7 +830,7 @@ export function registerTools(
       inputSchema: scoped(setHiddenInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_set_hidden', (toolCtx, input) => runSetHidden(toolCtx, input))
+    gated('hebra_set_hidden', (toolCtx, input) => runSetHidden(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -842,7 +842,7 @@ export function registerTools(
       inputSchema: scoped(clearConflictInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_clear_conflict', (toolCtx, input) => runClearConflict(toolCtx, input))
+    gated('hebra_clear_conflict', (toolCtx, input) => runClearConflict(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -854,7 +854,7 @@ export function registerTools(
       inputSchema: scoped(trashNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_trash_note', (toolCtx, input) => runTrashNote(toolCtx, input))
+    gated('hebra_trash_note', (toolCtx, input) => runTrashNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -866,7 +866,7 @@ export function registerTools(
       inputSchema: scoped(restoreNoteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_restore_note', (toolCtx, input) => runRestoreNote(toolCtx, input))
+    gated('hebra_restore_note', (toolCtx, input) => runRestoreNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1016,7 +1016,7 @@ export function registerTools(
       inputSchema: scoped(listVersionsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_versions', (toolCtx, input) => runListVersions(toolCtx, input))
+    gated('hebra_list_versions', (toolCtx, input) => runListVersions(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1027,7 +1027,7 @@ export function registerTools(
       inputSchema: scoped(readVersionInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_read_version', (toolCtx, input) => runReadVersion(toolCtx, input))
+    gated('hebra_read_version', (toolCtx, input) => runReadVersion(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1039,7 +1039,7 @@ export function registerTools(
       inputSchema: scoped(restoreVersionInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_restore_version', (toolCtx, input) => runRestoreVersion(toolCtx, input))
+    gated('hebra_restore_version', (toolCtx, input) => runRestoreVersion(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1099,7 +1099,7 @@ export function registerTools(
       inputSchema: scoped(addAttachmentInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_add_attachment', (toolCtx, input) => runAddAttachment(toolCtx, input))
+    gated('hebra_add_attachment', (toolCtx, input) => runAddAttachment(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1111,7 +1111,7 @@ export function registerTools(
       inputSchema: scoped(replaceInNotesInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_replace_in_notes', (toolCtx, input) => runReplaceInNotes(toolCtx, input))
+    gated('hebra_replace_in_notes', (toolCtx, input) => runReplaceInNotes(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

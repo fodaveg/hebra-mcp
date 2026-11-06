@@ -22,6 +22,11 @@
  * Restaurar es una EDICIÓN nueva con el control de `hebra_edit_note`: `expectedRevision`
  * (la de `hebra_read_note`), `operationId` para reintentar sin repetir, y una edición a
  * la vez en otro dispositivo deja una copia de conflicto visible (`NoteWriter.restoreVersion`).
+ *
+ * Perezosas (A5b del plan de memoria, 6 nov 2026): las tres se registran con `privacyLoad:
+ * 'lazy'` y solo cargan en el filtro la nota `id` (`requireLoadedVisibleNote`); lo que se juzga
+ * de una versión (`versionIsHidden`) solo mira la configuración. Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
@@ -32,7 +37,7 @@ import { ToolError } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 import { usageOf, type ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
-import { declareWriteUsage, requireValidOperationId, requireVisibleNote } from './guards';
+import { declareWriteUsage, requireLoadedVisibleNote, requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
 
 export interface ListedVersion {
@@ -79,7 +84,7 @@ export async function runListVersions(
   const limit = effectiveLimit(input.limit, LIMITS.listVersions);
   const after = input.cursor !== undefined ? Number(unwrapCursor('v1', input.cursor)) : null;
   if (after !== null && !Number.isInteger(after)) throw new ToolError('invalid_input');
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const { items } = await ctx.port.noteVersionsList(input.id);
 
   const readBodies = ctx.privacyConfig.privateTags.length > 0;
@@ -145,7 +150,7 @@ export async function runReadVersion(
   ctx: ToolContext,
   input: { id: string; versionId: number }
 ): Promise<ReadVersionOutput> {
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const version = await ctx.port.noteVersionRead(input.versionId);
   if (!version || version.noteId !== input.id || versionIsHidden(ctx.privacy, version)) {
     throw new ToolError('not_found');
@@ -164,7 +169,7 @@ export async function runRestoreVersion(
 ): Promise<EditNoteOutcome> {
   if (!ctx.write) throw new ToolError('invalid_input');
   requireValidOperationId(input.operationId);
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
 
   let result: EditNoteOutcome;
   try {

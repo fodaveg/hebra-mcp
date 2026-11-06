@@ -32,6 +32,12 @@
  * por `noteState` (`../../store/note-state.ts`) y, si el texto cambió, `revision_conflict`; sin
  * él, igual que siempre. Ocultar del listado general y quitar la marca de conflicto, también de
  * D23, en `./note-state.ts`.
+ *
+ * Perezosas (A5b del plan de memoria, 6 nov 2026): se registran con `privacyLoad: 'lazy'` y
+ * cargan en el filtro solo la nota sobre la que actúan (`requireLoadedVisibleNote`, o el
+ * `ensure` de `requireVisibleLiveOrTrashed`). `TrashFilter` se construye igual que antes: solo
+ * pregunta al filtro de la llamada por carpetas y configuración. Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
 import { TrashFilter } from '../../privacy/trash-filter';
@@ -40,7 +46,7 @@ import type { OrganizeAction } from '../../store/writes';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { syncOf, type NoteStateOutcome, type OrganizeOutcome, type SyncFields } from '../write-context';
-import { requireValidRevision, requireVisibleNote } from './guards';
+import { requireLoadedVisibleNote, requireValidRevision } from './guards';
 import { mapWriteError } from './write-errors';
 
 export type NoteOrganizeOutput = {
@@ -50,8 +56,11 @@ export type NoteOrganizeOutput = {
   archived: boolean;
 } & SyncFields;
 
-/** Viva y visible, o en la papelera y visible para el filtro de la papelera. */
+/** Viva y visible, o en la papelera y visible para el filtro de la papelera. La nota se carga
+ *  antes en el filtro de la llamada (`privacyLoad: 'lazy'`); el de la papelera solo pregunta a
+ *  ese filtro por carpetas y configuración, nunca por notas. */
 async function requireVisibleLiveOrTrashed(ctx: ToolContext, id: string): Promise<void> {
+  await ctx.privacy.ensure([id]);
   if (ctx.privacy.visibleMeta(id)) return;
   const trash = await TrashFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
   if (!trash.isVisible(id)) throw new ToolError('not_found');
@@ -111,7 +120,7 @@ export async function runMoveNote(
   input: { id: string; folderId: string; expectedRevision?: string }
 ): Promise<NoteOrganizeOutput> {
   requireValidRevision(input.expectedRevision);
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   requireVisibleFolder(ctx, input.folderId);
   const action = { action: 'moveNote', id: input.id, folderId: input.folderId } as const;
   const outcome =
@@ -126,7 +135,7 @@ export async function runSetFavorite(
   ctx: ToolContext,
   input: { id: string; favorite: boolean }
 ): Promise<NoteOrganizeOutput> {
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const action = { action: 'setFavorite', id: input.id, favorite: input.favorite } as const;
   return noteOutput(ctx, action.action, await organize(ctx, action));
 }
@@ -136,7 +145,7 @@ export async function runSetArchived(
   ctx: ToolContext,
   input: { id: string; archived: boolean }
 ): Promise<NoteOrganizeOutput> {
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const action = { action: 'setArchived', id: input.id, archived: input.archived } as const;
   return noteOutput(ctx, action.action, await organize(ctx, action));
 }

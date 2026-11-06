@@ -33,6 +33,10 @@
  *
  * Logs (§6.4): `note.attachment` con el id de la nota, el resultado y el estado de sync.
  * Nunca el nombre, el hash ni los bytes.
+ *
+ * Perezosa (A5b del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y solo
+ * carga en el filtro la nota `id` (`requireLoadedVisibleNote`). Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
 import {
@@ -45,7 +49,7 @@ import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { AddAttachmentOutcome } from '../write-context';
-import { declareWriteUsage, requireValidOperationId, requireVisibleNote } from './guards';
+import { declareWriteUsage, requireLoadedVisibleNote, requireValidOperationId } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
 
@@ -84,7 +88,7 @@ export async function runAddAttachment(
     );
   }
 
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const note = await ctx.port.noteRead(input.id);
   if (!note || note.trashedAt !== null) throw new ToolError('not_found');
   if (note.body.startsWith(LOCKED_BODY_PREFIX)) throw new ToolError('note_locked');

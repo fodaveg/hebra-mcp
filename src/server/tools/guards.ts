@@ -13,10 +13,26 @@ import { ToolError } from '../errors';
  * leerla: un error posterior que dependa de ella (`note_locked`, `ambiguous_heading` con sus
  * candidatos, `no_match`…) también la necesita visible y sin cambios al salir (R3-1 de la 3.ª
  * revisión de Codex).
+ *
+ * Juzga con lo que el filtro ya tenga cargado: en una herramienta perezosa (`privacyLoad:
+ * 'lazy'`) sin `ensure` previo, la nota cuenta como oculta (`not_found`, falla cerrando). Las
+ * perezosas usan `requireLoadedVisibleNote`.
  */
 export function requireVisibleNote(ctx: ToolContext, id: string): void {
   if (!ctx.privacy.visibleMeta(id)) throw new ToolError('not_found');
   usageOf(ctx).note(id);
+}
+
+/**
+ * `requireVisibleNote` para una herramienta perezosa (`privacyLoad: 'lazy'`, pieza A5b del plan
+ * de memoria, 6 nov 2026): carga antes esa nota en el filtro (`ctx.privacy.ensure([id])`, que
+ * con `'all'` no lee nada) y la juzga después igual. Es la única nota que decide: el escritor
+ * vuelve a comprobarlo todo dentro de su turno con su propia lectura, y la puerta final con la
+ * suya.
+ */
+export async function requireLoadedVisibleNote(ctx: ToolContext, id: string): Promise<void> {
+  await ctx.privacy.ensure([id]);
+  requireVisibleNote(ctx, id);
 }
 
 /**

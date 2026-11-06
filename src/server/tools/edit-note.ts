@@ -17,13 +17,17 @@
  * La salida distingue el guardado local (`outcome`) del estado de sync (`sync`,
  * `../write-context.ts`). Una copia de conflicto (otro dispositivo editó a la vez)
  * llega como `outcome: "conflict_copy"` con `copyId`: sin reintento automático.
+ *
+ * Perezosa (A5b del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y solo
+ * carga en el filtro la nota `id` (`requireLoadedVisibleNote`). Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
 import { editsWithinLimits, type TextEdit } from '../../store/edits';
 import { ToolError } from '../errors';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
-import { declareWriteUsage, requireValidOperationId, requireVisibleNote } from './guards';
+import { declareWriteUsage, requireLoadedVisibleNote, requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
 
 export async function runEditNote(
@@ -33,7 +37,7 @@ export async function runEditNote(
   if (!ctx.write) throw new ToolError('invalid_input');
   if (!editsWithinLimits(input.edits)) throw new ToolError('invalid_input');
   requireValidOperationId(input.operationId);
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
 
   let result: EditNoteOutcome;
   try {
