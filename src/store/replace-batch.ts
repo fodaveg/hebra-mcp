@@ -76,7 +76,7 @@ import {
   LOCKED_BODY_PREFIX,
   hiddenOperationTarget,
   priorOperation,
-  privacyInTurn,
+  privacyInTurnFor,
   REPLACE_BODY_MAX_LENGTH,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -388,6 +388,17 @@ function validCount(value: number, max: number): boolean {
   return Number.isSafeInteger(value) && value >= 1 && value <= max;
 }
 
+/** Lo que el informe de `apply` o de `undo` puede nombrar o contar: las notas del plan y
+ *  sus copias de conflicto (`visibleNow` carga solo esas). */
+function reportedIds(rows: readonly PlanNoteRecord[]): string[] {
+  const ids: string[] = [];
+  for (const row of rows) {
+    ids.push(row.noteId);
+    if (row.copyId !== null) ids.push(row.copyId);
+  }
+  return ids;
+}
+
 /** Los cambios guardados de una nota (JSON propio, ya validado al guardarlo). */
 function changesOf(preview: string): ReplaceChange[] {
   try {
@@ -510,17 +521,21 @@ export class ReplaceBatch {
     }
   }
 
-  /** Títulos y si es copia de conflicto de las notas vivas, y un filtro de privados
-   *  recién hecho: lo que necesita cualquier salida, para no nombrar una que ya es oculta. */
-  private async visibleNow(privacy: PrivacyConfig): Promise<{
+  /** Títulos y si es copia de conflicto de las notas de `ids` que siguen vivas y VISIBLES, y
+   *  un filtro de privados recién hecho: lo que necesita cualquier salida, para no nombrar una
+   *  que ya es oculta. `ids` son todas las que la salida puede nombrar o contar (las del plan y
+   *  sus copias de conflicto): el filtro carga solo esas (A8 del plan de memoria; antes, la
+   *  biblioteca entera), y una que no esté en `ids` no sale en `rows`. */
+  private async visibleNow(privacy: PrivacyConfig, ids: readonly string[]): Promise<{
     filter: PrivacyFilter;
     rows: Map<string, GrepNoteRow>;
   }> {
-    const filter = await (await PrivacyFilter.build(this.port, privacy)).ensureAll();
+    const filter = await (await PrivacyFilter.build(this.port, privacy)).ensure(ids);
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
+    const wanted = new Set(ids);
     const rows = new Map<string, GrepNoteRow>();
     for (const row of await this.port.grepNotes()) {
-      if (filter.visibleMeta(row.id)) rows.set(row.id, row);
+      if (wanted.has(row.id) && filter.visibleMeta(row.id)) rows.set(row.id, row);
     }
     return { filter, rows };
   }
@@ -544,7 +559,11 @@ export class ReplaceBatch {
     }
     const after = request.after === undefined ? null : parseContinue(request.after);
 
-    const filter = await (await PrivacyFilter.build(this.port, request.privacy)).ensureAll();
+    // Con `ids` en el ámbito solo se pueden mirar esas notas: el filtro carga solo ellas (A8).
+    // Sin `ids`, el ámbito es la biblioteca entera (o una carpeta o una etiqueta, que se
+    // deciden con la carpeta efectiva y las etiquetas de cada nota) y se carga entera.
+    const built = await PrivacyFilter.build(this.port, request.privacy);
+    const filter = scope.ids !== undefined ? await built.ensure(scope.ids) : await built.ensureAll();
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
     const nothing = (extra: Partial<ReplacePlanView> = {}): ReplaceLocal => ({
       result: {
@@ -587,11 +606,12 @@ export class ReplaceBatch {
     let pending: GrepNoteRow[] = [];
     for (const row of await this.port.grepNotes()) {
       if (row.locked) continue;
+      // Antes que el filtro: con `ids`, el filtro solo conoce esas (las demás, ocultas).
+      if (ids && !ids.has(row.id)) continue;
       const meta = filter.visibleMeta(row.id);
       if (!meta) continue;
       if (inFolder && !inFolder(meta.folderId)) continue;
       if (tag !== undefined && !filter.hasTag(row.id, tag)) continue;
-      if (ids && !ids.has(row.id)) continue;
       if (after) {
         const order = byId(row.id, after.id);
         if (order < 0 || (order === 0 && !after.inclusive)) continue;
@@ -752,7 +772,7 @@ export class ReplaceBatch {
     const createdAt = Date.now();
     const kept = await this.target.writeExclusive(async (store) => {
       store.replacePlans.purgeExpired(createdAt);
-      const inTurn = privacyInTurn(store, request.privacy);
+      const inTurn = privacyInTurnFor(store, request.privacy, entries.map((entry) => entry.id));
       const keep: Candidate[] = [];
       for (const entry of entries) {
         const note = await store.noteRead(entry.id);
@@ -892,7 +912,7 @@ export class ReplaceBatch {
       if (!last) throw writeRejected('invalid_input');
       after = last.position;
     }
-    const { rows: visible } = await this.visibleNow(request.privacy);
+    const { rows: visible } = await this.visibleNow(request.privacy, rows.map((row) => row.noteId));
     const views = rows
       .filter((row) => row.position > after && visible.has(row.noteId))
       .map((row) => {
@@ -936,7 +956,7 @@ export class ReplaceBatch {
         request.operationId,
         fingerprint,
         now,
-        hiddenOperationTarget(store, privacyInTurn(store, request.privacy), request.privacy)
+        hiddenOperationTarget(store, privacyInTurnFor(store, request.privacy, []), request.privacy)
       );
       const plan = requirePlan(store, request.planId, request.privacy, true);
       if (plan.applyOperationId === null) {
@@ -1008,7 +1028,7 @@ export class ReplaceBatch {
     const plans = store.replacePlans;
     const bodies = plans.bodies(planId, row.position);
     if (!bodies) return false;
-    const filter = privacyInTurn(store, privacy);
+    const filter = privacyInTurnFor(store, privacy, [row.noteId]);
     const note = await store.noteRead(row.noteId);
     const visible = note !== null && note.trashedAt === null && !filter.isHiddenNote(note.id);
     // AC6: el cuerpo base se guarda en el plan ANTES de escribir la nota, en este turno: si
@@ -1077,7 +1097,7 @@ export class ReplaceBatch {
     privacy: PrivacyConfig,
     replayed: boolean
   ): Promise<ReplaceApplyReport> {
-    const { filter, rows: visible } = await this.visibleNow(privacy);
+    const { filter, rows: visible } = await this.visibleNow(privacy, reportedIds(rows));
     const copyShown = await this.copyVisibility(filter, visible, privacy);
     const notes: ReplaceReportNote[] = [];
     for (const row of rows) {
@@ -1149,7 +1169,7 @@ export class ReplaceBatch {
       store.replacePlans.purgeExpired(Date.now());
       // M4: deshacer no exige la configuración con que se simuló (cada nota se vuelve a
       // comprobar en su turno con la de AHORA), pero sí una que se pueda aplicar.
-      privacyInTurn(store, request.privacy);
+      privacyInTurnFor(store, request.privacy, []);
       const plan = requirePlan(store, request.planId, request.privacy, false);
       // Una vuelta atrás nueva empieza de cero; una a medias (`undoing`, cortada por el
       // plazo) sigue por las que le faltan.
@@ -1182,7 +1202,7 @@ export class ReplaceBatch {
       if (plan.applyOperationId !== null && done) store.replacePlans.setState(plan.planId, 'undone');
       return now;
     });
-    const { filter, rows: visible } = await this.visibleNow(request.privacy);
+    const { filter, rows: visible } = await this.visibleNow(request.privacy, reportedIds(rows));
     const copyShown = await this.copyVisibility(filter, visible, request.privacy);
     const notes: ReplaceUndoNote[] = [];
     for (const row of rows) {

@@ -63,6 +63,10 @@ export interface RelinkTurn {
   files: FileFilter;
   live: PrivacyFilter;
   index: FilesIndex;
+  /** El filtro de privados del turno con SOLO esas notas (`privacyInTurnFor`, A8 del plan de
+   *  memoria): si está, las notas que se reenlazan se juzgan con él, porque `live` puede ser
+   *  uno hecho solo con las notas de los ficheros. Sin él, con `live`. */
+  liveFor?: (noteIds: readonly string[]) => PrivacyFilter;
 }
 
 /** El fichero como está GUARDADO: la fila, no lo que se enseña de ella (`fileRenameAndRelink`
@@ -88,7 +92,8 @@ export function relinkedNotesOf(plan: Pick<RelinkPlan, 'entries'>): string[] {
 export async function planRelink(turn: RelinkTurn, file: RelinkFile, newName: string): Promise<RelinkPlan> {
   const { store, live, files, index } = turn;
   const noteIds = store.notesRelinkingFile(file.id, file.name, file.sha256);
-  if (noteIds.some((id) => live.isHiddenNote(id))) throw writeRejected('not_found');
+  const judge = turn.liveFor ? turn.liveFor(noteIds) : live;
+  if (noteIds.some((id) => judge.isHiddenNote(id))) throw writeRejected('not_found');
 
   const others = files.visibleFiles().filter((other) => other.trashedAt === null && other.id !== file.id);
   const resolvesToAnother = others.some((other) => other.name === file.name && other.id < file.id);

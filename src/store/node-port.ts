@@ -1036,6 +1036,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         libraryId: () => this.libraryIdSync(),
         foldersList: () => this.engine.foldersList(),
         notesVisibilityIndex: () => noteVisibilityRows(this.db),
+        // A8 del plan de memoria: el escritor juzga solo las notas que decide.
+        notesVisibilityIndexFor: (ids) => noteVisibilityRowsFor(this.db, ids, (sql) => this.prepared(sql)),
+        lockedLiveNoteIds: () => lockedLiveNoteIds(this.db, (sql) => this.prepared(sql)),
         trashIndex: () => trashIndexRows(this.db),
         filesIndex: () => this.filesRows(),
         noteAttachments: (noteId) => this.attachmentRows(noteId),

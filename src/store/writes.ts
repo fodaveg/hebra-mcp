@@ -192,7 +192,16 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
   libraryId(): string;
   /** Lo que lee el filtro de privados, en este mismo turno. */
   foldersList(): FoldersList;
+  /** La visibilidad de TODAS las notas vivas: solo para quien recorre la biblioteca
+   *  (`privacyInTurn`, el JDex). Quien decide sobre unas notas concretas usa
+   *  `notesVisibilityIndexFor` (`privacyInTurnFor`, pieza A8 del plan de memoria). */
   notesVisibilityIndex(): NoteVisibilityEntry[];
+  /** Las filas de `notesVisibilityIndex()` solo de las notas de `ids` (`noteVisibilityRowsFor`
+   *  de `./privacy-sql.ts`): un id desconocido, de la papelera o lápida no sale. */
+  notesVisibilityIndexFor(ids: readonly string[]): NoteVisibilityEntry[];
+  /** Ids de las notas vivas bloqueadas (`lockedLiveNoteIds`): las que recorre
+   *  `PrivacyFilter.hasHiddenLockedNote`, que `FileFilter` pregunta siempre. */
+  lockedLiveNoteIds(): string[];
   /** Lo que lee el filtro de la papelera (`src/privacy/trash-filter.ts`). */
   trashIndex(): TrashIndex;
   /** Lo que lee el filtro de los ficheros sueltos (`src/privacy/file-filter.ts`). */
@@ -717,6 +726,12 @@ export function priorOperation(
  * D19, una carpeta que con la configuración de quien pide NO se ve? Los planes comparten el registro: se juzgan
  * por TODAS sus notas y por la configuración con que fueron simulados. Un destino ya
  * purgado se trata como oculto para no revelar que antes existió.
+ *
+ * De `filter` solo se usan las carpetas y la configuración: las notas que juzga (el destino,
+ * las que enlazan los ficheros, las bloqueadas, las de un plan) las lee aquí, en el mismo
+ * turno y solo cuando se llama, con `privacyInTurnFor` (pieza A8 del plan de memoria: antes
+ * miraba la biblioteca entera con `notesVisibilityIndex()`). Así `filter` puede ser uno
+ * hecho solo con las notas de quien llama.
  */
 export function hiddenOperationTarget(
   store: NoteWriteStore,
@@ -724,23 +739,25 @@ export function hiddenOperationTarget(
   privacy: PrivacyConfig
 ): (id: string) => boolean {
   return (id) => {
-    if (filter.visibleMeta(id)) return false;
+    const live = privacyInTurnFor(store, privacy, [id]);
+    if (live.visibleMeta(id)) return false;
     const trash = store.trashIndex();
     if (trash.notes.some((note) => note.id === id)) {
-      return !TrashFilter.fromSnapshot(filter, trash, privacy).isVisible(id);
+      return !TrashFilter.fromSnapshot(live, trash, privacy).isVisible(id);
     }
-    if (store.notesVisibilityIndex().some((note) => note.id === id)) return true;
+    if (store.notesVisibilityIndexFor([id]).length > 0) return true;
     const files = store.filesIndex();
     if (files.files.some((file) => file.id === id)) {
-      return !FileFilter.fromSnapshot(filter, files, privacy).isVisible(id);
+      return !looseFilesFilterInTurn(store, privacy, files).files.isVisible(id);
     }
     // Una carpeta (la pieza de un `hebra_jd_move` de carpeta, D19), con el filtro.
     if (filter.folderExists(id)) return filter.isFolderHidden(id);
     const plan = store.replacePlans.plan(id);
     if (plan) {
       const notes = store.replacePlans.notes(id);
+      const planFilter = privacyInTurnFor(store, privacy, notes.map((note) => note.noteId));
       return plan.libraryId !== store.libraryId() || plan.privacySha256 !== privacyFingerprint(privacy) ||
-        plan.state === 'expired' || notes.length === 0 || notes.some((note) => !filter.visibleMeta(note.noteId));
+        plan.state === 'expired' || notes.length === 0 || notes.some((note) => !planFilter.visibleMeta(note.noteId));
     }
     return true;
   };
@@ -777,6 +794,64 @@ export function privacyInTurn(store: NoteWriteStore, config: PrivacyConfig): Pri
   const filter = PrivacyFilter.fromSnapshot(store.foldersList(), store.notesVisibilityIndex(), config);
   if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
   return filter;
+}
+
+/**
+ * `privacyInTurn` con SOLO las notas de `ids` (pieza A8 del plan de memoria, 6 nov 2026).
+ * `privacyInTurn` lee la visibilidad de todas las notas vivas en cada escritura: a 30 000
+ * notas, unos 60 MiB de basura y 0,2-0,3 s por llamada, aunque la escritura toque una nota
+ * (y `replace_in_notes` lo repetía dos veces por nota del plan). Las carpetas y la
+ * configuración se leen igual, así que `unresolved`, `isFolderHidden`, `hidesAnyTag`,
+ * `folderPath`… dan lo mismo; y cada nota de `ids` se juzga con su fila, igual que con la
+ * biblioteca entera (la subida por las lápidas va en la propia fila).
+ *
+ * FALLA CERRANDO: una nota que no está en `ids` es desconocida para este filtro, y
+ * desconocida es OCULTA (`isHiddenNote`, `visibleMeta`). Por eso quien lo usa tiene que pasar
+ * TODAS las notas que va a juzgar, y nunca puede dárselo a quien recorre la biblioteca:
+ * - `visibleNotes()` devolvería solo las de `ids` (el JDex sigue con `privacyInTurn`);
+ * - `FileFilter` pregunta `hasHiddenLockedNote()`, que recorre las bloqueadas: con él, `ids`
+ *   tiene que llevar `looseFilesNoteIds` (las que enlazan ficheros y TODAS las bloqueadas),
+ *   el mismo criterio que la puerta final (`privacyRecheck` de `./node-port.ts`).
+ * `TrashFilter` solo le pregunta la configuración (`hidesAnyTag`, `hasPrivateTags`).
+ */
+export function privacyInTurnFor(
+  store: NoteWriteStore,
+  config: PrivacyConfig,
+  ids: Iterable<string>
+): PrivacyFilter {
+  // Sin ids, `noteVisibilityRowsFor` ya vuelve sin consultar nada.
+  const rows = store.notesVisibilityIndexFor([...new Set(ids)]);
+  const filter = PrivacyFilter.fromSnapshot(store.foldersList(), rows, config);
+  if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
+  return filter;
+}
+
+/**
+ * Las notas vivas que `FileFilter` juzga con el filtro de privados, para `privacyInTurnFor`:
+ * las que enlazan algún fichero suelto de `files` (regla (b) de D10, `isHiddenReference`) y
+ * todas las bloqueadas (`hasHiddenLockedNote`, la variante de A1). Quien además juzga otras
+ * referencias (las que enlazan unos bytes o un nombre, `notesLinkingBlob`,
+ * `notesLinkingFileName`) añade sus `noteId`.
+ */
+export function looseFilesNoteIds(store: NoteWriteStore, files: FilesIndex): string[] {
+  return [...files.refs.map((ref) => ref.noteId), ...store.lockedLiveNoteIds()];
+}
+
+/**
+ * El filtro de los ficheros sueltos del turno sobre `index`, con un filtro de privados de
+ * SOLO las notas que juzga (`looseFilesNoteIds` y `extraNoteIds`, A8). `extraNoteIds`: las
+ * notas de las referencias que quien llama va a pasar a `isHiddenReference` o `wouldHide`
+ * (las de `notesLinkingBlob`, `notesLinkingFileName`); una que falte contaría como oculta.
+ * Devuelve también el filtro de privados, para las carpetas.
+ */
+export function looseFilesFilterInTurn(
+  store: NoteWriteStore,
+  privacy: PrivacyConfig,
+  index: FilesIndex,
+  extraNoteIds: Iterable<string> = []
+): { live: PrivacyFilter; files: FileFilter } {
+  const live = privacyInTurnFor(store, privacy, [...looseFilesNoteIds(store, index), ...extraNoteIds]);
+  return { live, files: FileFilter.fromSnapshot(live, index, privacy) };
 }
 
 /**
@@ -841,7 +916,8 @@ export class NoteWriter {
       // cabecera v1 válida, una nota «bloqueada» con lo que el agente escribió. El MCP
       // nunca crea notas bloqueadas.
       if (input.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
-      const filter = privacyInTurn(store, input.privacy);
+      // Solo carpetas y configuración: no juzga ninguna nota (A8).
+      const filter = privacyInTurnFor(store, input.privacy, []);
       const folderId = input.folderId ?? ROOT_FOLDER_ID;
       if (!filter.folderExists(folderId) || filter.isFolderHidden(folderId)) {
         throw writeRejected('not_found');
@@ -886,7 +962,7 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      const filter = privacyInTurn(store, input.privacy);
+      const filter = privacyInTurnFor(store, input.privacy, [input.id]);
       const previous =
         operationId === undefined || fingerprint === null
           ? null
@@ -1008,7 +1084,7 @@ export class NoteWriter {
       const now = Date.now();
       const log = store.operations;
       const fingerprint = editFingerprint(input);
-      const filter = privacyInTurn(store, input.privacy);
+      const filter = privacyInTurnFor(store, input.privacy, [input.id]);
       const previous = priorOperation(
         log,
         input.operationId,
@@ -1132,7 +1208,7 @@ export class NoteWriter {
       const now = Date.now();
       const log = store.operations;
       const fingerprint = restoreVersionFingerprint(input);
-      const filter = privacyInTurn(store, input.privacy);
+      const filter = privacyInTurnFor(store, input.privacy, [input.id]);
       const previous = priorOperation(
         log,
         input.operationId,
@@ -1235,7 +1311,7 @@ export class NoteWriter {
    */
   async organizeLocal(input: OrganizeInput): Promise<LocalWrite<OrganizeSaved>> {
     const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<OrganizeSaved>> => {
-      const filter = privacyInTurn(store, input.privacy);
+      const filter = privacyInTurnFor(store, input.privacy, [input.id]);
 
       const requireVisibleFolder = (id: string): void => {
         if (!filter.folderExists(id) || filter.isFolderHidden(id)) throw writeRejected('not_found');
@@ -1323,8 +1399,7 @@ export class NoteWriter {
    */
   async organizeFileLocal(input: OrganizeFileInput): Promise<LocalWrite<FileSaved>> {
     const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FileSaved>> => {
-      const live = privacyInTurn(store, input.privacy);
-      const files = FileFilter.fromSnapshot(live, store.filesIndex(), input.privacy);
+      const { files } = looseFilesFilterInTurn(store, input.privacy, store.filesIndex());
       const file = files.visibleMeta(input.id);
       if (!file) throw writeRejected('not_found');
 
@@ -1359,7 +1434,7 @@ export class NoteWriter {
    */
   async createFolderLocal(input: CreateFolderInput): Promise<LocalWrite<FolderSaved>> {
     const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FolderSaved>> => {
-      const plan = planCreateFolder(privacyInTurn(store, input.privacy), input.parentId, input.name);
+      const plan = planCreateFolder(privacyInTurnFor(store, input.privacy, []), input.parentId, input.name);
       switch (plan.kind) {
         case 'reject':
           throw writeRejected(plan.code);
@@ -1385,7 +1460,7 @@ export class NoteWriter {
    */
   async renameFolderLocal(input: RenameFolderInput): Promise<LocalWrite<FolderSaved>> {
     const outcome = await this.target.writeExclusive(async (store): Promise<LocalWrite<FolderSaved>> => {
-      const plan = planRenameFolder(privacyInTurn(store, input.privacy), input.id, input.name);
+      const plan = planRenameFolder(privacyInTurnFor(store, input.privacy, []), input.id, input.name);
       switch (plan.kind) {
         case 'reject':
           throw writeRejected(plan.code);
@@ -1438,7 +1513,7 @@ export class NoteWriter {
     const { result, wrote } = await this.target.writeExclusive(async (store) => {
       const now = Date.now();
       const log = store.operations;
-      const filter = privacyInTurn(store, input.privacy);
+      const filter = privacyInTurnFor(store, input.privacy, [input.id]);
       const previous = priorOperation(
         log,
         input.operationId,
@@ -1547,7 +1622,13 @@ export class NoteWriter {
   ): Promise<boolean> {
     const sha256 = input.sha256.toLowerCase();
     const found = await this.target.writeExclusive(async (store) => {
-      const filter = privacyInTurn(store, input.privacy);
+      // Las notas que se juzgan (A8): la pedida, las que enlazan esos bytes y las de
+      // `FileFilter` (las que enlazan ficheros y las bloqueadas).
+      const linking = store.notesLinkingBlob(sha256);
+      const { live: filter, files } = looseFilesFilterInTurn(store, input.privacy, store.filesIndex(), [
+        input.noteId,
+        ...linking.map((ref) => ref.noteId)
+      ]);
       const note = await store.noteRead(input.noteId);
       if (!note || note.trashedAt !== null || filter.isHiddenNote(note.id)) {
         throw writeRejected('not_found');
@@ -1557,9 +1638,7 @@ export class NoteWriter {
       if (!row) throw writeRejected('not_found');
       // Bytes que son también de algo oculto (M6 del audit de privacidad): no se bajan, y
       // se responde como si no estuvieran (lo mismo que la herramienta).
-      const files = FileFilter.fromSnapshot(filter, store.filesIndex(), input.privacy);
-      const hidden =
-        store.notesLinkingBlob(sha256).some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256);
+      const hidden = linking.some((ref) => files.isHiddenReference(ref)) || files.hidesContent(sha256);
       return { present: row.present, hidden };
     });
     if (found.hidden) return false;

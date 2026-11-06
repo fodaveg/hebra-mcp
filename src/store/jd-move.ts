@@ -53,6 +53,7 @@ import {
   hiddenOperationTarget,
   priorOperation,
   privacyInTurn,
+  privacyInTurnFor,
   type LocalWrite,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -339,7 +340,7 @@ export async function runJdMove(
         return { result: { mode: 'discard' }, wrote: false };
       }
       if (request.mode === 'simulate') {
-        privacyInTurn(store, request.privacy);
+        privacyInTurnFor(store, request.privacy, []);
         return { result: await simulate(store, request, now), wrote: false };
       }
       const live = privacyInTurn(store, request.privacy);
