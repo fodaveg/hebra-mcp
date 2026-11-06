@@ -40,7 +40,12 @@ import {
   type SyncRoundResult
 } from '../hebra';
 import type { SyncStorePort } from '../store/sync-port';
-import { BLOB_DOWNLOAD_CONCURRENCY, processSyncGates, type SyncGates } from './gates';
+import {
+  BLOB_DOWNLOAD_CONCURRENCY,
+  DEFAULT_ACCOUNT_KEY,
+  processSyncGates,
+  type SyncGates
+} from './gates';
 
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
@@ -207,6 +212,11 @@ export interface SyncRunnerOptions {
    * que comparten todos los runners de `serve-http`; los tests inyectan los suyos.
    */
   gates?: SyncGates;
+  /**
+   * Clave OPACA de la cuenta de este runner, para el turno rotatorio de los topes de proceso
+   * (B4): ni el `sub` ni el email. Por defecto, una sola cuenta (stdio y tests).
+   */
+  accountKey?: string;
 }
 
 function isRevocation(result: LibrarySyncResultCode): boolean {
@@ -257,6 +267,7 @@ export class SyncRunner implements SyncStatusSource {
   private resolveFirstRound!: () => void;
   private readonly conflictListeners = new Set<(copy: SyncConflictCopy) => void>();
   private readonly gates: SyncGates;
+  private readonly accountKey: string;
   /** Se aborta en `stop()`: una ronda en cola de turno sale sin ejecutarse. */
   private readonly closing = new AbortController();
 
@@ -265,6 +276,7 @@ export class SyncRunner implements SyncStatusSource {
     private readonly options: SyncRunnerOptions
   ) {
     this.gates = options.gates ?? processSyncGates();
+    this.accountKey = options.accountKey ?? DEFAULT_ACCOUNT_KEY;
     this.firstRound = new Promise((resolve) => {
       this.resolveFirstRound = resolve;
     });
@@ -428,7 +440,7 @@ export class SyncRunner implements SyncStatusSource {
    * mientras espera, sale sin ejecutar nada ni coger plaza. El turno se suelta pase lo que pase.
    */
   private async execute(): Promise<SyncRoundResult | null> {
-    const release = await this.gates.rounds.acquire(this.closing.signal);
+    const release = await this.gates.rounds.acquire(this.closing.signal, this.accountKey);
     if (!release) {
       this.resolveFirstRound();
       return null;
@@ -477,20 +489,22 @@ export class SyncRunner implements SyncStatusSource {
    * Como mucho `BLOB_DOWNLOAD_CONCURRENCY` a la vez; las demás esperan su turno en cola
    * FIFO. Un 429 del relé se reintenta hasta `BLOB_DOWNLOAD_RETRIES` veces, tras esperar el
    * `Retry-After` (con tope `BLOB_RETRY_AFTER_MAX_MS`) o, sin él, 2, 4 y 8 s; agotados,
-   * `error`, como cualquier otro fallo. La descarga que espera CONSERVA su plaza: un 429 es
-   * del relé, no de ese objeto, y las de la cola recibirían otro; si la soltara, la cola
-   * entera pasaría por el relé mientras rechaza y gastaría sus reintentos, que es lo que
-   * pasó el 5 oct. Así, mientras dura la espera, nadie más baja nada.
+   * `error`, como cualquier otro fallo. La descarga que espera tras un 429 SUELTA su plaza
+   * mientras duerme y vuelve a pedirla (turno rotatorio por cuenta) al reintentar (B4, 6 nov
+   * 2026): conservarla hasta 3 x 30 s dejaba a las demás cuentas sin descargas. El reintento
+   * sigue sometido al tope de 4, así que nunca hay más en vuelo.
    */
   async readBlob(sha256: string): Promise<boolean> {
     let outcome: 'ok' | 'missing' | 'error' | 'revoked' = 'revoked';
-    const release = (await this.gates.downloads.acquire())!;
+    let release: (() => void) | null = null;
     try {
       for (let retry = 0; ; retry += 1) {
+        release = (await this.gates.downloads.acquire(undefined, this.accountKey))!;
         if (this.stopped || this.revokedFlag) {
           outcome = 'revoked';
           return false;
         }
+        let waitMs: number;
         try {
           const bytes = await this.engine.readBlob(sha256);
           outcome = bytes ? 'ok' : 'missing';
@@ -501,15 +515,18 @@ export class SyncRunner implements SyncStatusSource {
             outcome = 'error';
             return false;
           }
-          await sleep(
+          waitMs =
             limited.retryAfterMs !== undefined
               ? Math.min(Math.max(limited.retryAfterMs, 0), BLOB_RETRY_AFTER_MAX_MS)
-              : BLOB_DOWNLOAD_BACKOFF_MS[retry]!
-          );
+              : BLOB_DOWNLOAD_BACKOFF_MS[retry]!;
         }
+        // Retroceso por 429: la plaza se suelta antes de dormir.
+        release();
+        release = null;
+        await sleep(waitMs);
       }
     } finally {
-      release();
+      release?.();
       try {
         this.options.emitAttachment?.(outcome);
       } catch {

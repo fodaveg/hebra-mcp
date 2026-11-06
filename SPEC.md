@@ -2000,8 +2000,9 @@ Comando `hebra-mcp pair`, interactivo en terminal:
   `BLOB_UPLOAD_CONCURRENCY = 3`). Un 429 se reintenta hasta 3 veces, tras esperar el
   `Retry-After` (como mucho 30 s) o, sin él, 2, 4 y 8 s; agotados, la herramienta responde lo
   mismo que ante cualquier otro fallo del relé (`attachment_unavailable` en
-  `hebra_read_attachment`). La que espera conserva su plaza: un 429 es del relé, no del objeto, y
-  soltarla dejaría pasar la cola entera mientras el relé rechaza.
+  `hebra_read_attachment`). La que espera SUELTA su plaza durante el retroceso y la
+  vuelve a pedir al reintentar (B4, 6 nov 2026): conservarla hasta 3 x 30 s dejaba sin descargas a
+  las demás cuentas.
 - **Índice de subcadena de Hebra** (`notes_trigram`, H5 del audit de buscadores de Hebra;
   submódulo desde `aea2181c`): el motor crea la tabla al abrir, pero en una biblioteca que
   ya tenía notas la deja vacía y sin la marca de completo (`docs/FACHADA-NODE.md` §3 del
@@ -2682,6 +2683,13 @@ de su límite por defecto).
   (`SyncRunner.execute`, incluida la ronda final de `close_round`) pasan por un semáforo FIFO de
   PROCESO, 2 simultáneas por defecto (`HEBRA_MCP_SYNC_CONCURRENCY`, entero >= 1; uno inválido
   impide arrancar), y las descargas de adjuntos comparten un único tope de 4 en todo el proceso.
+  Ambos topes reparten el turno POR CUENTA (B4, 6 nov 2026): al liberarse una plaza la recibe la
+  cuenta con peticiones en espera que lleva más tiempo sin turno, y dentro de cada cuenta rige el
+  orden de llegada, de modo que una cuenta con muchas rondas o descargas no retrasa a otra más de
+  un turno. La clave de cuenta es opaca (hash del directorio de la cuenta, el mismo para su
+  biblioteca personal y sus espacios; `default` en stdio). Una descarga en retroceso por 429 no
+  ocupa plaza. No existe un tiempo máximo por ronda: una ronda cuelga su plaza mientras el motor
+  no responda (límite conocido, no inventado aquí).
   Una ronda que espera turno cuenta dentro de la espera de `whenReady` (10 s): si caduca, la
   herramienta responde con lo local y `hebra_status` no da aún `lastSyncAt`. Una ronda en cola de
   un contexto que se cierra sale de la cola sin ejecutarse ni coger el turno. En `serve` por stdio

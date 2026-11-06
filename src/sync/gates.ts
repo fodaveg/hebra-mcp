@@ -4,7 +4,7 @@
  * semáforos, la memoria del sync crecería con el número de contextos abiertos (medido el
  * 6 nov 2026: una primera descarga de 5 000 notas sube +38 MiB, cinco a la vez +152 MiB).
  * Aquí viven los dos topes que lo evitan: rondas simultáneas y descargas de adjuntos
- * simultáneas, ambos con cola FIFO.
+ * simultáneas, ambos con turno rotatorio por cuenta (FIFO dentro de cada cuenta).
  */
 
 /** Rondas de sync simultáneas de todo el proceso, por defecto. */
@@ -16,46 +16,110 @@ export const DEFAULT_SYNC_CONCURRENCY = 2;
  */
 export const BLOB_DOWNLOAD_CONCURRENCY = 4;
 
-/** Semáforo con cola FIFO: `acquire` resuelve con la función que libera la plaza. */
+/** Clave de cuenta por defecto: stdio, tests y todo runner al que nadie le dio otra. */
+export const DEFAULT_ACCOUNT_KEY = 'default';
+
+interface Waiter {
+  grant: () => void;
+}
+
+interface AccountState {
+  /** Plazas que esta cuenta tiene cogidas ahora. */
+  active: number;
+  /** Número de orden de su último turno concedido; 0 si nunca (o si olvidamos su historial). */
+  lastServed: number;
+  /** Peticiones de esta cuenta esperando, FIFO. */
+  queue: Waiter[];
+}
+
+/**
+ * Semáforo con turno rotatorio por cuenta (B4 de la revisión de seguridad del 6 nov 2026):
+ * cuando se libera una plaza, la recibe la cuenta con peticiones en espera cuyo último turno
+ * fue hace más tiempo (una cuenta sin historial va primero); dentro de cada cuenta, orden de
+ * llegada. Una cuenta con muchas peticiones no retrasa a las demás más de un turno. Con una
+ * sola cuenta es un FIFO normal. `acquire` resuelve con la función que libera la plaza.
+ */
 export class FifoSemaphore {
   private active = 0;
-  private readonly waiting: Array<{ grant: () => void }> = [];
+  private served = 0;
+  private waitingCount = 0;
+  private readonly accounts = new Map<string, AccountState>();
 
   constructor(private readonly limit: number) {}
 
   /**
    * Espera turno. Con `signal`, si se aborta mientras espera, sale de la cola SIN cogerlo y
    * resuelve `null` (quien llama no ejecuta nada ni tiene que liberar). Un `signal` ya
-   * abortado resuelve `null` al momento. Liberar es idempotente.
+   * abortado resuelve `null` al momento. Liberar es idempotente. `accountKey` es opaco.
    */
-  acquire(signal?: AbortSignal): Promise<(() => void) | null> {
+  acquire(signal?: AbortSignal, accountKey: string = DEFAULT_ACCOUNT_KEY): Promise<(() => void) | null> {
     if (signal?.aborted) return Promise.resolve(null);
     return new Promise((resolve) => {
-      const entry = {
+      const state = this.stateOf(accountKey);
+      const entry: Waiter = {
         grant: () => {
           signal?.removeEventListener('abort', onAbort);
           this.active += 1;
+          state.active += 1;
+          this.served += 1;
+          state.lastServed = this.served;
           let released = false;
           resolve(() => {
             if (released) return;
             released = true;
             this.active -= 1;
-            this.waiting.shift()?.grant();
+            state.active -= 1;
+            this.forget(accountKey, state);
+            this.grantNext();
           });
         }
       };
       const onAbort = (): void => {
-        const index = this.waiting.indexOf(entry);
-        if (index >= 0) this.waiting.splice(index, 1);
+        const index = state.queue.indexOf(entry);
+        if (index >= 0) {
+          state.queue.splice(index, 1);
+          this.waitingCount -= 1;
+        }
+        this.forget(accountKey, state);
         resolve(null);
       };
-      if (this.active < this.limit) {
+      if (this.active < this.limit && this.waitingCount === 0) {
         entry.grant();
       } else {
-        this.waiting.push(entry);
+        state.queue.push(entry);
+        this.waitingCount += 1;
         signal?.addEventListener('abort', onAbort, { once: true });
       }
     });
+  }
+
+  private stateOf(key: string): AccountState {
+    let state = this.accounts.get(key);
+    if (!state) {
+      state = { active: 0, lastServed: 0, queue: [] };
+      this.accounts.set(key, state);
+    }
+    return state;
+  }
+
+  /** Olvida a la cuenta cuando no tiene plazas ni peticiones: el mapa no crece con las cuentas vistas. */
+  private forget(key: string, state: AccountState): void {
+    if (state.active === 0 && state.queue.length === 0 && this.accounts.get(key) === state) {
+      this.accounts.delete(key);
+    }
+  }
+
+  private grantNext(): void {
+    while (this.active < this.limit && this.waitingCount > 0) {
+      let next: AccountState | null = null;
+      for (const state of this.accounts.values()) {
+        if (state.queue.length === 0) continue;
+        if (next === null || state.lastServed < next.lastServed) next = state;
+      }
+      if (!next) return;
+      this.waitingCount -= 1;
+      next.queue.shift()!.grant();
+    }
   }
 
   /** Plazas cogidas ahora (tests y diagnóstico). */
@@ -65,7 +129,7 @@ export class FifoSemaphore {
 
   /** Peticiones esperando turno ahora. */
   get queued(): number {
-    return this.waiting.length;
+    return this.waitingCount;
   }
 }
 

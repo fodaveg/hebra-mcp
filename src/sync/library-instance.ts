@@ -22,7 +22,8 @@
  * `port` es estable durante toda la vida de la instancia (las herramientas lo guardan
  * una vez): delega en el `NodeLibraryPort` vigente, que cambia al cambiar de papel.
  */
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import type {
   FoldersList,
@@ -144,6 +145,17 @@ const OPEN_READER_RETRY_MS = 100;
 export type WriterRole = 'this' | 'other_instance';
 
 /** Lo que el runner necesita además del almacén: identidad, clave y transporte. */
+/**
+ * Clave opaca de la cuenta para el turno rotatorio de los topes de sync (B4): hash del directorio
+ * de la cuenta. Una biblioteca personal vive en `<cuenta>` y cada espacio en `<cuenta>/spaces/<k>`,
+ * así que ambos caen en la misma clave. No contiene el `sub` ni el email.
+ */
+function accountKeyOf(dataDir: string): string {
+  const root = resolve(dataDir);
+  const account = basename(dirname(root)) === 'spaces' ? dirname(dirname(root)) : root;
+  return createHash('sha256').update(account).digest('hex').slice(0, 16);
+}
+
 export type LibrarySyncConfig = Omit<SyncRunnerOptions, 'port'>;
 
 /**
@@ -401,6 +413,7 @@ export class LibraryInstance implements NoteWriteTarget {
       const beforeSyncRound = this.options.beforeSyncRound;
       const runner = await SyncRunner.create({
         emitAttachment: (outcome) => logEvent({ event: 'attachment.fetch', outcome }),
+        accountKey: accountKeyOf(this.options.dataDir),
         ...this.options.sync,
         ...(beforeSyncRound ? { beforeRound: () => beforeSyncRound(port) } : {}),
         port: port.syncStorePort()
