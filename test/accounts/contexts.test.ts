@@ -1,6 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { MAX_BATCH_SIZE as SDK_MAX_BATCH_SIZE } from '@modelcontextprotocol/sdk/server/requestBody.js';
 import {
   CapacityGate,
   ContextUnavailableError,
@@ -15,7 +16,7 @@ import type { WriterLockOwner } from '../../src/lock';
 import { WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../../src/accounts/lifecycle';
 import type { AccountRegistry } from '../../src/accounts/registry';
 import type { AuthorizedAccount } from '../../src/accounts/types';
-import { createHttpApp, requestedCalls } from '../../src/http/app';
+import { createHttpApp, MAX_MCP_BATCH_MESSAGES, requestedCalls } from '../../src/http/app';
 import { httpConfigFor } from '../../src/http/config';
 import { bindPairingRevocation } from '../../src/http/serve-http';
 import type { SpaceLifecycleControl } from '../../src/server/context';
@@ -825,8 +826,6 @@ function withNotes(notesCount: number, asked: string[] = []) {
   });
 }
 
-/** `n` llamadas de herramienta a la biblioteca personal. */
-const personalCalls = (n: number): string[] => Array.from({ length: n }, () => 'personal');
 
 describe('memoria de las peticiones en curso', () => {
   function gateAt(memory: { usedBytes: number; limitBytes: number }, clock = new FakeClock()) {
@@ -864,55 +863,111 @@ describe('memoria de las peticiones en curso', () => {
     expect(clock.pending).toBe(0);
   });
 
-  it('sola, una petición mayor que el margen entra si la lectura está por debajo del límite', async () => {
+  it('la excepción "nada apartado" vale para una unidad (8 MiB), nunca para más', async () => {
     const clock = new FakeClock();
-    const gate = gateAt({ usedBytes: 700 * MIB, limitBytes: 1000 * MIB }, clock);
-    const alone = await gate.admit(undefined, 300 * MIB);
+    const gate = gateAt({ usedBytes: 795 * MIB, limitBytes: 1000 * MIB }, clock);
+    // Más de una unidad con nada apartado: tiene que caber entera (795 + 300 > 800), así que espera.
+    for (const bytes of [300 * MIB, 2 * REQUEST_RESERVE_BYTES]) {
+      const alone = gate.admit(undefined, bytes).catch((error: unknown) => error);
+      await settled();
+      expect(gate.reservedBytes).toBe(0);
+      await clock.advance(WAIT_MS);
+      expect(await alone).toMatchObject({ reason: 'capacity_wait_timeout' });
+    }
+    // Una sola llamada entra por la excepción (795 < 800); la segunda ya no (795 + 8 + 8 > 800).
+    const alone = await gate.admit(undefined, REQUEST_RESERVE_BYTES);
     let entered = false;
-    const next = gate.admit(undefined, 4 * MIB).then((ticket) => { entered = true; return ticket; });
+    const next = gate.admit(undefined, REQUEST_RESERVE_BYTES, 'otra').then((ticket) => { entered = true; return ticket; });
     await settled();
     expect(entered).toBe(false);
+    expect(gate.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
     alone.done();
     (await next).done();
     expect(gate.reservedBytes).toBe(0);
+    expect(clock.pending).toBe(0);
   });
 
-  it('aperturas y peticiones comparten una cola en orden de llegada: la pequeña no adelanta a la grande', async () => {
-    const { clock, memory, libraries, contexts } = harness();
+  it('la excepción no deja entrar dos llamadas de golpe', async () => {
+    const clock = new FakeClock();
+    const gate = gateAt({ usedBytes: 799 * MIB, limitBytes: 1000 * MIB }, clock);
+    const entered: string[] = [];
+    const calls = ['a1', 'a2', 'b1'].map((name) =>
+      gate.admit(undefined, REQUEST_RESERVE_BYTES, name[0]).then((ticket) => { entered.push(name); return ticket; }));
+    await settled();
+    expect(entered).toEqual(['a1']);
+    expect(gate.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    (await calls[0]!).done();
+    await settled();
+    expect(entered).toEqual(['a1', 'b1']); // la siguiente unidad, de una en una y por turno
+    expect(gate.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    (await calls[2]!).done();
+    (await calls[1]!).done();
+    expect(gate.reservedBytes).toBe(0);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('turno por cuenta: con A esperando 50 llamadas, B, que llega después con una, entra en el siguiente hueco', async () => {
+    const clock = new FakeClock();
+    const memory = { usedBytes: 784 * MIB, limitBytes: 1000 * MIB }; // caben dos: 784 + 16 = 800
+    const gate = gateAt(memory, clock);
     const order: string[] = [];
-    const holder = await contexts.acquire(account('a'));
-    await holder.admitCalls(personalCalls(6)); // seis llamadas: 48 MiB
-    memory.usedBytes = 760 * MIB;
-    const opening = deferred();
-    libraries.beforeOpen = async (id) => {
-      order.push(`abre-${id}`);
-      if (id === 'b') await opening.promise;
-    };
-    const b = contexts.acquire(account('b')); // 760 + 48 + 8 > 800: espera
+    const admitAs = (key: string, name: string) =>
+      gate.admit(undefined, REQUEST_RESERVE_BYTES, key).then((ticket) => { order.push(name); return ticket; });
+    const a = Array.from({ length: 52 }, (_, index) => admitAs('a', `a${index}`));
     await settled();
-    const second = await contexts.acquire(account('a')); // ya abierta: no espera a abrir
-    const call = second.admitCalls(personalCalls(6)).then(() => { order.push('llamada-a'); });
+    expect(order).toEqual(['a0', 'a1']);
+    expect(gate.waitingCount).toBe(50);
+    const b = admitAs('b', 'b0');
     await settled();
-    const c = contexts.acquire(account('c'));
+    (await a[0]!).done();
     await settled();
-    expect(order).toEqual([]);
-    holder.release(); // suelta sus 48 MiB: entra la apertura de b, que aparta 8 MiB mientras abre
+    expect(order).toEqual(['a0', 'a1', 'b0']); // B no espera a las 50 de A
+    (await a[1]!).done();
     await settled();
-    expect(order).toEqual(['abre-b']);
-    // La llamada de a (760 + 8 + 48) no cabe; la apertura de c (760 + 8 + 8) sí, pero no adelanta.
-    await clock.advance(500);
-    expect(order).toEqual(['abre-b']);
-    opening.resolve();
+    expect(order).toEqual(['a0', 'a1', 'b0', 'a2']); // dentro de A, en orden de llegada
+    // Con las dos esperando, el turno alterna: lleva el que hace más que no entra.
+    const b1 = admitAs('b', 'b1');
+    (await b).done();
     await settled();
-    expect(order).toEqual(['abre-b', 'llamada-a']);
-    await clock.advance(500);
-    expect(order).toEqual(['abre-b', 'llamada-a']); // c: 760 + 48 + 8 > 800
-    second.release();
+    expect(order.at(-1)).toBe('b1');
+    (await a[2]!).done();
     await settled();
-    expect(order).toEqual(['abre-b', 'llamada-a', 'abre-c']);
+    expect(order.at(-1)).toBe('a3');
+    // Sin tope por cuenta (D22): con memoria, A entra entera.
+    memory.usedBytes = 0;
+    (await b1).done();
+    await settled();
+    expect(gate.waitingCount).toBe(0);
+    for (const ticket of a.slice(3)) (await ticket).done();
+    expect(gate.reservedBytes).toBe(0);
+    expect(clock.pending).toBe(0);
+  });
+
+  it('las aperturas de una cuenta no quedan detrás de las llamadas de otra', async () => {
+    const { memory, libraries, contexts } = harness();
+    const lease = await contexts.acquire(account('a'));
+    memory.usedBytes = 784 * MIB; // caben dos reservas: 784 + 16 = 800
+    const tools: Array<() => void> = [];
+    const calls = Array.from({ length: 12 }, () =>
+      lease.ctx.trackInvocation!(() => new Promise<void>((resolve) => { tools.push(resolve); })));
+    await settled();
+    expect(tools).toHaveLength(2);
+    expect(contexts.waitingCount).toBe(10);
+    const b = contexts.acquire(account('b'));
+    await settled();
+    expect(libraries.opened).toEqual(['a']);
+    tools[0]!(); // un hueco: es para la apertura de b, no para la tercera llamada de a
+    await settled();
+    expect(libraries.opened).toEqual(['a', 'b']);
     (await b).release();
-    (await c).release();
-    await call;
+    memory.usedBytes = 0;
+    tools[1]!();
+    await settled();
+    expect(tools).toHaveLength(12);
+    for (const resolve of tools) resolve();
+    await Promise.all(calls);
+    lease.release();
+    expect(contexts.reservedBytes).toBe(0);
     await contexts.close();
   });
 
@@ -934,21 +989,37 @@ describe('memoria de las peticiones en curso', () => {
     });
     const lease = await contexts.acquire(account('a'));
     await lease.prepareSpaces(['s1']);
-    // s1 dos veces y personal (100 000 notas cada uno) y un espacio sin preparar: 4 × 8 MiB.
+    // s1 dos veces y personal (100 000 notas cada uno) y un espacio sin preparar: antes de llegar a
+    // las herramientas se aparta UNA llamada, no las cuatro.
     await lease.admitCalls(['s1', 'personal', 'otro', 's1']);
     expect(asked).toEqual([]);
-    // Apartado: 32 MiB. Con 753 MiB medidos (límite 800) cabe otra llamada (753 + 32 + 8 = 793)
-    // y ya no una apertura (753 + 40 + 8 = 801). Contando las notas, no cabría ni la llamada.
-    memory.usedBytes = 753 * MIB;
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    // Cada herramienta aparta lo suya al empezar (la primera usa la ya apartada) y lo suelta al
+    // terminar: 4 × 8 MiB mientras corren las cuatro, sin contar notas.
+    const tools: Array<() => void> = [];
+    const calls = Array.from({ length: 4 }, () =>
+      lease.ctx.trackInvocation!(() => new Promise<void>((resolve) => { tools.push(resolve); })));
+    await settled();
+    expect(tools).toHaveLength(4);
+    expect(contexts.reservedBytes).toBe(4 * REQUEST_RESERVE_BYTES);
+    tools[0]!();
+    await calls[0];
+    expect(contexts.reservedBytes).toBe(3 * REQUEST_RESERVE_BYTES);
+    // Con 768 MiB medidos (límite 800) y 24 apartados cabe otra llamada (768 + 24 + 8 = 800) y
+    // ya no una apertura más. Contando las notas, no cabría ni la llamada.
+    memory.usedBytes = 768 * MIB;
     const again = await contexts.acquire(account('a'));
     await again.admitCalls(['otro']);
     let entered = false;
     const next = contexts.acquire(account('c')).then((other) => { entered = true; return other; });
     await settled();
     expect(entered).toBe(false);
+    for (const resolve of tools) resolve();
+    await Promise.all(calls);
     lease.release();
     again.release();
     (await next).release();
+    expect(asked).toEqual([]);
     await contexts.close();
   });
 
@@ -975,13 +1046,101 @@ describe('memoria de las peticiones en curso', () => {
     await contexts.close();
   });
 
+  it('el cliente que corta mientras una llamada espera turno la saca de la cola sin apartar ni ejecutarla', async () => {
+    const { memory, contexts } = harness();
+    const lease = await contexts.acquire(account('a'));
+    const gone = new AbortController();
+    await lease.admitCalls(['personal', 'personal'], gone.signal);
+    memory.usedBytes = 795 * MIB; // con la primera dentro, la segunda no cabe (795 + 8 + 8 > 800)
+    const tool = deferred();
+    const first = lease.ctx.trackInvocation!(() => tool.promise);
+    let ran = false;
+    const second = lease.ctx.trackInvocation!(async () => { ran = true; }).catch((error: unknown) => error);
+    await settled();
+    expect(contexts.waitingCount).toBe(1);
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    gone.abort();
+    expect(await second).toMatchObject({ name: 'AbortError' });
+    expect(ran).toBe(false);
+    expect(contexts.waitingCount).toBe(0);
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES); // la que corre conserva lo suyo
+    lease.release(); // la respuesta se cortó; la herramienta en curso sigue hasta acabar
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    tool.resolve();
+    await first;
+    expect(contexts.reservedBytes).toBe(0);
+    await contexts.close();
+  });
+
+  it('una llamada de un lote que agota su espera falla ella sola, con su motivo en el log y sin datos personales', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const { clock, memory, contexts } = harness();
+      const lease = await contexts.acquire(account('sub-secreto'));
+      memory.usedBytes = 795 * MIB;
+      const tool = deferred();
+      const running = lease.ctx.trackInvocation!(() => tool.promise);
+      let ran = false;
+      const late = lease.ctx.trackInvocation!(async () => { ran = true; }).catch((error: unknown) => error);
+      await settled();
+      await clock.advance(WAIT_MS);
+      expect(await late).toMatchObject({ reason: 'capacity_wait_timeout' });
+      expect(ran).toBe(false);
+      const logged = stderr.mock.calls.flat().join('');
+      expect(logged).toContain('"event":"mcp.unavailable","reason":"capacity_wait_timeout","scope":"call"');
+      expect(logged).not.toContain('sub-secreto');
+      tool.resolve();
+      await running;
+      lease.release();
+      expect(contexts.reservedBytes).toBe(0);
+      await contexts.close();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('una llamada apartada que no llega a ejecutarse se suelta con la petición', async () => {
+    const { contexts } = harness();
+    const lease = await contexts.acquire(account('a'));
+    await lease.admitCalls(['personal']); // el SDK la rechaza antes de llegar a la herramienta
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    lease.release();
+    expect(contexts.reservedBytes).toBe(0);
+    await contexts.close();
+  });
+
+  it('el apagado saca a las llamadas que esperan turno, y lo de las que corren se suelta al acabar', async () => {
+    const { memory, contexts } = harness();
+    const lease = await contexts.acquire(account('a'));
+    memory.usedBytes = 795 * MIB;
+    const tool = deferred();
+    const running = lease.ctx.trackInvocation!(async () => {
+      await tool.promise;
+      throw new Error('cerrado');
+    }).catch((error: unknown) => error);
+    let ran = false;
+    const waiting = lease.ctx.trackInvocation!(async () => { ran = true; }).catch((error: unknown) => error);
+    await settled();
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    expect(contexts.waitingCount).toBe(1);
+    contexts.beginShutdown();
+    expect(await waiting).toMatchObject({ message: 'contexts_closed' });
+    expect(ran).toBe(false);
+    lease.release();
+    expect(contexts.reservedBytes).toBe(REQUEST_RESERVE_BYTES);
+    tool.resolve();
+    expect(await running).toMatchObject({ message: 'cerrado' });
+    expect(contexts.reservedBytes).toBe(0);
+    await contexts.close();
+  });
+
   it('ninguna reserva queda colgada: al cerrar el contexto no queda nada apartado, y el apagado saca a quien espera', async () => {
     const { clock, memory, libraries, contexts } = harness();
     const asked: string[] = [];
     libraries.decorate = withNotes(30_000, asked);
     const lease = await contexts.acquire(account('a'));
     await lease.admitCalls(['personal', 'personal']);
-    expect(asked).toEqual([]); // 16 MiB, sin contar las 30 000 notas
+    expect(asked).toEqual([]); // 8 MiB de la primera, sin contar las 30 000 notas
     await lease.ctx.trackInvocation!(async () => undefined);
     lease.release();
     await clock.advance(IDLE_MS);
@@ -1070,18 +1229,21 @@ describe('/mcp sobre AccountContexts', () => {
     stderr = null;
   });
 
-  async function serve(contexts: AccountContexts): Promise<{ post(body: object, signal?: AbortSignal): Promise<Response>; logged(): string }> {
+  /** La cuenta de cada petición sale de la cabecera `x-cuenta` (sin ella, `sub-secreto`). */
+  async function serve(contexts: AccountContexts): Promise<{ post(body: object, signal?: AbortSignal, cuenta?: string): Promise<Response>; logged(): string }> {
     stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const app = createHttpApp({
       contexts, version: 'test', config: httpConfigFor('http://127.0.0.1', 0),
-      auth: { install() {}, requireAuth: (_req, _res, next) => next(), account: () => account('sub-secreto') }
+      auth: { install() {}, requireAuth: (_req, _res, next) => next(),
+        account: (req) => account(typeof req.headers['x-cuenta'] === 'string' ? req.headers['x-cuenta'] : 'sub-secreto') }
     });
     server = createServer(app);
     await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
     const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
     return {
-      post: (body, signal) => fetch(url, { method: 'POST', body: JSON.stringify(body), signal,
-        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' } }),
+      post: (body, signal, cuenta) => fetch(url, { method: 'POST', body: JSON.stringify(body), signal,
+        headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream',
+          ...(cuenta ? { 'x-cuenta': cuenta } : {}) } }),
       logged: () => stderr!.mock.calls.flat().join('')
     };
   }
@@ -1263,6 +1425,125 @@ describe('/mcp sobre AccountContexts', () => {
     const other = await Promise.race([contexts.acquire(account('otra')), settled().then(() => null)]);
     expect(other).not.toBeNull();
     other!.release();
+    await contexts.close();
+  });
+
+  /** Un lote de `size` llamadas a `hebra_status`. */
+  const batch = (size: number) => Array.from({ length: size }, (_, id) => ({ ...STATUS_CALL, id }));
+
+  /**
+   * Cada llamada a la herramienta anota lo apartado al entrar y, si `slow(cuenta)`, queda parada
+   * hasta que se suelte su `release`; después falla (`isError`, respuesta 200).
+   */
+  function slowTools(libraries: FakeLibraries, contexts: AccountContexts, slow: (id: string) => boolean = () => true) {
+    const running: Array<{ id: string; release: () => void }> = [];
+    const reservedAtEntry: number[] = [];
+    const entered: string[] = [];
+    libraries.decorate = (context, id) => ({
+      ...context,
+      ctx: {
+        privacyConfigSource: { current: async () => {
+          entered.push(id);
+          reservedAtEntry.push(contexts.reservedBytes);
+          if (slow(id)) await new Promise<void>((resolve) => running.push({ id, release: resolve }));
+          throw new Error('fin');
+        } },
+        status: { getStatus: () => ({}) }
+      } as never
+    });
+    return { running, reservedAtEntry, entered };
+  }
+
+  /** Da vueltas al bucle de eventos, sin reloj, hasta que se cumpla `condition`. */
+  async function until(condition: () => boolean): Promise<void> {
+    for (let turn = 0; turn < 500 && !condition(); turn += 1) await new Promise((resolve) => setImmediate(resolve));
+    expect(condition()).toBe(true);
+  }
+
+  it('el tope del lote es el del SDK, y un lote de 100 mensajes pasa', async () => {
+    expect(MAX_MCP_BATCH_MESSAGES).toBe(SDK_MAX_BATCH_SIZE);
+    expect(MAX_MCP_BATCH_MESSAGES).toBe(100);
+    const { libraries, contexts } = harness();
+    libraries.decorate = (context) => ({
+      ...context, ctx: { privacyConfig: { privateFolders: [], privateTags: [] } } as never
+    });
+    const { post } = await serve(contexts);
+    const res = await post(Array.from({ length: 100 }, (_, id) => ({ ...LIST_TOOLS, id })));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toHaveLength(100);
+    await contexts.close();
+  });
+
+  it.each([101, 5000])('un lote de %i mensajes da 400 antes de abrir el contexto ni pedir turno', async (size) => {
+    const { clock, libraries, contexts } = harness();
+    const { post, logged } = await serve(contexts);
+    const res = await post(batch(size));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: -32600 } });
+    expect(libraries.opened).toEqual([]);
+    expect(contexts.waitingCount).toBe(0);
+    expect(contexts.reservedBytes).toBe(0);
+    expect(clock.pending).toBe(0);
+    expect(logged()).not.toContain('mcp.unavailable');
+    await contexts.close();
+  });
+
+  it.each([
+    ['caben cinco', 760, 5],
+    ['solo la excepción: de una en una, nunca dos de golpe', 799, 1]
+  ])('un lote de 100 llamadas aparta por llamada y nunca más de lo que cabe (%s)', async (_label, usedMib, fits) => {
+    const { clock, memory, libraries, contexts } = harness();
+    const tools = slowTools(libraries, contexts);
+    memory.usedBytes = usedMib * MIB; // límite 800: caben `fits` llamadas de 8 MiB
+    const { post } = await serve(contexts);
+    const response = post(batch(100));
+    await vi.waitFor(() => expect(tools.running).toHaveLength(fits));
+    await settled();
+    expect(tools.running).toHaveLength(fits);
+    expect(contexts.reservedBytes).toBe(fits * REQUEST_RESERVE_BYTES);
+    expect(contexts.waitingCount).toBe(100 - fits);
+    // Cada una que termina deja entrar a la siguiente; ninguna con más apartado de lo que cabe.
+    for (let done = 0; done < 100; done += 1) {
+      await until(() => tools.running.length > done);
+      tools.running[done]!.release();
+    }
+    const res = await response;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toHaveLength(100);
+    expect(tools.entered).toHaveLength(100);
+    expect(Math.max(...tools.reservedAtEntry)).toBeLessThanOrEqual(fits * REQUEST_RESERVE_BYTES);
+    expect(contexts.reservedBytes).toBe(0);
+    expect(contexts.waitingCount).toBe(0);
+    expect(clock.now()).toBe(0); // nadie agotó su espera: todo por turnos, sin reloj
+    await contexts.close();
+  });
+
+  it('regresión (sonda capacity-hol): 100 llamadas lentas de A no dejan a B esperando hasta el 503', async () => {
+    const { clock, memory, libraries, contexts } = harness();
+    const tools = slowTools(libraries, contexts, (id) => id === 'a');
+    memory.usedBytes = 760 * MIB; // caben cinco llamadas
+    const { post, logged } = await serve(contexts);
+    const fromA = post(batch(100), undefined, 'a');
+    await vi.waitFor(() => expect(tools.running).toHaveLength(5));
+    let answeredB: Response | null = null;
+    const fromB = post(STATUS_CALL, undefined, 'b').then((res) => { answeredB = res; return res; });
+    await vi.waitFor(() => expect(contexts.waitingCount).toBe(96)); // 95 llamadas de A y la apertura de B
+    // Primer hueco: la apertura de B. Segundo: su llamada. Las 94 de A que esperan no van antes.
+    tools.running[0]!.release();
+    await until(() => libraries.opened.includes('b'));
+    await vi.waitFor(() => expect(contexts.waitingCount).toBe(95)); // 94 de A y la llamada de B
+    tools.running[1]!.release();
+    await vi.waitFor(() => expect(answeredB).not.toBeNull());
+    expect((await fromB).status).toBe(200);
+    expect(tools.entered.filter((id) => id === 'a').length).toBeLessThanOrEqual(7);
+    expect(clock.now()).toBe(0);
+    expect(logged()).not.toContain('mcp.unavailable');
+    for (let done = 2; done < 100; done += 1) {
+      await until(() => tools.running.length > done);
+      tools.running[done]!.release();
+    }
+    expect((await fromA).status).toBe(200);
+    expect(contexts.reservedBytes).toBe(0);
     await contexts.close();
   });
 

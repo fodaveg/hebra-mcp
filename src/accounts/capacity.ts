@@ -1,11 +1,11 @@
 /**
  * La capacidad de `serve-http` se regula por memoria real y por espera, nunca por un
  * recuento de personas (SPEC.md §12.10, "Memoria real, no recuento"). Antes de abrir una
- * biblioteca o un espacio, y antes de que una petición llegue a sus herramientas, se mira
- * la memoria en uso del contenedor frente a `HEBRA_MCP_MEMORY_HIGH_WATER`. Por encima, se
- * cierran antes los contextos sin peticiones en curso; si no basta, la apertura o la
- * petición espera en orden de llegada hasta `HEBRA_MCP_OPEN_WAIT_MS`, y al agotarla la
- * petición recibe 503 con `Retry-After`.
+ * biblioteca o un espacio, y antes de que cada llamada de herramienta empiece a ejecutarse,
+ * se mira la memoria en uso del contenedor frente a `HEBRA_MCP_MEMORY_HIGH_WATER`. Por
+ * encima, se cierran antes los contextos sin peticiones en curso; si no basta, la apertura o
+ * la llamada espera su turno (rotatorio por cuenta, en orden de llegada dentro de cada una)
+ * hasta `HEBRA_MCP_OPEN_WAIT_MS`, y al agotarla la petición recibe 503 con `Retry-After`.
  */
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
@@ -45,7 +45,8 @@ export const OPENING_RESERVE_BYTES = 8 * MIB;
 export const REQUEST_RESERVE_BYTES = 8 * MIB;
 
 /** Lo que aparta una llamada de herramienta: `REQUEST_RESERVE_BYTES`, sin recuento de notas. Es
- *  la única regla del tamaño de la reserva de una petición (`AccountContexts.admitCalls`). */
+ *  la única regla del tamaño de la reserva de una llamada (`AccountContexts`, al empezar cada
+ *  herramienta). */
 export function requestReserveBytes(): number {
   return REQUEST_RESERVE_BYTES;
 }
@@ -197,21 +198,48 @@ export interface CapacityGateOptions {
 
 interface Waiter {
   bytes: number;
+  /** La cuenta en cuyo turno espera. */
+  key: string;
   resolve(ticket: AdmissionTicket): void;
   reject(error: unknown): void;
   /** Quita su plazo y su oyente de aborto. */
   detach(): void;
 }
 
+/** La cuenta de `admit` cuando no dice ninguna (pruebas de la compuerta sola). */
+export const ANONYMOUS_TURN = '';
+
 /**
- * Quien pide abrir, y cada petición antes de llegar a sus herramientas, pasa por aquí en una
- * sola cola, en orden de llegada. Cada uno aparta sus bytes mientras dura y entra solo si lo
- * apartado más lo medido, con lo suyo, no pasa del límite. La excepción es quien llega con
- * nada apartado: entra si la lectura está por debajo del límite, para que una petición sola
- * más grande que el margen no espere para siempre.
+ * El turno de una cuenta: sus esperas en orden de llegada y cuándo entró por última vez. Vive
+ * mientras la cuenta tenga esperas o algo apartado; sin ninguna de las dos se olvida, y si
+ * vuelve empieza como recién llegada.
+ */
+interface Turn {
+  readonly waiters: Waiter[];
+  /** Reservas suyas ya dentro y aún sin soltar. */
+  active: number;
+  /** Secuencia de su última entrada; 0 si aún no entró desde que existe el turno. */
+  lastServed: number;
+  /** Secuencia de su llegada, para desempatar entre las que no han entrado. */
+  readonly since: number;
+}
+
+/**
+ * Quien pide abrir, y cada llamada de herramienta antes de ejecutarse, pasa por aquí. Cada uno
+ * aparta sus bytes mientras dura y entra solo si lo apartado más lo medido, con lo suyo, no
+ * pasa del límite. La excepción es una reserva de una sola unidad (una llamada o una apertura)
+ * que llega con nada apartado: entra si la lectura está por debajo del límite, para que no
+ * espere para siempre con el margen agotado por lo medido. Nunca deja entrar más de una unidad.
+ *
+ * El turno rota por cuenta (`key`): el siguiente es el de la cuenta que lleva más sin entrar, y
+ * dentro de cada cuenta, en orden de llegada. Una cuenta con muchas esperas no retrasa a otra
+ * más de una plaza. No hay tope por cuenta (D22): solo el orden en que se reparte lo que cabe.
+ * Nadie adelanta a quien tiene el turno: si su reserva no cabe, esperan todos.
  */
 export class CapacityGate {
-  private readonly queue: Waiter[] = [];
+  private readonly turns = new Map<string, Turn>();
+  private waiting = 0;
+  private sequence = 0;
   private reserved = 0;
   private reclaiming = false;
   private closed = false;
@@ -224,12 +252,17 @@ export class CapacityGate {
     return this.reserved;
   }
 
+  /** Cuántos esperan turno ahora (diagnóstico y pruebas). */
+  get waitingCount(): number {
+    return this.waiting;
+  }
+
   /**
-   * Espera turno y aparta `bytes` hasta `done()`. Sin `bytes`, lo de una apertura. Al agotar
-   * la espera, `ContextUnavailableError('capacity_wait_timeout')`; si `signal` aborta, sale de
-   * la cola sin apartar nada.
+   * Espera el turno de `key` y aparta `bytes` hasta `done()`. Sin `bytes`, lo de una apertura.
+   * Al agotar la espera, `ContextUnavailableError('capacity_wait_timeout')`; si `signal`
+   * aborta, sale de la cola sin apartar nada.
    */
-  admit(signal?: AbortSignal, bytes?: number): Promise<AdmissionTicket> {
+  admit(signal?: AbortSignal, bytes?: number, key: string = ANONYMOUS_TURN): Promise<AdmissionTicket> {
     if (this.closed) return Promise.reject(new Error('contexts_closed'));
     if (signal?.aborted) return Promise.reject(signal.reason);
     const size = Math.max(0, bytes ?? this.options.reserveBytes ?? OPENING_RESERVE_BYTES);
@@ -246,6 +279,7 @@ export class CapacityGate {
       }, this.options.waitMs);
       const waiter: Waiter = {
         bytes: size,
+        key,
         resolve,
         reject,
         detach: () => {
@@ -254,7 +288,8 @@ export class CapacityGate {
         }
       };
       signal?.addEventListener('abort', onAbort, { once: true });
-      this.queue.push(waiter);
+      this.turnOf(key).waiters.push(waiter);
+      this.waiting += 1;
       this.pump();
     });
   }
@@ -268,9 +303,13 @@ export class CapacityGate {
   /** El apagado: nadie sigue esperando. */
   shutdown(): void {
     this.closed = true;
-    for (const waiter of this.queue.splice(0)) {
-      waiter.detach();
-      waiter.reject(new Error('contexts_closed'));
+    for (const [key, turn] of [...this.turns]) {
+      for (const waiter of turn.waiters.splice(0)) {
+        this.waiting -= 1;
+        waiter.detach();
+        waiter.reject(new Error('contexts_closed'));
+      }
+      this.forgetIfIdle(key, turn);
     }
     this.syncPoll();
   }
@@ -281,27 +320,78 @@ export class CapacityGate {
 
   private pump(): void {
     this.admitWhileRoom();
-    if (this.queue.length > 0) this.startReclaim();
+    if (this.waiting > 0) this.startReclaim();
     this.syncPoll();
   }
 
-  /** Deja entrar en orden mientras quepa el primero de la cola: nadie adelanta a quien espera. */
+  /**
+   * Deja entrar mientras quepa la primera espera de la cuenta que tiene el turno: nadie adelanta
+   * a quien lo tiene. Al entrar, esa cuenta pasa detrás de las demás que esperan.
+   */
   private admitWhileRoom(): void {
-    while (this.queue.length > 0 && this.hasRoom(this.queue[0]!.bytes)) {
-      const waiter = this.queue.shift()!;
+    for (;;) {
+      const next = this.nextTurn();
+      if (!next || !this.hasRoom(next.turn.waiters[0]!.bytes)) return;
+      const { key, turn } = next;
+      const waiter = turn.waiters.shift()!;
+      this.waiting -= 1;
       waiter.detach();
       const { bytes } = waiter;
       this.reserved += bytes;
+      turn.active += 1;
+      this.sequence += 1;
+      turn.lastServed = this.sequence;
       let done = false;
       waiter.resolve({
         done: () => {
           if (done) return;
           done = true;
           this.reserved -= bytes;
+          turn.active -= 1;
+          this.forgetIfIdle(key, turn);
           this.recheck();
         }
       });
     }
+  }
+
+  /** La cuenta con esperas que lleva más sin entrar; entre las que no han entrado, la primera
+   *  en llegar. */
+  private nextTurn(): { key: string; turn: Turn } | null {
+    let best: { key: string; turn: Turn } | null = null;
+    for (const [key, turn] of this.turns) {
+      if (turn.waiters.length === 0) continue;
+      if (
+        !best ||
+        turn.lastServed < best.turn.lastServed ||
+        (turn.lastServed === best.turn.lastServed && turn.since < best.turn.since)
+      ) {
+        best = { key, turn };
+      }
+    }
+    return best;
+  }
+
+  private turnOf(key: string): Turn {
+    let turn = this.turns.get(key);
+    if (!turn) {
+      this.sequence += 1;
+      turn = { waiters: [], active: 0, lastServed: 0, since: this.sequence };
+      this.turns.set(key, turn);
+    }
+    return turn;
+  }
+
+  /** Sin esperas ni nada apartado, la cuenta se olvida: el mapa no crece con las que pasaron. */
+  private forgetIfIdle(key: string, turn: Turn): void {
+    if (turn.waiters.length === 0 && turn.active === 0 && this.turns.get(key) === turn) {
+      this.turns.delete(key);
+    }
+  }
+
+  /** Una reserva de una sola unidad: una llamada (`REQUEST_RESERVE_BYTES`) o una apertura. */
+  private isSingleUnit(bytes: number): boolean {
+    return bytes <= Math.max(REQUEST_RESERVE_BYTES, this.options.reserveBytes ?? OPENING_RESERVE_BYTES);
   }
 
   private hasRoom(bytes: number): boolean {
@@ -314,7 +404,9 @@ export class CapacityGate {
     }
     const { highWater } = this.options;
     const water = 'bytes' in highWater ? highWater.bytes : reading.limitBytes * highWater.ratio;
-    if (this.reserved === 0) return reading.usedBytes < water;
+    // La excepción, solo para una unidad: con nada apartado, una llamada o una apertura entra
+    // si lo medido está por debajo. Más que eso tiene que caber entero.
+    if (this.reserved === 0 && this.isSingleUnit(bytes)) return reading.usedBytes < water;
     return reading.usedBytes + this.reserved + bytes <= water;
   }
 
@@ -331,14 +423,21 @@ export class CapacityGate {
   }
 
   private remove(waiter: Waiter): void {
-    const index = this.queue.indexOf(waiter);
-    if (index >= 0) this.queue.splice(index, 1);
+    const turn = this.turns.get(waiter.key);
+    const index = turn ? turn.waiters.indexOf(waiter) : -1;
+    if (turn && index >= 0) {
+      turn.waiters.splice(index, 1);
+      this.waiting -= 1;
+      this.forgetIfIdle(waiter.key, turn);
+    }
+    // Quien se fue pudo ser la cabeza de su cuenta y tapar a otra que ya cabe.
+    this.admitWhileRoom();
     this.syncPoll();
   }
 
   /** Solo se mide mientras alguien espera: sin esperas, ningún temporizador. */
   private syncPoll(): void {
-    if (this.queue.length === 0) {
+    if (this.waiting === 0) {
       this.cancelPoll?.();
       this.cancelPoll = null;
       return;

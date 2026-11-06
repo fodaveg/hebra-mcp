@@ -2652,32 +2652,48 @@ cada SQLite y suben al volver a abrirla. Los temporales que deje un corte se bor
 - Lo que no llegó a subirse se reintenta abriendo el contexto por la vía normal, y quien lo abre es
   quien lo cierra. Lo que sube sale de la lista; lo que no, se conserva.
 
-**Memoria real, no recuento.** Antes de abrir, y antes de que una petición llegue a sus
-herramientas, se mira la memoria en uso del contenedor frente a `HEBRA_MCP_MEMORY_HIGH_WATER` (80 %
+**Memoria real, no recuento.** Antes de abrir, y antes de que cada llamada de herramienta empiece a
+ejecutarse, se mira la memoria en uso del contenedor frente a `HEBRA_MCP_MEMORY_HIGH_WATER` (80 %
 de su límite por defecto).
 
-- Cada apertura y cada petición en curso apartan memoria mientras duran, porque la lectura del
+- Cada apertura y cada llamada en curso apartan memoria mientras duran, porque la lectura del
   contenedor aún no ve lo que están gastando. Una apertura aparta 8 MiB (el pico medido al abrir un
-  contexto es de unos 6 MiB, 6 nov 2026). Una petición con llamadas de herramienta aparta una
-  cantidad fija por cada llamada, 8 MiB, sea cual sea la biblioteca o el espacio al que va y sin
-  contar sus notas, porque su coste ya depende de las notas que toca, no de la biblioteca: cada
-  herramienta carga en el filtro de privados solo las suyas (§6.3, «Qué carga el filtro de cada
-  llamada»). Antes de eso eran unos 3,5 KB por nota de la biblioteca (unos 100 MiB con 30 000
-  notas, medido el 6 nov 2026), con un `COUNT(*)` por destino. Una petición sin llamadas
-  (`initialize`, `tools/list`) no aparta nada. Ese tamaño sale de una sola función
-  (`requestReserveBytes`, `src/accounts/capacity.ts`). Límite de la transición: las tres
-  `hebra_jd_*` aún cargan la biblioteca entera y apartan lo mismo que las demás.
+  contexto es de unos 6 MiB, 6 nov 2026). Cada llamada de herramienta aparta una cantidad fija,
+  8 MiB, sea cual sea la biblioteca o el espacio al que va y sin contar sus notas, porque su coste
+  ya depende de las notas que toca, no de la biblioteca: cada herramienta carga en el filtro de
+  privados solo las suyas (§6.3, «Qué carga el filtro de cada llamada»). Antes de eso eran unos
+  3,5 KB por nota de la biblioteca (unos 100 MiB con 30 000 notas, medido el 6 nov 2026), con un
+  `COUNT(*)` por destino. Una petición sin llamadas (`initialize`, `tools/list`) no aparta nada. Ese
+  tamaño sale de una sola función (`requestReserveBytes`, `src/accounts/capacity.ts`). Límite de la
+  transición: las tres `hebra_jd_*` aún cargan la biblioteca entera y apartan lo mismo que las demás.
+- **Por llamada, no por petición** (H1 de la revisión de seguridad del 6 nov 2026). Un lote
+  JSON-RPC con más de 100 mensajes (`MAX_BATCH_SIZE` del SDK, que no ejecutaría ninguno) recibe 400
+  antes de abrir el contexto ni pedir turno. En una petición con llamadas, después de abrir su
+  biblioteca y sus espacios se aparta la memoria de UNA, para que una petición que no cabe reciba el
+  503 antes de empezar; esa reserva la usa la primera herramienta que se ejecute. Cada una de las
+  demás aparta la suya cuando empieza a ejecutarse y la suelta al terminar, también si lanza. Lo que
+  ninguna herramienta llegó a usar (el SDK rechazó la llamada antes) se suelta con la petición. Así
+  un lote de 100 llamadas lentas entra de una en una según quepa, no aparta 800 MiB de golpe.
 - Se entra si lo medido más lo apartado, con lo propio, no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`.
-  Quien llega sin nada apartado en curso entra con que lo medido esté por debajo: una petición sola
-  más grande que el margen no espera para siempre.
-- La petición aparta después de abrir su biblioteca y sus espacios, y suelta cuando termina del
-  todo: respuesta enviada o cortada y última herramienta acabada, también si falla. Si el cliente
-  se va mientras espera turno, sale de la cola sin apartar nada.
+  La excepción es una reserva de una sola unidad (una llamada o una apertura) que llega sin nada
+  apartado en curso: entra con que lo medido esté por debajo, para no esperar para siempre con el
+  margen ocupado por lo medido. Nunca deja entrar más de una unidad: con una dentro, la siguiente ya
+  tiene que caber.
+- Si el cliente se va mientras una llamada espera turno, esa llamada sale de la cola sin apartar
+  nada y no se ejecuta. Una herramienta que ya corre sigue hasta acabar aunque el cliente se vaya, y
+  suelta lo suyo al terminar. El apagado saca a quien espera (`contexts_closed`).
 - Por encima, se cierran antes los contextos sin peticiones en curso ni subidas pendientes, aunque no
   hayan agotado su espera. Solo acorta esa espera: no afecta a quien tiene una petición en curso.
-- Si no basta, la apertura o la petición espera hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por defecto) en
-  una sola cola, por orden de llegada: una pequeña no adelanta a una grande que llegó antes. Quien ya
-  tiene su contexto abierto no espera a abrirlo, pero sus llamadas sí esperan su turno de memoria.
+- Si no basta, la apertura o la llamada espera hasta `HEBRA_MCP_OPEN_WAIT_MS` (20 s por defecto) su
+  **turno, que rota por cuenta**: lo tiene la cuenta que lleva más tiempo sin entrar y, dentro de
+  cada cuenta, se respeta el orden de llegada. Las aperturas de una cuenta (su biblioteca o sus
+  espacios) van en el turno de esa cuenta, así que no quedan detrás de las llamadas de otra. Una
+  cuenta con muchas esperas no retrasa a otra más de una plaza: si la cuenta A tiene 50 llamadas
+  esperando y llega la B con una, la de B entra en el siguiente hueco que se libere. No hay tope por
+  cuenta (D22): una cuenta sola usa todo lo que quepa; el turno solo decide el orden cuando varias
+  esperan. Nadie adelanta a quien tiene el turno: si su reserva no cabe, esperan todos. Una cuenta
+  sin esperas ni nada apartado se olvida, y si vuelve empieza como recién llegada. Quien ya tiene su
+  contexto abierto no espera a abrirlo, pero sus llamadas sí esperan su turno de memoria.
 - **El sync al abrir no crece con las bibliotecas abiertas.** Medido el 6 nov 2026: una primera
   descarga de 5 000 notas sube +38 MiB y cinco a la vez, +152 MiB. Por eso las rondas de sync
   (`SyncRunner.execute`, incluida la ronda final de `close_round`) pasan por un semáforo FIFO de
@@ -2700,11 +2716,14 @@ de su límite por defecto).
   un contexto que se cierra sale de la cola sin ejecutarse ni coger el turno. En `serve` por stdio
   hay un solo runner y no cambia nada visible.
 - Al agotar la espera: 503 con `Retry-After` y motivo `capacity_wait_timeout`, sin distinguir quién
-  conectó antes.
+  conectó antes. Eso vale para la apertura y para la primera llamada de la petición, que esperan
+  antes de responder. Las demás llamadas de un lote esperan con la respuesta ya en marcha: si una
+  agota su espera, esa herramienta falla (`isError`, con el texto `capacity_wait_timeout`) y las
+  demás del lote siguen; el log dice `mcp.unavailable` con `scope: "call"`.
 - Límite conocido: una herramienta que abre un espacio que no se preparó antes (un espacio que falló
   al prepararse, o más de los cuatro que se preparan por petición) pide esa apertura con su petición
-  ya dentro, y espera en la misma cola. Si delante hay peticiones que esperan a que la suya suelte,
-  la apertura acaba en su plazo como un error de esa herramienta, no en un bloqueo sin fin.
+  ya dentro, y espera en el turno de su cuenta. Si no llega a caber antes de su plazo, la apertura
+  acaba como un error de esa herramienta, no en un bloqueo sin fin.
 - `/mcp` registra el motivo de cada 503 (`capacity_wait_timeout`, `open_failed`, `lock_held`), sin
   `sub`, email ni títulos.
 - `mem_limit` del contenedor sigue existiendo como barrera de la máquina compartida. Su valor sale de
