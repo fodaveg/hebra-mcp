@@ -130,21 +130,41 @@ export function afterGate(ctx: ToolContext, run: () => void): void {
   else run();
 }
 
+/**
+ * Qué notas carga el filtro de privados de una llamada antes de que corra la herramienta
+ * (A4.0 del plan de memoria, 6 nov 2026):
+ * - `'all'` (por defecto): la biblioteca entera (`filter.ensureAll()`), como antes de A3.
+ * - `'lazy'`: ninguna; la herramienta pide las suyas con `await ctx.privacy.ensure(ids)`
+ *   antes de preguntar por ellas (cabecera de `../privacy/filter.ts`).
+ * Cada herramienta declara la suya al registrarse (`gated(nombre, run, { privacyLoad })` en
+ * `./register-tools.ts`).
+ */
+export type ToolPrivacyLoad = 'all' | 'lazy';
+
+export interface ResolveToolContextOptions {
+  /** `true` (por defecto): cargar todas las notas en el filtro (`ToolPrivacyLoad` `'all'`). */
+  loadAll?: boolean;
+}
+
 /** El filtro se rehace en cada llamada en vez de cachearlo (el sync cambia el almacén).
  *  `PrivacyFilter.build` solo lee las carpetas; las notas se cargan aparte, y cargarlas
  *  TODAS no es barato: a 30 000 notas, unos 40-50 MiB y 0,2 s por llamada aunque la
  *  herramienta toque una sola nota (medido, A3 del plan de memoria, 6 nov 2026).
  *
- *  TRANSICIÓN (A3): aquí se llama a `filter.ensureAll()` para que TODAS las herramientas
- *  sigan exactamente igual. Las piezas A4-A8 las pasan una a una a pedir solo sus notas con
- *  `await ctx.privacy.ensure(ids)` (patrón en la cabecera de `../privacy/filter.ts`); cuando
- *  no quede ninguna que dependa de la carga entera, esta llamada se quita. Antes, la
+ *  TRANSICIÓN (A3): con `loadAll` (el valor por defecto, `privacyLoad: 'all'`) aquí se llama a
+ *  `filter.ensureAll()`, para que las herramientas no adaptadas sigan exactamente igual. Las
+ *  piezas A4-A8 las pasan una a una a `privacyLoad: 'lazy'` (`loadAll: false`), y piden solo
+ *  sus notas con `await ctx.privacy.ensure(ids)` (patrón en la cabecera de
+ *  `../privacy/filter.ts`); cuando no quede ninguna con `'all'`, esta llamada se quita. Antes, la
  *  configuración vigente (M5: un
  *  `stat` de `config.json`; si no se puede aplicar, `PrivacyConfigUnreadable`) y la memoria
  *  de las carpetas privadas (A3, `privacyWithMemory`: una lectura más, y una escritura solo
  *  cuando una ruta resuelve a una carpeta nueva). La `privacyConfig` que sale lleva esa
  *  memoria (`knownPrivateFolderIds`), y con ella viaja a las escrituras. */
-export async function resolveToolContext(ctx: ServerContext): Promise<ToolContext> {
+export async function resolveToolContext(
+  ctx: ServerContext,
+  options: ResolveToolContextOptions = {}
+): Promise<ToolContext> {
   const current = ctx.privacyConfigSource ? await ctx.privacyConfigSource.current() : ctx.privacyConfig;
   // La época de privacidad ANTES del filtro (`./privacy-gate.ts`): cualquier cambio desde aquí,
   // también mientras se construye, hace que la puerta final no pase. Si anotar la memoria de
@@ -157,8 +177,9 @@ export async function resolveToolContext(ctx: ServerContext): Promise<ToolContex
     resolved = await privacyWithMemory(ctx.port, current);
   }
   const { config, filter } = resolved;
-  // Transición A3: la biblioteca entera, como antes (comentario de arriba).
-  await filter.ensureAll();
+  // Transición A3: la biblioteca entera, como antes, salvo con `privacyLoad: 'lazy'`
+  // (comentario de arriba).
+  if (options.loadAll ?? true) await filter.ensureAll();
   return {
     port: ctx.port,
     privacy: filter,

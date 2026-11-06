@@ -24,6 +24,12 @@
  * Estado (D23, 5 nov 2026): la salida lleva `favorite`, `archivedAt` (ISO o `null`) y
  * `generalHidden` (oculta del listado general por su marca o por su carpeta), siempre,
  * con `heading` y `lines` también (`./note-state.ts`).
+ *
+ * Perezosa (A4.0 del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y
+ * carga en el filtro solo lo que juzga (la nota pedida, sus homónimas por título y el
+ * original de una copia de conflicto), no la biblioteca entera. Es la herramienta de
+ * referencia del patrón; su equivalencia con `'all'` está en
+ * `test/tools/read-note-lazy.test.ts`.
  */
 import { lineStarts, READ_LINES_MAX, sliceLines } from '../../store/grep';
 import { encodeRevision } from '../../store/revision';
@@ -114,6 +120,9 @@ export async function runReadNote(
   requireValidHeadingInput(input);
   requireValidLinesInput(input);
   const id = await resolveNoteId(ctx, input);
+  // `privacyLoad: 'lazy'` (A4.0): el filtro solo conoce las notas que se le piden. Por título,
+  // `resolveNoteId` ya cargó la elegida con sus homónimas; esto no vuelve a leerla.
+  await ctx.privacy.ensure([id]);
   const meta = ctx.privacy.visibleMeta(id);
   if (!meta) throw new ToolError('not_found');
   const note = await ctx.port.noteRead(id);
@@ -184,6 +193,7 @@ export async function runReadNote(
   // conflicto de una nota oculta puede ser visible (escrita sin la etiqueta en otro
   // dispositivo), y su `conflictOf` daba el id del original. `isConflictCopy` sigue. La
   // puerta final lo vuelve a juzgar antes de responder.
+  if (note.conflictOf !== null) await ctx.privacy.ensure([note.conflictOf]);
   if (note.conflictOf !== null && ctx.privacy.visibleMeta(note.conflictOf)) {
     output.conflictOf = note.conflictOf;
     used.noteVisible(note.conflictOf);

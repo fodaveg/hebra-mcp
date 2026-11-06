@@ -17,6 +17,9 @@
  *   política (`GATE_POLICIES`) y anota la herramienta: `gatedTools` es lo que compara
  *   `test/privacy/gate-registration.test.ts` con lo que anuncia el servidor, así que una
  *   herramienta registrada sin la puerta hace fallar ese test.
+ * - Qué notas carga el filtro de privados antes de correr (A4.0 del plan de memoria): la
+ *   biblioteca entera por defecto, o solo las que pida la herramienta si se registra con
+ *   `gated(nombre, run, { privacyLoad: 'lazy' })` (`ToolPrivacyLoad`, `./context.ts`).
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, borra carpetas ni las mueve fuera de `hebra_jd_move`, ni cambia ni borra
@@ -29,7 +32,13 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk } from '../log/logger';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { runListOrganizations, runListSpaces } from '../spaces/directory';
-import { resolveToolContext, usageOf, type ServerContext, type ToolContext } from './context';
+import {
+  resolveToolContext,
+  usageOf,
+  type ServerContext,
+  type ToolContext,
+  type ToolPrivacyLoad
+} from './context';
 import { ToolContent, ToolError, toErrorResult, toOkResult } from './errors';
 import {
   GATE_ATTEMPTS,
@@ -422,11 +431,13 @@ async function settle(run: () => Promise<unknown>): Promise<ToolOutcome> {
  * del sync, invisible hasta reiniciar). Después, la puerta: una lectura que no pasa se repite
  * entera, hasta `GATE_ATTEMPTS` veces, y si la última tampoco pasa sale el estado fresco; una
  * escritura no se repite, su informe se filtra. Un solo log por llamada, del resultado final.
+ * `privacyLoad` dice qué notas carga ese filtro antes de `run` (`ToolPrivacyLoad`).
  */
 async function runTool(
   ctx: ServerContext,
   name: string,
   policy: GatePolicy,
+  privacyLoad: ToolPrivacyLoad,
   run: (toolCtx: ToolContext) => Promise<unknown>
 ): Promise<ReturnType<typeof toOkResult>> {
   /** Toda salida pasa por aquí. En un espacio compartido, `ctx.authorize` es la segunda y
@@ -456,7 +467,7 @@ async function runTool(
   for (let attempt = 1; attempt <= GATE_ATTEMPTS; attempt += 1) {
     let toolCtx: ToolContext;
     try {
-      toolCtx = await resolveToolContext(ctx);
+      toolCtx = await resolveToolContext(ctx, { loadAll: privacyLoad === 'all' });
     } catch (error) {
       // `config.json` cambió y no se puede aplicar (M5): nada sale hasta que se arregle.
       if (!(error instanceof PrivacyConfigUnreadable)) throw error;
@@ -512,19 +523,61 @@ export function gatedTools(server: McpServer): ReadonlySet<string> {
   return gatedByServer.get(server) ?? new Set();
 }
 
-export function registerTools(server: McpServer, ctx: ServerContext, version = 'unknown'): void {
+/** La `privacyLoad` que DECLARÓ cada herramienta de cada servidor al registrarse. */
+const privacyLoadByServer = new WeakMap<McpServer, Map<string, ToolPrivacyLoad>>();
+
+/** La `privacyLoad` con la que se registró `name` en `server` (`undefined` si no se
+ *  registró por `gated`). La declarada, también con `forcePrivacyLoad`: lo que mira el
+ *  helper de equivalencia (`test/fixtures/privacy-load.ts`) para no dar por perezosa una
+ *  herramienta que nadie marcó. */
+export function toolPrivacyLoad(server: McpServer, name: string): ToolPrivacyLoad | undefined {
+  return privacyLoadByServer.get(server)?.get(name);
+}
+
+/** Opciones de registro de UNA herramienta (tercer argumento de `gated`). */
+interface GatedOptions {
+  /**
+   * Qué notas carga el filtro de privados antes de correr (`ToolPrivacyLoad`; por defecto
+   * `'all'`). Una herramienta que pide sus notas con `await ctx.privacy.ensure(ids)` antes de
+   * preguntar por ellas se marca con `{ privacyLoad: 'lazy' }` en SU llamada a `gated`, sin
+   * tocar ninguna lista común (A4-A8 del plan de memoria marcan cada una la suya en paralelo),
+   * y lo demuestra con `expectLazyEquivalent` (`test/fixtures/privacy-load.ts`).
+   */
+  privacyLoad?: ToolPrivacyLoad;
+}
+
+export interface RegisterToolsOptions {
+  /** Solo tests: todas las herramientas con esta carga, declaren la que declaren. Lo usa el
+   *  helper de equivalencia para correr una herramienta `'lazy'` también con `'all'` y
+   *  comparar. Producción no lo pasa nunca. */
+  forcePrivacyLoad?: ToolPrivacyLoad;
+}
+
+export function registerTools(
+  server: McpServer,
+  ctx: ServerContext,
+  version = 'unknown',
+  options: RegisterToolsOptions = {}
+): void {
   const space = z.string().max(200).optional().describe('UUID de un espacio de hebra_list_spaces con `granted: true`; personal u omitido = biblioteca personal.');
   const scoped = <T extends Record<string, unknown>>(shape: T) => ({ ...shape, space });
   const gatedNames = new Set<string>();
   gatedByServer.set(server, gatedNames);
-  /** El manejador de una herramienta, por la puerta final con su política. */
+  const declaredLoads = new Map<string, ToolPrivacyLoad>();
+  privacyLoadByServer.set(server, declaredLoads);
+  /** El manejador de una herramienta, por la puerta final con su política y su carga del
+   *  filtro de privados (`GatedOptions`). */
   function gated<Input>(
     name: string,
-    run: (toolCtx: ToolContext, input: Input, server: ServerContext) => Promise<unknown>
+    run: (toolCtx: ToolContext, input: Input, server: ServerContext) => Promise<unknown>,
+    toolOptions: GatedOptions = {}
   ): (input: Input) => Promise<ReturnType<typeof toOkResult>> {
     const policy = GATE_POLICIES[name];
     if (!policy) throw new Error(`herramienta sin política de la puerta final: ${name}`);
     gatedNames.add(name);
+    const declaredLoad = toolOptions.privacyLoad ?? 'all';
+    declaredLoads.set(name, declaredLoad);
+    const privacyLoad = options.forcePrivacyLoad ?? declaredLoad;
     const invoke = async (input: Input): Promise<ReturnType<typeof toOkResult>> => {
       try {
         const { space, ...fields } = (input ?? {}) as Record<string, unknown>;
@@ -538,7 +591,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
           if (name.startsWith('hebra_jd_')) throw new ToolError('space_not_supported');
         }
         const result = await runTool(selected, name,
-          typeof policy === 'function' ? policy(fields, selected) : policy,
+          typeof policy === 'function' ? policy(fields, selected) : policy, privacyLoad,
           (toolCtx) => run(toolCtx, fields as Input, selected));
         // Origen explícito también para imágenes/recursos y errores ligados al contenido.
         if (selected.spaceId) return { ...result, content: [
@@ -616,7 +669,7 @@ export function registerTools(server: McpServer, ctx: ServerContext, version = '
       inputSchema: scoped(readNoteInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_read_note', (toolCtx, input) => runReadNote(toolCtx, input))
+    gated('hebra_read_note', (toolCtx, input) => runReadNote(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

@@ -20,6 +20,9 @@ const AMBIGUOUS_CANDIDATES_MAX = 50;
  *  una visible podía quedar detrás de 50 ocultas y dar un `not_found` falso. */
 export async function resolveIdByTitle(ctx: ToolContext, title: string): Promise<string> {
   const { items } = await ctx.port.notesByExactTitle(title);
+  // Todas las homónimas, visibles u ocultas, antes de juzgarlas (A4.0: con `privacyLoad:
+  // 'lazy'` el filtro no las trae cargadas; con `'all'` no lee nada).
+  await ctx.privacy.ensure(items.map((item) => item.id));
   const candidates = items.filter((item) => ctx.privacy.visibleMeta(item.id) !== undefined);
   if (candidates.length === 0) throw new ToolError('not_found');
   // Todas las visibles deciden entre «una» y «ambigua»: la puerta final las vuelve a juzgar,
