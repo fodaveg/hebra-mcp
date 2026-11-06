@@ -149,7 +149,7 @@ export async function grepContext(
   mode: 'readWrite' | 'readOnly' = 'readWrite'
 ): Promise<{ ctx: ToolContext; port: NodeLibraryPort }> {
   const port = await openNodeLibraryPort({ sqlitePath, dataDir: join(sqlitePath, '..'), mode });
-  const privacy = await PrivacyFilter.build(port, privacyConfig);
+  const privacy = await (await PrivacyFilter.build(port, privacyConfig)).ensureAll();
   return {
     ctx: { port, privacy, privacyConfig, status: new UnlinkedStatusSource() },
     port

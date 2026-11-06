@@ -306,7 +306,13 @@ export interface ReplaceBatchOptions {
 /** Lo que la simulación lee del almacén (fuera del turno de escritura). */
 export type ReplaceReadPort = Pick<
   HebraLibraryPort,
-  'grepNotes' | 'grepCandidates' | 'grepBodies' | 'foldersList' | 'notesVisibilityIndex' | 'trashIndex'
+  | 'grepNotes'
+  | 'grepCandidates'
+  | 'grepBodies'
+  | 'foldersList'
+  | 'notesVisibilityIndex'
+  | 'notesVisibilityIndexFor'
+  | 'trashIndex'
 >;
 
 /** Una nota que la simulación metería en el plan. */
@@ -510,7 +516,7 @@ export class ReplaceBatch {
     filter: PrivacyFilter;
     rows: Map<string, GrepNoteRow>;
   }> {
-    const filter = await PrivacyFilter.build(this.port, privacy);
+    const filter = await (await PrivacyFilter.build(this.port, privacy)).ensureAll();
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
     const rows = new Map<string, GrepNoteRow>();
     for (const row of await this.port.grepNotes()) {
@@ -538,7 +544,7 @@ export class ReplaceBatch {
     }
     const after = request.after === undefined ? null : parseContinue(request.after);
 
-    const filter = await PrivacyFilter.build(this.port, request.privacy);
+    const filter = await (await PrivacyFilter.build(this.port, request.privacy)).ensureAll();
     if (filter.unresolved) throw writeRejected('privacy_config_unresolved');
     const nothing = (extra: Partial<ReplacePlanView> = {}): ReplaceLocal => ({
       result: {

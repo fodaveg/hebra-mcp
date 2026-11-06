@@ -41,6 +41,7 @@ describe('A3: la memoria de las rutas privadas', () => {
       await privacyWithMemory(h.port, { privateFolders: [], privateTags: ['secreto'] });
       const again = await privacyWithMemory(h.port, CONFIG);
       expect(again.filter.isFolderHidden(h.library.folders.diario)).toBe(false);
+      await again.filter.ensure([h.library.privateFolderNoteId]);
       expect(again.filter.isHiddenNote(h.library.privateFolderNoteId)).toBe(false);
     } finally {
       await h.close();
@@ -59,7 +60,11 @@ describe('A3: la memoria de las rutas privadas', () => {
         await engine.folderCreate(null, 'Diario');
       });
       const fromReader = await privacyWithMemory(reader, CONFIG);
+      // El filtro de `privacyWithMemory` no trae notas cargadas (A3 del plan de memoria): sin
+      // `ensure`, oculta por no cargada, no por la memoria que se comprueba aquí.
+      await fromReader.filter.ensure([h.library.privateFolderNoteId]);
       expect(fromReader.filter.isHiddenNote(h.library.privateFolderNoteId)).toBe(true);
+      expect(fromReader.filter.unloadedLookups).toBe(0);
       // El escritor anota la de ahora en la tabla; un lector nuevo la lee de ahí.
       await privacyWithMemory(h.port, CONFIG);
       const rows = await reader.rememberedPrivateFolders();
