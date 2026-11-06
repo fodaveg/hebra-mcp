@@ -6,9 +6,13 @@
  *
  * Oculta, aquí, es del listado general: una preferencia de vista de Hebra, no privacidad
  * (SPEC.md §13.7). La nota sigue en su carpeta, sus etiquetas, la búsqueda, los enlaces y el MCP.
+ *
+ * Perezosas (A5b del plan de memoria, 6 nov 2026): se registran con `privacyLoad: 'lazy'` y solo
+ * cargan en el filtro la nota `id` (`requireLoadedVisibleNote`). Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import type { ToolContext } from '../context';
-import { requireVisibleNote } from './guards';
+import { requireLoadedVisibleNote } from './guards';
 import { noteOutput, noteState, type NoteOrganizeOutput } from './organize';
 
 export type NoteHiddenOutput = NoteOrganizeOutput & { hidden: boolean };
@@ -18,7 +22,7 @@ export async function runSetHidden(
   ctx: ToolContext,
   input: { id: string; hidden: boolean }
 ): Promise<NoteHiddenOutput> {
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const outcome = await noteState(ctx, { action: 'setHidden', id: input.id, hidden: input.hidden });
   return { ...noteOutput(ctx, 'setHidden', outcome), hidden: outcome.hidden };
 }
@@ -32,7 +36,7 @@ export async function runClearConflict(
   ctx: ToolContext,
   input: { id: string }
 ): Promise<ClearConflictOutput> {
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
   const outcome = await noteState(ctx, { action: 'clearConflict', id: input.id });
   return { ...noteOutput(ctx, 'clearConflict', outcome), cleared: outcome.changed };
 }

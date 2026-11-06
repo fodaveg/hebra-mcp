@@ -28,13 +28,17 @@
  * respuesta de un append ya guardado y el reintento lo duplicaba). Con él, el mismo id con
  * la misma petición no vuelve a añadir el texto y devuelve la misma respuesta con
  * `replayed: true`; con otra petición, `operation_id_reused`. Sin él, como siempre.
+ *
+ * Perezosa (A5b del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y solo
+ * carga en el filtro la nota `id` (`requireLoadedVisibleNote`). Equivalencia con `'all'` en
+ * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
 import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH, type AppendedProof } from '../../store/writes';
 import { ToolError } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
-import { requireValidOperationId, requireVisibleNote } from './guards';
+import { requireLoadedVisibleNote, requireValidOperationId } from './guards';
 import { requireValidHeadingInput } from './read-note';
 import { mapWriteError } from './write-errors';
 
@@ -68,7 +72,7 @@ export async function runAppendToNote(
   requireValidHeadingInput(input);
   if (input.operationId !== undefined) requireValidOperationId(input.operationId);
 
-  requireVisibleNote(ctx, input.id);
+  await requireLoadedVisibleNote(ctx, input.id);
 
   let result;
   try {
