@@ -19,7 +19,9 @@
  *   herramienta registrada sin la puerta hace fallar ese test.
  * - Qué notas carga el filtro de privados antes de correr (A4.0 del plan de memoria): la
  *   biblioteca entera por defecto, o solo las que pida la herramienta si se registra con
- *   `gated(nombre, run, { privacyLoad: 'lazy' })` (`ToolPrivacyLoad`, `./context.ts`).
+ *   `gated(nombre, run, { privacyLoad: 'lazy' })` (`ToolPrivacyLoad`, `./context.ts`). Todas
+ *   están ya en `'lazy'` salvo las del JDex (`hebra_jd_*`), y
+ *   `test/tools/privacy-load-default.test.ts` falla si otra se queda en `'all'`.
  * - Log cerrado de cada llamada (§6.4): nunca la entrada, solo si salió bien y un
  *   recuento cuando aplica, o el código si falló.
  * Ninguna purga ni vacía la papelera, borra carpetas ni las mueve fuera de `hebra_jd_move`, ni cambia ni borra
@@ -611,7 +613,9 @@ export function registerTools(
     title: 'Espacios que vería la persona',
     description: 'Lista los espacios que vería la persona de este agente, con `spaceId`, `name` (null si no se puede leer), `organization` ({orgId, name} o null) y `granted`. Solo con `granted: true` se puede usar spaceId como selector space; con false responde space_access_denied, aunque seas miembro de la organización. Omitir space siempre elige personal. Si `organizationsAvailable` es false, el directorio no está disponible y salen solo los espacios con concesión. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
     inputSchema: {}, annotations: READ_ONLY
-  }, gated('hebra_list_spaces', () => runListSpaces(ctx)));
+  },
+  // Solo el catálogo y el directorio del relé: no pregunta al filtro de privados por ninguna nota.
+  gated('hebra_list_spaces', () => runListSpaces(ctx), { privacyLoad: 'lazy' }));
 
   server.registerTool(
     'hebra_list_organizations',
@@ -621,8 +625,11 @@ export function registerTools(
       inputSchema: listOrganizationsInputShape,
       annotations: READ_ONLY
     },
-    gated('hebra_list_organizations', (_toolCtx, input: { limit?: number; cursor?: string }) =>
-      runListOrganizations(ctx, input)
+    // Como `hebra_list_spaces`: el directorio del relé, sin preguntar al filtro por notas.
+    gated(
+      'hebra_list_organizations',
+      (_toolCtx, input: { limit?: number; cursor?: string }) => runListOrganizations(ctx, input),
+      { privacyLoad: 'lazy' }
     )
   );
 
@@ -748,7 +755,7 @@ export function registerTools(
         'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.',
       annotations: READ_ONLY
     },
-    gated('hebra_status', (toolCtx) => runStatus(toolCtx, version))
+    gated('hebra_status', (toolCtx) => runStatus(toolCtx, version), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1077,7 +1084,7 @@ export function registerTools(
       inputSchema: scoped(createFolderInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_create_folder', (toolCtx, input) => runCreateFolder(toolCtx, input))
+    gated('hebra_create_folder', (toolCtx, input) => runCreateFolder(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(
@@ -1089,7 +1096,7 @@ export function registerTools(
       inputSchema: scoped(renameFolderInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_rename_folder', (toolCtx, input) => runRenameFolder(toolCtx, input))
+    gated('hebra_rename_folder', (toolCtx, input) => runRenameFolder(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

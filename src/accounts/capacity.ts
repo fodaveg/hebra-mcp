@@ -30,24 +30,24 @@ const MIB = 1024 * 1024;
  */
 export const OPENING_RESERVE_BYTES = 8 * MIB;
 
-/** Lo que cuesta en memoria una petición por cada nota de la biblioteca que toca (unos 3,5 KB,
- *  medido el 6 nov 2026: de 78 a 104 MiB con 30 000 notas). */
-export const REQUEST_BYTES_PER_NOTE = 3_584;
-/** Lo mínimo que aparta una petición, también sobre una biblioteca vacía o sin recuento. */
-export const MIN_REQUEST_RESERVE_BYTES = 4 * MIB;
-
 /**
- * Lo que aparta una llamada de herramienta mientras corre, según cuántas notas tiene la
- * biblioteca o el espacio al que va (`null`: no se pudo contar). Hoy una petición cuesta en
- * proporción a las notas de la biblioteca entera, no a las que toca.
+ * Lo que aparta cada llamada de herramienta mientras corre, la misma para todas y sea cual sea
+ * su destino. Antes eran unos 3,5 KB por nota de la biblioteca o del espacio (medido el 6 nov
+ * 2026: de 78 a 104 MiB por petición con 30 000 notas), con un `COUNT(*)` por destino, porque
+ * cada llamada cargaba en el filtro de privados la visibilidad de la biblioteca entera. Desde
+ * A9b del plan de memoria cada herramienta carga solo las notas que decide
+ * (`privacyLoad: 'lazy'`, SPEC.md §6.3): su coste ya depende de las notas que toca, no de la
+ * biblioteca, y basta una cantidad fija.
  *
- * Es la única regla del tamaño de la reserva y se sustituye aquí sin tocar nada más: cuando
- * el coste por petición pase a ser O(notas tocadas), será una constante de unos 8 MiB y el
- * recuento de notas dejará de hacer falta.
+ * Límite de la transición: las tres `hebra_jd_*` aún cargan la biblioteca entera hasta que su
+ * pieza las pase a `'lazy'`, y apartan lo mismo que las demás.
  */
-export function requestReserveBytes(notes: number | null): number {
-  if (notes === null || !Number.isFinite(notes) || notes <= 0) return MIN_REQUEST_RESERVE_BYTES;
-  return Math.max(MIN_REQUEST_RESERVE_BYTES, Math.ceil(notes) * REQUEST_BYTES_PER_NOTE);
+export const REQUEST_RESERVE_BYTES = 8 * MIB;
+
+/** Lo que aparta una llamada de herramienta: `REQUEST_RESERVE_BYTES`, sin recuento de notas. Es
+ *  la única regla del tamaño de la reserva de una petición (`AccountContexts.admitCalls`). */
+export function requestReserveBytes(): number {
+  return REQUEST_RESERVE_BYTES;
 }
 
 /** Por encima de esto, un límite de cgroup v1 significa "sin límite". */

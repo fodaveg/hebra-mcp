@@ -14,6 +14,12 @@
  *    escribir; si para entonces la carpeta no fuera visible, `not_found` en vez de enseñar
  *    una ruta privada.
  *
+ * Carga del filtro (A9b del plan de memoria, 6 nov 2026): las dos se registran con
+ * `privacyLoad: 'lazy'` y no cargan ninguna nota. El plan, la declaración para la puerta y la
+ * ruta de después solo preguntan por carpetas y por la configuración (`folderExists`,
+ * `isFolderHidden`, `folderChildren`, `isPrivateFolderPath`…), que el filtro ya sabe sin notas;
+ * el escritor rehace el plan igual, con un filtro sin notas (`privacyInTurnFor(…, [])`).
+ *
  * `folder_unavailable` es UNO para todo lo que tenga que ver con lo privado (ruta privada
  * o debajo de una, una privada debajo de la que se renombra, un choque con algo oculto):
  * la misma respuesta exista o no la carpeta privada. `folder_name_taken` solo nombra

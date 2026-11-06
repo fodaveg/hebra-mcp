@@ -1,7 +1,9 @@
 /**
  * `hebra_status` (SPEC.md §5): sin contenido de notas, así que no pasa por el filtro de
  * privados más que el `privacy_config_unresolved` común a toda herramienta (§6.3),
- * aplicado por el registro de herramientas, no aquí.
+ * aplicado por el registro de herramientas, no aquí. Por eso se registra con
+ * `privacyLoad: 'lazy'` (A9b del plan de memoria) sin cargar ninguna nota: ese error solo
+ * depende de las carpetas y de la configuración.
  */
 import type { ToolContext } from '../context';
 import type { HebraStatus } from '../../status/status-source';

@@ -30,8 +30,9 @@ export interface AccountContextLease {
   prepareSpaces(spaceIds: readonly string[], shouldStop?: () => boolean): Promise<void>;
   /**
    * Antes de llegar a las herramientas: aparta en la compuerta de memoria lo que costarán las
-   * llamadas de la petición, una por destino (`'personal'` o el `spaceId`; uno no preparado
-   * aparta el mínimo), en la misma cola y con la misma espera que las aperturas. Lo apartado se
+   * llamadas de la petición, una entrada por llamada con su destino (`'personal'` o el
+   * `spaceId`), `requestReserveBytes()` cada una sea cual sea el destino y sin contar sus notas,
+   * en la misma cola y con la misma espera que las aperturas. Lo apartado se
    * suelta cuando la petición termina del todo: respuesta enviada o cortada y última
    * herramienta acabada, también si lanzó. Al agotar la espera,
    * `ContextUnavailableError('capacity_wait_timeout')`; con `signal` abortado, sale de la cola.
@@ -43,20 +44,6 @@ export interface AccountContextLease {
 
 /** El destino de una llamada sin `space`, o con `space: "personal"`. */
 export const PERSONAL_TARGET = 'personal';
-
-/**
- * Cuántas notas tiene la biblioteca de `ctx`, con el `COUNT(*)` de `libraryOpen` (va por el
- * índice parcial de notas vivas, sin leer filas). Sin puerto o si falla, `null`: un recuento
- * roto no niega el acceso, solo deja la reserva en su mínimo.
- */
-async function countNotes(ctx: ServerContext | undefined): Promise<number | null> {
-  if (!ctx?.port) return null;
-  try {
-    return (await ctx.port.libraryOpen()).notesCount;
-  } catch {
-    return null;
-  }
-}
 
 type OpenAccount = (account: AuthorizedAccount) => Promise<ServeContext>;
 
@@ -242,31 +229,15 @@ export class AccountContexts {
       }
       const use = new RequestUse(() => lease.release());
       const lifecycle = lease.value.ctx.spaces?.lifecycle;
-      const personal = lease.value.ctx;
-      const prepared = new Map<string, ServerContext>();
       return {
         ctx: guardedContext(lease.value.ctx, this.registry, account, use),
         prepareSpaces: async (spaceIds, shouldStop) => {
           if (!lifecycle || spaceIds.length === 0) return;
-          for (const space of await lifecycle.prepare(spaceIds, shouldStop)) {
-            const value = use.hold(space);
-            if (value.spaceId) prepared.set(value.spaceId, value);
-          }
+          for (const space of await lifecycle.prepare(spaceIds, shouldStop)) use.hold(space);
         },
         admitCalls: async (targets, signal) => {
           if (targets.length === 0) return;
-          const notes = new Map<string, Promise<number | null>>();
-          const countOf = (target: string): Promise<number | null> => {
-            let count = notes.get(target);
-            if (!count) {
-              count = countNotes(target === PERSONAL_TARGET ? personal : prepared.get(target));
-              notes.set(target, count);
-            }
-            return count;
-          };
-          let bytes = 0;
-          for (const target of targets) bytes += requestReserveBytes(await countOf(target));
-          use.holdTicket(await this.gate.admit(signal, bytes));
+          use.holdTicket(await this.gate.admit(signal, targets.length * requestReserveBytes()));
         },
         release: () => use.release()
       };

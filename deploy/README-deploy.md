@@ -398,13 +398,16 @@ ruta compartida está cerrada, la biblioteca personal puede seguir operativa.
   `Retry-After` y su motivo en el log (`mcp.unavailable`): `capacity_wait_timeout`, `open_failed` o
   `lock_held`.
 - Lo que hay en curso no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`. Cada apertura aparta 8 MiB mientras
-  abre y cada llamada de herramienta aparta, mientras corre, unos 3,5 KB por nota de la biblioteca o
-  el espacio al que va (4 MiB como mínimo; unos 100 MiB con 30 000 notas). Lo que no cabe espera en
-  una sola cola, por orden de llegada, hasta `HEBRA_MCP_OPEN_WAIT_MS`, y después recibe el 503
-  `capacity_wait_timeout`. Una ráfaga de búsquedas sobre bibliotecas grandes ya no sube la memoria
-  sin control: espera su turno. Muchos `capacity_wait_timeout` con poca gente indican que el límite
-  se queda corto para el tamaño de las bibliotecas, no un fallo: se sube `mem_limit`. Una sola
-  petición que no cabe en el margen entra igual si no hay nada más en curso.
+  abre y cada llamada de herramienta aparta otros 8 MiB fijos mientras corre, sea cual sea el tamaño
+  de la biblioteca o del espacio al que va: su coste ya depende de las notas que toca, no de la
+  biblioteca, porque cada herramienta carga solo las suyas en el filtro de privados (SPEC.md §6.3).
+  Antes eran unos 3,5 KB por nota de la biblioteca, unos 100 MiB por llamada con 30 000 notas. Las
+  tres herramientas del JDex (`hebra_jd_*`) aún cargan la biblioteca entera mientras no esté hecha
+  su pieza, y apartan lo mismo. Lo que no cabe espera en una sola cola, por orden de llegada, hasta
+  `HEBRA_MCP_OPEN_WAIT_MS`, y después recibe el 503 `capacity_wait_timeout`. Una ráfaga de
+  búsquedas ya no sube la memoria sin control: espera su turno. Muchos `capacity_wait_timeout` con
+  poca gente indican que el límite se queda corto para lo que hay abierto, no un fallo: se sube
+  `mem_limit`. Una sola petición que no cabe en el margen entra igual si no hay nada más en curso.
 - `control/server.lock` lo toma el servicio y lo ve cualquier proceso, también de otro contenedor
   sobre el mismo volumen. Un segundo `serve-http` no arranca. Es un fichero vacío que no se borra.
 - `control/pending-uploads-v1.json` es la lista de subidas que quedaron al cerrar una biblioteca.

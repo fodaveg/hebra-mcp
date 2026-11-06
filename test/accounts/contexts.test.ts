@@ -4,11 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CapacityGate,
   ContextUnavailableError,
-  MIN_REQUEST_RESERVE_BYTES,
   OPENING_RESERVE_BYTES,
   readCapacityConfig,
   readMemoryUsage,
-  REQUEST_BYTES_PER_NOTE,
+  REQUEST_RESERVE_BYTES,
   requestReserveBytes
 } from '../../src/accounts/capacity';
 import { AccountContexts, type AccountContextsOptions } from '../../src/accounts/contexts';
@@ -817,7 +816,8 @@ describe('memoria real, no recuento', () => {
   });
 });
 
-/** Un contexto cuya biblioteca tiene `notesCount` notas (`libraryOpen`), contando cuántas veces se pregunta. */
+/** Un contexto cuya biblioteca tiene `notesCount` notas (`libraryOpen`), contando cuántas veces se
+ *  pregunta: la reserva de una llamada ya no las cuenta (A9b), así que `asked` debe quedar vacío. */
 function withNotes(notesCount: number, asked: string[] = []) {
   return (context: ServeContext, id: string): ServeContext => ({
     ...context,
@@ -825,20 +825,20 @@ function withNotes(notesCount: number, asked: string[] = []) {
   });
 }
 
+/** `n` llamadas de herramienta a la biblioteca personal. */
+const personalCalls = (n: number): string[] => Array.from({ length: n }, () => 'personal');
+
 describe('memoria de las peticiones en curso', () => {
   function gateAt(memory: { usedBytes: number; limitBytes: number }, clock = new FakeClock()) {
     return new CapacityGate({ readMemory: () => memory, highWater: { ratio: 0.8 }, waitMs: WAIT_MS,
       clock, reclaim: async () => undefined });
   }
 
-  it('el tamaño de la reserva: unos 3,5 KB por nota, nunca menos de 4 MiB; una apertura, 8 MiB', () => {
-    expect(requestReserveBytes(null)).toBe(MIN_REQUEST_RESERVE_BYTES);
-    expect(requestReserveBytes(0)).toBe(4 * MIB);
-    expect(requestReserveBytes(1_000)).toBe(4 * MIB);
-    expect(requestReserveBytes(30_000)).toBe(30_000 * REQUEST_BYTES_PER_NOTE);
-    // Lo medido el 6 nov 2026 a 30 000 notas: de 78 a 104 MiB por petición.
-    expect(requestReserveBytes(30_000) / MIB).toBeGreaterThan(100);
-    expect(requestReserveBytes(30_000) / MIB).toBeLessThan(105);
+  it('el tamaño de la reserva: 8 MiB fijos por llamada, sin recuento de notas; una apertura, 8 MiB', () => {
+    // A9b del plan de memoria: cada herramienta carga solo las notas que decide, así que una
+    // llamada ya no cuesta según la biblioteca (antes, unos 3,5 KB por nota: ~100 MiB a 30 000).
+    expect(REQUEST_RESERVE_BYTES).toBe(8 * MIB);
+    expect(requestReserveBytes()).toBe(REQUEST_RESERVE_BYTES);
     expect(OPENING_RESERVE_BYTES).toBe(8 * MIB);
   });
 
@@ -879,35 +879,34 @@ describe('memoria de las peticiones en curso', () => {
 
   it('aperturas y peticiones comparten una cola en orden de llegada: la pequeña no adelanta a la grande', async () => {
     const { clock, memory, libraries, contexts } = harness();
-    libraries.decorate = withNotes(14_629); // unos 50 MiB por llamada
     const order: string[] = [];
     const holder = await contexts.acquire(account('a'));
-    await holder.admitCalls(['personal']);
+    await holder.admitCalls(personalCalls(6)); // seis llamadas: 48 MiB
     memory.usedBytes = 760 * MIB;
     const opening = deferred();
     libraries.beforeOpen = async (id) => {
       order.push(`abre-${id}`);
       if (id === 'b') await opening.promise;
     };
-    const b = contexts.acquire(account('b')); // 760 + 50 + 8 > 800: espera
+    const b = contexts.acquire(account('b')); // 760 + 48 + 8 > 800: espera
     await settled();
     const second = await contexts.acquire(account('a')); // ya abierta: no espera a abrir
-    const call = second.admitCalls(['personal']).then(() => { order.push('llamada-a'); });
+    const call = second.admitCalls(personalCalls(6)).then(() => { order.push('llamada-a'); });
     await settled();
     const c = contexts.acquire(account('c'));
     await settled();
     expect(order).toEqual([]);
-    holder.release(); // suelta sus 50 MiB: entra la apertura de b, que aparta 8 MiB mientras abre
+    holder.release(); // suelta sus 48 MiB: entra la apertura de b, que aparta 8 MiB mientras abre
     await settled();
     expect(order).toEqual(['abre-b']);
-    // La llamada de a (760 + 8 + 50) no cabe; la apertura de c (760 + 8 + 8) sí, pero no adelanta.
+    // La llamada de a (760 + 8 + 48) no cabe; la apertura de c (760 + 8 + 8) sí, pero no adelanta.
     await clock.advance(500);
     expect(order).toEqual(['abre-b']);
     opening.resolve();
     await settled();
     expect(order).toEqual(['abre-b', 'llamada-a']);
     await clock.advance(500);
-    expect(order).toEqual(['abre-b', 'llamada-a']); // c: 760 + 50 + 8 > 800
+    expect(order).toEqual(['abre-b', 'llamada-a']); // c: 760 + 48 + 8 > 800
     second.release();
     await settled();
     expect(order).toEqual(['abre-b', 'llamada-a', 'abre-c']);
@@ -917,7 +916,7 @@ describe('memoria de las peticiones en curso', () => {
     await contexts.close();
   });
 
-  it('cada llamada aparta según las notas de su destino, contadas una vez; uno no preparado, el mínimo', async () => {
+  it('cada llamada aparta 8 MiB sea cual sea su destino, sin contar las notas de ninguno', async () => {
     const { memory, libraries, contexts } = harness();
     const asked: string[] = [];
     const control = spaceControl({
@@ -928,16 +927,19 @@ describe('memoria de las peticiones en curso', () => {
     });
     libraries.decorate = (context) => ({
       ...context,
-      ctx: { spaces: { lifecycle: control, list: async () => [], resolve: async () => { throw new Error('unused'); } } } as never
+      ctx: {
+        port: { libraryOpen: async () => { asked.push('personal'); return { notesCount: 100_000 }; } },
+        spaces: { lifecycle: control, list: async () => [], resolve: async () => { throw new Error('unused'); } }
+      } as never
     });
     const lease = await contexts.acquire(account('a'));
     await lease.prepareSpaces(['s1']);
-    // s1 dos veces (100 000 notas), personal sin puerto y un espacio sin preparar: el mínimo.
+    // s1 dos veces y personal (100 000 notas cada uno) y un espacio sin preparar: 4 × 8 MiB.
     await lease.admitCalls(['s1', 'personal', 'otro', 's1']);
-    expect(asked).toEqual(['s1']);
-    // Apartado: 2 × 100 000 × 3,5 KB + 2 × 4 MiB = 691,6 MiB. Con 100 MiB medidos (límite 800)
-    // cabe otra llamada de 4 MiB (795,6) y ya no una apertura de 8 MiB (803,6).
-    memory.usedBytes = 100 * MIB;
+    expect(asked).toEqual([]);
+    // Apartado: 32 MiB. Con 753 MiB medidos (límite 800) cabe otra llamada (753 + 32 + 8 = 793)
+    // y ya no una apertura (753 + 40 + 8 = 801). Contando las notas, no cabría ni la llamada.
+    memory.usedBytes = 753 * MIB;
     const again = await contexts.acquire(account('a'));
     await again.admitCalls(['otro']);
     let entered = false;
@@ -954,7 +956,7 @@ describe('memoria de las peticiones en curso', () => {
     const { memory, contexts } = harness();
     memory.usedBytes = 790 * MIB; // con algo apartado no cabe ni una apertura
     const lease = await contexts.acquire(account('a'));
-    await lease.admitCalls(['personal']); // sin puerto: el mínimo, 4 MiB
+    await lease.admitCalls(['personal']); // 8 MiB
     const tool = deferred();
     const running = lease.ctx.trackInvocation!(async () => {
       await tool.promise;
@@ -964,7 +966,7 @@ describe('memoria de las peticiones en curso', () => {
     let entered = false;
     const other = contexts.acquire(account('b')).then((next) => { entered = true; return next; });
     await settled();
-    expect(entered).toBe(false); // 790 + 4 + 8 > 800
+    expect(entered).toBe(false); // 790 + 8 + 8 > 800
     tool.resolve();
     expect(await running).toMatchObject({ message: 'falla' });
     await settled();
@@ -975,9 +977,11 @@ describe('memoria de las peticiones en curso', () => {
 
   it('ninguna reserva queda colgada: al cerrar el contexto no queda nada apartado, y el apagado saca a quien espera', async () => {
     const { clock, memory, libraries, contexts } = harness();
-    libraries.decorate = withNotes(30_000);
+    const asked: string[] = [];
+    libraries.decorate = withNotes(30_000, asked);
     const lease = await contexts.acquire(account('a'));
     await lease.admitCalls(['personal', 'personal']);
+    expect(asked).toEqual([]); // 16 MiB, sin contar las 30 000 notas
     await lease.ctx.trackInvocation!(async () => undefined);
     lease.release();
     await clock.advance(IDLE_MS);
@@ -1180,7 +1184,8 @@ describe('/mcp sobre AccountContexts', () => {
     await contexts.close();
   });
 
-  /** Una biblioteca de 50 000 notas (unos 171 MiB por llamada) cuya herramienta espera a `tool`. */
+  /** Una biblioteca de 50 000 notas cuya herramienta espera a `tool`. Su llamada aparta 8 MiB,
+   *  como cualquier otra (antes de A9b, unos 171 MiB por las notas). */
   function bigLibraryWithBlockingTool(libraries: FakeLibraries) {
     const entered = deferred();
     const tool = deferred();
@@ -1215,7 +1220,7 @@ describe('/mcp sobre AccountContexts', () => {
   it('una llamada que no cabe espera a que otra suelte su memoria; si no llega, 503 capacity_wait_timeout', async () => {
     const { clock, memory, libraries, contexts } = harness();
     const { entered, tool } = bigLibraryWithBlockingTool(libraries);
-    memory.usedBytes = 600 * MIB; // 600 + 171 cabe; 600 + 171 + 171 no
+    memory.usedBytes = 790 * MIB; // sola, la llamada entra (790 < 800); 790 + 8 + 8 ya no
     const { post, logged } = await serve(contexts);
     const first = post(STATUS_CALL);
     await entered.promise;
@@ -1239,7 +1244,7 @@ describe('/mcp sobre AccountContexts', () => {
   it('el cliente que se va mientras espera memoria sale de la cola sin apartar nada ni dejar un 503 en el log', async () => {
     const { clock, memory, libraries, contexts } = harness();
     const { entered, tool } = bigLibraryWithBlockingTool(libraries);
-    memory.usedBytes = 600 * MIB;
+    memory.usedBytes = 790 * MIB; // la segunda llamada no cabe: 790 + 8 + 8 > 800
     const { post, logged } = await serve(contexts);
     const first = post(STATUS_CALL);
     await entered.promise;

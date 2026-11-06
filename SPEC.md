@@ -1038,11 +1038,19 @@ El dispositivo acumula tres secretos:
   cerrando**: una nota por la que se pregunta sin haberla cargado se trata como oculta, nunca
   como visible, y deja rastro en un contador que comprueban los tests; `visibleNotes` y
   `hasHiddenLockedNote`, que recorren la biblioteca, sin `ensureAll` no cuentan lo no cargado y
-  dan «hay una bloqueada oculta», respectivamente. Transición: `resolveToolContext` llama a
-  `ensureAll()`, así que todas las herramientas se comportan igual que antes; las piezas A4 a
-  A8 las pasan una a una a `ensure` con sus ids, y los recuentos (`visibleNotes`) y
-  `hasHiddenLockedNote`, a SQL (A6/A7). La puerta final (abajo) construye su propio filtro con
-  lo leído en su transacción (`fromSnapshot`) y no depende de esta carga.
+  dan «hay una bloqueada oculta», respectivamente. Cada herramienta declara su carga al
+  registrarse (`privacyLoad`, `src/server/register-tools.ts`), y desde A9b (6 nov 2026) **todas
+  cargan solo sus notas** (`'lazy'`): piden con `ensure` las que decide su respuesta (la nota
+  pedida, la página leída, las homónimas…), o ninguna si no pregunta por notas
+  (`hebra_list_spaces`, `hebra_list_organizations`, `hebra_status` y crear o renombrar carpetas,
+  que solo miran carpetas y configuración); los recuentos y listados aplican las reglas del filtro
+  dentro de la consulta (A6/A7). La excepción, mientras no esté hecha su pieza, son las tres del
+  JDex (`hebra_jd_*`), que aún cargan la biblioteca entera. `ensureAll()` queda solo para los tests
+  (el oráculo `visibleNotes`, la equivalencia `'lazy'`/`'all'`) y para esa transición: lo llama
+  `resolveToolContext` únicamente con `privacyLoad: 'all'`, que es todavía el valor por defecto
+  del registro; un test (`test/tools/privacy-load-default.test.ts`) falla si otra herramienta se
+  queda en `'all'`. La puerta final (abajo) construye su propio filtro con lo leído en su
+  transacción (`fromSnapshot`) y no depende de esta carga.
 - **Cuándo se evalúa**: al construir cada respuesta, a partir de los ids de carpeta y las etiquetas
   canónicas (`canonicalTag` de Hebra) del almacén, no del texto. El filtro de la llamada se
   construye al empezar y lo demás se lee después, y entre las dos cosas el sync (u otra llamada)
@@ -2649,13 +2657,15 @@ de su límite por defecto).
 
 - Cada apertura y cada petición en curso apartan memoria mientras duran, porque la lectura del
   contenedor aún no ve lo que están gastando. Una apertura aparta 8 MiB (el pico medido al abrir un
-  contexto es de unos 6 MiB, 6 nov 2026). Una petición con llamadas de herramienta aparta, por cada
-  llamada, unos 3,5 KB por nota de la biblioteca o del espacio al que va, con un mínimo de 4 MiB;
-  las notas se cuentan con un `COUNT(*)` sobre el índice de notas vivas, sin leer filas. Una
-  petición sin llamadas (`initialize`, `tools/list`) no aparta nada. Ese tamaño sale de una sola
-  función (`requestReserveBytes`, `src/accounts/capacity.ts`) porque hoy una petición cuesta según
-  las notas de la biblioteca entera: cuando cueste según las notas que toca, pasará a una cantidad
-  fija de unos 8 MiB.
+  contexto es de unos 6 MiB, 6 nov 2026). Una petición con llamadas de herramienta aparta una
+  cantidad fija por cada llamada, 8 MiB, sea cual sea la biblioteca o el espacio al que va y sin
+  contar sus notas, porque su coste ya depende de las notas que toca, no de la biblioteca: cada
+  herramienta carga en el filtro de privados solo las suyas (§6.3, «Qué carga el filtro de cada
+  llamada»). Antes de eso eran unos 3,5 KB por nota de la biblioteca (unos 100 MiB con 30 000
+  notas, medido el 6 nov 2026), con un `COUNT(*)` por destino. Una petición sin llamadas
+  (`initialize`, `tools/list`) no aparta nada. Ese tamaño sale de una sola función
+  (`requestReserveBytes`, `src/accounts/capacity.ts`). Límite de la transición: las tres
+  `hebra_jd_*` aún cargan la biblioteca entera y apartan lo mismo que las demás.
 - Se entra si lo medido más lo apartado, con lo propio, no pasa de `HEBRA_MCP_MEMORY_HIGH_WATER`.
   Quien llega sin nada apartado en curso entra con que lo medido esté por debajo: una petición sola
   más grande que el margen no espera para siempre.
