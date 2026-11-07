@@ -662,7 +662,7 @@ export function registerTools(
     'hebra_list_notes',
     {
       title: 'Listar notas',
-      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con las favoritas primero y después por `updatedAt` descendente. Cada nota lleva `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general, por su marca o por su carpeta). Sin `archived` NO salen las archivadas (con carpeta, etiqueta o sin filtro) y SÍ las ocultas del listado general, con `generalHidden: true`. Con `archived: true` salen solo las archivadas, la última archivada primero; no se combina con `folder` ni `tag` (invalid_input). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
+      description: 'Lista notas de la biblioteca, opcionalmente por carpeta o etiqueta, con primero las notas ancladas en ese sitio (sin filtro, la lista general; con `folder`, esa carpeta; con `tag` o `archived: true` no hay anclados y todo va por `updatedAt` descendente) y después por `updatedAt` descendente. `favorite` solo dice si la nota está marcada: no decide el orden por sí solo. Cada nota lleva `favorite`, `archivedAt` (ISO o null) y `generalHidden` (oculta del listado general, por su marca o por su carpeta). Sin `archived` NO salen las archivadas (con carpeta, etiqueta o sin filtro) y SÍ las ocultas del listado general, con `generalHidden: true`. Con `archived: true` salen solo las archivadas, la última archivada primero; no se combina con `folder` ni `tag` (invalid_input). Paginada (`limit`, `cursor`, `nextCursor`); `fields` pide solo algunos campos.',
       inputSchema: scoped(listNotesInputShape),
       annotations: READ_ONLY
     },
@@ -812,7 +812,7 @@ export function registerTools(
     'hebra_set_favorite',
     {
       title: 'Marcar como favorita',
-      description: 'Marca (true) o desmarca (false) una nota como favorita.',
+      description: 'Marca (true) o desmarca (false) el bit `favorite` de una nota, el que se ve en las respuestas. Marcar una nota sin sitios de anclado la deja anclada en la lista general y en su carpeta actual, así que puede subir en `hebra_list_notes`; si ya está anclada en sitios concretos, no los toca. Desmarcar quita todos sus anclados. Elegir en qué sitios queda anclada se hace desde Hebra, no desde aquí.',
       inputSchema: scoped(setFavoriteInputShape),
       annotations: WRITE_IDEMPOTENT
     },
