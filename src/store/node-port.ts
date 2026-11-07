@@ -463,10 +463,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     scope?: NotesScope | null,
     options?: PortSearchOptions
   ): Promise<SearchPage> {
-    const page = (from: string | null, size: number | undefined, used: SearchFilters | null): SearchPage => cleanSearchPage(
+    const alive = (): void => {
+      // Un `close()` forzado mientras se cedía el hilo: error con código, no una consulta sobre una conexión cerrada.
+      if (this.closed) throw busyOtherInstance();
+    };
+    const page = async (from: string | null, size: number | undefined, used: SearchFilters | null): Promise<SearchPage> => cleanSearchPage(
       options?.embedded === true
         ? this.engine.search(q, from, size, used, scope ?? null)
-        : safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable)
+        : await safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable, alive)
     );
     if (filters && hasValuedProps(filters)) {
       return this.walking(() => searchCheckingValues({

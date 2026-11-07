@@ -217,7 +217,7 @@ export async function searchCheckingValues(options: {
   cursor: string | null;
   limit: number | undefined;
   filters: SearchFilters;
-  page(cursor: string | null, filters: SearchFilters): SearchPage;
+  page(cursor: string | null, filters: SearchFilters): SearchPage | Promise<SearchPage>;
   turn<T>(operation: () => T): Promise<T>;
 }): Promise<SearchPage> {
   const want = Math.min(Math.max(options.limit ?? 50, 1), 200);
@@ -312,8 +312,19 @@ function substringPage(
   }));
 }
 
-/** Página del motor sin ficheros incrustados y con subcadenas de la propia nota. */
-export function safeTextSearch(
+/**
+ * Página del motor sin ficheros incrustados y con subcadenas de la propia nota.
+ *
+ * Con un término negativo por subcadena el motor puede tener que dar muchas páginas hasta llenar `want`
+ * (10 001 notas, `garbanzos -anzos`, `limit: 1`: 51 consultas). Entre una página y la siguiente se suelta
+ * el hilo (`yieldToEventLoop`), porque `serve-http` es un solo proceso para todas las cuentas. No hay
+ * conexión, transacción ni sentencia abierta a través de la cesión: cada `engine.search` es una consulta
+ * completa y el filtro de exclusión se prepara una vez, fuera del bucle (las sentencias preparadas no
+ * guardan cursor entre `get`). Si otra llamada escribe mientras se cede, es aceptable: el cursor es por
+ * clave (`updatedAt`, `id`), no por posición. `alive` se llama tras cada cesión para que quien llama
+ * aborte si la conexión se cerró a la fuerza mientras tanto.
+ */
+export async function safeTextSearch(
   engine: SqliteLibraryEngine,
   db: DatabaseSync,
   query: string,
@@ -322,8 +333,9 @@ export function safeTextSearch(
   filters: SearchFilters | null,
   scope: NotesScope | null,
   conn?: SqliteConn,
-  writable = false
-): SearchPage {
+  writable = false,
+  alive: () => void = () => {}
+): Promise<SearchPage> {
   const want = Math.min(Math.max(limit ?? 50, 1), 200);
   const safeFilters: SearchFilters = { ...filters, bodyOnly: true };
   // Otros consumidores (menciones sin enlazar) piden explícitamente solo FTS exacto.
@@ -346,15 +358,20 @@ export function safeTextSearch(
   const exactItems: SearchHit[] = [];
   let exactCursor = cursor;
   let exact: SearchPage;
-  do {
-    exact = engine.search(query, exactCursor, want, safeFilters, scope);
-    exactItems.push(...(excluded
-      ? exact.items.filter((hit) => !db.prepare(`SELECT 1 FROM notes_trigram
+  const isExcluded = excluded
+    ? db.prepare(`SELECT 1 FROM notes_trigram
           WHERE notes_trigram MATCH ? AND rowid = (SELECT rowid FROM notes WHERE id = ?)`)
-          .get(excluded, hit.id))
+    : null;
+  for (;;) {
+    exact = engine.search(query, exactCursor, want, safeFilters, scope);
+    exactItems.push(...(isExcluded
+      ? exact.items.filter((hit) => !isExcluded.get(excluded!, hit.id))
       : exact.items));
     exactCursor = exact.nextCursor;
-  } while (excluded && exactItems.length < want && exactCursor);
+    if (!(excluded && exactItems.length < want && exactCursor)) break;
+    await yieldToEventLoop();
+    alive();
+  }
   const substringItems = scope && scope.kind !== 'folder' && scope.kind !== 'all'
     ? []
     : ready ? substringPage(engine, db, query, cursor, want, safeFilters, scope) : [];

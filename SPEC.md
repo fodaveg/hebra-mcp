@@ -1697,12 +1697,13 @@ El dispositivo acumula tres secretos:
     entre lector y escritor (`closeWhenIdle`) espera a que acaben los recorridos en curso, también si
     uno falla, sin ocupar la cola mientras espera. Con un `close()` forzado a mitad, el puerto rechaza
     la búsqueda con `busy_other_instance`, y como la puerta final tampoco puede leer, la herramienta
-    responde un error sin resultados. **Qué no entra en esa garantía**: el bucle de un término negativo
-    por subcadena de la búsqueda segura (`while (excluded && ...)` en `safeTextSearch`), anterior a D23,
-    recorre páginas del motor sin ceder (10 001 notas, `garbanzos -anzos`, `limit: 1`: 51 consultas y
-    663 ms); y una sola página de 200 de la búsqueda interna no se parte, así que con cuerpos muy largos
-    su fragmento de texto para el hilo lo que tarde (199 notas de 100 000 caracteres: 1,2 s por palabra
-    y 2,2 s por subcadena). Coste asumido: una búsqueda con un par con valor pide páginas de 200 aunque
+    responde un error sin resultados. **El bucle de un término negativo por subcadena** de la búsqueda segura
+    (`safeTextSearch`), anterior a D23, ahora cede el hilo entre una página del motor y la siguiente
+    (antes: 10 001 notas, `garbanzos -anzos`, `limit: 1`, 51 consultas y 663 ms sin ceder); el cursor
+    es por clave (`updatedAt`, `id`), así que una escritura entre páginas no lo rompe. **Qué no entra
+    en esa garantía**: una sola página de 200 de la búsqueda interna no se parte, así que con cuerpos
+    muy largos su fragmento de texto para el hilo lo que tarde (199 notas de 100 000 caracteres: 1,2 s
+    por palabra y 2,2 s por subcadena). Coste asumido: una búsqueda con un par con valor pide páginas de 200 aunque
     `limit` sea menor, y si casan pocas notas recorre todos los aciertos de texto que tienen la clave;
     también lee los valores de las notas ocultas que están entre esos aciertos, sin que salga nada de
     ahí. El máximo de 32 `props` por llamada no cambia. **Medido** (5 nov 2026, este Mac, Node 24, por el camino entero, con algo privado
