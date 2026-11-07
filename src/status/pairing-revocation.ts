@@ -4,9 +4,8 @@
  * hebra-mcp; el proceso sigue sano (`/healthz` 200), pero ya no puede sincronizar ni conseguir
  * concesiones nuevas. Se sabe por dos caminos:
  *
- * - El relé rechaza la credencial (401/403): el runner de sync lo deja en `revoked: true`, emite
- *   `pairing.revoked` una vez y reintenta con espera creciente; si vuelve a valer (agente
- *   reactivado en Hebra), su ronda correcta lo levanta (`src/sync/runner.ts`).
+ * - El relé rechaza la credencial (401/403): el runner de sync ya lo deja en `revoked: true`
+ *   y emite `pairing.revoked` una vez (`src/sync/runner.ts`).
  * - Lumbre responde `410 {"error":"pairing_revoked"}` en `/requests` o en `sumego/exchange`:
  *   el OAuth llama a `markRevoked`, que emite `pairing.revoked` una vez si el relé no lo
  *   había dicho ya.
@@ -19,23 +18,15 @@
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from './status-source';
 
-/**
- * El motivo que dan `hebra_status` y la página de `/authorize`. Lumbre responde lo mismo a una
- * credencial revocada y a un agente desactivado desde los ajustes de Hebra (`401
- * credential_revoked`, `410 pairing_revoked`), así que el texto cubre los dos y dice qué hacer en
- * cada caso: reemparejar NO reactiva un agente desactivado (Lumbre conserva la fila con su marca
- * aunque se repita el mismo `deviceId`), y uno reactivado vuelve solo, porque el sync reintenta.
- */
+/** El motivo que dan `hebra_status` y la página de `/authorize`. */
 export const PAIRING_REVOKED_REASON =
-  'La conexión con la biblioteca está cortada: este agente está revocado o desactivado desde Hebra (también se revoca al cerrar sesión en todas partes). ' +
-  'Si se desactivó el agente en los ajustes de Hebra, actívalo allí: hebra-mcp lo reintenta solo y reanuda el sync sin reiniciar; volver a emparejar no lo reactiva. ' +
-  'Si se revocó, hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed`, que conserva la identidad y la clave de la biblioteca.';
+  'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
+  'Hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed`, que conserva la identidad y la clave de la biblioteca.';
 
 /** La misma página en el conector multiusuario, donde nadie puede lanzar `hebra-mcp pair` (D22). */
 export const PAIRING_REVOKED_REMOTE_REASON =
-  'La conexión con la biblioteca está cortada: este agente está revocado o desactivado desde Hebra (también se revoca al cerrar sesión en todas partes). ' +
-  'Si se desactivó el agente en los ajustes de Hebra, actívalo allí primero (y, si tu aplicación lo pide, vuelve a conectar); conectar sin activarlo no lo reactiva. ' +
-  'Vuelve a conectar Hebra desde tu aplicación si se revocó: al iniciar sesión podrás renovarla, sin perder tus notas.';
+  'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
+  'Vuelve a conectar Hebra desde tu aplicación: al iniciar sesión podrás renovarla, sin perder tus notas.';
 
 export class PairingRevocation {
   /** Credenciales que Lumbre dio por revocadas (D22: por cuenta, la credencial es de una sola persona). */

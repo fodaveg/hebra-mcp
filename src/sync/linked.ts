@@ -23,7 +23,7 @@ import {
 } from '../hebra';
 import type { PairedSecrets } from '../secrets';
 import type { LibrarySyncConfig } from './library-instance';
-import type { RetryScheduler, SyncEmit } from './runner';
+import type { SyncEmit } from './runner';
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -37,13 +37,7 @@ export interface LinkedSync {
 
 export async function linkedSyncFrom(
   secrets: PairedSecrets,
-  options: {
-    fetcher?: Fetcher;
-    emit?: SyncEmit;
-    intervalMs?: number | null;
-    /** Cómo se programa el reintento tras un 401/403 (tests; por defecto, `setTimeout`). */
-    retryScheduler?: RetryScheduler;
-  } = {}
+  options: { fetcher?: Fetcher; emit?: SyncEmit; intervalMs?: number | null } = {}
 ): Promise<LinkedSync | null> {
   const recovered = await decodeRecoveryCode(secrets.recoveryCode);
   if (new URL(secrets.connection.apiOrigin).origin !== recovered.relayOrigin) return null;
@@ -68,8 +62,7 @@ export async function linkedSyncFrom(
       connection,
       fetcher: options.fetcher,
       emit: options.emit,
-      ...(options.intervalMs === undefined ? {} : { intervalMs: options.intervalMs }),
-      ...(options.retryScheduler ? { retryScheduler: options.retryScheduler } : {})
+      ...(options.intervalMs === undefined ? {} : { intervalMs: options.intervalMs })
     }
   };
 }

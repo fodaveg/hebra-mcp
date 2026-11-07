@@ -26,8 +26,7 @@ comprobada, el 10 oct 2026).
 5. Ninguna nota de una carpeta o etiqueta privada llega a Claude por ninguna herramienta
    (títulos, cuerpos, fragmentos de búsqueda, enlaces, backlinks ni recuentos).
 6. Los logs no contienen títulos, cuerpos, consultas ni argumentos de herramientas.
-7. Al revocar la conexión en Lumbre, el proceso deja de sincronizar y lo dice en `hebra_status`; si
-   la credencial vuelve a valer (agente reactivado en Hebra), reanuda solo, sin reiniciar (§6.2).
+7. Al revocar la conexión en Lumbre, el proceso deja de sincronizar y lo dice en `hebra_status`.
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
@@ -980,41 +979,6 @@ El dispositivo acumula tres secretos:
 - **Desde Lumbre**: Integraciones > Hebra > revocar la conexión de hebra-mcp. El relé rechaza sus
   tokens y el proceso pasa a `revoked: true` y deja de sincronizar. Es el mecanismo que ya indica
   Hebra en `LibrarySettingsDeviceLinks.svelte:308`.
-- **Desactivar el agente desde Hebra** (Ajustes, `PUT /api/integrations/hebra/agents/{id}` con
-  `enabled: false`): Lumbre responde lo mismo que a una credencial revocada (`401
-  credential_revoked` en el relé, el catálogo y el registro de la clave; `410 pairing_revoked` en el
-  emparejado), a propósito, y hebra-mcp no los distingue. Reactivarlo no cambia la credencial, y
-  volver a emparejar con el mismo `deviceId` no la reactiva (Lumbre conserva la fila con su marca).
-  Por eso, desde la tarea c9b8f5e1 (7 nov 2026), un 401/403 ya no para el sync hasta reiniciar:
-  - **Reintento** (`src/sync/runner.ts`): la ronda periódica se para y se reintenta UNA ronda a
-    los 30 s, doblando la espera en cada rechazo seguido hasta 5 min (`REVOKED_RETRY_BASE_MS`,
-    `REVOKED_RETRY_MAX_MS`); un fallo sin respuesta de la credencial (sin red, 5xx, cuota) sigue
-    contando como rechazo. Mientras tanto las escrituras no piden ronda (`requestRound` da `null`):
-    solo el reintento habla con el relé, una petición por intento. La primera ronda correcta levanta
-    `revoked`, emite `pairing.restored` una vez, sube lo escrito mientras tanto y rearma la ronda
-    periódica. El estado es de cada runner, y por tanto de cada cuenta y credencial: en
-    `serve-http` el corte de una persona no toca a otra (`PairingRevocation` sigue siendo por
-    credencial). `stop()` cancela el reintento pendiente.
-  - **Espacios**: no se sirven mientras la credencial esté rechazada. No hace falta una marca local:
-    cada invocación compartida consulta el catálogo fresco dos veces (§14) con esa misma credencial,
-    Lumbre responde 401 y la herramienta da `space_access_denied` sin leer la caché del espacio. Al
-    reactivar, el siguiente catálogo vuelve a concederlo y se sirve otra vez, sin reiniciar y sin
-    marcar `access-denied` en disco (eso es solo para una concesión retirada o cambiada).
-  - **Biblioteca personal**: sigue sirviendo su copia local, de lectura y de escritura (las
-    escrituras quedan pendientes y suben al volver el acceso). Es el límite R1 de abajo: revocar no
-    borra lo que el dispositivo ya tiene ni rota su clave. En `serve-http` el acceso de Claude lo
-    corta además la introspección OAuth (§12.2): una credencial desactivada da `active: false` y la
-    familia se corta en cuanto caduca la introspección guardada (30 s como máximo).
-  - **Motivo** (`revokedReason` de `hebra_status` y página de `/authorize`): dice que el agente
-    está «revocado o desactivado desde Hebra», que uno desactivado se reactiva en los ajustes de
-    Hebra (y reemparejar no lo reactiva) y que uno revocado se renueva con `hebra-mcp pair` en modo
-    `credential_renewed` (o desde el conector, en `serve-http`).
-  - **Caché de introspección** (criterio de la sesión, 7 nov 2026; revisable por David): se queda
-    en 30 s (D8). Esa ventana solo alarga el acceso de Claude a la biblioteca personal que el
-    servidor ya guarda (R1) en `serve-http`; los espacios no dependen de ella, porque se comprueban
-    contra el catálogo en cada invocación, y `serve` por stdio no tiene introspección. Bajarla
-    añadiría una ida a Lumbre (`POST /introspect`) a cada petición `/mcp` pasado el plazo sin cerrar
-    ningún hueco de los espacios. No se midió la latencia de Lumbre en producción.
 - **Límite conocido**: revocar borra la credencial en Lumbre (`hebra-integration.ts:224-238`) y
   corta el relé, pero **no rota la clave de biblioteca** ni borra lo que el dispositivo ya descargó.
   `keyEpoch` está fijo a 1 en todo Hebra y la rotación está aplazada a una fase posterior
@@ -2606,8 +2570,7 @@ por `sid` no toca el emparejado. A cambio, hebra-mcp no se queda caído sin avis
 - Cuando el relé rechaza la credencial (401/403), o Lumbre responde `410
   {"error":"pairing_revoked"}` en `/requests` (con o sin Sumego) o en `sumego/exchange` (con
   `code` además de `error`), hebra-mcp lo anota en el estado (`revoked: true`, que ya existe) y
-  emite una vez el evento de log `pairing.revoked` (en el relé, una vez por corte: si el reintento
-  de §6.2 vuelve a pasar, sale `pairing.restored` y un corte posterior se anuncia otra vez). Un `400` de Lumbre es un cuerpo mal formado,
+  emite una vez el evento de log `pairing.revoked`. Un `400` de Lumbre es un cuerpo mal formado,
   no una revocación: sigue siendo «no disponible». Un fallo pasajero es `503` u otro 5xx.
 - Con el emparejado revocado, `/authorize` no responde un 503 JSON. Muestra una página HTML que
   dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes. En `serve` por
@@ -2905,10 +2868,7 @@ necesita operador. Tras el login de Sumego, `/authorize` empieza un alta de reno
 vínculo y títulos. Con la misma bóveda conserva la raíz, la identidad y la clave
 (`credential_renewed`, §7), y publica vínculo y generación nueva de forma atómica. Si la bóveda es
 otra, la página lo dice y confirmar retira la cuenta anterior por el camino normal antes de dar de
-alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente apertura, sin reiniciar,
-y una biblioteca que sigue abierta lo nota en el siguiente reintento de su sync (§6.2, como mucho
-5 min). Si mientras estaba desactivado llegó una petición `/mcp` con la introspección ya caducada,
-Lumbre dio `active: false` y esa familia OAuth se cortó: el cliente tiene que volver a conectar.
+alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente apertura, sin reiniciar.
 
 **Agente desactivado.** Lumbre responde 401 `credential_revoked` igual a una credencial revocada y a
 un agente desactivado, a propósito, y hebra-mcp no los distingue.
