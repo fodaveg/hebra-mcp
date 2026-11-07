@@ -490,9 +490,12 @@ pregunta dónde, sin crear tú una carpeta para ellos. Lo que sigue es solo para
    Hoy, Sin etiquetar ni Tareas nuevas, y sigue en la barra lateral y para el MCP. El MCP no
    puede poner esa marca ni ver si está puesta. Si el usuario dice que ve relevos o changelogs
    en el listado principal, pídele que marque así la `.05` de esa categoría.
-5. **Lo que dura no va ahí**: las decisiones confirmadas, a la nota de memoria del proyecto
-   que fijen las instrucciones del usuario; los audits, specs y guías, a la carpeta del ID del
-   proyecto.
+5. **Las notas de decisiones de los agentes también van ahí.** La nota donde los agentes
+   apuntan las decisiones y lo aprendido de un proyecto (por ejemplo `<Proyecto> - Decisiones
+   y aprendizajes`) es memoria que el agente escribe para sí, no un informe para el usuario:
+   va a la `.05` de la categoría aunque dure. Lo que dura y es para el usuario (audits,
+   specs, planes y guías) va a la carpeta del ID del proyecto. Si las instrucciones del
+   usuario fijan otra nota o carpeta para las decisiones, mandan ellas.
 
 ## Informes que pide el usuario: para una persona
 
@@ -709,8 +712,8 @@ del usuario (las instrucciones del servidor lo dicen igual).
 - **Hebra**: las notas que el usuario pida leer o escribir ahí.
 - **Tareas** → Lumbre (skill `lumbre`) si el usuario lo usa, nunca una lista de tareas en
   una nota de Hebra.
-- **Relevos, changelogs y documentos efímeros** → con Johnny.Decimal, la `.05` de la
-  categoría del proyecto; sin él, la carpeta que designen el usuario o el repo (apartado
+- **Relevos, changelogs, documentos efímeros y notas de decisiones de los agentes** → con
+  Johnny.Decimal, la `.05` de la categoría del proyecto; sin él, la carpeta que designen el usuario o el repo (apartado
   "Relevos, changelogs y documentos efímeros").
 - Dónde se registra cualquier otra cosa (decisiones de proyecto, memoria de agentes) lo
   fijan las instrucciones globales del usuario (`CLAUDE.md`, `AGENTS.md`), que mandan sobre
