@@ -465,6 +465,12 @@ documento de vida corta de un proyecto (partes de estado, notas de trabajo de un
 borradores que se van a tirar) van a la carpeta `.05` de la categoría del proyecto, nunca a
 la carpeta del ID del proyecto ni a su raíz. Para `21.11 lumbre`, la `21.05`.
 
+La regla cubre **todo lo que el agente escribe sin que el usuario lo haya pedido**, no solo
+lo efímero: si nadie pidió la nota, va a la `.05`. Lo que no es de ninguna categoría (entorno,
+infraestructura de los agentes, el propio sistema) va a la `.05` de la categoría de gestión
+del sistema, la `00.05`. Lo que el usuario pide (audits, specs, planes, informes, ideas) sigue
+en la carpeta de su proyecto. Antes de crear una nota, pregúntate quién la pidió.
+
 Sin Johnny.Decimal, van a la carpeta que designen el usuario o el repo. Si no hay ninguna,
 pregunta dónde, sin crear tú una carpeta para ellos. Lo que sigue es solo para Johnny.Decimal.
 
