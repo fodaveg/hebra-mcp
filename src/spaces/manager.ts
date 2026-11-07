@@ -26,7 +26,7 @@ import {
 } from '../server/forward';
 import { HttpLibraryTransport, readSpaceMeta } from '../hebra';
 import { AgentDevice } from './device';
-import { fetchAgentDirectory } from './directory';
+import { directoryRevoked, fetchAgentDirectory } from './directory';
 import { catalogueSchema, type AgentSpaceAccess } from './protocol';
 
 /** Cuánto vale un nombre leído, y cuánto un fallo o un meta ausente. */
@@ -167,8 +167,34 @@ export class AgentSpaceManager implements SpaceRouter {
      *  los topes de sync, es la misma que la de la biblioteca personal. */
     private readonly instanceOptions?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs' | 'accountKey'>,
     private readonly assertAccountActive?: () => void,
-    private readonly now: () => number = () => Date.now()
+    private readonly now: () => number = () => Date.now(),
+    /**
+     * ¿Está revocada la credencial de la cuenta? (D24: el runner de la biblioteca personal, y en
+     * `serve-http` la marca por credencial de `PairingRevocation`.) Mientras lo esté, todo espacio
+     * responde `space_access_denied` sin red ni caché y el listado no ofrece ninguno. Si lanza,
+     * cuenta como revocada (cerrado ante la duda).
+     */
+    private readonly credentialRevoked?: () => boolean
   ) {}
+
+  private revokedNow(): boolean {
+    try {
+      return this.credentialRevoked?.() === true;
+    } catch {
+      return true;
+    }
+  }
+
+  /**
+   * La credencial de la cuenta vuelve a valer (D24): el sync de cada espacio abierto que se quedó
+   * revocado por su cuenta reintenta ya, sin esperar su plazo. Los que no lo estaban siguen con
+   * su bucle, que el bloqueo por credencial solo frenaba en local.
+   */
+  credentialRestored(): void {
+    for (const entry of this.entries.values()) {
+      void entry.instance?.syncRunner?.retryNow().catch(() => null);
+    }
+  }
 
   /**
    * El catálogo del relé (D22). Una consulta nunca se reutiliza si es anterior a quien la pide:
@@ -180,14 +206,15 @@ export class AgentSpaceManager implements SpaceRouter {
    */
   private async catalogue(maxAgeMs = 0): Promise<AgentSpaceAccess[]> {
     this.assertAccountActive?.();
-    if (this.closed) throw new ToolError('space_access_denied');
+    // Con la credencial revocada, ni el relé ni la última lectura (D24).
+    if (this.closed || this.revokedNow()) throw new ToolError('space_access_denied');
     const last = this.lastCatalogue;
     const spaces =
       maxAgeMs > 0 && last && this.now() - last.startedAt < maxAgeMs
         ? last.spaces
         : await this.sharedCatalogue();
     this.assertAccountActive?.();
-    if (this.closed) throw new ToolError('space_access_denied');
+    if (this.closed || this.revokedNow()) throw new ToolError('space_access_denied');
     return spaces;
   }
 
@@ -332,6 +359,9 @@ export class AgentSpaceManager implements SpaceRouter {
   }
 
   async list(): Promise<Array<{ spaceId: string; name: string | null }>> {
+    // Con la credencial revocada no se ofrece ningún espacio con concesión (D24), sin red.
+    this.assertAccountActive?.();
+    if (this.revokedNow()) return [];
     const before = await this.catalogue();
     const after = new Set((await this.catalogue()).map((s) => s.spaceId));
     const items = before.filter((s) => after.has(s.spaceId));
@@ -344,6 +374,7 @@ export class AgentSpaceManager implements SpaceRouter {
   async directory(): Promise<DirectoryView> {
     this.assertAccountActive?.();
     if (this.closed) throw new ToolError('space_access_denied');
+    if (this.revokedNow()) throw directoryRevoked();
     const { accountId } = await this.device.ensureRegistered();
     const directory = await fetchAgentDirectory(this.device, this.fetcher);
     this.assertAccountActive?.();
@@ -424,7 +455,8 @@ export class AgentSpaceManager implements SpaceRouter {
    * poder mirarlo dentro del turno FIFO antes de cada mutación sin cederlo. */
   private assertActive(entry: Entry): void {
     this.assertAccountActive?.();
-    if (entry.denied || this.closed) throw new ToolError('space_access_denied');
+    // La credencial revocada no retira el espacio: vuelve a servirse al recuperarla (D24).
+    if (entry.denied || this.closed || this.revokedNow()) throw new ToolError('space_access_denied');
     try {
       statSync(join(entry.directory, 'access-denied'));
     } catch (error) {

@@ -5,7 +5,8 @@
  * - Lee los secretos de `pair` del llavero (`src/secrets/`). Si están los tres y el relé
  *   de la credencial es el de la bóveda, registra el dispositivo (idempotente) y abre la
  *   `LibraryInstance` CON sync: `hebra_status` dice `linked: true`, y un 401/403 del relé
- *   lo deja en `revoked: true` (SPEC.md §6.2).
+ *   lo deja en `revoked: true` (SPEC.md §6.2): los espacios dejan de servirse y el runner
+ *   reintenta solo hasta que la credencial vuelva a valer (D24).
  * - Sin secretos (o sin llavero en esta plataforma), igual que en L1: la SQLite local sin
  *   sync y `linked: false`. Lo dice en stderr con un evento cerrado, sin valores.
  * - Escritor único (SPEC.md §8): la instancia que tiene `writer.lock` escucha en
@@ -19,6 +20,7 @@ import { AgentSpaceManager } from '../spaces/manager';
 import type { AccountUploadLedger } from '../accounts/pending-sweep';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
+import type { SyncScheduler } from '../sync/runner';
 import { PrivacyConfigSource } from '../privacy/config-source';
 import { privacyWithMemory } from '../privacy/folder-memory';
 import { logEvent } from '../log/logger';
@@ -70,6 +72,15 @@ export interface OpenServeOptions {
    * ella, la clave por defecto (stdio: una sola cuenta por proceso).
    */
   accountKey?: string;
+  /**
+   * `serve-http`: la marca de revocación de la credencial de esta cuenta que sobrevive a cerrar el
+   * contexto (`PairingRevocation.isRevoked`). Se suma al `revoked` del runner para bloquear los
+   * espacios (D24), así que una cuenta revocada que se reabre no sirve ningún espacio hasta que
+   * una ronda correcta pruebe que la credencial vale.
+   */
+  credentialRevoked?: () => boolean;
+  /** Tests: temporizadores del runner de la biblioteca personal (bucle y reintento, D24). */
+  syncScheduler?: SyncScheduler;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -176,10 +187,19 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   assertActive();
   const paired = await readSecretsQuietly(options.secrets);
   assertActive();
+  // D24: la credencial revocada (el runner de la biblioteca personal, que se abre más abajo, o la
+  // marca de `serve-http`) bloquea los espacios. El 401 al registrar la clave de agente también la
+  // da por revocada; sin runner (sin sync), los espacios ya caen por el catálogo del relé.
+  let opened: LibraryInstance | null = null;
+  const credentialRevoked = (): boolean =>
+    opened?.syncRunner?.revoked === true || options.credentialRevoked?.() === true;
+  const credentialRejected = (): void => opened?.syncRunner?.markRevoked('agent_key');
   // H-L7: el registro del agente y el catálogo de concesiones solo se piden al usar un
   // espacio compartido. La biblioteca personal (sin `space`) no los espera: funciona sin
   // red y con un relé sin la API de H-L7, como antes de los espacios.
-  const device = paired && options.secrets ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive) : null;
+  const device = paired && options.secrets
+    ? new AgentDevice(paired, options.secrets, options.fetcher, dataDir, assertActive, credentialRejected)
+    : null;
   const { uploadLedger, accountKey } = options;
   // El gestor abre cada espacio con estas opciones tal cual, así que la lista y la clave de cuenta
   // llegan también a sus bibliotecas sin que el gestor sepa de ellas.
@@ -188,7 +208,10 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     ...(uploadLedger ? { uploadLedger } : {}),
     ...(accountKey === undefined ? {} : { accountKey })
   };
-  const spaces = device ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive) : undefined;
+  const spaces = device
+    ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive,
+        undefined, credentialRevoked)
+    : undefined;
   const directory = spaces ? () => spaces.directory() : undefined;
   const linked = paired
     ? await linkedSyncFrom(paired, {
@@ -213,7 +236,17 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   const instance = await LibraryInstance.open({
     dataDir,
     deviceLabel: 'Claude',
-    sync: linked?.config ?? null,
+    sync: linked
+      ? {
+          ...linked.config,
+          ...(options.syncScheduler ? { scheduler: options.syncScheduler } : {}),
+          // Al recuperar la credencial, el sync de los espacios abiertos que se quedó revocado
+          // reintenta ya (D24).
+          onRevocationChange: (revoked) => {
+            if (!revoked) spaces?.credentialRestored();
+          }
+        }
+      : null,
     // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
     // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
     writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened, authorize), opened),
@@ -228,6 +261,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     ...(accountKey === undefined ? {} : { accountKey }),
     assertActive
   });
+  opened = instance;
   // §8 y §12.10: la ronda de abrir ya está en marcha, y las lecturas la esperan como mucho 10 s
   // desde aquí, no desde cada llamada. Espera la lectura y no la apertura: `serve` no retrasa el
   // saludo de MCP, y una escritura no tiene por qué pagarla.

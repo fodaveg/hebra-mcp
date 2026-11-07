@@ -373,7 +373,10 @@ export class AccountContexts {
         open: (signal) => this.openAccount(account, signal),
         close: (opened) => opened.close(),
         retiredError: () => new Error(this.closed ? 'contexts_closed' : 'account_inactive'),
-        closeAfterUse: (opened) => !this.isActive(account) || opened.instance.syncRunner?.revoked === true,
+        // Una credencial revocada ya no cierra el contexto tras cada uso (D24): su runner reintenta
+        // con espera creciente mientras esté abierto, y reabrir en cada petición sería una ronda
+        // contra el relé por cada llamada. Se cierra por inactividad como cualquier otra.
+        closeAfterUse: () => !this.isActive(account),
         onDisposable: () => {
           if (this.entries.get(account.id) === entry) this.entries.delete(account.id);
           this.gate.recheck();

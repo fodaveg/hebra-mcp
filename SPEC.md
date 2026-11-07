@@ -26,7 +26,8 @@ comprobada, el 10 oct 2026).
 5. Ninguna nota de una carpeta o etiqueta privada llega a Claude por ninguna herramienta
    (títulos, cuerpos, fragmentos de búsqueda, enlaces, backlinks ni recuentos).
 6. Los logs no contienen títulos, cuerpos, consultas ni argumentos de herramientas.
-7. Al revocar la conexión en Lumbre, el proceso deja de sincronizar y lo dice en `hebra_status`.
+7. Al revocar la conexión en Lumbre, el proceso deja de sincronizar y lo dice en `hebra_status`. Si
+   la misma credencial vuelve a valer (agente reactivado en Hebra), vuelve solo, sin reiniciar (D24).
 
 El conector remoto (D6) añade su propia aceptación en §12.7.
 
@@ -57,6 +58,7 @@ El conector remoto (D6) añade su propia aceptación en §12.7.
 | D21 | **Conector remoto multiusuario** (3 nov 2026). David acepta que el servidor remoto guarde la clave de cada biblioteca conectada y fija este límite: cada persona solo puede acceder a su biblioteca personal y al contenido compartido para el que tenga membresía y permiso en sus espacios u organizaciones; pertenecer a un espacio u organización nunca abre la biblioteca personal de otro miembro. **Revisa D6, D7 y D20**: el `sub` validado de Sumego identifica a la persona, pero Lumbre tiene que confirmar además que esa persona es propietaria del vínculo exacto `pairedCredentialId`/`syncVaultId`/`opaqueDeviceId`. Cada cuenta tiene contexto, SQLite, blobs, secretos, configuración de privados, escritor, sync y espacios aislados. El emparejado de una cuenta nueva se inicia desde el conector, se aprueba en su Hebra y solo se persiste después de comprobar la propiedad y confirmar hasta tres títulos. El dispositivo actual de David se conserva sin reemparejar y solo se asocia mediante una prueba de propiedad; retirar una persona bloquea, drena y revoca antes de borrar exclusivamente sus datos. Contrato en §12.10. | Descartados: una biblioteca global para todas las sesiones; elegir por email, `clientId`, cabeceras o argumentos MCP; asignar la biblioteca heredada al primer login; ampliar CORS del relé para resolver el retorno del emparejado; alargar la validez del ID token para cubrir una aprobación lenta; y volver al binario monousuario como rollback después de aceptar cuentas nuevas si pudiera reasignarlas o resucitar una revocación. |
 | D22 | **Acceso sin tope por recuento** (4 nov 2026). David: "necesito que cada persona pueda acceder a su biblioteca, sus espacios compartidos y su organización sin depender de ningun tope" y "no quiero parches". Eligió la alternativa B del análisis de arquitectura (hebra://note/aa1f7f86-1f14-4ace-b027-b01c61791c3c). **Revisa D21 y el dimensionado de §12.10 con dos cuentas.** En `serve-http` estar conectado deja de equivaler a estar abierto: una biblioteca o un espacio solo existen en memoria mientras se usan, y sin llamadas no hay sync, memoria ni peticiones al relé por esa persona. Ningún recuento de cuentas, contextos, espacios, familias ni solicitudes niega el acceso a una persona admitida; la capacidad se regula por memoria real y por espera. Una persona con la credencial revocada vuelve desde el conector, sin operador. Claude Code conecta como cliente admitido. Un agente ve en solo lectura las organizaciones, sus miembros y los espacios que vería su persona ("Ve la lista, contenido por espacio", decisión de David en hebra://note/23bf2e3f-74f1-45f3-afb7-eb3959acaef3); el contenido sigue por `spaceId` y permiso espacio por espacio. El MCP no tiene contexto activo: cada llamada dice su destino y, sin indicarlo, va a `personal`. Detalle en §12.10, "Capacidad sin recuento". | Descartados: subir `mem_limit` y quitar `maxOpen` manteniendo las bibliotecas residentes, porque el tope pasa a ser un OOM que saca a todos; cerrar el contexto menos usado cuando llega otra cuenta, porque mantiene un número máximo y hace que la petición de una persona cierre el contexto de otra; un proceso por cuenta activa desde el principio, porque pesa al menos 112 MiB por persona activa y cuesta unos 10 días más sin evidencia de que haga falta. Se pasa a procesos si la carga de aceptación muestra que la primera descarga de una persona retrasa a las demás por encima de lo aceptable, o si aparece un OOM con uso normal. |
 | D23 | **Huecos frente a la app: lecturas y escrituras acotadas** (5 nov 2026, decidido por David sobre el audit `hebra://note/c36a9f4e-2973-492d-a703-afaaae610fa4`: "puedes hacer los 2 lotes"). 1) Lecturas: `favorite`, `archivedAt` y `generalHidden` en `hebra_list_notes` y `hebra_read_note`, `archived: true` en `hebra_list_notes`, `kind: "folders"` en `hebra_list_trash`, `hebra_note_authors`, `hebra_list_properties`, `hebra_query_properties` y los filtros `props`, `linksTo` y `titleOnly` de `hebra_search`. 2) Escrituras, la decisión nueva que pide §10: `hebra_rename_file` arregla las notas que incrustan el fichero (el cuerpo lo calcula el motor en el escritor; el agente sigue sin mandar un cuerpo entero), `hebra_set_hidden`, `hebra_clear_conflict` y `expectedRevision` opcional en `hebra_move_note`, `hebra_trash_note` y `hebra_restore_note`. 3) D3 se aplica a todo: lo oculto no cuenta en recuentos, orden, cursores ni errores (§6.3). 4) Vincular una tarea con una nota va en `lumbre-mcp`, no aquí. | Descartados: texto de PDF en `hebra_search` (el índice lo llena la app y extraerlo en el servidor es caro), administrar espacios, invitaciones y acceso de agentes, exportar, importar, dibujos, anotar PDF, y los atajos del audit (tareas, grafo, prefijo de título, entre espacios). `tagRename` y las purgas siguen fuera. |
+| D24 | **Credencial revocada o agente desactivado: sin espacios, con motivo propio y reintento solo** (7 nov 2026, decidido por la sesión principal sobre la propuesta de la revisión de seguridad de Lumbre del 31 oct, hallazgo medio; tarea de Lumbre c9b8f5e1). Desactivar un agente en Ajustes de Hebra y reactivarlo (`PUT /api/integrations/hebra/agents/{id}` de Lumbre) hace que la MISMA credencial vuelva a valer. 1) Con la credencial revocada (401/403 del relé, o 401 `credential_revoked` al registrar la clave de agente), toda llamada con `space` distinto de personal responde `space_access_denied` sin red ni caché, `hebra_list_spaces` no ofrece ningún espacio con `granted: true` (el directorio responde `organizations_unavailable` con `reason: credential_revoked`) y la biblioteca personal se sigue sirviendo desde la SQLite local, con `hebra_status` diciendo que está revocada. 2) Motivo propio para este caso (`AGENT_REVOKED_REASON`): agente revocado o desactivado desde Hebra, hebra-mcp lo vuelve a intentar solo y recupera el acceso en cuanto se reactive en Ajustes de Hebra, sin reiniciar ni volver a emparejar. `PAIRING_REVOKED_REASON` y su versión remota quedan solo para el `410 pairing_revoked` de Lumbre (cierre de sesión en todas partes), que sí pide renovar la conexión. 3) Reintento sin reiniciar: el runner reintenta una ronda a 1 min, el doble en cada intento fallido, con tope de 15 min (`REVOKED_RETRY_FIRST_MS`, `REVOKED_RETRY_MAX_MS`). En cuanto una ronda va bien, `revoked` vuelve a `false`, vuelve el bucle de 30 s, el sync de los espacios abiertos reintenta ya, sale `pairing.restored` (§6.4) y esa ronda sube lo pendiente. Una escritura durante la revocación no pide ronda al relé. No hay canal de aviso de Lumbre; la única señal es el GET de lectura correcto del login en `serve-http`, que además hace reintentar ya al runner abierto. 4) La caché de introspección OAuth (`INTROSPECTION_CACHE_MS`, 30 s) no se toca: desactivar el agente puede tardar hasta 30 s en cortar `/mcp`, coste aceptado (§12.2). 5) Multiusuario: revocación y recuperación son por cuenta y nunca tocan a otra. Una cuenta revocada que se cerró por inactividad y se reabre no sirve ningún espacio hasta que una ronda correcta de su runner nuevo pruebe que la credencial vale, y esa misma ronda la recupera. Para que el reintento pueda ocurrir, una cuenta revocada ya no se cierra tras cada uso: se cierra por inactividad como cualquier otra (§12.10). | Descartados: dejar el runner parado hasta reiniciar (el agente reactivado no volvía), seguir sirviendo los espacios desde la caché con la credencial revocada, reabrir el contexto en cada petición de una cuenta revocada (una ronda contra el relé por llamada) y acortar la caché de introspección. |
 
 **Alcance de D16 en este cierre (sondas codex5/codex6):** la puerta compara también la
 ruta exacta que devuelve una escritura de carpeta; moverla antes de la transacción final
@@ -979,6 +981,17 @@ El dispositivo acumula tres secretos:
 - **Desde Lumbre**: Integraciones > Hebra > revocar la conexión de hebra-mcp. El relé rechaza sus
   tokens y el proceso pasa a `revoked: true` y deja de sincronizar. Es el mecanismo que ya indica
   Hebra en `LibrarySettingsDeviceLinks.svelte:308`.
+- **Agente desactivado en Ajustes de Hebra** (D24): el relé responde igual, 401/403, y Lumbre da
+  401 `credential_revoked` al registrar la clave de agente; hebra-mcp no distingue las dos cosas.
+  Mientras dure, `revoked: true` con `revokedReason` propio (`AGENT_REVOKED_REASON`), los espacios
+  compartidos responden `space_access_denied` sin red ni caché, `hebra_list_spaces` no ofrece
+  ninguno con `granted: true`, y la biblioteca personal se sigue sirviendo desde la SQLite local.
+- **Reintento sin reiniciar** (D24, `src/sync/runner.ts`): el bucle de 30 s se para y el runner
+  reintenta una ronda a 1 min, el doble en cada intento fallido, hasta un tope de 15 min. Una
+  escritura durante la revocación no pide ronda al relé. Reactivar el agente devuelve la MISMA
+  credencial: la primera ronda que va bien pone `revoked: false`, vuelve el bucle de 30 s, reabre
+  el sync de los espacios, sube lo pendiente y emite `pairing.restored`. No hace falta reiniciar
+  ni volver a emparejar. Antes de D24, el bucle se paraba hasta reiniciar el proceso.
 - **Límite conocido**: revocar borra la credencial en Lumbre (`hebra-integration.ts:224-238`) y
   corta el relé, pero **no rota la clave de biblioteca** ni borra lo que el dispositivo ya descargó.
   `keyEpoch` está fijo a 1 en todo Hebra y la rotación está aplazada a una fase posterior
@@ -1776,6 +1789,9 @@ P8, P9 y P10).
   (`sync.round`, `sync.lease_lost`, `sync.record_error`, `sync.conflict_copy` y, desde el
   submódulo en `59b5d403`, `sync.blob_unreadable`, que solo lleva el tamaño del adjunto, y,
   desde `aea2181c`, `substring.index`, el relleno del índice de subcadena, §8), con ids opacos, códigos y recuentos.
+  La credencial tiene dos: `pairing.revoked` (`source`: `relay`, `agent_key` o `lumbre`, §12.9) y,
+  desde D24, `pairing.restored` (`source: relay` y `failedRetries`, los reintentos fallidos antes de
+  recuperarla), una vez cada uno por cambio.
 - **Qué nunca se registra**: títulos, cuerpos, consultas de búsqueda ni argumentos de herramientas. Tampoco el título de un apartado (D11) ni el texto de la prueba de lo guardado; como mucho, `heading: true` en `note.append`. Ni el patrón de `hebra_grep` (D13): su `tool.call` lleva solo `count`, el número de coincidencias devueltas. Ni el patrón ni el reemplazo de `hebra_replace_in_notes` (D14): `replace.batch` lleva el modo y números. Ni el nombre, el contenido ni el hash de un fichero suelto (D15): `file.replace` lleva el id (opaco), el resultado y el estado de sync.
 - Stdout es exclusivo del protocolo MCP.
 - **Test**: un test ejecuta todas las herramientas con notas-cebo y comprueba que ningún texto de
@@ -2241,7 +2257,9 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   del reloj de pared no lo prolonga. Nunca se guarda un `active: false`, un desajuste ni un
   error, y una entrada caducada no se alarga si Lumbre no responde. Revocar solo esa fila Blob V2 corta
   el refresh al momento y los access en un máximo de 30 s, aunque sobreviva la credencial
-  de emparejado.
+  de emparejado. Desactivar el agente en Ajustes de Hebra tampoco acorta ese plazo: `/mcp` puede
+  seguir aceptando el access hasta 30 s, aunque el relé ya rechace la credencial. Es un
+  coste aceptado y `INTROSPECTION_CACHE_MS` se queda en 30 s (D24, 7 nov 2026).
 - Lumbre devuelve un `accountId` opaco, nunca `users.id`. La concesión upstream no se
   acepta directamente en `/mcp`, ni el token OAuth de Hebra autentica las APIs de Lumbre.
   Access/refresh de ambos clientes quedan como hashes en `oauth-tokens.json` v2; el bearer de la
@@ -2572,12 +2590,16 @@ por `sid` no toca el emparejado. A cambio, hebra-mcp no se queda caído sin avis
   `code` además de `error`), hebra-mcp lo anota en el estado (`revoked: true`, que ya existe) y
   emite una vez el evento de log `pairing.revoked`. Un `400` de Lumbre es un cuerpo mal formado,
   no una revocación: sigue siendo «no disponible». Un fallo pasajero es `503` u otro 5xx.
-- Con el emparejado revocado, `/authorize` no responde un 503 JSON. Muestra una página HTML que
-  dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes. En `serve` por
-  stdio hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7,
+- Con el `410 pairing_revoked` de Lumbre, `/authorize` no responde un 503 JSON. Muestra una página
+  HTML que dice que la conexión con la biblioteca se cortó al cerrar sesión en todas partes. En
+  `serve` por stdio hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed` (§7,
   `src/pair/pair.ts`), que conserva la identidad y la clave. En `serve-http` se vuelve desde el
   propio conector (§12.10, "Reconectar tras una revocación"), sin operador ni CLI (D22).
-- `hebra_status` devuelve ese mismo motivo, en `revokedReason`, junto a `revoked: true`.
+- Si solo lo rechaza el relé, sin ese `410`, la causa puede ser un agente desactivado en Hebra, que
+  vuelve solo al reactivarlo (D24). La página y `hebra_status` dan entonces `AGENT_REVOKED_REASON`,
+  que no pide reemparejar ni reiniciar, y los espacios compartidos dejan de servirse hasta que la
+  credencial vuelva a valer (§6.2).
+- `hebra_status` devuelve el motivo que toca, en `revokedReason`, junto a `revoked: true`.
 - `/healthz` sigue respondiendo 204, porque el proceso está sano.
 
 **Pruebas** (sintéticas, sin red): discovery y JWKS falsos con claves ES256 generadas en el
@@ -2662,7 +2684,10 @@ intervenga. No existe un máximo de cuentas, contextos ni espacios abiertos.
   otras cuentas.
 - `abierto` se cierra cuando lleva `HEBRA_MCP_CONTEXT_IDLE_MS` (120 s por defecto) sin peticiones en
   curso. No se cierra un escritor con peticiones en curso.
-- Una cuenta revocada o retirada se cierra en cuanto termina lo que tenga en curso.
+- Una cuenta retirada se cierra en cuanto termina lo que tenga en curso. Una revocada no (D24):
+  sigue abierta mientras se use, sirviendo solo su biblioteca personal, para que su runner reintente
+  con espera creciente, y se cierra por inactividad como cualquier otra. Reabrirla en cada petición
+  sería una ronda contra el relé por llamada.
 - Un espacio se cierra por su propio uso, sin esperar a la cuenta. Un espacio denegado se cierra, sin
   dejar su puerto abierto.
 
@@ -2868,7 +2893,9 @@ necesita operador. Tras el login de Sumego, `/authorize` empieza un alta de reno
 vínculo y títulos. Con la misma bóveda conserva la raíz, la identidad y la clave
 (`credential_renewed`, §7), y publica vínculo y generación nueva de forma atómica. Si la bóveda es
 otra, la página lo dice y confirmar retira la cuenta anterior por el camino normal antes de dar de
-alta la nueva. Un agente reactivado en Hebra vuelve a funcionar en su siguiente apertura, sin reiniciar.
+alta la nueva. Un agente reactivado en Hebra vuelve a funcionar sin reiniciar ni otro login (D24): si
+la cuenta tiene el contexto abierto, en el siguiente reintento de su runner; si estaba cerrada, en la
+primera ronda de su siguiente apertura.
 
 **Agente desactivado.** Lumbre responde 401 `credential_revoked` igual a una credencial revocada y a
 un agente desactivado, a propósito, y hebra-mcp no los distingue.
@@ -2880,7 +2907,13 @@ un agente desactivado, a propósito, y hebra-mcp no los distingue.
   sobrevive: se guardan los nuevos, sin revocarla ni borrar nada, y el login falla con
   `agent_rejected`. Al reactivar el agente en Hebra, la cuenta vuelve sin otro login.
 - La marca de revocado de una credencial se limpia con una ronda de sync correcta de su runner o con
-  un GET de lectura correcto al hacer login. No hace falta renovar ni reiniciar.
+  un GET de lectura correcto al hacer login, que además hace reintentar ya al runner abierto que siga
+  revocado (D24). No hace falta renovar ni reiniciar.
+- Mientras la marca siga puesta, la cuenta no sirve ningún espacio compartido, tampoco al reabrir un
+  contexto que se cerró por inactividad: su runner nuevo aún no ha hablado con el relé, y hasta que
+  una ronda correcta pruebe que la credencial vale los espacios responden `space_access_denied` sin
+  red. Esa ronda es la primera de la apertura, así que la cuenta no se queda revocada para siempre.
+  Revocar o recuperar una cuenta nunca cambia el estado de otra (D24).
 
 **Alta sin atascos.**
 
@@ -2953,7 +2986,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
 - `hebra_list_organizations` (`limit`, `cursor`) añade `isSelf` a cada miembro, comparando con el
   `accountId` del registro del agente. Con el directorio no disponible responde
   `organizations_unavailable` con `reason` (`not_available`, `rate_limited` y `retryAfterSeconds` si se
-  conoce, `relay_unavailable`, `invalid_response`).
+  conoce, `relay_unavailable`, `invalid_response`, y `credential_revoked` con la credencial revocada,
+  sin preguntar al relé, D24).
 - Es un dato de permisos: cada llamada lo pide de nuevo, sin caché, y consultarlo no abre ninguna
   biblioteca ni consume un contexto de espacio. Los nombres no van a logs.
 - Privacidad: `hebra_list_organizations` entrega el nombre y el `accountId` de otros miembros al

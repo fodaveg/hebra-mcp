@@ -21,7 +21,7 @@ import { httpConfigFor } from '../../src/http/config';
 import { bindPairingRevocation } from '../../src/http/serve-http';
 import type { SpaceLifecycleControl } from '../../src/server/context';
 import type { ServeContext } from '../../src/server/serve';
-import { PAIRING_REVOKED_REMOTE_REASON, PairingRevocation } from '../../src/status/pairing-revocation';
+import { AGENT_REVOKED_REASON, PAIRING_REVOKED_REMOTE_REASON, PairingRevocation } from '../../src/status/pairing-revocation';
 import { runStatus } from '../../src/server/tools/status';
 import { deferred } from '../fixtures/deferred';
 
@@ -420,18 +420,21 @@ describe('ciclo de vida sin recuento (D22)', () => {
     await contexts.close();
   });
 
-  it('una cuenta revocada se cierra al terminar lo que tiene en curso, sin esperar', async () => {
-    const { libraries, contexts } = harness();
+  it('una cuenta revocada sigue abierta tras usarla, para reintentar, y se cierra por inactividad (D24)', async () => {
+    const { clock, libraries, contexts } = harness();
     let revoked = false;
     libraries.decorate = (context) => ({
       ...context, instance: { get syncRunner() { return { revoked }; } } as never
     });
     const lease = await contexts.acquire(account('a'));
     revoked = true;
-    await settled();
-    expect(libraries.closed).toEqual([]);
     lease.release();
     await settled();
+    // Reabrir en cada petición sería una ronda contra el relé por llamada: el runner reintenta solo.
+    expect(libraries.closed).toEqual([]);
+    (await contexts.acquire(account('a'))).release();
+    expect(libraries.opened).toEqual(['a']);
+    await clock.advance(IDLE_MS);
     expect(libraries.closed).toEqual(['a']);
     await contexts.close();
   });
@@ -1682,7 +1685,8 @@ describe('marca de revocación compartida (bindPairingRevocation)', () => {
     const reopened = await statusNow('mikel');
     expect(libraries.opened).toEqual(['mikel', 'mikel']);
     expect(reopened.revoked).toBe(true);
-    expect(reopened.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
+    // Solo lo rechazó el relé: el motivo del agente revocado o desactivado (D24), no el de renovar.
+    expect(reopened.revokedReason).toBe(AGENT_REVOKED_REASON);
     await contexts.close();
   });
 
@@ -1723,17 +1727,23 @@ describe('marca de revocación compartida (bindPairingRevocation)', () => {
     await contexts.close();
   });
 
-  it('hebra_status dice el motivo del conector remoto, y en stdio el de siempre', async () => {
+  it('hebra_status: el relé da el motivo del agente (D24); el 410 de Lumbre, el de renovar desde el conector', async () => {
     const pairing = new PairingRevocation();
     const { runners, contexts } = revocableHarness(pairing);
+    const privacyConfig = { privateFolders: [], privateTags: [] };
     const lease = await contexts.acquire(account('mikel'));
     runners.get('mikel')!.revoked = true;
-    const remote = await runStatus({ status: lease.ctx.status, privacyConfig: { privateFolders: [], privateTags: [] } } as never);
-    expect(remote.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
-    expect(remote.revokedReason).not.toContain('hebra-mcp pair');
+    const relay = await runStatus({ status: lease.ctx.status, privacyConfig } as never);
+    expect(relay.revokedReason).toBe(AGENT_REVOKED_REASON);
+    pairing.markRevoked('mikel-credential');
+    const lumbre = await runStatus({ status: lease.ctx.status, privacyConfig } as never);
+    expect(lumbre.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
+    expect(lumbre.revokedReason).not.toContain('hebra-mcp pair');
     lease.release();
-    const stdio = await runStatus({ status: statusOf(true), privacyConfig: { privateFolders: [], privateTags: [] } } as never);
-    expect(stdio.revokedReason).toContain('hebra-mcp pair');
+    // En stdio solo puede ser el relé: el mismo motivo, sin pedir reemparejar.
+    const stdio = await runStatus({ status: statusOf(true), privacyConfig } as never);
+    expect(stdio.revokedReason).toBe(AGENT_REVOKED_REASON);
+    expect(stdio.revokedReason).not.toContain('hebra-mcp pair');
     await contexts.close();
   });
 });
