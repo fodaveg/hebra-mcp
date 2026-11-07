@@ -5,7 +5,7 @@
  * - Lee los secretos de `pair` del llavero (`src/secrets/`). Si están los tres y el relé
  *   de la credencial es el de la bóveda, registra el dispositivo (idempotente) y abre la
  *   `LibraryInstance` CON sync: `hebra_status` dice `linked: true`, y un 401/403 del relé
- *   lo deja en `revoked: true` (SPEC.md §6.2).
+ *   lo deja en `revoked: true` hasta que un reintento vuelva a pasar (SPEC.md §6.2).
  * - Sin secretos (o sin llavero en esta plataforma), igual que en L1: la SQLite local sin
  *   sync y `linked: false`. Lo dice en stderr con un evento cerrado, sin valores.
  * - Escritor único (SPEC.md §8): la instancia que tiene `writer.lock` escucha en
@@ -19,6 +19,7 @@ import { AgentSpaceManager } from '../spaces/manager';
 import type { AccountUploadLedger } from '../accounts/pending-sweep';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { linkedSyncFrom, registerLinkedDevice } from '../sync/linked';
+import type { RetryScheduler } from '../sync/runner';
 import { PrivacyConfigSource } from '../privacy/config-source';
 import { privacyWithMemory } from '../privacy/folder-memory';
 import { logEvent } from '../log/logger';
@@ -44,6 +45,8 @@ export interface OpenServeOptions {
    *  al de los secretos de `pair`. */
   instance?: Pick<OpenLibraryInstanceOptions, 'lock' | 'checkIntervalMs' | 'sync'>;
   syncIntervalMs?: number | null;
+  /** Tests: cómo se programa el reintento del sync personal tras un 401/403 (`SyncRunner`). */
+  syncRetryScheduler?: RetryScheduler;
   /** Tests: tiempos de espera del reenvío al escritor. */
   forward?: ForwardOptions;
   /**
@@ -194,7 +197,8 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     ? await linkedSyncFrom(paired, {
         fetcher: options.fetcher,
         emit: (event, fields) => logEvent({ event, ...fields }),
-        intervalMs: options.syncIntervalMs
+        intervalMs: options.syncIntervalMs,
+        ...(options.syncRetryScheduler ? { retryScheduler: options.syncRetryScheduler } : {})
       })
     : null;
   logEvent({ event: 'serve.start', linked: linked !== null });

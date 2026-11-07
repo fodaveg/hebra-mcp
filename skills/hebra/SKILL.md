@@ -101,7 +101,9 @@ Si `hebra_status` dice `revoked: true`, la credencial de esta cuenta está revoc
 desactivado en Hebra (el servidor no los distingue). No lo arregles tú ni pruebes otras cuentas: dile
 a la persona que reconecte el conector con `/mcp` (o lo quite y lo vuelva a añadir), que inicie sesión
 en Sumego y apruebe el dispositivo en Hebra; con la misma biblioteca conserva sus datos. Si solo había
-desactivado el agente, al reactivarlo en Hebra vuelve a funcionar sin otro login.
+desactivado el agente, al reactivarlo en Hebra vuelve a funcionar sin otro login. Mientras tanto,
+los espacios responden `space_access_denied` y la biblioteca personal solo enseña lo que ya tenía:
+lo que escribas ahí no sube hasta que vuelva el acceso.
 
 ## Instalar el comando `hebra-mcp`
 

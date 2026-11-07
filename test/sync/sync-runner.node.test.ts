@@ -16,8 +16,45 @@ import {
 } from './devices';
 import { openNodeLibraryPort } from '../../src/store/node-port';
 import { NoteWriter } from '../../src/store/writes';
-import { SyncRunner } from '../../src/sync/runner';
+import {
+  REVOKED_RETRY_BASE_MS,
+  REVOKED_RETRY_MAX_MS,
+  revokedRetryDelay,
+  SyncRunner,
+  type RetryScheduler
+} from '../../src/sync/runner';
 import { NO_PRIVATE } from '../fixtures/no-private';
+
+/**
+ * Reloj falso para el reintento tras un 401/403: guarda lo programado sin esperar nada. `fire`
+ * ejecuta el más antiguo y espera a que su ronda termine.
+ */
+function fakeRetries() {
+  const queue: Array<{ ms: number; run: () => Promise<void>; cancelled: boolean }> = [];
+  let cancelled = 0;
+  const scheduler: RetryScheduler = (ms, run) => {
+    const entry = { ms, run, cancelled: false };
+    queue.push(entry);
+    return () => {
+      if (!entry.cancelled) cancelled += 1;
+      entry.cancelled = true;
+    };
+  };
+  const live = () => queue.filter((entry) => !entry.cancelled);
+  return {
+    scheduler,
+    pending: () => live().map((entry) => entry.ms),
+    get cancelled() {
+      return cancelled;
+    },
+    async fire(): Promise<void> {
+      const entry = live()[0];
+      if (!entry) throw new Error('no hay reintento programado');
+      queue.splice(queue.indexOf(entry), 1);
+      await entry.run();
+    }
+  };
+}
 
 /**
  * L3 (SPEC.md §10): el motor de sync de Hebra sin cambios, sobre el almacén de
@@ -194,9 +231,10 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     );
   });
 
-  it('un 401 del relé deja revoked:true y no vuelve a llamar al relé', async () => {
+  it('un 401 del relé deja revoked:true; las escrituras no llaman al relé, solo el reintento', async () => {
     const relay = new InMemoryLibraryRelay();
-    const mcp = await mcpDevice(relay);
+    const retries = fakeRetries();
+    const mcp = await mcpDevice(relay, { retryScheduler: retries.scheduler });
     await mcp.runner.requestRound();
     relay.httpErrorNextChanges = { status: 401 };
     const round = await mcp.runner.requestRound();
@@ -209,10 +247,93 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     await mcp.writer.createNote({ body: '# Después de revocar', privacy: NO_PRIVATE });
     expect(await mcp.runner.requestRound()).toBeNull();
     expect(relay.changesCalls).toBe(calls);
+    // Un solo reintento programado, a los 30 s, aunque se pidan más rondas.
+    expect(retries.pending()).toEqual([REVOKED_RETRY_BASE_MS]);
     // SPEC.md §12.9: `pairing.revoked` una sola vez.
     expect(mcp.logged.filter((entry) => entry.event === 'pairing.revoked')).toEqual([
       { event: 'pairing.revoked', fields: { source: 'relay' } }
     ]);
+  });
+
+  it('con la credencial rechazada reintenta con espera creciente y tope, una petición por intento', async () => {
+    const relay = new InMemoryLibraryRelay();
+    const retries = fakeRetries();
+    const mcp = await mcpDevice(relay, { retryScheduler: retries.scheduler });
+    relay.httpErrorNextChanges = { status: 401 };
+    await mcp.runner.requestRound();
+    const delays: number[] = [];
+    for (let i = 0; i < 6; i += 1) {
+      const [delay] = retries.pending();
+      delays.push(delay!);
+      const before = relay.changesCalls;
+      relay.httpErrorNextChanges = { status: 401 };
+      await retries.fire();
+      expect(relay.changesCalls - before, `intento ${i}`).toBe(1);
+      expect(mcp.runner.revoked).toBe(true);
+    }
+    expect(delays).toEqual([30_000, 60_000, 120_000, 240_000, 300_000, 300_000]);
+    expect(REVOKED_RETRY_MAX_MS).toBe(300_000);
+    expect(revokedRetryDelay(50)).toBe(REVOKED_RETRY_MAX_MS);
+    // El corte se anuncia una vez, no en cada intento.
+    expect(mcp.logged.filter((entry) => entry.event === 'pairing.revoked')).toHaveLength(1);
+  });
+
+  it('agente reactivado: el reintento que pasa levanta revoked, sube lo pendiente y vuelve a pedir rondas', async () => {
+    const relay = new InMemoryLibraryRelay();
+    const retries = fakeRetries();
+    const mcp = await mcpDevice(relay, { retryScheduler: retries.scheduler });
+    const app = await appDevice(relay);
+    relay.httpErrorNextChanges = { status: 401 };
+    await mcp.runner.requestRound();
+    expect(mcp.runner.revoked).toBe(true);
+    const written = await mcp.writer.createNote({ body: '# Escrita sin acceso\n', privacy: NO_PRIVATE });
+    // Sin error preparado: el relé vuelve a aceptar la credencial.
+    await retries.fire();
+    expect(mcp.runner.revoked).toBe(false);
+    expect(retries.pending()).toEqual([]);
+    expect((await mcp.runner.syncStatus()).pendingUpload).toBe(0);
+    await app.sync.runRound();
+    expect((await app.port.noteRead(written.id))?.body).toBe('# Escrita sin acceso\n');
+    expect(mcp.logged.filter((entry) => entry.event === 'pairing.restored')).toEqual([
+      { event: 'pairing.restored', fields: { source: 'relay' } }
+    ]);
+    // De nuevo una ronda normal por escritura.
+    expect((await mcp.runner.requestRound())?.result).toBe('ok');
+
+    // Un segundo corte vuelve a empezar la espera desde la base y se anuncia otra vez.
+    relay.httpErrorNextChanges = { status: 403 };
+    await mcp.runner.requestRound();
+    expect(retries.pending()).toEqual([REVOKED_RETRY_BASE_MS]);
+    expect(mcp.logged.filter((entry) => entry.event === 'pairing.revoked')).toHaveLength(2);
+  });
+
+  it('sin red durante el corte sigue revocado y sigue esperando más; stop() cancela el reintento', async () => {
+    const relay = new InMemoryLibraryRelay();
+    const retries = fakeRetries();
+    const mcp = await mcpDevice(relay, { retryScheduler: retries.scheduler });
+    relay.httpErrorNextChanges = { status: 401 };
+    await mcp.runner.requestRound();
+    relay.httpErrorNextChanges = { status: 503 };
+    await retries.fire();
+    // Un 5xx no dice nada de la credencial: no la da por buena.
+    expect(mcp.runner.revoked).toBe(true);
+    expect(retries.pending()).toEqual([60_000]);
+    await mcp.runner.stop();
+    expect(retries.pending()).toEqual([]);
+    expect(retries.cancelled).toBe(1);
+  });
+
+  it('la revocación es de cada runner: el de otra cuenta sigue sincronizando', async () => {
+    const relayA = new InMemoryLibraryRelay();
+    const relayB = new InMemoryLibraryRelay();
+    const retries = fakeRetries();
+    const a = await mcpDevice(relayA, { retryScheduler: retries.scheduler });
+    const b = await mcpDevice(relayB, { retryScheduler: retries.scheduler });
+    relayA.httpErrorNextChanges = { status: 401 };
+    await a.runner.requestRound();
+    expect(a.runner.revoked).toBe(true);
+    expect(b.runner.revoked).toBe(false);
+    expect((await b.runner.requestRound())?.result).toBe('ok');
   });
 
   it('un 403 por el transporte HTTP de Hebra (fetch real inyectado) también revoca', async () => {
@@ -243,6 +364,7 @@ describe('SyncRunner: hebra-mcp como un dispositivo más', () => {
     expect(seen[0]).toContain('/api/integrations/hebra/library/v1/vaults/');
     expect(await runner.requestRound()).toBeNull();
     expect(seen).toHaveLength(1);
+    await runner.stop();
   });
 
   it('nunca hay dos rondas solapadas; las peticiones de mientras comparten UNA ronda detrás', async () => {

@@ -204,9 +204,25 @@ export class FakeLumbre {
     return globalThis.fetch(tamper(new URL(callbacks.web)));
   }
 
+  /**
+   * Agentes desactivados desde los ajustes de Hebra (`PUT agents/{id}` con `enabled: false`):
+   * Lumbre conserva la credencial y sus concesiones, pero `activeHebraCredentialCondition` la
+   * rechaza en todas partes con el mismo 401 que una revocada. `enable` la devuelve tal cual.
+   */
+  private readonly disabled = new Set<string>();
+
+  disable(credentialId: string): void {
+    this.disabled.add(credentialId);
+  }
+
+  enable(credentialId: string): void {
+    this.disabled.delete(credentialId);
+  }
+
   private auth(req: IncomingMessage, kind: 'read' | 'write'): TokenEntry | null {
     const token = (req.headers.authorization ?? '').replace(/^Bearer /u, '');
     const entry = this.tokens.get(token);
+    if (entry && this.disabled.has(entry.credentialId)) return null;
     return entry && entry.kind === kind ? entry : null;
   }
 

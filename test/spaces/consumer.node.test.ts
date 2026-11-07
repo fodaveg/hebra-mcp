@@ -957,3 +957,64 @@ describe('herramientas MCP por espacio', () => {
     }
   });
 });
+
+describe('agente desactivado y reactivado desde los ajustes de Hebra (tarea c9b8f5e1)', () => {
+  it('desactivado: espacios cerrados, personal con lo local y motivo propio; reactivado: vuelve sin reiniciar', async () => {
+    // El reintento del sync personal, con reloj falso: se guarda y se ejecuta a mano.
+    const retries: Array<{ ms: number; run: () => Promise<void> }> = [];
+    await client.close();
+    await server.close();
+    await served.close();
+    served = await openServeContext({
+      dataDir: directory,
+      secrets,
+      fetcher: fake.fetcher,
+      syncIntervalMs: null,
+      syncRetryScheduler: (ms, run) => {
+        retries.push({ ms, run });
+        return () => undefined;
+      },
+      instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
+    });
+    await served.instance.whenReady();
+    await connect();
+    await grant();
+    expect(text(await call('hebra_read_note', { space: SPACE, id: NOTE }))).toContain('Equipo');
+    const status = async () =>
+      JSON.parse((await call('hebra_status') as { content: Array<{ text: string }> }).content[0]!.text) as {
+        revoked: boolean;
+        revokedReason?: string;
+      };
+
+    fake.disable(paired.connection.credentialId);
+    const runner = served.instance.syncRunner!;
+    expect((await runner.requestRound())?.result).toBe('http_401');
+    expect(runner.revoked).toBe(true);
+    // Los espacios dejan de servirse: el catálogo responde 401 y la caché local no sale.
+    const denied = await call('hebra_read_note', { space: SPACE, id: NOTE });
+    expect(denied.isError).toBe(true);
+    expect(text(denied)).toContain('space_access_denied');
+    expect(text(denied)).not.toContain('Equipo');
+    expect(text(await call('hebra_search', { space: SPACE, query: 'Equipo' }))).not.toContain('Texto compartido');
+    // La biblioteca personal sigue sirviendo su copia local (SPEC.md §6.2: revocar no la borra).
+    expect(text(await call('hebra_read_note', { id: 'personal-note' }))).toContain('Personal');
+    const cut = await status();
+    expect(cut.revoked).toBe(true);
+    expect(cut.revokedReason).toContain('revocado o desactivado desde Hebra');
+    expect(cut.revokedReason).toContain('volver a emparejar no lo reactiva');
+    expect(retries.map((entry) => entry.ms)).toEqual([30_000]);
+
+    // Reactivado en Hebra: el reintento pasa, sin reiniciar el proceso.
+    fake.enable(paired.connection.credentialId);
+    await retries.shift()!.run();
+    expect(runner.revoked).toBe(false);
+    expect(retries).toEqual([]);
+    expect((await status()).revoked).toBe(false);
+    expect(text(await call('hebra_read_note', { space: SPACE, id: NOTE }))).toContain('Equipo');
+    const created = await call('hebra_create_note', { body: '# Tras reactivar' });
+    expect(created.isError).not.toBe(true);
+    // Las escrituras vuelven a pedir su ronda y suben.
+    expect((await runner.requestRound())?.result).toBe('ok');
+    expect((await runner.syncStatus()).pendingUpload).toBe(0);
+  });
+});
