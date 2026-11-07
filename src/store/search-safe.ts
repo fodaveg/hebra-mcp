@@ -33,6 +33,10 @@ import {
 } from '../hebra';
 import { FolderIndex } from '../privacy/folder-index';
 import { readFoldedTitleTargets } from './props-sql';
+import type { SearchBudget } from './types';
+
+/** Filas por consulta del recorrido con un término negativo por subcadena (el máximo del motor). */
+const EXCLUDED_PAGE_ROWS = 200;
 
 type SearchHit = SearchPage['items'][number];
 
@@ -306,10 +310,62 @@ function substringPage(
     updatedAt: Number(row.updated_at),
     favorite: Number(row.favorite) === 1,
     conflict: row.conflict_of !== null,
-    snippet: substringSnippet(String(row.body ?? ''), substring.needles, {
-      start: SEARCH_MARK_START, end: SEARCH_MARK_END
-    }, 12)
+    snippet: boundedSubstringSnippet(String(row.body ?? ''), substring.needles, SUBSTRING_SNIPPET_TOKENS)
   }));
+}
+
+/** Palabras del fragmento de la rama de subcadenas (las de `snippet()` del motor). */
+const SUBSTRING_SNIPPET_TOKENS = 12;
+
+/** Largos del principio del cuerpo con los que se prueba el fragmento antes de usar el cuerpo entero. */
+const SNIPPET_PREFIX_CHARS = [4_096, 65_536] as const;
+
+const WHITE_SPACE = /\p{White_Space}/gu;
+
+/**
+ * Dónde cortar el cuerpo, a partir de `from`, sin cambiar lo que `substringSnippet` ve antes del
+ * corte; -1 si no hay sitio. Sus trozos ocultos (`substringHiddenRanges`: `[[…]]` en una línea,
+ * `hebra://…` hasta un espacio, `sha256:` con 64 cifras) no cruzan un salto de línea, y una aparición
+ * de una aguja sin espacios tampoco cruza un espacio. Así que se corta en el primer salto de línea
+ * o, si ninguna aguja lleva espacios, en el primer espacio en blanco que no deje un `[[` de esa línea
+ * sin cerrar antes del corte (ese podría cerrarse después y ocultar texto de antes).
+ */
+function snippetCut(body: string, from: number, needlesHaveSpace: boolean): number {
+  const newline = body.indexOf('\n', from);
+  if (needlesHaveSpace) return newline;
+  WHITE_SPACE.lastIndex = from;
+  const space = WHITE_SPACE.exec(body)?.index ?? -1;
+  if (space < 0 || (newline >= 0 && newline <= space)) return newline;
+  const lineStart = body.lastIndexOf('\n', space - 1) + 1;
+  const open = body.lastIndexOf('[[', space - 1);
+  if (open >= lineStart && !body.slice(open + 2, space).includes(']]')) return newline;
+  return space;
+}
+
+/**
+ * `substringSnippet` sin plegar el cuerpo entero cuando no hace falta (tarea 237558ca): plegarlo
+ * carácter a carácter es lo caro (200 cuerpos de 100 000 caracteres, 525 ms medidos solo en esto).
+ * Se calcula primero sobre un principio del cuerpo cortado con `snippetCut` y solo se acepta si sale
+ * IGUAL que con el cuerpo entero, que pasa cuando ese principio contiene una aparición visible (el
+ * fragmento lleva la marca) y el fragmento se corta antes del final del principio (acaba en `…`):
+ * entonces el ancla es la misma (las apariciones de después del corte empiezan después), las palabras
+ * de alrededor también, y lo que sigue al corte solo confirma el `…` que ya había. Si no, prueba un
+ * principio más largo y, al final, el cuerpo entero. Un cuerpo que ya contiene los caracteres de las
+ * marcas va siempre entero, para no confundir la comprobación.
+ */
+export function boundedSubstringSnippet(body: string, needles: readonly string[], tokens: number): string {
+  const marks = { start: SEARCH_MARK_START, end: SEARCH_MARK_END };
+  if (!body.includes(SEARCH_MARK_START) && !body.includes(SEARCH_MARK_END)) {
+    const needlesHaveSpace = needles.some((needle) => /\p{White_Space}/u.test(needle));
+    for (const size of SNIPPET_PREFIX_CHARS) {
+      if (body.length <= size) break;
+      const cut = snippetCut(body, size, needlesHaveSpace);
+      if (cut < 0) break;
+      const snippet = substringSnippet(body.slice(0, cut), needles, marks, tokens);
+      if (snippet.includes(SEARCH_MARK_START) && snippet.endsWith('…')) return snippet;
+    }
+  }
+  return substringSnippet(body, needles, marks, tokens);
 }
 
 /**
@@ -323,6 +379,11 @@ function substringPage(
  * guardan cursor entre `get`). Si otra llamada escribe mientras se cede, es aceptable: el cursor es por
  * clave (`updatedAt`, `id`), no por posición. `alive` se llama tras cada cesión para que quien llama
  * aborte si la conexión se cerró a la fuerza mientras tanto.
+ *
+ * Tope de trabajo (tarea 237558ca): cada consulta al motor resta una del `budget` de la llamada de
+ * herramienta. Agotado, el recorrido para y la página sale con lo reunido hasta la última fila mirada y
+ * `nextCursor` en ella, aunque tenga menos de `want` (o ninguna). Medido antes del tope, por el camino
+ * entero (10 001 notas, `garbanzos -anzos`, `limit: 1`): 5 001 consultas y 13,5 s cediendo el hilo.
  */
 export async function safeTextSearch(
   engine: SqliteLibraryEngine,
@@ -334,7 +395,8 @@ export async function safeTextSearch(
   scope: NotesScope | null,
   conn?: SqliteConn,
   writable = false,
-  alive: () => void = () => {}
+  alive: () => void = () => {},
+  budget?: SearchBudget
 ): Promise<SearchPage> {
   const want = Math.min(Math.max(limit ?? 50, 1), 200);
   const safeFilters: SearchFilters = { ...filters, bodyOnly: true };
@@ -362,13 +424,24 @@ export async function safeTextSearch(
     ? db.prepare(`SELECT 1 FROM notes_trigram
           WHERE notes_trigram MATCH ? AND rowid = (SELECT rowid FROM notes WHERE id = ?)`)
     : null;
+  // Con exclusión, páginas del máximo del motor: cada consulta cuesta casi lo mismo pida 2 filas o
+  // 200 (FTS casa y ordena todo antes del LIMIT), y el resultado no depende del tamaño, porque abajo
+  // se ordena y se corta a `want`. Antes se pedía `want`: con `limit: 1`, una consulta por cada 2 notas.
+  const pageRows = isExcluded ? EXCLUDED_PAGE_ROWS : want;
+  /** La última fila mirada si el tope cortó el recorrido: de ahí sigue la página siguiente. */
+  let frontier: SearchHit | null = null;
   for (;;) {
-    exact = engine.search(query, exactCursor, want, safeFilters, scope);
+    exact = engine.search(query, exactCursor, pageRows, safeFilters, scope);
+    if (budget) budget.queries -= 1;
     exactItems.push(...(isExcluded
       ? exact.items.filter((hit) => !isExcluded.get(excluded!, hit.id))
       : exact.items));
     exactCursor = exact.nextCursor;
     if (!(excluded && exactItems.length < want && exactCursor)) break;
+    if (budget && budget.queries <= 0) {
+      frontier = exact.items.at(-1) ?? null;
+      break;
+    }
     await yieldToEventLoop();
     alive();
   }
@@ -377,12 +450,23 @@ export async function safeTextSearch(
     : ready ? substringPage(engine, db, query, cursor, want, safeFilters, scope) : [];
   const byId = new Map<string, SearchHit>();
   for (const item of [...exactItems, ...substringItems]) if (!byId.has(item.id)) byId.set(item.id, item);
-  const items = [...byId.values()]
-    .sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
-    .slice(0, want);
+  const sorted = [...byId.values()]
+    .sort((a, b) => b.updatedAt - a.updatedAt || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+  // Cortado por el tope: lo exacto solo está mirado hasta `frontier`, así que una fila de subcadenas
+  // de después podría saltarse otra exacta aún sin mirar que va antes. Se devuelve solo lo que va
+  // antes o en `frontier`, y el cursor sigue ahí aunque no haya salido nada: paginación honesta.
+  const items = (frontier ? sorted.filter((hit) => !isAfter(hit, frontier!)) : sorted).slice(0, want);
+  const last = items.at(-1);
   return {
     ...exact,
     items,
-    nextCursor: items.length === want ? encodeCursor([items[items.length - 1]!.updatedAt], items[items.length - 1]!.id) : null
+    nextCursor: last && items.length === want
+      ? encodeCursor([last.updatedAt], last.id)
+      : frontier ? encodeCursor([frontier.updatedAt], frontier.id) : null
   };
+}
+
+/** ¿Va `hit` después de `frontier` en el orden de la búsqueda (`updatedAt` y `id`, descendentes)? */
+function isAfter(hit: SearchHit, frontier: SearchHit): boolean {
+  return hit.updatedAt < frontier.updatedAt || (hit.updatedAt === frontier.updatedAt && hit.id < frontier.id);
 }

@@ -467,10 +467,14 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       // Un `close()` forzado mientras se cedía el hilo: error con código, no una consulta sobre una conexión cerrada.
       if (this.closed) throw busyOtherInstance();
     };
+    const budget = options?.budget;
     const page = async (from: string | null, size: number | undefined, used: SearchFilters | null): Promise<SearchPage> => cleanSearchPage(
       options?.embedded === true
-        ? this.engine.search(q, from, size, used, scope ?? null)
-        : await safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable, alive)
+        ? (() => {
+            if (budget) budget.queries -= 1;
+            return this.engine.search(q, from, size, used, scope ?? null);
+          })()
+        : await safeTextSearch(this.engine, this.db, q, from, size, used, scope ?? null, this.conn, this.writable, alive, budget)
     );
     if (filters && hasValuedProps(filters)) {
       return this.walking(() => searchCheckingValues({

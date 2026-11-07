@@ -107,6 +107,13 @@ export async function fillPage<Item, Out>(options: {
   fetch(cursor: string | null, want: number): Promise<StorePage<Item>>;
   accept(item: Item): Out | undefined;
   cursorAfter(item: Item): string;
+  /**
+   * Tope de trabajo: tras cada página del almacén, si devuelve `true` y el almacén tiene más, para
+   * y devuelve lo reunido con `lastCursor` = el cursor del almacén tras esa página (todo lo de antes
+   * ya está mirado, aceptado o no). La página puede salir corta, o vacía, con `lastCursor`: no dice
+   * que haya otro elemento, solo dónde seguir. Sin él, se rellena entera.
+   */
+  stop?: () => boolean;
 }): Promise<{ items: Out[]; lastCursor: string | null }> {
   const out: Out[] = [];
   let lastItem: Item | undefined;
@@ -123,6 +130,7 @@ export async function fillPage<Item, Out>(options: {
       lastItem = item;
     }
     if (!page.nextCursor) return { items: out, lastCursor: null };
+    if (options.stop?.()) return { items: out, lastCursor: page.nextCursor };
     cursor = page.nextCursor;
   }
 }

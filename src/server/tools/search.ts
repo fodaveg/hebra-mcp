@@ -4,9 +4,10 @@
  * etiqueta (`SearchFilters.tags`) y por carpeta (`NotesScope` de carpeta, con `subfolders`
  * el subárbol efectivo de `folderSubtree`, el mismo de `hebra_list_notes`); solo el filtro
  * de privados se aplica aquí, nota a nota: la paginación interna sigue pidiendo páginas
- * hasta reunir `limit` resultados visibles o agotar el almacén (SPEC.md §6.3). El cursor
- * es la clave `(updatedAt, id)` del último resultado devuelto, envuelta (`pagination.ts`):
- * reanuda exactamente tras él.
+ * hasta reunir `limit` resultados visibles o agotar el almacén (SPEC.md §6.3), o hasta gastar
+ * `SEARCH_QUERIES_PER_CALL` consultas: entonces sale corta, con `nextCursor` donde paró. El cursor
+ * es la clave `(updatedAt, id)` del último resultado devuelto (o de la última fila mirada, si
+ * paró el tope), envuelta (`pagination.ts`): reanuda exactamente tras él.
  *
  * Con algo privado configurado (o la configuración sin resolver), solo se busca en título y
  * cuerpo, incluidas subcadenas: el puerto excluye las ramas de nombres y texto de ficheros
@@ -50,6 +51,15 @@ import { headingOfSnippet } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import type { SEARCH_FIELDS } from '../schemas';
 import { resolveSearchExtra, type SearchExtraInput } from './search-filters';
+import type { SearchBudget } from '../../store/types';
+
+/**
+ * Consultas de página al motor que puede hacer una llamada de `hebra_search` (tarea 237558ca,
+ * SPEC.md §6.3) antes de responder con lo que lleve y `nextCursor`. Una página normal es una
+ * consulta; las que suman son el término negativo por subcadena (páginas de 200 que se descartan)
+ * y una página llena de notas ocultas. 20 consultas de 200 filas son 4 000 notas miradas.
+ */
+export const SEARCH_QUERIES_PER_CALL = 20;
 
 export interface SearchResult {
   id: string;
@@ -127,14 +137,19 @@ export async function runSearch(
   // puerta compara con la de ahora (`samePrivacyConfig`), así que un cambio a «con
   // privados» a mitad repite la llamada, que ya busca sin ellos.
   const embedded = !hasPrivates(ctx.privacyConfig) && !ctx.privacy.unresolved;
+  // Tope de trabajo de esta llamada (tarea 237558ca): consultas de página al motor entre todas las
+  // páginas que pida `fillPage`. Agotado, la respuesta sale con lo reunido y `nextCursor` donde se
+  // paró, en vez de recorrer la biblioteca entera.
+  const budget: SearchBudget = { queries: SEARCH_QUERIES_PER_CALL };
   const page = await fillPage({
     limit,
     startCursor,
+    stop: () => budget.queries <= 0,
     fetch: async (cursor, want) => {
       const stored = await ctx.port.search(input.query, cursor, storePageSize(want), {
         ...(tagFilter ? { tags: [tagFilter] } : {}),
         ...extra.filters
-      }, scope, { embedded });
+      }, scope, { embedded, budget });
       // `privacyLoad: 'lazy'` (A4): las notas de ESTA página del motor, antes de que `accept`
       // las juzgue; si la página se queda corta, la siguiente pasa también por aquí.
       await ctx.privacy.ensure(stored.items.map((hit) => hit.id));

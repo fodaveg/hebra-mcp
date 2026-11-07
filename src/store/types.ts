@@ -87,6 +87,18 @@ export interface PortSearchOptions {
    * la nota se vea. Por defecto, `false`: solo título y cuerpo (`safeTextSearch`).
    */
   embedded?: boolean;
+  /**
+   * Tope de trabajo de una llamada de herramienta, compartido por todas las páginas que pide
+   * (tarea 237558ca, SPEC.md §6.3): cada consulta de página al motor resta uno de `queries`.
+   * Con `queries` a 0, `safeTextSearch` deja de recorrer y devuelve lo reunido hasta donde miró,
+   * con `nextCursor` en ese punto. Sin él, sin tope.
+   */
+  budget?: SearchBudget;
+}
+
+/** Consultas de página al motor que le quedan a una llamada (`PortSearchOptions.budget`). */
+export interface SearchBudget {
+  queries: number;
 }
 
 /** Lo que pide la puerta final (`src/server/privacy-gate.ts`): el sello de esas notas y,
