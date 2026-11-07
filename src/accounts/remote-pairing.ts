@@ -240,8 +240,9 @@ export async function openRemotePairing(options: OpenRemotePairingOptions): Prom
           });
           await response.body?.cancel();
           // Un GET de lectura correcto prueba que la credencial vale: si estaba marcada como
-          // revocada (agente desactivado y luego reactivado), la marca se levanta aquí.
-          if (response.ok) options.provider.pairing.clear(paired.connection.credentialId);
+          // revocada (agente desactivado y luego reactivado), la marca se levanta aquí, y un
+          // runner abierto que seguía revocado reintenta ya (D24).
+          if (response.ok) options.provider.pairing.credentialWorks(paired.connection.credentialId);
           return response.status === 401 || response.status === 403;
         } catch { return false; }
       }

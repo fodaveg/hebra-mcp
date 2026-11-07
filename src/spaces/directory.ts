@@ -13,13 +13,25 @@ import { effectiveLimit, LIMITS, sliceAfterKey, unwrapCursor, wrapCursor } from 
 import { readLimitedJson, type AgentDevice } from './device';
 import { agentDirectorySchema, type AgentDirectory } from './protocol';
 
-type UnavailableReason = 'not_available' | 'rate_limited' | 'relay_unavailable' | 'invalid_response';
+type UnavailableReason =
+  | 'not_available'
+  | 'rate_limited'
+  | 'relay_unavailable'
+  | 'invalid_response'
+  // La credencial de la cuenta está revocada (D24): ni se pregunta al relé.
+  | 'credential_revoked';
 
 function unavailable(reason: UnavailableReason, retryAfterSeconds?: number): ToolError {
   return new ToolError('organizations_unavailable', {
     reason,
     ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds })
   });
+}
+
+/** El directorio con la credencial revocada (D24): no disponible, sin red. `hebra_list_spaces`
+ *  responde entonces sin organizaciones y sin ningún espacio con concesión. */
+export function directoryRevoked(): ToolError {
+  return unavailable('credential_revoked');
 }
 
 /** `Retry-After` en segundos. La forma de fecha HTTP se ignora: el aviso es orientativo. */

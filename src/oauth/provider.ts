@@ -25,7 +25,7 @@ import { sendTooManyRequests } from './failure-limit';
 import { GrantSecrets } from './grants';
 import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
-import { sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendFamilyRateLimitedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
+import { sendAgentRevokedPage, sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendFamilyRateLimitedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
 import { SumegoError, type SumegoOidc } from './sumego';
 import type { RefreshSealer } from './sumego-refresh';
 import { familyRateKey, FamilyRateLimitedError, logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
@@ -524,7 +524,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.status(503).json({ error: 'temporarily_unavailable' }); return;
     }
     if (binding && this.pairing.isRevoked(binding.pairedCredentialId)) {
-      sendPairingRevokedPage(res); return;
+      // Con el 410 de Lumbre, reemparejar; si solo lo rechaza el relé, se recupera solo (D24).
+      if (this.pairing.revokedByLumbre(binding.pairedCredentialId)) sendPairingRevokedPage(res);
+      else sendAgentRevokedPage(res);
+      return;
     }
     this.makeRoomForPending(ip);
     const clientName = (client.client_name || 'Claude').slice(0, 120);

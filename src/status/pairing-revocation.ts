@@ -5,10 +5,14 @@
  * concesiones nuevas. Se sabe por dos caminos:
  *
  * - El relé rechaza la credencial (401/403): el runner de sync ya lo deja en `revoked: true`
- *   y emite `pairing.revoked` una vez (`src/sync/runner.ts`).
+ *   y emite `pairing.revoked` una vez (`src/sync/runner.ts`). Es también lo que pasa al
+ *   desactivar el agente en Ajustes de Hebra, y la misma credencial vuelve a valer al
+ *   reactivarlo: el runner reintenta solo y lo recupera sin reiniciar (D24). Motivo:
+ *   `AGENT_REVOKED_REASON`.
  * - Lumbre responde `410 {"error":"pairing_revoked"}` en `/requests` o en `sumego/exchange`:
  *   el OAuth llama a `markRevoked`, que emite `pairing.revoked` una vez si el relé no lo
- *   había dicho ya.
+ *   había dicho ya. Motivos: `PAIRING_REVOKED_REASON` y `PAIRING_REVOKED_REMOTE_REASON`, que
+ *   piden renovar la conexión.
  *
  * Un 400 de Lumbre NO es una revocación (cuerpo mal formado): sigue siendo «no disponible».
  * La marca va atada a la credencial con la que se vio, y por tanto a una sola cuenta (D22):
@@ -18,12 +22,24 @@
 import { logEvent } from '../log/logger';
 import type { HebraStatus, StatusSource } from './status-source';
 
-/** El motivo que dan `hebra_status` y la página de `/authorize`. */
+/**
+ * El motivo cuando el relé (o Lumbre al registrar la clave de agente) rechaza la credencial
+ * (D24): agente revocado o desactivado desde Hebra, que no se distinguen. Igual en stdio y en
+ * remoto, porque no pide nada a quien lo lee salvo reactivar el agente.
+ */
+export const AGENT_REVOKED_REASON =
+  'Hebra no acepta ahora la conexión de este agente porque está revocado o desactivado desde Hebra. ' +
+  'hebra-mcp lo vuelve a intentar solo y recupera el acceso en cuanto lo reactives en Ajustes de Hebra, ' +
+  'sin reiniciar ni volver a emparejar. Mientras tanto, la biblioteca personal responde con lo que ya tenía ' +
+  'descargado y los espacios compartidos no están disponibles.';
+
+/** El motivo del `410 pairing_revoked` de Lumbre (cierre de sesión en todas partes) en `hebra_status`
+ *  y en la página de `/authorize`, donde se puede lanzar `hebra-mcp pair`. */
 export const PAIRING_REVOKED_REASON =
   'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
   'Hay que reemparejar con `hebra-mcp pair` en modo `credential_renewed`, que conserva la identidad y la clave de la biblioteca.';
 
-/** La misma página en el conector multiusuario, donde nadie puede lanzar `hebra-mcp pair` (D22). */
+/** El mismo `410` en el conector remoto, donde nadie puede lanzar `hebra-mcp pair` (D22). */
 export const PAIRING_REVOKED_REMOTE_REASON =
   'La conexión con la biblioteca se cortó al cerrar sesión en todas partes (o al revocarla en Lumbre). ' +
   'Vuelve a conectar Hebra desde tu aplicación: al iniciar sesión podrás renovarla, sin perder tus notas.';
@@ -43,6 +59,8 @@ export class PairingRevocation {
    * reloj, con contadores.
    */
   private readonly marks = new Map<string, { attachId: number | null; okRounds: number }>();
+  /** Por credencial: que el runner abierto reintente ya, si está revocado (D24). */
+  private readonly relayRetry = new Map<string, () => void>();
   private attachSeq = 0;
 
   /** `relayRevoked`: el `revoked` global del runner de sync en modo de una sola cuenta, si lo hay. */
@@ -54,7 +72,13 @@ export class PairingRevocation {
    * captura) se suelta, así que cerrar no da un estado falso ni retiene la instancia.
    * Devuelve la función que desacopla.
    */
-  attachRelay(credentialId: string, revoked: () => boolean, okRounds: () => number = () => 0): () => void {
+  attachRelay(
+    credentialId: string,
+    revoked: () => boolean,
+    okRounds: () => number = () => 0,
+    /** Que el runner abierto reintente ya (`SyncRunner.retryNow`, D24); lo usa `credentialWorks`. */
+    retryNow: () => void = () => undefined
+  ): () => void {
     // No se toca `relayLatched`: una cuenta revocada que se cerró por inactividad y se reabre
     // tiene un runner nuevo que aún no ha hablado con el relé, y no por eso deja de estar
     // revocada. La levantan la renovación (`clear`), una credencial con otro id o una prueba de
@@ -63,8 +87,10 @@ export class PairingRevocation {
     this.attachSeq += 1;
     this.relayLive.set(credentialId, revoked);
     this.relayRounds.set(credentialId, { id: this.attachSeq, okRounds });
+    this.relayRetry.set(credentialId, retryNow);
     return () => {
       if (this.relayLive.get(credentialId) !== revoked) return;
+      this.relayRetry.delete(credentialId);
       let value = false;
       let ok = false;
       try { value = revoked(); } catch { /* instancia ya cerrada: sin dato nuevo */ }
@@ -124,6 +150,27 @@ export class PairingRevocation {
     this.marks.delete(credentialId);
   }
 
+  /**
+   * Un GET de lectura con esta credencial acaba de salir bien (el login, `remote-pairing.ts`): se
+   * olvida la marca y, si la cuenta tiene el contexto abierto con el runner revocado, este
+   * reintenta ya en vez de esperar su plazo (D24). Es la única señal de reactivación que llega a
+   * hebra-mcp: Lumbre no avisa por ningún otro canal.
+   */
+  credentialWorks(credentialId: string): void {
+    this.clear(credentialId);
+    try { this.relayRetry.get(credentialId)?.(); } catch { /* instancia ya cerrada */ }
+  }
+
+  /**
+   * ¿La revocación que sigue vigente para esta credencial es el `410 pairing_revoked` de Lumbre
+   * (cierre de sesión en todas partes), y no solo un rechazo del relé? Decide el motivo: el de
+   * Lumbre pide renovar la conexión, el del relé no (D24).
+   */
+  revokedByLumbre(credentialId: string | null | undefined): boolean {
+    if (credentialId == null || !this.revokedCredentials.has(credentialId)) return false;
+    return !this.recoveredSince(credentialId);
+  }
+
   /** Lumbre dijo `pairing_revoked` para esta credencial. El evento sale una sola vez. */
   markRevoked(credentialId: string): void {
     const already = this.isRevoked(credentialId);
@@ -133,19 +180,26 @@ export class PairingRevocation {
   }
 }
 
-/** Añade el motivo del conector remoto a un estado revocado (`serve-http`, donde `hebra-mcp pair` no existe). */
-export function withRemoteRevokedReason(status: HebraStatus): HebraStatus {
+/**
+ * Pone motivo a un estado revocado que aún no lo trae. Sin marca de Lumbre, la revocación es la
+ * del relé (el runner): `AGENT_REVOKED_REASON` (D24).
+ */
+export function withRevokedReason(status: HebraStatus, reason = AGENT_REVOKED_REASON): HebraStatus {
   return status.revoked === true && status.revokedReason === undefined
-    ? { ...status, revokedReason: PAIRING_REVOKED_REMOTE_REASON } : status;
+    ? { ...status, revokedReason: reason } : status;
 }
 
-/** Un `StatusSource` de `serve-http`: si dice revocado, con el motivo remoto. */
+/** Un `StatusSource` de `serve-http`: si dice revocado sin motivo, el del relé. */
 export class RemoteStatusSource implements StatusSource {
   constructor(private readonly inner: StatusSource) {}
-  async getStatus(): Promise<HebraStatus> { return withRemoteRevokedReason(await this.inner.getStatus()); }
+  async getStatus(): Promise<HebraStatus> { return withRevokedReason(await this.inner.getStatus()); }
 }
 
-/** `hebra_status` con la marca de Lumbre sumada al `revoked` del relé, para la credencial de su cuenta. */
+/**
+ * `hebra_status` con la marca de Lumbre sumada al `revoked` del relé, para la credencial de su
+ * cuenta. Con el `410 pairing_revoked` de Lumbre vigente, su motivo remoto (renovar desde el
+ * conector); si no, el del relé (reintenta solo, D24).
+ */
 export class PairingStatusSource implements StatusSource {
   constructor(
     private readonly inner: StatusSource,
@@ -155,7 +209,9 @@ export class PairingStatusSource implements StatusSource {
 
   async getStatus(): Promise<HebraStatus> {
     const status = await this.inner.getStatus();
-    return withRemoteRevokedReason(
-      this.pairing.isRevoked(await this.credentialId()) ? { ...status, revoked: true } : status);
+    const credentialId = await this.credentialId();
+    const revoked = this.pairing.isRevoked(credentialId) ? { ...status, revoked: true } : status;
+    return withRevokedReason(revoked,
+      this.pairing.revokedByLumbre(credentialId) ? PAIRING_REVOKED_REMOTE_REASON : AGENT_REVOKED_REASON);
   }
 }

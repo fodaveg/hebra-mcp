@@ -98,11 +98,13 @@ describe('emparejado revocado en /authorize', () => {
     expect(requestBodies[0]).not.toHaveProperty('sumegoNonceSha256');
   });
 
-  it('el revoked del relé: página HTML sin llamar a Lumbre; /healthz sigue en 204', async () => {
+  it('el revoked del relé: página HTML sin llamar a Lumbre ni pedir reemparejar (D24); /healthz sigue en 204', async () => {
     const { origin, config } = await start(new PairingRevocation(() => true));
     const res = await authorize(origin, config.resourceUrl);
     expect(res.status).toBe(503);
-    expect(await res.text()).toContain('hebra-mcp pair');
+    const page = await res.text();
+    expect(page).toContain('Ajustes de Hebra');
+    expect(page).not.toContain('hebra-mcp pair');
     expect(requestBodies).toHaveLength(0);
     expect((await fetch(`${origin}/healthz`)).status).toBe(204);
   });

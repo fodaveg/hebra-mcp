@@ -154,7 +154,9 @@ export function bindPairingRevocation(opened: ServeContext, pairing: PairingRevo
     return (runner ?? lastRunner)?.revoked ?? false;
   };
   const detachRelay = pairing.attachRelay(credentialId, revoked,
-    () => (opened.instance.syncRunner ?? lastRunner)?.okRounds ?? 0);
+    () => (opened.instance.syncRunner ?? lastRunner)?.okRounds ?? 0,
+    // El login probó que la credencial vale: el runner revocado reintenta ya (D24).
+    () => void opened.instance.syncRunner?.retryNow().catch(() => null));
   opened.ctx.status = new PairingStatusSource(opened.ctx.status, pairing, () => credentialId);
   return { ...opened, close: async () => {
     revoked();
@@ -251,6 +253,9 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           writerOnly: true, authorize: async () => { activeRegistry.assertActive(account); },
           assertActive: () => { activeRegistry.assertActive(account); },
           uploadLedger: pendingUploads.ledger(account),
+          // D24 y D22: una cuenta revocada que se cerró y se reabre no sirve ningún espacio hasta
+          // que una ronda correcta de su runner nuevo pruebe que la credencial vale.
+          credentialRevoked: () => pairing.isRevoked(account.binding.pairedCredentialId),
           // El turno de los topes de sync es por cuenta: la clave sale del id de la cuenta (un
           // hash, sin `sub` ni email), no del directorio, y la comparten personal y espacios.
           accountKey: accountTurnKey(account.id) });

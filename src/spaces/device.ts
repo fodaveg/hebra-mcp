@@ -60,6 +60,13 @@ export class AgentKeyNotFoundError extends ToolError {
 export class AgentKeyUnauthorizedError extends ToolError {
   constructor() { super('space_access_denied'); }
 }
+/**
+ * Un 401 de Lumbre a una petición del agente (`AgentDevice.request`). Hacia fuera es el mismo
+ * `space_access_denied`; `register` lo distingue para avisar de que la credencial no vale (D24).
+ */
+class CredentialUnauthorizedError extends ToolError {
+  constructor() { super('space_access_denied'); }
+}
 export interface PreparedAgentDevice {
   privateKey: JsonWebKey;
   registration: AgentRegistration;
@@ -198,7 +205,13 @@ export class AgentDevice {
     private readonly secrets: SecretStore,
     private readonly fetcher: Fetcher = globalThis.fetch.bind(globalThis),
     private readonly dataDir?: string,
-    private readonly assertAccountActive?: () => void
+    private readonly assertAccountActive?: () => void,
+    /**
+     * Lumbre respondió 401 `credential_revoked` al registrar la clave de agente: credencial
+     * revocada o agente desactivado, que no se distinguen (D24). `serve` lo pasa al runner de la
+     * biblioteca personal, que deja de servir los espacios y reintenta hasta recuperarla.
+     */
+    private readonly onCredentialRejected?: () => void
   ) {}
 
   /** Ningún proceso ya abierto sigue sirviendo la caché después de cambiar de vínculo. */
@@ -233,12 +246,14 @@ export class AgentDevice {
       // Un 429 es falta de cupo del relé, no una denegación: la persona recibe cuándo reintentar
       // y nada se marca ni se recuerda (el catálogo solo guarda lecturas correctas).
       if (response.status === 429) throw rateLimited(response);
+      if (response.status === 401) throw new CredentialUnauthorizedError();
       if (!response.ok) throw new Error();
       const value = await readLimitedJson(response);
       await this.assertPairing();
       return value;
     } catch (error) {
       if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
+      if (error instanceof CredentialUnauthorizedError) throw error;
       throw new ToolError('space_access_denied');
     }
   }
@@ -322,6 +337,9 @@ export class AgentDevice {
       return registration;
     } catch (error) {
       if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
+      if (error instanceof CredentialUnauthorizedError) {
+        try { this.onCredentialRejected?.(); } catch { /* el aviso no cambia la respuesta */ }
+      }
       throw new ToolError('space_access_denied');
     }
   }

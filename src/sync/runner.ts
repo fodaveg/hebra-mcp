@@ -14,12 +14,19 @@
  * detrás (todas las peticiones de mientras comparten esa), porque la que está en vuelo
  * puede haber subido ya y no llevarse la escritura recién hecha.
  *
- * Revocación (§6.2): un 401/403 del relé deja `revoked: true` y el bucle se para hasta
- * que el proceso se reinicie (un token revocado no vuelve a valer; reintentar solo
- * haría ruido en el relé).
+ * Revocación (§6.2, D24): un 401/403 del relé (o el 401 al registrar la clave de agente, que
+ * avisa con `markRevoked`) deja `revoked: true` y para el bucle de 30 s. Desactivar el agente en
+ * Ajustes de Hebra y volver a activarlo hace que la MISMA credencial vuelva a valer, así que el
+ * runner no se queda parado: reintenta una ronda con espera creciente (`REVOKED_RETRY_FIRST_MS`,
+ * el doble en cada intento fallido, tope `REVOKED_RETRY_MAX_MS`). Mientras tanto ninguna
+ * escritura pide ronda al relé (`requestRound` da `null`), para no hacer ruido. En cuanto una
+ * ronda vuelve a ir bien, `revoked` pasa a `false`, sale `pairing.restored`, vuelve el bucle de
+ * 30 s y avisa a quien escuche (`onRevocationChange`), que reabre el sync de los espacios. Esa
+ * misma ronda sube lo pendiente. Sin reiniciar ni volver a emparejar.
  *
  * Logs (§6.4): solo los eventos cerrados del motor (`sync.round`, `sync.lease_lost`,
- * `sync.record_error`, `sync.conflict_copy`, `sync.blob_unreadable`), con ids opacos, códigos y recuentos, por
+ * `sync.record_error`, `sync.conflict_copy`, `sync.blob_unreadable`) y los dos de la credencial
+ * (`pairing.revoked`, `pairing.restored`), con ids opacos, códigos y recuentos, por
  * una función `emit` que inyecta quien crea el runner (el logger es de L1).
  *
  * Credenciales, clave de biblioteca e identidad llegan por parámetro: el emparejado y el
@@ -49,6 +56,44 @@ import {
 
 export const SYNC_INTERVAL_MS = 30_000;
 export const STARTUP_READ_WAIT_MS = 10_000;
+/** Primera espera del reintento tras una revocación (D24): 1 min. */
+export const REVOKED_RETRY_FIRST_MS = 60_000;
+/** Tope de esa espera, que se dobla en cada intento fallido (D24): 15 min. */
+export const REVOKED_RETRY_MAX_MS = 15 * 60_000;
+
+/** Espera antes del siguiente reintento con la credencial revocada, tras `failedRetries`
+ *  intentos fallidos seguidos: 1, 2, 4, 8 y luego 15 min para siempre. */
+export function revokedRetryDelayMs(failedRetries: number): number {
+  return Math.min(REVOKED_RETRY_FIRST_MS * 2 ** Math.max(0, failedRetries), REVOKED_RETRY_MAX_MS);
+}
+
+/**
+ * Los temporizadores del runner: el bucle de 30 s (`every`) y el reintento tras una revocación
+ * (`after`). Cada uno devuelve la función que lo cancela. `run` devuelve la ronda que pide, para
+ * que un test que lo dispara a mano pueda esperarla. Por defecto, `setInterval` y `setTimeout`
+ * que no mantienen vivo el proceso; los tests inyectan uno que se dispara a mano.
+ */
+export interface SyncScheduler {
+  every(ms: number, run: () => Promise<unknown>): () => void;
+  after(ms: number, run: () => Promise<unknown>): () => void;
+}
+
+/** Un disparo del temporizador real: la ronda nunca rechaza, pero un fallo no queda suelto. */
+const fire = (run: () => Promise<unknown>) => () => void run().catch(() => undefined);
+
+const REAL_SCHEDULER: SyncScheduler = {
+  every(ms, run) {
+    const timer = setInterval(fire(run), ms);
+    // El intervalo no mantiene vivo el proceso: lo mantiene el transporte MCP.
+    timer.unref?.();
+    return () => clearInterval(timer);
+  },
+  after(ms, run) {
+    const timer = setTimeout(fire(run), ms);
+    timer.unref?.();
+    return () => clearTimeout(timer);
+  }
+};
 /**
  * Cuánto espera el cierre de un contexto a su ronda final (D22, §12.10). Lo que no suba en ese
  * plazo ya está anotado en la lista durable (`src/accounts/pending-sweep.ts`) y lo reintenta el
@@ -135,7 +180,9 @@ export type SyncLogEventName =
   | 'sync.conflict_copy'
   | 'sync.blob_unreadable'
   // La credencial de emparejado está revocada (SPEC.md §12.9): una vez, al primer 401/403.
-  | 'pairing.revoked';
+  | 'pairing.revoked'
+  // La credencial vuelve a valer (D24): una vez, en la primera ronda correcta tras revocarse.
+  | 'pairing.restored';
 
 /** Campos de un evento: escalares, sin contenido de notas. */
 export type SyncLogFields = Record<string, string | number | boolean | null>;
@@ -193,8 +240,17 @@ export interface SyncRunnerOptions {
   emit?: SyncEmit;
   /** Resultado cerrado de cada `readBlob` (log `attachment.fetch`; tests). */
   emitAttachment?: (outcome: 'ok' | 'missing' | 'error' | 'revoked') => void;
-  /** Cada cuánto hay ronda periódica; `null` la desactiva (tests). */
+  /** Cada cuánto hay ronda periódica; `null` la desactiva (tests). Con `null` y sin `scheduler`
+   *  tampoco hay reintento solo tras una revocación: el test mueve las rondas a mano. */
   intervalMs?: number | null;
+  /** Temporizadores del bucle y del reintento (D24). Por defecto, los reales. */
+  scheduler?: SyncScheduler;
+  /**
+   * Cada vez que la credencial pasa a revocada (`true`) o vuelve a valer (`false`), después de
+   * cambiar `revoked`. `serve` lo usa para reabrir el sync de los espacios al recuperarla. Un
+   * oyente que lanza no para el sync.
+   */
+  onRevocationChange?: (revoked: boolean) => void;
   now?: () => number;
   /**
    * Antes de cada ronda, con el almacén aún como lo dejó la anterior. El escritor anota aquí
@@ -255,10 +311,21 @@ function logFieldsOf(event: LibrarySyncEvent): SyncLogFields {
   }
 }
 
+/** Quién vio que la credencial no vale: el relé (401/403 en una ronda) o Lumbre al registrar la
+ *  clave de agente de los espacios (401 `credential_revoked`, `src/spaces/device.ts`). */
+export type RevocationSource = 'relay' | 'agent_key';
+
 export class SyncRunner implements SyncStatusSource {
   private current: Promise<SyncRoundResult | null> | null = null;
   private queued: Promise<SyncRoundResult | null> | null = null;
-  private timer: ReturnType<typeof setInterval> | null = null;
+  /** La ronda encadenada la pidió un reintento con la credencial revocada (D24). */
+  private queuedRetry = false;
+  /** Cancela el bucle de 30 s, si está en marcha. */
+  private cancelInterval: (() => void) | null = null;
+  /** Cancela el reintento programado tras una revocación, si lo hay. */
+  private cancelRetry: (() => void) | null = null;
+  /** Reintentos seguidos que no recuperaron la credencial: dan la espera del siguiente. */
+  private failedRetries = 0;
   private stopped = false;
   private revokedFlag = false;
   private okRoundCount = 0;
@@ -323,6 +390,19 @@ export class SyncRunner implements SyncStatusSource {
     return (this.options.now ?? Date.now)();
   }
 
+  private get scheduler(): SyncScheduler {
+    return this.options.scheduler ?? REAL_SCHEDULER;
+  }
+
+  /** Un logger que lanza no para el sync. */
+  private safeEmit(event: SyncLogEventName, fields: SyncLogFields): void {
+    try {
+      this.options.emit?.(event, fields);
+    } catch {
+      // Igual que en `handleEngineEvent`.
+    }
+  }
+
   private handleEngineEvent(event: LibrarySyncEvent): void {
     try {
       this.options.emit?.(event.event, logFieldsOf(event));
@@ -361,17 +441,93 @@ export class SyncRunner implements SyncStatusSource {
     return this.engine.clientOutdated();
   }
 
-  /** Ronda de arranque y ronda periódica. Idempotente. */
+  /** Ronda de arranque y ronda periódica. Idempotente. Con la credencial ya revocada
+   *  (`markRevoked` antes de arrancar), solo el reintento. */
   start(): void {
-    if (this.stopped || this.timer || this.revokedFlag) return;
+    if (this.stopped || this.cancelInterval) return;
+    if (this.revokedFlag) {
+      if (!this.cancelRetry) this.scheduleRetry();
+      return;
+    }
     void this.requestRound();
+    this.startInterval();
+  }
+
+  private startInterval(): void {
+    if (this.stopped || this.cancelInterval) return;
     const interval =
       this.options.intervalMs === undefined ? SYNC_INTERVAL_MS : this.options.intervalMs;
     if (interval !== null) {
-      this.timer = setInterval(() => void this.requestRound(), interval);
-      // El intervalo no mantiene vivo el proceso: lo mantiene el transporte MCP.
-      this.timer.unref?.();
+      this.cancelInterval = this.scheduler.every(interval, () => this.requestRound());
     }
+  }
+
+  /** ¿Hay reintento solo tras una revocación? No en los tests que mueven las rondas a mano. */
+  private get retriesEnabled(): boolean {
+    return this.options.scheduler !== undefined || this.options.intervalMs !== null;
+  }
+
+  /** Programa el siguiente reintento con la espera que toca (`revokedRetryDelayMs`). */
+  private scheduleRetry(): void {
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    if (this.stopped || !this.revokedFlag || !this.retriesEnabled) return;
+    this.cancelRetry = this.scheduler.after(revokedRetryDelayMs(this.failedRetries), () => {
+      this.cancelRetry = null;
+      return this.enqueue(true);
+    });
+  }
+
+  /**
+   * Lumbre rechazó la credencial fuera de una ronda (401 al registrar la clave de agente, D24):
+   * el runner pasa a revocado como con un 401 del relé y empieza a reintentar. Sin efecto si ya
+   * lo estaba o está parado.
+   */
+  markRevoked(source: RevocationSource = 'agent_key'): void {
+    if (this.stopped) return;
+    this.enterRevoked(source);
+  }
+
+  /**
+   * Con la credencial revocada, reintenta ya en vez de esperar al siguiente plazo (lo usa el
+   * gestor de espacios al recuperar la credencial de la cuenta, y el login cuando un GET de
+   * lectura sale bien). `null` si no está revocada o está parado.
+   */
+  retryNow(): Promise<SyncRoundResult | null> {
+    if (this.stopped || !this.revokedFlag) return Promise.resolve(null);
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    return this.enqueue(true);
+  }
+
+  private notifyRevocation(revoked: boolean): void {
+    try {
+      this.options.onRevocationChange?.(revoked);
+    } catch {
+      // Un oyente que lanza no para el sync.
+    }
+  }
+
+  private enterRevoked(source: RevocationSource): void {
+    if (this.revokedFlag) return;
+    this.revokedFlag = true;
+    this.failedRetries = 0;
+    this.safeEmit('pairing.revoked', { source });
+    this.stopInterval();
+    this.scheduleRetry();
+    this.notifyRevocation(true);
+  }
+
+  /** La primera ronda correcta tras la revocación: vuelta al ritmo normal. */
+  private restore(): void {
+    const retries = this.failedRetries;
+    this.revokedFlag = false;
+    this.failedRetries = 0;
+    this.cancelRetry?.();
+    this.cancelRetry = null;
+    this.safeEmit('pairing.restored', { source: 'relay', failedRetries: retries });
+    this.startInterval();
+    this.notifyRevocation(false);
   }
 
   /**
@@ -407,30 +563,33 @@ export class SyncRunner implements SyncStatusSource {
 
   /**
    * Pide una ronda. Sin ninguna en vuelo, empieza ya; con una en vuelo, encadena una
-   * (compartida) detrás. `null` si el runner está parado o revocado.
+   * (compartida) detrás. `null` si el runner está parado o revocado: con la credencial revocada,
+   * una escritura no llama al relé (D24); solo lo hace el reintento.
    */
   requestRound(): Promise<SyncRoundResult | null> {
-    if (this.stopped || this.revokedFlag) return Promise.resolve(null);
+    return this.enqueue(false);
+  }
+
+  /** `retry`: la pide el reintento con la credencial revocada, que sí llama al relé. */
+  private enqueue(retry: boolean): Promise<SyncRoundResult | null> {
+    if (this.stopped || (this.revokedFlag && !retry)) return Promise.resolve(null);
     if (!this.current) {
-      const round = this.execute();
+      const round = this.execute(retry);
       this.current = round;
       void round.finally(() => {
         if (this.current === round) this.current = null;
       });
       return round;
     }
+    if (retry) this.queuedRetry = true;
     if (!this.queued) {
-      const queued = this.current.then(
-        () => {
-          this.queued = null;
-          return this.requestRound();
-        },
-        () => {
-          this.queued = null;
-          return this.requestRound();
-        }
-      );
-      this.queued = queued;
+      const next = () => {
+        this.queued = null;
+        const asRetry = this.queuedRetry;
+        this.queuedRetry = false;
+        return this.enqueue(asRetry);
+      };
+      this.queued = this.current.then(next, next);
     }
     return this.queued;
   }
@@ -439,20 +598,20 @@ export class SyncRunner implements SyncStatusSource {
    * Una ronda, tras esperar turno en el semáforo de proceso (FIFO). Si el runner se para
    * mientras espera, sale sin ejecutar nada ni coger plaza. El turno se suelta pase lo que pase.
    */
-  private async execute(): Promise<SyncRoundResult | null> {
+  private async execute(retry: boolean): Promise<SyncRoundResult | null> {
     const release = await this.gates.rounds.acquire(this.closing.signal, this.accountKey);
     if (!release) {
       this.resolveFirstRound();
       return null;
     }
     try {
-      return await this.executeRound();
+      return await this.executeRound(retry);
     } finally {
       release();
     }
   }
 
-  private async executeRound(): Promise<SyncRoundResult | null> {
+  private async executeRound(retry: boolean): Promise<SyncRoundResult | null> {
     let round: SyncRoundResult | null = null;
     try {
       await this.options.beforeRound?.();
@@ -470,10 +629,18 @@ export class SyncRunner implements SyncStatusSource {
     const result: LibrarySyncResultCode = round?.result ?? 'unknown';
     this.lastRound = { at: this.now(), result };
     if (result === 'ok') this.okRoundCount += 1;
-    if (isRevocation(result)) {
-      if (!this.revokedFlag) this.options.emit?.('pairing.revoked', { source: 'relay' });
-      this.revokedFlag = true;
-      this.stopTimer();
+    // También con el runner ya parado: la ronda final de un cierre puede recibir el 401, y
+    // `bindPairingRevocation` lee `revoked` después (los temporizadores ya no se arman).
+    if (!this.revokedFlag) {
+      if (isRevocation(result)) this.enterRevoked('relay');
+    } else if (result === 'ok') {
+      // Cualquier ronda correcta prueba que la credencial vuelve a valer.
+      this.restore();
+    } else if (retry) {
+      // Un reintento que no la recupera (otro 401, o sin red: no se sabe) alarga la espera. Una
+      // ronda que ya estaba en vuelo al revocarse no cuenta como intento.
+      this.failedRetries += 1;
+      this.scheduleRetry();
     }
     this.resolveFirstRound();
     return round;
@@ -550,9 +717,9 @@ export class SyncRunner implements SyncStatusSource {
     };
   }
 
-  private stopTimer(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+  private stopInterval(): void {
+    this.cancelInterval?.();
+    this.cancelInterval = null;
   }
 
   /**
@@ -565,7 +732,9 @@ export class SyncRunner implements SyncStatusSource {
   async stop(): Promise<void> {
     this.stopped = true;
     this.closing.abort();
-    this.stopTimer();
+    this.stopInterval();
+    this.cancelRetry?.();
+    this.cancelRetry = null;
     this.resolveFirstRound();
     this.engine.stop();
     await (this.queued ?? this.current)?.catch(() => null);

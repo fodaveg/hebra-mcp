@@ -207,7 +207,21 @@ export class FakeLumbre {
   private auth(req: IncomingMessage, kind: 'read' | 'write'): TokenEntry | null {
     const token = (req.headers.authorization ?? '').replace(/^Bearer /u, '');
     const entry = this.tokens.get(token);
+    if (entry && this.disabled.has(entry.credentialId)) return null;
     return entry && entry.kind === kind ? entry : null;
+  }
+
+  /** Agentes desactivados en Ajustes de Hebra: sus tokens dan 401, pero siguen existiendo. */
+  private readonly disabled = new Set<string>();
+
+  /** Desactiva el agente (PUT …/agents/{id} en Lumbre): 401 en todo hasta `enable`. */
+  disable(credentialId: string): void {
+    this.disabled.add(credentialId);
+  }
+
+  /** Lo reactiva: la MISMA credencial vuelve a valer, sin emparejar otra vez. */
+  enable(credentialId: string): void {
+    this.disabled.delete(credentialId);
   }
 
   private async handle(
