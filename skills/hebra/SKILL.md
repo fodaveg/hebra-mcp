@@ -98,10 +98,16 @@ cuenta, y los espacios con `granted: true` y la biblioteca personal siguen funci
 pide y no los copies a notas ni los repitas sin motivo.
 
 Si `hebra_status` dice `revoked: true`, la credencial de esta cuenta está revocada o el agente está
-desactivado en Hebra (el servidor no los distingue). No lo arregles tú ni pruebes otras cuentas: dile
-a la persona que reconecte el conector con `/mcp` (o lo quite y lo vuelva a añadir), que inicie sesión
-en Sumego y apruebe el dispositivo en Hebra; con la misma biblioteca conserva sus datos. Si solo había
-desactivado el agente, al reactivarlo en Hebra vuelve a funcionar sin otro login.
+desactivado en Hebra (el servidor no los distingue), y `revokedReason` dice qué hacer. Mientras dure,
+la biblioteca personal responde con lo que ya estaba descargado y los espacios compartidos no:
+`space_access_denied`, ningún espacio con `granted: true` y `organizations_unavailable` con
+`reason: credential_revoked`. No lo arregles tú ni pruebes otras cuentas, y no pidas reiniciar:
+- Si el motivo habla de un agente revocado o desactivado desde Hebra, basta con que la persona lo
+  reactive en Ajustes de Hebra. hebra-mcp lo reintenta solo y vuelve sin reiniciar, sin volver a
+  emparejar y sin otro login; puede tardar hasta 15 minutos.
+- Si el motivo habla de cerrar sesión en todas partes, dile que reconecte el conector con `/mcp` (o lo
+  quite y lo vuelva a añadir), que inicie sesión en Sumego y apruebe el dispositivo en Hebra; con la
+  misma biblioteca conserva sus datos.
 
 ## Instalar el comando `hebra-mcp`
 
@@ -659,7 +665,7 @@ título) ni especules sobre qué hay oculto.
 |---|---|---|
 | `space_access_denied` | `space` no es `personal` ni un UUID válido y autorizado para esta cuenta, o se intentó abrir una SQLite compartida mediante el flujo local de ficheros de trabajo. Para un UUID, la respuesta no distingue entre inexistencia y falta de membresía, concesión o permiso propio del agente. | No pruebes variantes ni otros IDs. Informa que ese espacio no está disponible; usa `hebra_list_spaces` para los autorizados o trabaja sin `space` en la biblioteca personal. |
 | `space_not_supported` | Se pidió un espacio compartido a una herramienta `hebra_jd_*`. | Usa esa operación JD solo en `personal`. |
-| `organizations_unavailable` | `hebra_list_organizations` no puede leer el directorio; `reason` dice por qué (`not_available`, `rate_limited` con `retryAfterSeconds` si se conoce, `relay_unavailable`, `invalid_response`). | Dilo tal cual. Los espacios con concesión de `hebra_list_spaces` y la biblioteca personal siguen funcionando. |
+| `organizations_unavailable` | `hebra_list_organizations` no puede leer el directorio; `reason` dice por qué (`not_available`, `rate_limited` con `retryAfterSeconds` si se conoce, `relay_unavailable`, `invalid_response`, `credential_revoked`). | Dilo tal cual. Los espacios con concesión de `hebra_list_spaces` y la biblioteca personal siguen funcionando, salvo con `credential_revoked`: ahí no hay espacios hasta que la credencial vuelva a valer (mira `revokedReason` en `hebra_status`). |
 | `not_found` | No existe, está en la papelera (fuera de las tools de papelera), está oculta, la carpeta o la versión no existe, o el resultado sería privado. En las de ficheros sueltos: el fichero no existe, no está disponible o el `id` no es de un fichero suelto (el de una nota o el `attachmentId` de un adjunto no valen) | Busca de nuevo (en la papelera, con `hebra_list_trash`; un fichero, con `hebra_list_files` y `trashed`); si sigue, díselo sin suponer cuál de las causas es. |
 | `ambiguous_title` | Varias notas con ese título | Regla 2. |
 | `invalid_input` | Entrada mal formada, `revision` de otra nota o ilegible, cursor ilegible, de otra herramienta o de un elemento que ya no existe, `offset`/`maxChars` fuera de rango, base64 mal formado, nombre de carpeta o de adjunto que no vale, renombrar la raíz, o instancia sin escritura | Revisa longitudes (100 000 / 20 000, 1-50 sustituciones, `operationId` ≤ 200, nombres ≤ 255) y caracteres prohibidos. Los límites de parámetros los rechaza el esquema del cliente MCP. |
