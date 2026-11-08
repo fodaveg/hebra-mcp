@@ -16,6 +16,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Clock } from '../../src/accounts/lifecycle';
+import { PendingUploadList } from '../../src/accounts/pending-sweep';
+import type { AccountRef } from '../../src/accounts/types';
 import { encodeRecoveryCode } from '../../src/hebra';
 import { WRITER_LOCK_FILE } from '../../src/lock/writer-lock';
 import { MemorySecretStore, writePairedSecrets, type PairedSecrets } from '../../src/secrets';
@@ -29,11 +31,13 @@ import { FakeLumbre, LUMBRE } from '../pair/fake-lumbre';
 const SPACE = '351f12d0-dd49-48a6-b84c-301e16c9d64a';
 const SHARED_VAULT = '22'.repeat(16);
 const PERSONAL_VAULT = '11'.repeat(16);
+const ACCOUNT: AccountRef = { id: randomUUID(), generation: 1 };
 
 let fake: FakeLumbre;
 let directory: string;
 let secrets: MemorySecretStore;
 let paired: PairedSecrets;
+let list: PendingUploadList;
 let uploadsBlocked: boolean;
 let uploadsAccepted: number;
 let stderr: ReturnType<typeof vi.spyOn>;
@@ -66,7 +70,10 @@ async function open(): Promise<ServeContext> {
     fetcher,
     syncIntervalMs: null,
     writerOnly: true,
-    instance: { checkIntervalMs: null, lock: { releaseOnExit: false } }
+    instance: { checkIntervalMs: null, lock: { releaseOnExit: false } },
+    // Sin la lista durable `settleUploads` no hace nada: la subida del cierre saldria de una ronda
+    // encolada por la escritura, segun el orden en que acaben las promesas.
+    uploadLedger: list.ledger(ACCOUNT)
   });
   served.ctx.spaces!.lifecycle!.configure({
     idleMs: 3_600_000,
@@ -118,6 +125,7 @@ beforeEach(async () => {
   });
   fake = await FakeLumbre.start();
   directory = await mkdtemp(join(tmpdir(), 'hebra-space-shutdown-'));
+  list = await PendingUploadList.open(join(directory, 'control'));
   secrets = new MemorySecretStore();
   const deviceId = randomUUID();
   const connection = fake.addAgent('alice', deviceId);
@@ -186,8 +194,12 @@ describe('bloqueo de un espacio y señal del proceso', () => {
     uploadsBlocked = true;
     await writeInSpace(client);
     await close();
-    expect(uploadsAccepted).toBe(0);
     const space = spaceInstances[0];
+    // La escritura deja rondas en vuelo y encoladas (la suya y la de `afterWrite`); una ronda nueva
+    // se encadena detras de todas, asi que al volver no queda ninguna que pueda subir tras el
+    // desbloqueo y la unica subida posterior es la ronda final del cierre.
+    await space.syncRunner!.requestRound();
+    expect(uploadsAccepted).toBe(0);
 
     // SIGTERM llega mientras el apagado propio aún no empezó a cerrar el espacio.
     expect(lockOf(space).handleSignal().outcome).toBe('deferred');
