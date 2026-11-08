@@ -70,7 +70,7 @@ runbook, sustituidos ahora por los reales.
 
 | Pieza | Dónde | Qué |
 |---|---|---|
-| Servicio | un directorio propio en el VPS de Lumbre (mismo servidor que `lumbre-app` y `lumbre-mcp`) | copia de `dist/`, `package.json`, `package-lock.json` y `deploy/`, subida por `rsync` |
+| Servicio | un directorio propio en el VPS de Lumbre (mismo servidor que `lumbre-app` y `lumbre-mcp`) | `deploy/compose.yml` y `deploy/.env` (secretos más `HEBRA_MCP_IMAGE`); la imagen sale del registro `git.dualhand.com/fodaveg/hebra-mcp`, sin `rsync` ni build en el servidor |
 | Contenedor | `hebra-mcp` | `node dist/cli.mjs serve-http`, escucha en 8787, usuario sin root |
 | Borde | `mcp-hebra-pro.caddy` en el `conf.d` del Caddy compartido (`/srv/edge` del VPS, el mismo borde que ya sirve Lumbre, Vega, fodaveg y las demos) | Caddy termina TLS y hace proxy, sin exponer `/healthz` |
 | Estado | volumen `hebra-mcp_data` en bind a `HEBRA_MCP_DATA_DEVICE`, en el volumen cifrado del servidor | Control OAuth y registro multiusuario en la raíz; biblioteca heredada de David en `legacy-root`; cuentas nuevas en directorios aislados con SQLite, blobs, privados, secretos, escritor, sync y espacios propios |
@@ -82,9 +82,9 @@ la red Docker externa `edge` (`hebra-mcp:8787`), igual que `lumbre-app` y
 `vendor/hebra` es un submódulo **privado** (`git@github.com:fodaveg/hebra.git`):
 el servidor no lo puede clonar con la clave de despliegue que tenga (si
 tuviera alguna), así que el flujo de publicación nunca hace `git clone` ni
-`git pull` de este repo en el servidor — sube `dist/` ya compilado. Por el
-mismo motivo, la imagen no se publica en ningún registro: lleva código de
-Hebra empaquetado dentro de `dist/`.
+`git pull` de este repo en el servidor — despliega una imagen ya construida. Por el
+mismo motivo, la imagen solo va al registro propio (`git.dualhand.com`, privado y
+con credenciales, nunca a uno público): lleva código de Hebra empaquetado dentro de `dist/`.
 
 ### `trust proxy` y la IP real del cliente (auditoría de seguridad, 26 sep 2026)
 
@@ -140,33 +140,95 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 
 ## Publicar una versión nueva
 
-1. Compilar en el Mac (donde SÍ está el submódulo `vendor/hebra`; desde D18, también
-   `vendor/jdex-manager`, público: `git submodule update --init` los trae los dos, y el
-   motor JD queda dentro de `dist/` igual que el código de Hebra):
+1. Desplegar con `deploy/publicar.sh`. Desde el 8 nov 2026 la imagen se despliega
+   **por el registro de imágenes del Forgejo propio**
+   (`git.dualhand.com/fodaveg/hebra-mcp`, privado: lleva el código de Hebra
+   empaquetado en `dist/`), con despliegue por huella (`@sha256:…`) y vuelta
+   atrás, como Senda y lumbre-mcp. Ya no se sube `dist/` por `rsync` ni se
+   construye en el servidor.
 
    ```bash
-   npm run build
-   npm run check:bundle   # falla si dist/ no coincide con lo commiteado en src/
+   ./deploy/publicar.sh                  # despliega el HEAD
+   ./deploy/publicar.sh --anterior       # vuelve a la imagen anterior (sin gate ni build)
+   ./deploy/publicar.sh --version <sha>  # despliega la imagen de ese commit (ya en el registro)
+   ./deploy/publicar.sh --historial      # historial de despliegues del server
+   ./deploy/publicar.sh --dry-run        # ensayo en seco: dice qué haría
    ```
 
-2. Subir por `rsync` solo lo que hace falta — nunca `src/`, nunca
-   `vendor/hebra`, nunca `node_modules/`:
+   Sirve igual desde el Mac que desde Fedora. Hace falta `docker login
+   git.dualhand.com` con un token de **escritura** en la máquina que publica y de
+   **solo lectura** en el servidor (para el `docker pull`); el script no crea ni
+   pide credenciales. El host es el alias `SSH_HOST` (por defecto `lumbre-arm`) y
+   el servicio vive en `REMOTE_DIR` (por defecto `/srv/hebra-mcp/deploy`, el
+   `deploy/` del directorio del servicio: allí están `compose.yml` y el
+   `deploy/.env` de siempre). Variables: `SSH_HOST`, `REMOTE_DIR`,
+   `HEBRA_MCP_ENV_FILE` (por defecto `$REMOTE_DIR/.env`), `DEPLOY_REGISTRY`
+   (`git.dualhand.com/fodaveg`), `DOCKER_PLATFORM`.
+
+   Deploy normal del HEAD:
+
+   1. Exige árbol limpio (`git status --porcelain` vacío, que incluye cambios
+      dentro de los submódulos) y el HEAD contenido en `origin/main` tras un
+      `git fetch`.
+   2. Pregunta al registro (`docker buildx imagetools inspect`) por
+      `git.dualhand.com/fodaveg/hebra-mcp:<sha completo>` para la arquitectura
+      del servidor (`linux/arm64`, por `ssh lumbre-arm uname -m`):
+      - **Ya está** → se reutiliza SIN gate ni build (no hace falta Node ni los
+        submódulos).
+      - **No está** → comprueba que `vendor/hebra` y `vendor/jdex-manager` están
+        inicializados y en los commits FIJADOS por el repo (si no:
+        `git submodule update --init --recursive`), pasa el gate
+        (`npm run check`: typecheck, `check:no-hebra-code`, tests y
+        `check:bundle`), recompila con `npm run build` (`dist/` no está en el
+        repo: sale de `src/` más los submódulos, y el motor JD queda dentro igual
+        que el código de Hebra), construye con
+        `docker buildx build --platform linux/arm64 -f deploy/Dockerfile --push`
+        y lee la huella de `--metadata-file`, que comprueba contra el registro.
+        El `.dockerignore` deja pasar al contexto solo `package.json`,
+        `package-lock.json` y `dist/`.
+      - **Registro caído o sin credenciales** → para ANTES del gate.
+   3. En el servidor, con un candado `flock` (un deploy a la vez): comprueba que
+      el `.env` es legible y `0600`; instala `deploy/compose.yml` del commit solo
+      si lee `HEBRA_MCP_IMAGE`; baja la imagen por huella ANTES de tocar nada;
+      escribe `HEBRA_MCP_IMAGE=<repo>@sha256:…` en el `.env` (la línea se añade al
+      mismo `deploy/.env` privado, que conserva sus permisos y el resto de
+      valores; así los comandos `docker compose --env-file deploy/.env -f
+      deploy/compose.yml …` de este runbook siguen valiendo y usan esa imagen);
+      `docker compose up -d --wait` y comprobación de que se queda en marcha. Si
+      no arranca, restaura la imagen anterior, la levanta y sale con error.
+      Apunta una línea en `despliegues.log` y la salida de docker en
+      `despliegues-compose.log`, ambos en `REMOTE_DIR`.
+
+   **Primer despliegue por registro.** La imagen que corría antes
+   (`hebra-mcp:latest`, construida en el servidor) se etiqueta
+   `hebra-mcp:previo-registro` y queda como destino de la primera vuelta atrás;
+   después se retira la etiqueta `hebra-mcp:latest`. El volumen `hebra-mcp_data`
+   y el contenedor no cambian (el proyecto de compose sigue siendo `hebra-mcp`).
+   La etiqueta antigua `hebra-mcp:previous` y el `Dockerfile` y `dist/` que dejó el
+   `rsync` en el servidor quedan sin uso y se retiran a mano cuando David lo
+   confirme.
+
+2. Vuelta atrás:
 
    ```bash
-   rsync -az --delete --exclude=.env \
-     dist deploy package.json package-lock.json \
-     "$HEBRA_MCP_HOST:$HEBRA_MCP_DEST/"
+   ./deploy/publicar.sh --anterior          # la imagen que corría antes de la actual
+   ./deploy/publicar.sh --version <sha>     # la de un commit concreto (en el registro)
    ```
 
-   `dist` y `deploy` van SIN barra final: con `dist/`, `rsync` copia el
-   contenido suelto en la raíz del destino y el `COPY dist/` del Dockerfile no
-   lo encuentra (visto al preparar el primer despliegue, 26 sep 2026).
+   Sin gate ni build, con el mismo candado, `up --wait` y línea de historial.
+   `--anterior` busca en `despliegues.log` la línea cuya imagen nueva es la del
+   `.env` y vuelve a su anterior; dos seguidas alternan entre las dos últimas.
+   El `compose.yml` que instala sale de `origin/main` tras `git fetch`, no del
+   HEAD ni del árbol de trabajo. Qué commit corre:
+   `docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' hebra-mcp`
+   o `./deploy/publicar.sh --historial`.
 
-   El `--delete` es intencional: si un despliegue anterior dejó un fichero de
-   `dist/` que ya no existe, no debe seguir sirviéndose. `--exclude=.env`
-   protege `deploy/.env`, provisionado solo en el servidor, tanto de la copia
-   como de la eliminación. No aplicar `--delete` sobre nada que no sea el
-   árbol que gestiona este `rsync`.
+   **Ojo con los datos.** El script solo cambia la imagen: no sabe si la versión
+   anterior entiende el estado del volumen. En cuanto D21 haya creado o retirado
+   una cuenta, una versión monousuario no puede interpretar de forma segura el
+   registro, los diarios ni las revocaciones nuevos; en ese caso NO se usa
+   `--anterior` contra el volumen actual (ver «Volver a una imagen anterior a
+   esta migración»).
 
 3. Preparar el directorio de datos la PRIMERA vez. El estado vive en un volumen
    cifrado del servidor, no en el volumen sin cifrar de Docker. Con ese volumen
@@ -192,27 +254,13 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
    a mano sin el volumen montado: se montaría el cifrado encima después y los
    datos quedarían ocultos en el disco sin cifrar.
 
-4. Construir y levantar. En el servidor se guardan como mucho dos imágenes: la
-   actual (`hebra-mcp:latest`) y una para volver atrás (`hebra-mcp:previous`).
-   El disco del sistema del VPS es pequeño y no se puede ampliar (19 oct 2026):
-   antes de construir, la imagen en uso pasa a `previous`; después se borran
-   las imágenes de este proyecto que se quedaron sin etiqueta (la `previous`
-   anterior y las de builds intermedias). El filtro por la etiqueta de compose
-   deja fuera las imágenes de los demás servicios:
-
-   ```bash
-   ssh "$HEBRA_MCP_HOST" "cd $HEBRA_MCP_DEST && \
-     { ! docker image inspect hebra-mcp:latest >/dev/null 2>&1 || \
-       docker tag hebra-mcp:latest hebra-mcp:previous; } && \
-     docker compose --env-file deploy/.env -f deploy/compose.yml up -d --build && \
-     docker image prune -f --filter label=com.docker.compose.project=hebra-mcp"
-   ```
-
-   La imagen `previous` sirve para diagnóstico, no garantiza una vuelta atrás.
-   En cuanto D21 haya creado o retirado una cuenta, una versión monousuario no
-   puede interpretar de forma segura el registro, los diarios ni las
-   revocaciones nuevos. En ese caso se cierra el conector y se corrige hacia
-   delante; no se arranca `previous` contra el volumen actual.
+4. Configurar el servidor. El script ya construye y levanta (paso 1); lo que sigue
+   es lo que tiene que existir en el `deploy/.env` privado ANTES del primer
+   deploy. Cada deploy deja en el servidor la imagen nueva por huella y las
+   anteriores siguen ahí (son la vuelta atrás): el disco del VPS es pequeño y no
+   se puede ampliar (19 oct 2026), así que las que ya no hagan falta se retiran a
+   mano (`docker image ls`, `docker image rm`), nunca la actual ni la anterior
+   del historial.
 
    Antes de este paso, provisionar `HEBRA_MCP_BACKCHANNEL_SECRET` en
    `deploy/.env` privado con el mismo valor que el broker Lumbre. También se
@@ -248,9 +296,8 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
 5. Comprobar salud y el recorrido de consentimiento y revocación real antes de
    dar la publicación por buena.
 
-**No hay `git pull` en el servidor**, por el submódulo privado (ver arriba). Si
-algún día se decide clonar el árbol público sin `vendor/hebra` y compilar en el
-propio VPS, este paso cambiaría; hoy no es el caso.
+**No hay `git pull` en el servidor**, por el submódulo privado (ver arriba): el
+servidor solo baja la imagen del registro.
 
 ## Migración al volumen cifrado (19 oct 2026)
 
@@ -648,9 +695,9 @@ sesión en la nube (§12.7, C6).
 
 ## Actualizar y retirar
 
-- **Actualizar**: repetir "Publicar una versión nueva" desde el paso 1. El
-  `up -d --build` con la misma imagen reconstruida sustituye el contenedor sin
-  tocar el volumen `hebra-mcp_data`.
+- **Actualizar**: `./deploy/publicar.sh` (paso 1 de "Publicar una versión nueva").
+  El `up -d --wait` con la imagen nueva sustituye el contenedor sin tocar el
+  volumen `hebra-mcp_data`.
 - **Retirar una cuenta**: seguir la secuencia individual anterior sin borrar
   `HEBRA_MCP_DATA_DEVICE`; para `legacy-root`, la raíz contiene además estado
   global y tampoco es el objetivo de borrado. El operador identifica la entrada

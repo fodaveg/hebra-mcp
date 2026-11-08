@@ -1,0 +1,8 @@
+# El contexto del build es la raíz del repo, y `deploy/Dockerfile` solo copia
+# `package.json`, `package-lock.json` y `dist/`: se deja pasar solo eso. Así no
+# viajan al daemon `node_modules`, `.git`, `vendor/` (el código privado de Hebra,
+# que solo debe entrar empaquetado en `dist/`) ni ningún `.env` local.
+*
+!package.json
+!package-lock.json
+!dist

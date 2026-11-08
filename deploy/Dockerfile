@@ -1,11 +1,12 @@
 # Imagen del transporte HTTP remoto de hebra-mcp (mcp.hebra.pro, SPEC.md §12.5,
 # lote C4). `dist/` NO viaja en el repo (está en `.gitignore`, a diferencia de
 # lumbre-mcp): esta imagen NO compila TypeScript, solo instala dependencias de
-# producción y copia el `dist/` que se sube por `rsync` desde el Mac (el
-# servidor no puede clonar `vendor/hebra`, el submódulo privado). Si `dist/` no
-# trae `cli.mjs` con el subcomando `serve-http` (C2, `src/server/main.ts`),
-# recompílalo (`npm run build`) y súbelo ANTES de reconstruir la imagen — ver
-# `deploy/README-deploy.md`.
+# producción y copia el `dist/` que `deploy/publicar.sh` deja con `npm run build`
+# en el Mac o en Fedora (el servidor no puede clonar `vendor/hebra`, el submódulo
+# privado). El contexto es la raíz del repo y el `.dockerignore` deja pasar solo
+# `package.json`, `package-lock.json` y `dist/`. Si `dist/` no trae `cli.mjs` con
+# el subcomando `serve-http` (C2, `src/server/main.ts`), recompílalo
+# (`npm run build`) ANTES de construir — ver `deploy/README-deploy.md`.
 #
 # Nombres de subcomandos y variables: confirmados contra `src/server/main.ts`,
 # `src/http/config.ts` y `src/oauth/cli.ts` (rama `c2-c3-serve-http-oauth`,

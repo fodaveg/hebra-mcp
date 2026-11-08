@@ -2330,8 +2330,10 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   que no se suma), después la ronda en vuelo, que con el relé colgado tarda hasta unos 30 s en
   soltarse, y el vaciado de la cola: 12 + 30 más el vaciado caben en 50. Con 10 s, el SIGKILL
   cortaba respuestas de escrituras ya guardadas.
-- `dist/` se compila en el Mac y se sube por `rsync`: el servidor no puede clonar el submódulo privado
-  `vendor/hebra`. No se publica en ningún registro porque lleva código de Hebra.
+- `dist/` se compila en el Mac o en Fedora (el servidor no puede clonar el submódulo privado
+  `vendor/hebra`) y viaja DENTRO de la imagen, que desde el 8 nov 2026 se despliega por el registro
+  propio (`git.dualhand.com`, privado) con `deploy/publicar.sh`, por huella y con vuelta atrás. No se
+  publica en un registro público porque lleva código de Hebra.
 - Host propio `mcp.hebra.pro` (elegido por David el 26 sep 2026), porque la metadata OAuth va en la raíz
   del host. El sitio Caddy se comprobó operativo el 28 sep 2026.
 - Fragmento de Caddy versionado en `deploy/`, con límite de cuerpo, HSTS y `flush_interval -1`.
