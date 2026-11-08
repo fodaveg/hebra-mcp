@@ -355,6 +355,7 @@ deploy_build_push() {
   meta="$(mktemp)" || return 1
   docker buildx build --platform "$platform" \
     --label "org.opencontainers.image.revision=$sha" \
+    --build-arg BASE_REGISTRY=git.dualhand.com/fodaveg/espejo \
     --metadata-file "$meta" \
     ${DEPLOY_DOCKERFILE:+-f "$DEPLOY_DOCKERFILE"} \
     -t "$tag" --push "$DEPLOY_CONTEXT" >&2 || {

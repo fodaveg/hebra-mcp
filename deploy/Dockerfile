@@ -14,7 +14,10 @@
 #
 # Digest fijado (índice multi-arch, `docker buildx imagetools inspect
 # node:24-alpine`, medido el 26 sep 2026):
-FROM node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+# Registro de las imágenes base: Docker Hub por defecto; el deploy propio pasa
+# --build-arg BASE_REGISTRY=git.dualhand.com/fodaveg/espejo (copia con la misma huella).
+ARG BASE_REGISTRY=docker.io/library
+FROM ${BASE_REGISTRY}/node:24-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
 
 WORKDIR /app
 
