@@ -463,7 +463,7 @@ export function buildWriteContext(
       }
       const wait = await awaitRound(roundTimeoutMs);
       let result: EditNoteSaved = saved;
-      if (saved.outcome === 'saved' && raceCopyId !== undefined) {
+      if (saved.outcome !== 'conflict_copy' && raceCopyId !== undefined) {
         // Otro dispositivo editó la misma nota: el motor dejó el texto de la edición en
         // una copia visible. Sin reintento automático; queda anotado para un reintento
         // con el mismo `operationId`.

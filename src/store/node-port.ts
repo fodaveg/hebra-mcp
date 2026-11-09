@@ -990,6 +990,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteCreate: (folderId) => this.engine.noteCreate(folderId ?? null),
         noteRead: async (id) => this.engine.noteRead(id),
         noteSave: (input) => this.engine.noteSave(input),
+        // D25: un espacio compartido es una base abierta con `spaceAccess` (la concesión).
+        isSpaceLibrary: () => this.spaceAccess !== undefined,
         // A7: las notas de una carpeta, sin cuerpo (`./jd-port.ts`, `listNotes`).
         titlesInFolder: (folderId) => titlesInFolderRows(this.db, folderId),
         // D18 y A9a: las candidatas de `hasHidden`, solo títulos (`./jd-port.ts`).

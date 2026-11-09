@@ -224,7 +224,7 @@ export class JdLibraryPort implements LibraryPort {
     const saved = await this.writes.noteSave(saveInputFor(note, text, note, derived));
     // Recién creada, nadie más la conoce: `redirected` sería un fallo del motor, no un
     // conflicto. Se devuelve igual el id donde quedó el texto.
-    const id = saved.outcome === 'saved' ? note.id : saved.redirectedTo;
+    const id = saved.outcome === 'redirected' ? saved.redirectedTo : note.id;
     if (id !== note.id) this.created.push({ kind: 'note', id });
     return { id, created: true };
   }

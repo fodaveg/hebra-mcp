@@ -44,11 +44,13 @@ import { mapWriteError } from './write-errors';
 
 export interface AppendToNoteOutput {
   id: string;
-  outcome: 'saved' | 'conflict_copy';
+  outcome: 'saved' | 'merged' | 'conflict_copy';
   copyId?: string;
-  /** Con `saved` (D11), la prueba de lo guardado: la nueva revisión, el tamaño del
-   *  cuerpo guardado y lo insertado (tamaño, final leído del cuerpo guardado, línea y
-   *  apartado). Con `conflict_copy` no hay: el texto fue a la copia. */
+  /** Con `saved` o `merged` (D11), la prueba de lo guardado: la nueva revisión, el tamaño
+   *  del cuerpo guardado y lo insertado (tamaño, final leído del cuerpo guardado, línea y
+   *  apartado). `merged` (D25): nota de espacio que cambió por debajo; el texto quedó en la
+   *  MISMA nota, combinado con lo que había. Con `conflict_copy` no hay: el texto fue a la
+   *  copia. */
   revision?: string;
   totalChars?: number;
   appended?: AppendedProof;
@@ -111,7 +113,7 @@ export async function runAppendToNote(
   if (copyId !== undefined) used.noteInAnyState(copyId);
   const output: AppendToNoteOutput = { id: input.id, outcome };
   if (copyId !== undefined) output.copyId = copyId;
-  if (result.outcome === 'saved') {
+  if (result.outcome === 'saved' || result.outcome === 'merged') {
     if (result.revision !== undefined) output.revision = result.revision;
     if (result.totalChars !== undefined) output.totalChars = result.totalChars;
     if (result.appended !== undefined) output.appended = result.appended;

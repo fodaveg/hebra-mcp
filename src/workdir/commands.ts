@@ -591,7 +591,16 @@ const NOT_CLEAN: ReadonlySet<ApplyOutcomeName> = new Set([
   'bloqueada'
 ]);
 
-function outcomeName(result: ReplaceBodyResult): ApplyOutcomeName {
+/** `ReplaceBodyResult` sin `merged` (D25): los ficheros de trabajo no mandan `baseBody`, así
+ *  que el motor nunca combina para ellos (copia o rechazo, como siempre). */
+type WorkdirReplaceResult = Exclude<ReplaceBodyResult, { outcome: 'merged' }>;
+
+function withoutMerge(result: ReplaceBodyResult): WorkdirReplaceResult {
+  if (result.outcome === 'merged') throw new Error('writer_protocol');
+  return result;
+}
+
+function outcomeName(result: WorkdirReplaceResult): ApplyOutcomeName {
   switch (result.outcome) {
     case 'applied':
       return 'aplicada';
@@ -747,14 +756,14 @@ async function applyLocked(
         en: at()
       });
       workdir.writeLoteBase(lote, entry.id, entry.base!);
-      let result: ReplaceBodyResult;
+      let result: WorkdirReplaceResult;
       try {
-        result = await lib.replaceBody({
+        result = withoutMerge(await lib.replaceBody({
           id: entry.id,
           body: edited,
           baseBodySha256: meta.sha,
           onConflict: args.conflicto === 'copia' ? 'copy' : 'reject'
-        });
+        }));
       } catch (error) {
         failure = writeFailure(errorCode(error));
         break;
@@ -1002,12 +1011,12 @@ async function undoLocked(io: CommandIo, open: OpenLibrary, args: UndoArgs, work
       }
       // Lo que diga la biblioteca decide, no las copias: si el original es el editado, lo
       // escribió este lote y se restaura (`reject`: si cambió después, no se toca).
-      const result = await lib.replaceBody({
+      const result = withoutMerge(await lib.replaceBody({
         id: item.id,
         body: base,
         baseBodySha256: item.shaEditado,
         onConflict: 'reject'
-      });
+      }));
       let name: UndoOutcomeName;
       switch (result.outcome) {
         case 'applied':

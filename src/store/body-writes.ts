@@ -29,6 +29,12 @@
  *    `copy` busca antes una copia de conflicto viva de esta nota con el mismo cuerpo
  *    editado (un reintento tras un corte no crea otra) y, si no la hay, `noteSave` con la
  *    base vieja: el motor deja el texto en una copia nueva y no toca el original.
+ *    D25 (RT-4 de Hebra, §27.3 punto 5): con `baseBody` (el TEXTO de la base) en una nota
+ *    de ESPACIO, ese `noteSave` ya no deja copia si el parche encaja sobre lo actual: el
+ *    motor combina en la misma nota y responde `merged` con el cuerpo guardado, que no es
+ *    el que se mandó. Si no encaja, copia como siempre (`spaceReason` dice por qué). Con
+ *    `reject` no se combina: sigue siendo `conflict_rejected` sin escribir (deshacer solo
+ *    restaura lo que el lote dejó tal cual).
  *
  * `trashConflictCopiesInTurn`: manda a la papelera (reversible) las copias de conflicto de
  * una nota que siguen con el cuerpo que dejó un lote. Solo copias (`conflictOf` de esa
@@ -64,6 +70,10 @@ export interface ReplaceBodyInput {
   /** SHA-256 hex del cuerpo sobre el que se editó (la base sacada). Es lo ÚNICO que decide
    *  si hay conflicto: el `local_seq` de la sacada no viaja (ver `NO_LOCAL_SEQ`). */
   baseBodySha256: string;
+  /** D25: el texto de la base (el que lleva `baseBodySha256`), si quien llama lo tiene. En
+   *  una nota de espacio deja que el motor combine con `copy` en vez de crear la copia. Sin
+   *  él, o en la biblioteca personal, todo sigue como antes. */
+  baseBody?: string | null;
   onConflict: ConflictMode;
   /** Configuración de privados de quien pide (la del CLI, o la del lector por el socket). */
   privacy: PrivacyConfig;
@@ -72,6 +82,9 @@ export interface ReplaceBodyInput {
 export type ReplaceBodyResult =
   | { outcome: 'applied'; localSeq: number; bodySha256: string }
   | { outcome: 'already'; localSeq: number; bodySha256: string }
+  /** D25: nota de espacio que cambió por debajo; se combinó en la MISMA nota. `bodySha256`
+   *  y `body` son los de lo guardado (la combinación), no los del cuerpo que se mandó. */
+  | { outcome: 'merged'; localSeq: number; bodySha256: string; body: string }
   | { outcome: 'conflict_copy'; copyId: string; reused: boolean }
   | { outcome: 'conflict_rejected' }
   | { outcome: 'unavailable' }
@@ -174,7 +187,15 @@ export async function replaceBodyInTurn(
   // otro, y un `rev` de la sacada que coincidiera por casualidad (carpeta copiada de otra
   // máquina, biblioteca re-emparejada) pisaría la edición ajena sin copia ni instantánea.
   const base = changedUnderneath ? { localSeq: NO_LOCAL_SEQ, bodySha256: input.baseBodySha256 } : note;
-  const saveInput = saveInputFor(note, input.body, base);
+  // D25: con el texto de la base, el motor de una nota de ESPACIO combina en vez de copiar.
+  // Con la base al día (`!changedUnderneath`) el texto actual ES la base, así que se pasa
+  // `note.body` aunque quien llama no lo mandara: mantiene el `ydoc` al día en el espacio.
+  const baseBody = changedUnderneath ? (input.baseBody ?? undefined) : note.body;
+  const saveInput = saveInputFor(note, input.body, {
+    localSeq: base.localSeq,
+    bodySha256: base.bodySha256,
+    ...(baseBody !== undefined ? { baseBody } : {})
+  });
   if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
     return { result: { outcome: 'unavailable' }, wrote: false };
   }
@@ -185,6 +206,12 @@ export async function replaceBodyInTurn(
   if (saved.outcome === 'redirected') {
     return {
       result: { outcome: 'conflict_copy', copyId: saved.redirectedTo, reused: false },
+      wrote: true
+    };
+  }
+  if (saved.outcome === 'merged') {
+    return {
+      result: { outcome: 'merged', localSeq: saved.localSeq, bodySha256: saved.bodySha256, body: saved.body },
       wrote: true
     };
   }

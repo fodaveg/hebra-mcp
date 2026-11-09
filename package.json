@@ -15,8 +15,10 @@
     "@lezer/markdown": "1.8.1",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@napi-rs/keyring": "2.1.2",
+    "@sanity/diff-match-patch": "3.2.1",
     "express": "5.3.0",
     "jose": "6.2.15",
+    "yjs": "13.6.33",
     "zod": "4.6.7"
   },
   "scripts": {

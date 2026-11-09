@@ -117,6 +117,10 @@ export type { NoteMutationGuard, FolderMutationGuard } from '../hebra';
 /** Acceso directo del motor dentro de un turno de la cola (`NodeLibraryPort`). D23, en
  *  `NoteStateEngine`. */
 export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRead' | 'noteSave'>, NoteStateEngine {
+  /** ¿Es la biblioteca de un ESPACIO compartido? (D25.) Solo ahí el motor combina una
+   *  edición con `baseBody` (§27.3 punto 5): quien necesite guardar el texto de una base
+   *  para usarlo después lo hace solo si es `true`. Ausente (dobles de test), `false`. */
+  isSpaceLibrary?(): boolean;
   /** Las notas vivas de una carpeta efectiva con su título, sin leer su cuerpo ni filtrar:
    *  `listNotes` del puerto del motor JD (`./jd-port.ts`, `titlesInFolderRows`). */
   titlesInFolder(folderId: string): FolderNoteTitle[];
@@ -280,7 +284,10 @@ export interface AppendedProof {
 export type AppendToNoteResult =
   | {
       id: string;
-      outcome: 'saved';
+      /** `merged` (D25): nota de espacio que cambió por debajo; el texto se combinó con el
+       *  actual en la MISMA nota (sin copia). `revision`, `totalChars` y `appended` salen del
+       *  cuerpo guardado, que ya no es el que se calculó. */
+      outcome: 'saved' | 'merged';
       revision?: string;
       totalChars?: number;
       appended?: AppendedProof;
@@ -357,7 +364,10 @@ export interface EditNoteInput {
 export type EditNoteSaved =
   | {
       id: string;
-      outcome: 'saved';
+      /** `merged` (D25, RT-4 de Hebra): nota de espacio que cambió por debajo; el motor
+       *  combinó la edición con el texto actual en la MISMA nota, sin copia. Lo demás, como
+       *  `saved`, leído del cuerpo guardado (que es la combinación). */
+      outcome: 'saved' | 'merged';
       revision: string;
       /** Prueba de lo guardado (D11): tamaño del cuerpo guardado y una entrada por
        *  sustitución. Ausentes en restaurar una versión, en añadir un adjunto, en una
@@ -782,7 +792,7 @@ function isEditNoteSaved(value: unknown): value is EditNoteSaved {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   if (typeof record.id !== 'string') return false;
-  if (record.outcome === 'saved') return typeof record.revision === 'string';
+  if (record.outcome === 'saved' || record.outcome === 'merged') return typeof record.revision === 'string';
   return record.outcome === 'conflict_copy' && typeof record.copyId === 'string';
 }
 
@@ -865,7 +875,9 @@ export function looseFilesFilterInTurn(
  * también, aunque `noteSave` lo recalcula del cuerpo y no se fía de él.
  *
  * `base`: la versión sobre la que se escribe. Por defecto, la de `note` (lo recién
- * leído); `editNote` pasa la de la revisión que trae el agente.
+ * leído); `editNote` pasa la de la revisión que trae el agente. `base.baseBody` es el texto
+ * de esa versión (D25): quien lo tiene lo pasa para que, en una nota de espacio, el motor
+ * combine en vez de crear una copia si la nota cambió por debajo.
  *
  * `derived`: lo que ya devolvió `deriveNote(body)`, si quien llama lo analizó antes (para
  * mirar sus etiquetas) y no quiere pagar el análisis dos veces. Tiene que ser el resultado
@@ -874,7 +886,7 @@ export function looseFilesFilterInTurn(
 export function saveInputFor(
   note: NoteRow,
   body: string,
-  base: { localSeq: number; bodySha256: string } = note,
+  base: { localSeq: number; bodySha256: string; baseBody?: string | null } = note,
   derived: ReturnType<typeof deriveNote> = deriveNote(body)
 ): NoteSaveInput {
   return {
@@ -882,7 +894,11 @@ export function saveInputFor(
     id: note.id,
     body,
     expectedLocalSeq: base.localSeq,
-    baseBodySha256: base.bodySha256
+    baseBodySha256: base.bodySha256,
+    // D25 (RT-4 de Hebra, §27.3 punto 5): el TEXTO que leyó quien escribe, al lado de su
+    // SHA. Solo cuenta en una nota de espacio (en la personal el motor lo ignora). Sin él,
+    // el guardado es el de siempre.
+    ...(base.baseBody !== undefined ? { baseBody: base.baseBody } : {})
   };
 }
 
@@ -932,7 +948,7 @@ export class NoteWriter {
       const saved = await store.noteSave(saveInputFor(note, input.body, note, derived));
       // Recién creada, nadie más la conoce: `redirected` aquí sería un fallo del motor,
       // no un conflicto. Se devuelve igual el id donde quedó el texto.
-      const id = saved.outcome === 'saved' ? note.id : saved.redirectedTo;
+      const id = saved.outcome === 'redirected' ? saved.redirectedTo : note.id;
       const row = await store.noteRead(id);
       return { id, title: row?.title ?? '', folderId: row?.folderId ?? note.folderId };
     });
@@ -1011,7 +1027,11 @@ export class NoteWriter {
         sectionTitle = picked.section.heading;
         insertion = insertIntoSection(note.body, picked.section, input.text);
       }
-      const saveInput = saveInputFor(note, insertion.body);
+      const saveInput = saveInputFor(note, insertion.body, {
+        localSeq: note.localSeq,
+        bodySha256: note.bodySha256,
+        baseBody: note.body
+      });
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
@@ -1026,22 +1046,27 @@ export class NoteWriter {
       }
       const saved = await store.noteSave(saveInput);
       let outcome: AppendToNoteResult;
-      if (saved.outcome !== 'saved') {
+      if (saved.outcome === 'redirected') {
         outcome = { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
       } else {
         // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este mismo turno), no de
         // la entrada: si el almacén cambiara algo, se vería aquí.
         const row = await store.noteRead(input.id);
         const savedBody = row?.body ?? insertion.body;
+        // Con `merged` (D25) el cuerpo guardado es la combinación: el texto insertado se
+        // busca en él por su posición calculada sobre el cuerpo leído, que ya no vale, así
+        // que la prueba (`tail`, `line`) se toma de donde esté el texto añadido.
+        const at = saved.outcome === 'merged' ? Math.max(0, savedBody.lastIndexOf(input.text)) : insertion.start;
+        const end = saved.outcome === 'merged' ? at + (insertion.end - insertion.start) : insertion.end;
         const appended: AppendedProof = {
           chars: input.text.length,
-          tail: proofTail(savedBody.slice(insertion.start, insertion.end)),
-          line: lineAt(savedBody, insertion.start)
+          tail: proofTail(savedBody.slice(at, end)),
+          line: lineAt(savedBody, at)
         };
         if (sectionTitle !== undefined) appended.heading = capHeading(sectionTitle);
         outcome = {
           id: input.id,
-          outcome: 'saved',
+          outcome: saved.outcome,
           revision: revisionOf(saved),
           totalChars: savedBody.length,
           appended
@@ -1147,7 +1172,9 @@ export class NoteWriter {
         return { result: unchanged, wrote: false };
       }
 
-      const saveInput = saveInputFor(note, body, revision);
+      // `revision.bodySha256` ya se comprobó igual al cuerpo de este turno: el texto que
+      // leyó el agente es `note.body` (D25: se pasa como `baseBody`).
+      const saveInput = saveInputFor(note, body, { ...revision, baseBody: note.body });
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
@@ -1161,14 +1188,15 @@ export class NoteWriter {
       });
       const saved = await store.noteSave(saveInput);
       let outcome: EditNoteSaved;
-      if (saved.outcome === 'saved') {
+      if (saved.outcome === 'saved' || saved.outcome === 'merged') {
         // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este turno), no de las
-        // sustituciones pedidas (D11).
+        // sustituciones pedidas (D11). Con `merged` (D25) es la combinación con lo que
+        // cambió por debajo, y `editProof` ya sabe ubicar un `replace` que se desplazó.
         const row = await store.noteRead(input.id);
         const savedBody = row?.body ?? body;
         outcome = {
           id: input.id,
-          outcome: 'saved',
+          outcome: saved.outcome,
           revision: revisionOf(saved),
           totalChars: savedBody.length,
           applied: editProof(input.edits, applied.placed, applied.body, savedBody)
@@ -1249,7 +1277,7 @@ export class NoteWriter {
       const version = store.noteVersionRead(input.versionId);
       if (!version || version.noteId !== input.id) throw writeRejected('not_found');
       if (version.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
-      const saveInput = saveInputFor(note, version.body, revision);
+      const saveInput = saveInputFor(note, version.body, { ...revision, baseBody: note.body });
       if (filter.hidesAnyTag((saveInput.tags ?? []).map(({ tag }) => tag))) {
         throw writeRejected('not_found');
       }
@@ -1269,9 +1297,9 @@ export class NoteWriter {
       await store.noteVersionSnapshot(input.id);
       const saved = await store.noteSave(saveInput);
       const outcome: EditNoteSaved =
-        saved.outcome === 'saved'
-          ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
-          : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+        saved.outcome === 'redirected'
+          ? { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo }
+          : { id: input.id, outcome: saved.outcome, revision: revisionOf(saved) };
       log.finish(input.operationId, outcome);
       return { result: outcome, wrote: true };
     });
@@ -1587,9 +1615,9 @@ export class NoteWriter {
       await store.blobPut(input.bytes, { mime: detected.mimeType, expectedSha256: attachmentId });
       const saved = await store.noteSave(saveInput);
       const outcome: EditNoteSaved =
-        saved.outcome === 'saved'
-          ? { id: input.id, outcome: 'saved', revision: revisionOf(saved) }
-          : { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo };
+        saved.outcome === 'redirected'
+          ? { id: input.id, outcome: 'conflict_copy', copyId: saved.redirectedTo }
+          : { id: input.id, outcome: saved.outcome, revision: revisionOf(saved) };
       log.finish(input.operationId, outcome);
       let placed: AttachmentPlacement | undefined;
       if (section && saved.outcome === 'saved') {

@@ -275,11 +275,11 @@ function asEditOutcome(value: unknown, id: string): EditNoteOutcome {
   if (!isRecord(value)) throw new Error('writer_protocol');
   const sync = syncFieldsFrom(value);
   const replayed = value.replayed === true ? { replayed: true as const } : {};
-  if (value.outcome === 'saved' && typeof value.revision === 'string') {
+  if ((value.outcome === 'saved' || value.outcome === 'merged') && typeof value.revision === 'string') {
     const proof: { totalChars?: number; applied?: AppliedEdit[] } = {};
     if (value.totalChars !== undefined) proof.totalChars = asCount(value.totalChars);
     if (value.applied !== undefined) proof.applied = asApplied(value.applied);
-    return { id, outcome: 'saved', revision: value.revision, ...proof, ...replayed, ...sync };
+    return { id, outcome: value.outcome, revision: value.revision, ...proof, ...replayed, ...sync };
   }
   if (value.outcome === 'conflict_copy' && typeof value.copyId === 'string') {
     return { id, outcome: 'conflict_copy', copyId: value.copyId, ...replayed, ...sync };
@@ -682,6 +682,7 @@ function asReplaceOutcome(value: unknown): ReplaceOutcome {
             outcome: oneOfValues(note.outcome, [
               'applied',
               'already',
+              'merged',
               'conflict_copy',
               'locked',
               'pending'
@@ -750,8 +751,8 @@ function asCreateResult(value: unknown): CreateNoteResult {
 
 function asAppendResult(value: unknown, id: string): AppendToNoteResult {
   const replayed = isRecord(value) && value.replayed === true ? { replayed: true as const } : {};
-  if (isRecord(value) && value.outcome === 'saved') {
-    const saved: AppendToNoteResult & { outcome: 'saved' } = { id, outcome: 'saved', ...replayed };
+  if (isRecord(value) && (value.outcome === 'saved' || value.outcome === 'merged')) {
+    const saved: AppendToNoteResult & { outcome: 'saved' | 'merged' } = { id, outcome: value.outcome, ...replayed };
     if (value.revision !== undefined) {
       if (typeof value.revision !== 'string') throw new Error('writer_protocol');
       saved.revision = value.revision;

@@ -16,7 +16,10 @@
  *
  * La salida distingue el guardado local (`outcome`) del estado de sync (`sync`,
  * `../write-context.ts`). Una copia de conflicto (otro dispositivo editó a la vez)
- * llega como `outcome: "conflict_copy"` con `copyId`: sin reintento automático.
+ * llega como `outcome: "conflict_copy"` con `copyId`: sin reintento automático. En una nota
+ * de ESPACIO (D25), si el cambio ajeno encaja, el motor combina y el resultado es
+ * `outcome: "merged"`: misma nota, sin copia, con la prueba (`totalChars`, `applied`) de lo
+ * guardado, que es la combinación.
  *
  * Perezosa (A5b del plan de memoria, 6 nov 2026): se registra con `privacyLoad: 'lazy'` y solo
  * carga en el filtro la nota `id` (`requireLoadedVisibleNote`). Equivalencia con `'all'` en

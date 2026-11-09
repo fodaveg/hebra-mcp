@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS hebra_mcp_replace_plan_notes (
   undo_proof TEXT,
   attempt_at INTEGER,
   copy_owned INTEGER NOT NULL DEFAULT 0,
+  sim_base_body TEXT,
   PRIMARY KEY (plan_id, position)
 )`;
 
@@ -99,14 +100,18 @@ CREATE TABLE IF NOT EXISTS hebra_mcp_replace_plan_notes (
 const ADDED_COLUMNS: ReadonlyArray<[table: string, column: string, definition: string]> = [
   ['hebra_mcp_replace_plans', 'result_chars', 'INTEGER NOT NULL DEFAULT 0'],
   ['hebra_mcp_replace_plan_notes', 'attempt_at', 'INTEGER'],
-  ['hebra_mcp_replace_plan_notes', 'copy_owned', 'INTEGER NOT NULL DEFAULT 0']
+  ['hebra_mcp_replace_plan_notes', 'copy_owned', 'INTEGER NOT NULL DEFAULT 0'],
+  // D25: el texto de la base simulada, solo en un espacio compartido (ver `NewPlanNote`).
+  ['hebra_mcp_replace_plan_notes', 'sim_base_body', 'TEXT']
 ];
 
 export type PlanState = 'simulated' | 'applying' | 'applied' | 'undoing' | 'undone' | 'expired';
 
-/** Cómo quedó una nota al aplicar. `unavailable`: borrada, en la papelera u oculta (o el
+/** Cómo quedó una nota al aplicar. `merged` (D25): nota de ESPACIO que cambió entre la
+ *  simulación y la aplicación; el motor combinó el resultado simulado con el texto actual en
+ *  la misma nota (el cuerpo guardado NO es el simulado). `unavailable`: borrada, en la papelera u oculta (o el
  *  resultado la dejaría con una etiqueta privada); NUNCA sale en el informe. */
-export type ApplyOutcome = 'applied' | 'already' | 'conflict_copy' | 'locked' | 'unavailable';
+export type ApplyOutcome = 'applied' | 'already' | 'merged' | 'conflict_copy' | 'locked' | 'unavailable';
 
 /** Cómo quedó una nota al deshacer: `restored` (vuelve a la base), `already` (ya estaba en
  *  la base), `changed` (cambió después del lote: no se toca), `locked` o `unavailable`
@@ -164,6 +169,9 @@ export interface NewPlanNote {
   resultBody: string;
   matches: number;
   preview: string;
+  /** D25: el texto de la base de la simulación (el que lleva `baseSha256`), solo si la
+   *  biblioteca es un espacio. Es el `baseBody` de `noteSave` si la nota cambió desde entonces. */
+  simBaseBody?: string | null;
 }
 
 /** Un plan sin aplicar, para el tope de lo guardado. */
@@ -185,7 +193,10 @@ export interface ReplacePlanStore {
   plan(planId: string): PlanRecord | null;
   notes(planId: string): PlanNoteRecord[];
   /** Los dos cuerpos de una nota del plan (el base, si ya se guardó). */
-  bodies(planId: string, position: number): { result: string; base: string | null } | null;
+  bodies(
+    planId: string,
+    position: number
+  ): { result: string; base: string | null; simBase: string | null } | null;
   /** Empieza la aplicación: el `operationId` queda ligado al plan. */
   startApply(planId: string, operationId: string, now: number): void;
   setState(planId: string, state: PlanState): void;
@@ -258,7 +269,8 @@ const PLAN_COLUMNS = [
 ];
 const PLAN_NOTE_COLUMNS = [
   'plan_id', 'position', 'note_id', 'base_sha256', 'result_sha256', 'result_body', 'matches', 'preview', 'base_body',
-  'outcome', 'copy_id', 'proof', 'undo_outcome', 'undo_copy', 'undo_proof', 'attempt_at', 'copy_owned'
+  'outcome', 'copy_id', 'proof', 'undo_outcome', 'undo_copy', 'undo_proof', 'attempt_at', 'copy_owned',
+  'sim_base_body'
 ];
 
 /** `true` si `library.sqlite` aún guarda planes de replace de una versión anterior (hay que migrarlos). */
@@ -353,6 +365,7 @@ const PLAN_STATES: ReadonlySet<string> = new Set<PlanState>([
 const APPLY_OUTCOMES: ReadonlySet<string> = new Set<ApplyOutcome>([
   'applied',
   'already',
+  'merged',
   'conflict_copy',
   'locked',
   'unavailable'
@@ -428,12 +441,13 @@ export function sqliteReplacePlanStore(db: DatabaseSync): ReplacePlanStore {
           plan.privacySha256,
           plan.createdAt,
           plan.matches,
-          notes.reduce((sum, note) => sum + note.resultBody.length, 0)
+          notes.reduce((sum, note) => sum + note.resultBody.length + (note.simBaseBody?.length ?? 0), 0)
         );
         const insertNote = statement(
           `INSERT INTO hebra_mcp_replace_plan_notes
-             (plan_id, position, note_id, base_sha256, result_sha256, result_body, matches, preview)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+             (plan_id, position, note_id, base_sha256, result_sha256, result_body, matches, preview,
+              sim_base_body)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         );
         notes.forEach((note, position) => {
           insertNote.run(
@@ -444,7 +458,8 @@ export function sqliteReplacePlanStore(db: DatabaseSync): ReplacePlanStore {
             note.resultSha256,
             note.resultBody,
             note.matches,
-            note.preview
+            note.preview,
+            note.simBaseBody ?? null
           );
         });
         db.exec('COMMIT');
@@ -521,10 +536,17 @@ export function sqliteReplacePlanStore(db: DatabaseSync): ReplacePlanStore {
     },
     bodies(planId, position) {
       const row = statement(
-        `SELECT result_body, base_body FROM hebra_mcp_replace_plan_notes WHERE plan_id = ? AND position = ?`
-      ).get(planId, position) as { result_body: string; base_body: string | null } | undefined;
+        `SELECT result_body, base_body, sim_base_body FROM hebra_mcp_replace_plan_notes
+         WHERE plan_id = ? AND position = ?`
+      ).get(planId, position) as
+        | { result_body: string; base_body: string | null; sim_base_body: string | null }
+        | undefined;
       if (!row) return null;
-      return { result: String(row.result_body), base: typeof row.base_body === 'string' ? row.base_body : null };
+      return {
+        result: String(row.result_body),
+        base: typeof row.base_body === 'string' ? row.base_body : null,
+        simBase: typeof row.sim_base_body === 'string' ? row.sim_base_body : null
+      };
     },
     startApply(planId, operationId, now) {
       statement(

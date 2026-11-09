@@ -21,7 +21,8 @@
  *
  * Restaurar es una EDICIÓN nueva con el control de `hebra_edit_note`: `expectedRevision`
  * (la de `hebra_read_note`), `operationId` para reintentar sin repetir, y una edición a
- * la vez en otro dispositivo deja una copia de conflicto visible (`NoteWriter.restoreVersion`).
+ * la vez en otro dispositivo deja una copia de conflicto visible (`NoteWriter.restoreVersion`),
+ * salvo en un espacio compartido, donde el motor combina y el resultado es `merged` (D25).
  *
  * Perezosas (A5b del plan de memoria, 6 nov 2026): las tres se registran con `privacyLoad:
  * 'lazy'` y solo cargan en el filtro la nota `id` (`requireLoadedVisibleNote`); lo que se juzga

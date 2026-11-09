@@ -45,6 +45,15 @@
  *   `navigator` y `localStorage`) si `typeof process === 'undefined'` o el proceso es un
  *   renderer de Electron o NW.js; en Node carga `node.js`.
  * - `object-inspect/index.js:255`: `typeof window !== 'undefined' && obj === window`.
+ *
+ * `yjs` y su dependencia `lib0` entran con D25 (9 nov 2026, RT-4 de Hebra: el motor de Hebra
+ * combina las ediciones de una nota de espacio con un `Y.Text`, y esbuild las resuelve desde
+ * el `package.json` de hebra-mcp). Quedan exentos por la misma razón, medido con este check:
+ * - `lib0/environment.js` y `lib0/storage.js`: `typeof window/document/navigator/localStorage
+ *   !== 'undefined'` antes de cada uso (el módulo detecta el entorno).
+ * - `yjs/dist/yjs.mjs`: `typeof window !== 'undefined'` para elegir el global, y `document`
+ *   solo como valor por defecto del parámetro de `toDOM` de los tipos XML, que hebra-mcp no
+ *   llama (solo usa `Y.Text`); la prueba de humo del paso 3 lo carga sin DOM.
  */
 import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -67,7 +76,11 @@ const DOM_EXEMPT_PACKAGES = [
   'debug',
   'debug/*',
   'object-inspect',
-  'object-inspect/*'
+  'object-inspect/*',
+  'yjs',
+  'yjs/*',
+  'lib0',
+  'lib0/*'
 ];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */

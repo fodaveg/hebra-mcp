@@ -179,6 +179,11 @@ export type SyncLogEventName =
   | 'sync.records_without_rev'
   | 'sync.conflict_copy'
   | 'sync.blob_unreadable'
+  // §27.4 (RT-2c de Hebra): una nota de espacio no se pudo combinar y salió la copia; solo el
+  // motivo cerrado. Va junto a `sync.conflict_copy`.
+  | 'sync.space_merge_copy'
+  // §27.3 punto 3: el `ydoc` de una nota de espacio recibida no se leyó o se ignoró; solo el motivo.
+  | 'sync.ydoc_unreadable'
   // La credencial de emparejado está revocada (SPEC.md §12.9): una vez, al primer 401/403.
   | 'pairing.revoked'
   // La credencial vuelve a valer (D24): una vez, en la primera ronda correcta tras revocarse.
@@ -308,6 +313,10 @@ function logFieldsOf(event: LibrarySyncEvent): SyncLogFields {
     case 'sync.blob_unreadable':
       // Solo el tamaño: el motor no da nombre, ruta ni hash, y aquí tampoco se añaden.
       return { byteLength: event.byteLength };
+    case 'sync.space_merge_copy':
+      return { recordId: event.recordId, copyId: event.copyId, reason: event.reason };
+    case 'sync.ydoc_unreadable':
+      return { recordId: event.recordId, reason: event.reason };
   }
 }
 

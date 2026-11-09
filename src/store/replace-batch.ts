@@ -232,10 +232,13 @@ export interface ReplaceReportNote {
   id: string;
   title: string;
   /** `applied`: entró; `already`: ya tenía el resultado sin que este lote lo escribiera;
+   *  `merged` (D25): nota de espacio que cambió desde la simulación; el resultado se combinó
+   *  con el texto actual en la MISMA nota, así que lo guardado no es el cuerpo simulado (la
+   *  prueba, `totalChars` y `bodySha256`, es la de lo guardado);
    *  `conflict_copy`: cambió desde la simulación y el resultado fue a una copia (`copyId`);
    *  `locked`: está bloqueada, no se tocó; `pending`: no se llegó (corte por plazo). */
-  outcome: 'applied' | 'already' | 'conflict_copy' | 'locked' | 'pending';
-  /** Prueba de lo guardado (`applied`/`already`), leída de la nota en el turno en que se
+  outcome: 'applied' | 'already' | 'merged' | 'conflict_copy' | 'locked' | 'pending';
+  /** Prueba de lo guardado (`applied`/`already`/`merged`), leída de la nota en el turno en que se
    *  escribió: la revisión nueva (vale como `expectedRevision`), el tamaño y el SHA-256. */
   revision?: string;
   totalChars?: number;
@@ -907,19 +910,27 @@ export class ReplaceBatch {
       store.replacePlans.purgeExpired(createdAt);
       const inTurn = privacyInTurnFor(store, request.privacy, entries.map((entry) => entry.id));
       const keep: Candidate[] = [];
+      // D25: en un espacio, el texto de la base simulada (la nota sigue siendo exactamente ella:
+      // se comprueba aquí) para poder combinar si cambia antes de aplicar.
+      const space = store.isSpaceLibrary?.() === true;
+      const simBases = new Map<string, string>();
       for (const entry of entries) {
         const note = await store.noteRead(entry.id);
         if (!note || note.trashedAt !== null || inTurn.isHiddenNote(note.id)) continue;
         if (note.body.startsWith(LOCKED_BODY_PREFIX) || note.bodySha256 !== entry.baseSha256) continue;
         if (inTurn.hidesAnyTag(entry.resultTags)) continue;
         keep.push(entry);
+        if (space) simBases.set(entry.id, note.body);
       }
       if (keep.length === 0) return keep;
       // M2: tope de lo guardado sin aplicar. Caen los más antiguos SIN aplicar; uno aplicado
       // o a medias nunca (hace falta para deshacer).
       const maxPlans = this.options.maxStoredPlans ?? STORED_PLANS_MAX;
       const maxChars = this.options.maxStoredPlanChars ?? STORED_PLAN_CHARS_MAX;
-      const newChars = keep.reduce((sum, entry) => sum + entry.resultBody.length, 0);
+      const newChars = keep.reduce(
+        (sum, entry) => sum + entry.resultBody.length + (simBases.get(entry.id)?.length ?? 0),
+        0
+      );
       const stored = store.replacePlans.unapplied();
       let storedChars = stored.reduce((sum, plan) => sum + plan.resultChars, 0);
       while (stored.length > 0 && (stored.length + 1 > maxPlans || storedChars + newChars > maxChars)) {
@@ -941,7 +952,8 @@ export class ReplaceBatch {
           resultSha256: sha256Hex(entry.resultBody),
           resultBody: entry.resultBody,
           matches: entry.matches,
-          preview: JSON.stringify(entry.changes)
+          preview: JSON.stringify(entry.changes),
+          ...(simBases.has(entry.id) ? { simBaseBody: simBases.get(entry.id)! } : {})
         }))
       );
       return keep;
@@ -1180,6 +1192,9 @@ export class ReplaceBatch {
         id: row.noteId,
         body: bodies.result,
         baseBodySha256: row.baseSha256,
+        // D25: el texto de la base simulada (solo en un espacio): si la nota cambió desde
+        // entonces, el motor combina en vez de dejar una copia.
+        baseBody: bodies.simBase,
         onConflict: 'copy',
         privacy
       },
@@ -1200,6 +1215,16 @@ export class ReplaceBatch {
         // guardado y esta anotación): entró.
         outcome = bodies.base !== null ? 'applied' : 'already';
         proof = await proofOf(store, row.noteId);
+        break;
+      case 'merged':
+        // El cuerpo guardado es la combinación, no `bodies.result`: no hay «ya estaba» que
+        // comprobar por su SHA. Se guarda como base el cuerpo que tenía la nota justo antes
+        // (leído arriba, en este mismo turno): deshacer vuelve a ÉL (conserva lo que
+        // cambiaron los demás) y no a la base simulada. La prueba lleva el SHA de lo
+        // guardado, que es el que `undo` espera encontrar.
+        outcome = 'merged';
+        proof = await proofOf(store, row.noteId);
+        if (note && bodies.base === null) plans.saveBase(planId, row.position, note.body);
         break;
       case 'conflict_copy': {
         outcome = 'conflict_copy';
@@ -1382,7 +1407,9 @@ export class ReplaceBatch {
       const restored = await replaceBodyInTurn(store, {
         id: row.noteId,
         body: bodies.base,
-        baseBodySha256: row.resultSha256,
+        // Lo que el lote dejó: el resultado simulado o, si se combinó (D25), el SHA del
+        // cuerpo guardado, que anotó la prueba.
+        baseBodySha256: row.outcome === 'merged' && row.proof ? row.proof.bodySha256 : row.resultSha256,
         onConflict: 'reject',
         privacy
       });
