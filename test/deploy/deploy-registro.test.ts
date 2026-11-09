@@ -481,7 +481,7 @@ describe('publicar.sh de punta a punta (docker, ssh, npm y node falsos)', () => 
 		const build = dockerCalls().find((c) => c.startsWith('buildx build'));
 		expect(build).toMatch(
 			new RegExp(
-				`--platform linux/arm64 --label org.opencontainers.image.revision=${head} --metadata-file .* -f deploy/Dockerfile -t ${REG}:${head} --push \\.$`
+				`--platform linux/arm64 --label org.opencontainers.image.revision=${head} --build-arg BASE_REGISTRY=git.dualhand.com/fodaveg/espejo --metadata-file .* -f deploy/Dockerfile -t ${REG}:${head} --push \\.$`
 			)
 		);
 		expect(lines(`${fakeLog}.node`)).toEqual(expect.arrayContaining(['npm run check', 'npm run build']));

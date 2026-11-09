@@ -41,7 +41,8 @@ describe('publicar.sh: constantes que tienen que casar con compose.yml y el regi
       const text = read(file);
       expect(text, file).not.toMatch(/\brsync\b.*(--delete|-rlptz)/);
       expect(text, file).not.toContain('compose build');
-      expect(text, file).not.toContain('--build');
+      // `--build` de compose o de docker run; `--build-arg` de buildx sí vale.
+      expect(text, file).not.toMatch(/--build(?![-\w])/);
     }
     expect(read('deploy/compose.yml')).not.toMatch(/^ {4}build:/m);
   });

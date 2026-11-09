@@ -16,7 +16,9 @@ beforeEach(async () => { dataDir = await mkdtemp(join(tmpdir(), 'hebra-mcp-e2e-h
 afterEach(async () => { await rm(dataDir, { recursive: true, force: true }); });
 
 function run(args: string[], extra: Record<string, string> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
-  const child = spawn('node', [cliPath, ...args], { env: { ...process.env, HEBRA_MCP_DATA_DIR: dataDir,
+  // Node 22 avisa por stderr de que node:sqlite es experimental; ese aviso es del runtime,
+  // no del CLI, y rompe el JSON.parse del stderr. Solo se calla ese tipo de aviso.
+  const child = spawn('node', ['--disable-warning=ExperimentalWarning', cliPath, ...args], { env: { ...process.env, HEBRA_MCP_DATA_DIR: dataDir,
     HEBRA_MCP_SECRET_STORE: 'file', ...extra }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = '';
   child.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
