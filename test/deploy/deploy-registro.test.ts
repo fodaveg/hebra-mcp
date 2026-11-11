@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import {
 	chmodSync,
 	copyFileSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -14,7 +15,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 /**
  * Despliegue por registro de imágenes (deploy/lib/deploy-registro.sh, lado
@@ -30,8 +31,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * `--metadata-file` NO se prueban aquí: solo la decisión sobre lo que
  * devuelven (ver «Por comprobar en real» en el commit).
  */
-
-vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LOCAL_LIB = join(ROOT, 'deploy', 'lib', 'deploy-registro.sh');
@@ -369,15 +368,27 @@ describe('registry_lookup', () => {
 	});
 });
 
+/** Raíz de la plantilla del repo de prueba (se construye una vez por fichero). */
+let template: string;
+
+/** git directo (sin bash ni source), aislado de la config del usuario. */
+function gitIn(cwd: string, ...args: string[]): void {
+	const r = spawnSync('git', args, { cwd, encoding: 'utf8', env: baseEnv() });
+	if (r.status !== 0) throw new Error(`git ${args.join(' ')} falló: ${r.stderr}`);
+}
+
 /**
- * Repo temporal con un remoto «origin» desnudo y `main` empujada. Copia los
- * scripts de deploy REALES, un submódulo (vendor/hebra, vendor/jdex-manager) y
- * `node_modules/` para el gate falso.
+ * Construye UNA vez la plantilla: un remoto origin desnudo con `main`
+ * empujada, el repo de trabajo con los scripts de deploy REALES, dos submódulos
+ * (vendor/hebra, vendor/jdex-manager) y `node_modules/` para el gate falso.
+ * Los submódulos se añaden con URL relativa (../sub-nombre, resuelta contra
+ * origin) para que `.gitmodules`, que va en el commit, no dependa de la carpeta.
  */
-function makeRepo(): string {
-	const remote = join(tmp, 'remote.git');
-	const work = join(tmp, 'work');
-	sh(LOCAL_LIB, `git init -q --bare -b main "${remote}" && git init -q -b main "${work}"`);
+function buildTemplate(root: string): void {
+	const remote = join(root, 'remote.git');
+	const work = join(root, 'work');
+	gitIn(root, 'init', '-q', '--bare', '-b', 'main', remote);
+	gitIn(root, 'init', '-q', '-b', 'main', work);
 	mkdirSync(join(work, 'deploy', 'lib'), { recursive: true });
 	copyFileSync(join(ROOT, 'deploy', 'publicar.sh'), join(work, 'deploy', 'publicar.sh'));
 	for (const f of ['deploy-registro.sh', 'remote-release.sh', 'docker-platform.sh']) {
@@ -386,18 +397,46 @@ function makeRepo(): string {
 	writeFileSync(join(work, 'deploy', 'compose.yml'), COMPOSE);
 	writeFileSync(join(work, '.gitignore'), 'node_modules\ndist/\n');
 	mkdirSync(join(work, 'node_modules'));
-	const git = (args: string) => sh(LOCAL_LIB, `git ${args}`, {}, work);
-	// Dos submódulos como los reales (vendor/hebra, vendor/jdex-manager), con
-	// origen local; `protocol.file.allow` porque git lo bloquea por defecto.
+	gitIn(work, 'remote', 'add', 'origin', remote);
+	// `protocol.file.allow` porque git bloquea por defecto los submódulos locales.
 	for (const name of ['hebra', 'jdex-manager']) {
-		const src = join(tmp, `sub-${name}`);
-		sh(LOCAL_LIB, `git init -q -b main "${src}" && git -C "${src}" commit -q --allow-empty -m sub`);
-		git(`-c protocol.file.allow=always submodule add -q "${src}" vendor/${name}`);
+		const src = join(root, `sub-${name}`);
+		gitIn(root, 'init', '-q', '-b', 'main', src);
+		gitIn(src, 'commit', '-q', '--allow-empty', '-m', 'sub');
+		gitIn(work, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', `../sub-${name}`, `vendor/${name}`);
 	}
-	git('add -A');
-	git('commit -qm uno');
-	git(`remote add origin "${remote}"`);
-	git('push -q origin main');
+	gitIn(work, 'add', '-A');
+	gitIn(work, 'commit', '-qm', 'uno');
+	gitIn(work, 'push', '-q', 'origin', 'main');
+}
+
+beforeAll(() => {
+	template = mkdtempSync(join(tmpdir(), 'hebra-mcp-plantilla-'));
+	// baseEnv() necesita un tmp para el PATH; el de verdad lo crea cada beforeEach.
+	tmp = template;
+	buildTemplate(template);
+});
+
+afterAll(() => {
+	rmSync(template, { recursive: true, force: true });
+});
+
+/**
+ * Repo temporal por test: copia de la plantilla en `tmp`. Git guarda rutas
+ * absolutas de la plantilla en `.git/config` y en `.git/modules/vendor/<n>/config`
+ * (URL ya resuelta del submódulo y de origin); se reescriben a la carpeta del
+ * test. Cada test trabaja sobre su propia copia, sin compartir nada.
+ */
+function makeRepo(): string {
+	cpSync(template, tmp, { recursive: true, preserveTimestamps: true });
+	const work = join(tmp, 'work');
+	const configs = [join(work, '.git', 'config')];
+	for (const n of ['hebra', 'jdex-manager']) {
+		configs.push(join(work, '.git', 'modules', 'vendor', n, 'config'));
+	}
+	for (const f of configs) {
+		writeFileSync(f, readFileSync(f, 'utf8').split(template).join(tmp));
+	}
 	return work;
 }
 
