@@ -133,7 +133,7 @@ de hasta 8 MB desde D9 (la app corta en 7 514 796 bytes).
 
 El comando `hebra-mcp` es un lanzador en `~/.local/bin` que ejecuta `dist/cli.mjs` con Node 24
 (no `npm link`: el `node` por defecto puede ser otra versión). Cómo instalarlo: apartado
-"Instalar el comando `hebra-mcp`" de `skills/hebra/SKILL.md`. `pair` necesita una terminal
+"Instalar el comando `hebra-mcp`" de `skills/hebra/references/ficheros-de-trabajo.md`. `pair` necesita una terminal
 real (TTY).
 
 ```sh

@@ -31,7 +31,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * devuelven (ver «Por comprobar en real» en el commit).
  */
 
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LOCAL_LIB = join(ROOT, 'deploy', 'lib', 'deploy-registro.sh');
