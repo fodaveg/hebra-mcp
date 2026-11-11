@@ -438,6 +438,92 @@ describe('árbol limpio y HEAD en origin/main', () => {
 	});
 });
 
+describe('aviso de reinstalar la skill hebra', () => {
+	let work: string;
+	const git = (args: string) => sh(LOCAL_LIB, `git ${args}`, {}, work);
+	const sha = (rev: string) => git(`rev-parse ${rev}`).stdout.trim();
+	const notice = (prev: string, to: string) =>
+		sh(LOCAL_LIB, `DEPLOY_PREV_SHA="${prev}"; deploy_skill_notice "${to}"`, {}, work);
+	const INSTALL = 'npx --yes skills add fodaveg/hebra-mcp -g -y --skill hebra --agent codex claude-code';
+
+	beforeEach(() => {
+		work = makeRepo();
+		mkdirSync(join(work, 'skills', 'hebra'), { recursive: true });
+		writeFileSync(join(work, 'skills', 'hebra', 'SKILL.md'), 'uno\n');
+		git('add -A');
+		git('commit -qm skill');
+	});
+
+	it('si skills/hebra/ cambió desde la versión desplegada, avisa con el comando exacto', () => {
+		const base = sha('HEAD');
+		writeFileSync(join(work, 'skills', 'hebra', 'SKILL.md'), 'dos\n');
+		git('commit -qam skill-2');
+		const r = notice(base, sha('HEAD'));
+		expect(r.code, r.stderr).toBe(0);
+		expect(r.stdout).toContain('AVISO: reinstala la skill hebra');
+		expect(r.stdout).toContain(INSTALL);
+	});
+
+	it('si no cambió, no imprime nada', () => {
+		const base = sha('HEAD');
+		writeFileSync(join(work, 'deploy', 'otra.txt'), 'x\n');
+		git('add -A');
+		git('commit -qm otra-cosa');
+		const r = notice(base, sha('HEAD'));
+		expect(r.code).toBe(0);
+		expect(r.stdout).toBe('');
+	});
+
+	it('sin versión anterior conocida, o que este checkout no tiene, avisa siempre y no falla', () => {
+		const empty = notice('', sha('HEAD'));
+		expect(empty.code).toBe(0);
+		expect(empty.stdout).toContain('no se conoce la versión');
+		expect(empty.stdout).toContain(INSTALL);
+		const unknown = notice('f'.repeat(40), sha('HEAD'));
+		expect(unknown.code).toBe(0);
+		expect(unknown.stdout).toContain('no está en este checkout');
+		expect(unknown.stdout).toContain(INSTALL);
+	});
+
+	it('deploy_capture_previous_sha saca el sha de la última línea del historial; sin historial queda vacío', () => {
+		const line = ['2026-11-10T10:00:00Z', 'mcp', 'desplegar', SHA, REF_A, '-', '-'].join('\t');
+		const ok = sh(
+			LOCAL_LIB,
+			`deploy_remote() { printf 'actual=x\\nultima=%s\\n' "$(printf '${line}')"; }\ndeploy_capture_previous_sha; echo "[$DEPLOY_PREV_SHA]"`,
+			{},
+			work
+		);
+		expect(ok.stdout.trim()).toBe(`[${SHA}]`);
+		const none = sh(
+			LOCAL_LIB,
+			`deploy_remote() { printf 'actual=\\nultima=\\n'; }\ndeploy_capture_previous_sha; echo "[$DEPLOY_PREV_SHA]"`,
+			{},
+			work
+		);
+		expect(none.stdout.trim()).toBe('[]');
+		const down = sh(LOCAL_LIB, 'deploy_remote() { return 1; }\ndeploy_capture_previous_sha; echo "[$DEPLOY_PREV_SHA]"', {}, work);
+		expect(down.code).toBe(0);
+		expect(down.stdout.trim()).toBe('[]');
+	});
+
+	it('un deploy real termina con el aviso (el ssh falso no da historial) y sigue con código 0', () => {
+		git('push -q origin main');
+		const r = spawnSync('bash', ['deploy/publicar.sh'], {
+			cwd: work,
+			encoding: 'utf8',
+			env: baseEnv({
+				DOCKER_PLATFORM: 'linux/arm64',
+				FAKE_DIGEST: DIGEST_A,
+				FAKE_BUILD_DIGEST: DIGEST_A,
+				FAKE_IMAGE_JSON: ARM64_JSON
+			})
+		});
+		expect(r.status, r.stderr).toBe(0);
+		expect(r.stdout).toContain('AVISO: reinstala la skill hebra');
+		expect(r.stdout).toContain(INSTALL);
+	});
+});
+
 describe('publicar.sh de punta a punta (docker, ssh, npm y node falsos)', () => {
 	let work: string;
 	let head: string;
@@ -485,7 +571,8 @@ describe('publicar.sh de punta a punta (docker, ssh, npm y node falsos)', () => 
 			)
 		);
 		expect(lines(`${fakeLog}.node`)).toEqual(expect.arrayContaining(['npm run check', 'npm run build']));
-		expect(ssh()).toEqual(['lumbre-arm bash -s']);
+		// Dos SSH: leer el estado (versión desplegada, para el aviso de la skill) y aplicar.
+		expect(ssh()).toEqual(['lumbre-arm bash -s', 'lumbre-arm bash -s']);
 		expect(sentScript()).toContain(
 			`release_main apply /srv/hebra-mcp/deploy mcp ${VAR} ${REF_A} ${head} desplegar`
 		);
