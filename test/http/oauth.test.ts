@@ -606,13 +606,16 @@ describe('consentimiento y vínculo exacto', () => {
 
   it('revocar globalmente entre solicitud, código y canje no fabrica una familia nueva', async () => {
     await authorize(pkce().challenge);
-    await revokeAllTokens(context.dataDir, Date.now() + 1);
+    // La revocación corta "hasta T inclusive". Lo creado después debe caer en un instante estrictamente mayor,
+    // así que se adelanta el reloj del proveedor en vez de depender de que el ms real cambie.
+    await revokeAllTokens(context.dataDir, Date.now() + clockOffset);
+    clockOffset += 10;
     approved = true;
     expect((await callback('approved')).status).toBe(400);
     expect(exchangeCount).toBe(0);
 
     const { code, verifier } = await approvedCode();
-    await revokeAllTokens(context.dataDir, Date.now() + 2);
+    await revokeAllTokens(context.dataDir, Date.now() + clockOffset);
     expect((await token({ grant_type: 'authorization_code', code, code_verifier: verifier,
       redirect_uri: CLAUDE_CALLBACK })).status).toBe(400);
     expect((await readFile(join(context.dataDir, OAUTH_TOKENS_FILE), 'utf8').catch(() => ''))).not.toContain(GRANT_ID);
