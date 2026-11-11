@@ -64,14 +64,19 @@ describe('privacidad del resultado tras la ronda del escritor por socket', () =>
     } finally { await f.close(); }
   });
 
-  // Aceptado por la sesión principal (11 oct 2026): §6.4 permite ids opacos en los logs, y
-  // `note.append` se emite en cuanto el escritor responde, antes de saber si la ronda ocultó
-  // la nota. No es una fuga de contenido (ni título, ni cuerpo, ni apartado).
-  it.skip('append no registra el id de una nota que la ronda acaba de ocultar', async () => {
+  // Aceptado por la sesión principal (11 oct 2026): SPEC.md §6.4 permite ids opacos en los
+  // logs, y `note.append` se emite en cuanto el escritor responde, antes de saber si la ronda
+  // ocultó la nota. Por eso el id de la nota recién ocultada puede aparecer en el log. Lo que
+  // no puede aparecer es contenido: ni título, ni cuerpo, ni el texto añadido, ni la etiqueta.
+  it('el log de append no contiene título, cuerpo, texto añadido ni etiqueta de una nota que la ronda acaba de ocultar', async () => {
     const f = await appendThatBecomesPrivate();
     try {
       const { logs } = await f.run();
-      expect(logs, 'note.append registra el id de la nota ya oculta después de esperar el sync').not.toContain(f.h.extra);
+      // Límite aceptado: el id opaco sí queda en el log de `note.append`.
+      expect(logs).toContain(`"event":"note.append","id":"${f.h.extra}"`);
+      const leaked = ['IPC visible', 'Texto inicial', 'CEBO_IPC_APARTADO', 'Apartado', 'secreto']
+        .filter((needle) => logs.includes(needle));
+      expect(leaked, 'El log de note.append filtra contenido de la nota').toEqual([]);
     } finally { await f.close(); }
   });
 });
