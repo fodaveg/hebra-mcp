@@ -198,6 +198,13 @@ EDGE_CONFD=/srv/edge/conf.d       # conf.d del Caddy compartido
       no arranca, restaura la imagen anterior, la levanta y sale con error.
       Apunta una línea en `despliegues.log` y la salida de docker en
       `despliegues-compose.log`, ambos en `REMOTE_DIR`.
+   4. Paso final, solo informativo (no instala nada ni puede fallar el deploy):
+      compara `skills/hebra/` entre el commit que estaba desplegado (campo `sha`
+      de la última línea de `despliegues.log`, leído antes de aplicar) y el que
+      se publica. Si cambió, o si no se pudo saber la versión anterior, imprime el
+      comando `npx --yes skills add fodaveg/hebra-mcp -g -y --skill hebra --agent
+      codex claude-code` para repetirlo en cada máquina. Si no cambió, calla. Vale
+      para el deploy del HEAD y para `--version`; `--anterior` no lo imprime.
 
    **Primer despliegue por registro.** La imagen que corría antes
    (`hebra-mcp:latest`, construida en el servidor) se etiqueta

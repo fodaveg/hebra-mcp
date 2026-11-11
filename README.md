@@ -308,6 +308,9 @@ npx --yes skills add fodaveg/hebra-mcp -g -y \
 
 Para actualizarla tras un cambio en `skills/hebra/`, se repite el mismo comando.
 
+`deploy/publicar.sh` lo recuerda: al terminar, si `skills/hebra/` cambió respecto a lo que estaba
+desplegado, imprime este mismo comando para reinstalarla en cada máquina.
+
 ## Build y tests
 
 ```sh

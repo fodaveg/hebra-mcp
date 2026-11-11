@@ -473,7 +473,52 @@ deploy_version() {
     deploy_print_apply_plan "$ref" "$sha" version "$DEPLOY_REMOTE/$DEPLOY_BRANCH"
     return 0
   fi
+  deploy_capture_previous_sha
   deploy_remote --con-compose "$rev" apply "$REMOTE_DIR" "$DEPLOY_SERVICE" "$DEPLOY_ENV_VAR" "$ref" "$sha" version || return 1
+  deploy_skill_notice "$sha"
+}
+
+# Skill `hebra` (skills/hebra/): se instala por máquina y nadie se acuerda de
+# repetirlo cuando cambia. Estos dos pasos SOLO avisan: nunca fallan ni instalan.
+DEPLOY_SKILL_DIR="skills/hebra"
+DEPLOY_SKILL_INSTALL='npx --yes skills add fodaveg/hebra-mcp -g -y --skill hebra --agent codex claude-code'
+
+# deploy_capture_previous_sha: deja en DEPLOY_PREV_SHA el commit que estaba
+# desplegado ANTES de este deploy (campo 4 de la última línea válida del
+# historial del server), o vacío si no se pudo saber. Se llama antes de aplicar.
+# Mejor esfuerzo: un server que no responde no para nada.
+deploy_capture_previous_sha() {
+  local ultima
+  DEPLOY_PREV_SHA=""
+  deploy_read_state 2>/dev/null || return 0
+  ultima="$(deploy_state_field ultima)"
+  DEPLOY_PREV_SHA="$(printf '%s\n' "$ultima" | awk -F '\t' '{ print $4 }')"
+  case "$DEPLOY_PREV_SHA" in
+    "" | "-" | *[!0-9a-f]*) DEPLOY_PREV_SHA="" ;;
+  esac
+  return 0
+}
+
+# deploy_skill_notice <sha publicado>: paso final de la publicación. Si
+# skills/hebra/ cambió entre DEPLOY_PREV_SHA y <sha>, avisa con el comando para
+# reinstalarla en cada máquina; si no se conoce la versión anterior (sin
+# historial, server mudo o commit que este checkout no tiene), avisa siempre.
+# Si no cambió, no imprime nada. Siempre devuelve 0.
+deploy_skill_notice() {
+  local sha="$1" prev="${DEPLOY_PREV_SHA:-}" motivo=""
+  if [ -z "$prev" ]; then
+    motivo="no se conoce la versión que estaba desplegada"
+  elif ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
+    motivo="la versión anterior (${prev:0:12}) no está en este checkout"
+  elif git diff --quiet "$prev" "$sha" -- "$DEPLOY_SKILL_DIR" 2>/dev/null; then
+    return 0
+  else
+    motivo="$DEPLOY_SKILL_DIR/ cambió desde ${prev:0:12}"
+  fi
+  echo
+  echo "==> AVISO: reinstala la skill hebra en cada máquina ($motivo)."
+  echo "    $DEPLOY_SKILL_INSTALL"
+  return 0
 }
 
 # deploy_head: deploy normal del HEAD.
@@ -538,7 +583,9 @@ deploy_head() {
     echo "ERROR: referencia de imagen no válida: '$ref'." >&2
     return 1
   }
+  deploy_capture_previous_sha
   deploy_remote --con-compose HEAD apply "$REMOTE_DIR" "$DEPLOY_SERVICE" "$DEPLOY_ENV_VAR" "$ref" "$sha" desplegar || return 1
+  deploy_skill_notice "$sha"
 }
 
 # deploy_main <comando> <argumentos…>: punto de entrada de publicar.sh.
