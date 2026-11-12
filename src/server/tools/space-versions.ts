@@ -18,12 +18,18 @@
  * - **Autores** (`hebra_read_version` con `authors: true`): los tramos del texto de la versión
  *   con su dueño (`authorRuns`): una cuenta, con `confirmed` (§28.4), "Autor sin confirmar" o
  *   "Texto anterior". Para eso se bajan y descifran TODAS las versiones de la nota (hasta 500,
- *   §28.2): es la lectura cara y solo se hace si se pide.
+ *   §28.2): es la lectura cara y solo se hace si se pide. Tiene que caber en la reserva de la
+ *   llamada (D22): con más de `AUTHORS_MAX_ENTRIES` versiones o más de `AUTHORS_MAX_BYTES` de
+ *   sobres (sumados del listado, antes de leer ninguno), no se leen y `authorRuns` y
+ *   `changedBy` salen a `null` con `authorsReason: "too_large"`; y como mucho una a la vez por
+ *   cuenta (la otra, `authorsReason: "busy"`). El cuerpo y `editedBy` salen siempre.
  * - **Caída a lo local**: un relé sin la función (404, el flag `HEBRA_SPACE_HISTORY` apagado,
  *   que es lo que hay en producción el 12 nov 2026, §28.14), sin red, con 429 o con cualquier
  *   otro fallo da `unavailable` y la herramienta responde con las versiones LOCALES de hoy,
  *   con `source: "local"` y `sourceReason` (el motivo). Una nota bloqueada no pide el
- *   historial (§28.7): también local, con `sourceReason: "locked"`.
+ *   historial (§28.7): también local, con `sourceReason: "locked"`. Solo listar y leer sin
+ *   `source`: restaurar, y leer con `source: "server"`, responden `history_unavailable`
+ *   (`./versions.ts`).
  *
  * Privacidad (regla 4 de D2, como `./versions.ts`): la nota tiene que ser visible, y una
  * versión cuyo cuerpo lleva una etiqueta privada (o es el de una nota bloqueada) no se lista,
@@ -51,6 +57,7 @@ import {
   type SpaceHistoryUnavailableReason,
   type SpaceHistoryVersion
 } from '../../hebra';
+import { REQUEST_RESERVE_BYTES } from '../../accounts/capacity';
 import { logEvent } from '../../log/logger';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
 import { usageOf, type DirectoryView, type SpaceHistoryAccess, type ToolContext } from '../context';
@@ -67,6 +74,10 @@ export interface SpaceVersionsDeps {
   directory?: () => Promise<DirectoryView>;
   /** El espacio, para elegir la organización dueña en el directorio. */
   spaceId?: string;
+  /** La cuenta, para «una lectura de autores a la vez» (cualquier objeto estable mientras esté
+   *  abierto su contexto: `register-tools.ts` pasa el puerto de su biblioteca personal). Sin
+   *  él, cuenta como cuenta el acceso al historial del espacio. */
+  account?: object;
 }
 
 /** Una cuenta sellada por el relé, con su nombre visible. */
@@ -128,13 +139,21 @@ export interface ServerReadOutput extends ServerListedVersion {
   source: 'server';
   body: string;
   namesResolved: boolean;
-  /** Solo con `authors: true`. */
+  /** Solo con `authors: true`. `null` si la versión no trae `ydoc` o si no se calcularon
+   *  (`authorsReason`). */
   authorRuns?: AuthorRunOutput[] | null;
   /** Solo con `authors: true`: los dueños de los `clientID` que avanzaron desde la versión
    *  anterior (`advancedOwners` de `versionSummaries`), con el mismo formato que los tramos
-   *  y sin `text`. */
-  changedBy?: Array<Omit<AuthorRunOutput, 'text'>>;
+   *  y sin `text`. `null` si no se calcularon (`authorsReason`). */
+  changedBy?: Array<Omit<AuthorRunOutput, 'text'>> | null;
+  /** Solo con `authors: true` y sin autores calculados: por qué (ver `AuthorsReason`). */
+  authorsReason?: AuthorsReason;
 }
+
+/** Por qué `authors: true` no trajo autores: `too_large`, la nota tiene más versiones o más
+ *  bytes de los que caben en la reserva de una llamada; `busy`, otra lectura de autores de la
+ *  misma cuenta está en curso. El cuerpo y `editedBy` salen igual. */
+export type AuthorsReason = 'too_large' | 'busy';
 
 export type Unavailable = { unavailable: LocalSourceReason };
 
@@ -143,6 +162,25 @@ export type Unavailable = { unavailable: LocalSourceReason };
 const MAX_HISTORY_PAGES = 12;
 /** La página que se pide al relé (`HISTORY_PAGE_MAX`). */
 const RELAY_PAGE = 100;
+
+const MIB = 1024 * 1024;
+/** Lo más que cabe en un sobre del relé (`RELAY_MAX_ENVELOPE_BYTES` de Hebra): el tamaño que se
+ *  supone a una versión cuyo `byteLength` no manda el relé. */
+const RELAY_MAX_ENVELOPE_BYTES = 2 * MIB;
+/** Versiones que lee como mucho `authors: true` (las que guarda el relé por nota, §28.2). */
+export const AUTHORS_MAX_ENTRIES = 500;
+/**
+ * Bytes de sobres que lee como mucho `authors: true`, sumando el `byteLength` de cada versión
+ * ANTES de leer ninguna. Tiene que caber en la reserva de una llamada (`REQUEST_RESERVE_BYTES`,
+ * D22), porque la admisión no aparta más para esta: mientras dura la lectura viven a la vez los
+ * sobres, los cuerpos y `ydoc` descifrados y el contexto de autores de Yjs, unas cuatro veces
+ * los bytes de los sobres (estimado, no medido). Por eso la cuarta parte de la reserva.
+ */
+export const AUTHORS_MAX_BYTES = REQUEST_RESERVE_BYTES / 4;
+
+/** Las cuentas con una lectura de autores en curso (`SpaceVersionsDeps.account`): como mucho
+ *  una a la vez por cuenta, para que varias llamadas suyas no sumen varias lecturas caras. */
+const authorsInFlight = new WeakSet<object>();
 
 const UNCONFIRMED_OWNER = 'Autor sin confirmar';
 const PREVIOUS_TEXT = 'Texto anterior';
@@ -331,20 +369,34 @@ export async function listServerVersions(
   const visible: SpaceHistoryEntry[] = [];
   let first: SpaceHistoryListing | null = null;
   let next: Cursor | null = null;
+  /** La página del relé en curso: se reutiliza mientras le queden entradas por mirar (con
+   *  versiones ocultas, cada vuelta mira solo un tramo) y solo se pide otra al agotarla. */
+  let page: SpaceHistoryListing | null = null;
+  let pages = 0;
 
-  for (let pages = 0; pages < MAX_HISTORY_PAGES && next === null; pages += 1) {
-    const page = await listSpaceHistory({
-      ...request(deps, input.id, localBody),
-      before,
-      limit: RELAY_PAGE,
-      declarations: false
-    });
-    if (page.status === 'locked') return { unavailable: 'locked' };
-    if (page.status === 'unavailable') return { unavailable: page.reason };
-    first ??= page;
-    // Un cursor de una página que ya no tiene tantas entradas: inválido, como una versión
-    // de un cursor local que ya no existe.
-    if (skip > page.entries.length) throw new ToolError('invalid_input');
+  for (;;) {
+    if (page === null) {
+      // Presupuesto agotado sin llenar la página: no es el final del historial. El cursor
+      // sigue por donde se quedó, en vez de un `null` que diría que no hay más.
+      if (pages >= MAX_HISTORY_PAGES) {
+        next = { before, skip };
+        break;
+      }
+      pages += 1;
+      const listed = await listSpaceHistory({
+        ...request(deps, input.id, localBody),
+        before,
+        limit: RELAY_PAGE,
+        declarations: false
+      });
+      if (listed.status === 'locked') return { unavailable: 'locked' };
+      if (listed.status === 'unavailable') return { unavailable: listed.reason };
+      page = listed;
+      first ??= listed;
+      // Un cursor de una página que ya no tiene tantas entradas: inválido, como una versión
+      // de un cursor local que ya no existe.
+      if (skip > page.entries.length) throw new ToolError('invalid_input');
+    }
     const candidates = page.entries.slice(skip, skip + (input.limit - visible.length + 1));
     const hidden = await hiddenOf(ctx, deps, input.id, localBody, page, candidates);
     if (!Array.isArray(hidden)) return hidden;
@@ -362,6 +414,7 @@ export async function listServerVersions(
     if (page.nextBefore === null) break;
     before = page.nextBefore;
     skip = 0;
+    page = null;
   }
 
   const names = await Names.load(deps);
@@ -421,7 +474,26 @@ export async function readServerVersion(
   deps: SpaceVersionsDeps,
   input: { id: string; versionId: number; authors?: boolean }
 ): Promise<ServerReadOutput | Unavailable> {
-  const read = await readServerVersionBody(ctx, deps, input);
+  const wantsAuthors = input.authors === true;
+  // Una lectura de autores a la vez por cuenta: se aparta antes de ir al relé.
+  const account = deps.account ?? deps.history;
+  const busy = wantsAuthors && authorsInFlight.has(account);
+  const holds = wantsAuthors && !busy;
+  if (holds) authorsInFlight.add(account);
+  try {
+    return await readServerVersionWith(ctx, deps, input, holds ? 'authors' : busy ? 'busy' : 'plain');
+  } finally {
+    if (holds) authorsInFlight.delete(account);
+  }
+}
+
+async function readServerVersionWith(
+  ctx: ToolContext,
+  deps: SpaceVersionsDeps,
+  input: { id: string; versionId: number },
+  mode: 'plain' | 'authors' | 'busy'
+): Promise<ServerReadOutput | Unavailable> {
+  const read = await readServerVersionBody(ctx, deps, { ...input, authors: mode === 'authors' });
   if ('unavailable' in read) return read;
   const { history, version, entry, versions } = read;
   const names = await Names.load(deps);
@@ -432,7 +504,12 @@ export async function readServerVersion(
     body: version.body,
     namesResolved: names.resolved
   };
-  if (input.authors === true) {
+  const authorsReason: AuthorsReason | undefined = mode === 'busy' ? 'busy' : read.authorsReason;
+  if (authorsReason !== undefined) {
+    output.authorRuns = null;
+    output.changedBy = null;
+    output.authorsReason = authorsReason;
+  } else if (mode === 'authors') {
     const ydocByRev = new Map(
       (versions ?? []).map((item) => [item.rev, item.status === 'ok' ? item.ydoc : null] as const)
     );
@@ -465,15 +542,23 @@ async function readServerVersionBody(
       version: Extract<SpaceHistoryVersion, { status: 'ok' }>;
       /** Con `authors`: todas las versiones leídas (para `buildHistoryContext`). */
       versions: SpaceHistoryVersion[] | null;
+      /** Con `authors` y la nota por encima de los topes: solo se leyó la versión pedida. */
+      authorsReason?: 'too_large';
     }
   | Unavailable
 > {
-  const all = input.authors === true;
   const localBody = await localBodyOf(ctx, input.id);
-  const history = await collectHistory(deps, input.id, localBody, { rev: input.versionId, all });
+  const history = await collectHistory(deps, input.id, localBody, {
+    rev: input.versionId,
+    all: input.authors === true
+  });
   if ('unavailable' in history) return history;
   const entry = history.entries.find((item) => item.rev === input.versionId);
   if (!entry) throw new ToolError('not_found');
+  // Los topes de `authors`, ANTES de leer ningún sobre: con el listado (sin cuerpos) ya se
+  // sabe cuántas versiones son y cuánto pesan.
+  const tooLarge = input.authors === true && !authorsFit(history.entries);
+  const all = input.authors === true && !tooLarge;
   const revs = all ? history.entries.map((item) => item.rev) : [entry.rev];
   const read = await readSpaceHistory({ ...request(deps, input.id, localBody), revs, history });
   if (read.status === 'locked') return { unavailable: 'locked' };
@@ -482,7 +567,26 @@ async function readServerVersionBody(
   if (!version || version.status !== 'ok' || bodyIsHidden(ctx, version.body)) {
     throw new ToolError('not_found');
   }
-  return { history, entry, version, versions: all ? read.versions : null };
+  return {
+    history,
+    entry,
+    version,
+    versions: all ? read.versions : null,
+    ...(tooLarge ? { authorsReason: 'too_large' as const } : {})
+  };
+}
+
+/** `true` si leer todas las `entries` para los autores cabe en los topes: como mucho
+ *  `AUTHORS_MAX_ENTRIES` versiones y `AUTHORS_MAX_BYTES` de sobres (una sin `byteLength`, como
+ *  el sobre más grande posible). */
+function authorsFit(entries: readonly SpaceHistoryEntry[]): boolean {
+  if (entries.length > AUTHORS_MAX_ENTRIES) return false;
+  let bytes = 0;
+  for (const entry of entries) {
+    bytes += entry.byteLength ?? RELAY_MAX_ENVELOPE_BYTES;
+    if (bytes > AUTHORS_MAX_BYTES) return false;
+  }
+  return true;
 }
 
 /** `hebra_restore_version` con `space`: el cuerpo de la versión del relé que se restaura. */

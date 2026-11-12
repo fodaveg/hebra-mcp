@@ -98,7 +98,9 @@ que busca no está (las de otros dispositivos no llegan aquí), que la restaure 
 `space` son las del historial del espacio en el servidor, las que ven todos los miembros, con
 quién editó cada una (`editedBy`; un agente sale como "<nombre> (agente)"). Si la respuesta dice
 `source: "local"` (el servidor no las dio), son las de este dispositivo: pasa ese mismo `source`
-a `hebra_read_version` y `hebra_restore_version`.
+a `hebra_read_version` y `hebra_restore_version`. Restaurar sin él nunca usa una local: si el
+servidor no da la versión, `history_unavailable` sin escribir nada. Con `authors: true`,
+`authorRuns: null` y `authorsReason` (`too_large` o `busy`) dicen que no se calcularon.
 
 ## Adjuntos de una nota
 

@@ -66,6 +66,14 @@ class FakeHistoryRelay {
   /** Tamaño de página que fuerza el relé (para probar `nextBefore`). */
   pageSize = 100;
   calls: string[] = [];
+  /** Los `revs` de cada `POST /history/read`, en orden. */
+  reads: number[][] = [];
+  /** El `byteLength` que manda el relé de cada versión (por defecto, `100 + rev`). */
+  byteLengthOf: (rev: number) => number | undefined = (rev) => 100 + rev;
+  /** Si está, el siguiente `POST /history/read` (solo ese) avisa con `onRead` y espera a que
+   *  se resuelva. */
+  hold: Promise<void> | null = null;
+  onRead: (() => void) | null = null;
   private envelopes = new Map<number, string>();
 
   constructor(private readonly noteId: string) {}
@@ -84,6 +92,12 @@ class FakeHistoryRelay {
       }
     });
     this.envelopes.set(version.rev, base64FromBytes(envelope));
+  }
+
+  /** Una versión que sale en `GET /history` pero cuyo sobre no se puede leer (para probar
+   *  lo que se decide antes de leer sobres, sin cifrar cientos). */
+  listOnly(version: FakeVersion): void {
+    this.versions.push(version);
   }
 
   readonly fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -109,7 +123,7 @@ class FakeHistoryRelay {
           windowStart: version.savedAt,
           windowEnd: version.savedAt,
           savedAt: version.savedAt,
-          byteLength: 100 + version.rev,
+          byteLength: this.byteLengthOf(version.rev),
           generationSyncVaultId: VAULT,
           writers: version.writers
         })),
@@ -121,6 +135,13 @@ class FakeHistoryRelay {
     if (route === 'history/clients') return json({ clients: this.clients, nextAfter: null });
     if (route === 'history/read') {
       const { revs } = JSON.parse(String(init?.body)) as { revs: number[] };
+      this.reads.push(revs);
+      const hold = this.hold;
+      this.hold = null;
+      if (hold) {
+        this.onRead?.();
+        await hold;
+      }
       return json({
         entries: revs
           .filter((rev) => this.envelopes.has(rev))
@@ -191,6 +212,7 @@ describe('versiones de una nota de espacio desde el relé (HS-5)', () => {
         identity: () => ({ syncVaultId: VAULT, vaultKeyHex: Buffer.from(KEY).toString('hex') })
       },
       spaceId: SPACE,
+      account: {},
       ...(options.directory === false
         ? { directory: async () => { throw new ToolError('organizations_unavailable'); } }
         : { directory: async () => DIRECTORY })
@@ -340,6 +362,162 @@ describe('versiones de una nota de espacio desde el relé (HS-5)', () => {
     await expect(
       runRestoreVersion(await fresh(), { id, versionId: 4, expectedRevision: revision, operationId: opId() }, deps)
     ).rejects.toMatchObject({ code: 'revision_conflict' });
+  });
+
+  it('restaurar sin source o con source "server" y el relé caído no escribe, aunque haya una local con ese número', async () => {
+    const { id, relay, deps } = await setup();
+    // El número de una versión LOCAL de la misma nota: antes, al caer a lo local, el escritor
+    // la aceptaba y guardaba un texto que el agente nunca había visto.
+    const { versionedNoteVersionId: versionId } = test!.library;
+    const { revision, body } = await runReadNote(await fresh(), { id });
+    const down: Array<[() => void, string]> = [
+      [() => { relay.status = 404; }, 'not_found'],
+      [() => { relay.status = 429; }, 'rate_limited'],
+      [() => { relay.status = null; relay.offline = true; }, 'offline']
+    ];
+    for (const [breakRelay, sourceReason] of down) {
+      breakRelay();
+      for (const source of [undefined, 'server'] as const) {
+        await expect(
+          runRestoreVersion(
+            await fresh(),
+            { id, versionId, expectedRevision: revision, operationId: opId(), ...(source ? { source } : {}) },
+            deps
+          )
+        ).rejects.toMatchObject({ code: 'history_unavailable', extra: { sourceReason } });
+      }
+    }
+    expect((await runReadNote(await fresh(), { id })).body).toBe(body);
+
+    // Con `source: "local"`, a propósito, sí: la versión de este dispositivo, sin preguntar al relé.
+    relay.calls = [];
+    const restored = await runRestoreVersion(
+      await fresh(),
+      { id, versionId, expectedRevision: revision, operationId: opId(), source: 'local' },
+      deps
+    );
+    expect(restored).toMatchObject({ id, outcome: 'saved', source: 'local' });
+    expect(restored).not.toHaveProperty('sourceReason');
+    expect(relay.calls).toEqual([]);
+    expect((await runReadNote(await fresh(), { id })).body).toBe(VERSIONED_OLD_BODY);
+  });
+
+  it('leer con source "server" y el relé caído es un error, sin caer a lo local', async () => {
+    const { id, relay, deps } = await setup();
+    const { versionedNoteVersionId: versionId } = test!.library;
+    relay.status = 404;
+    await expect(runReadVersion(await fresh(), { id, versionId, source: 'server' }, deps)).rejects.toMatchObject({
+      code: 'history_unavailable',
+      extra: { sourceReason: 'not_found' }
+    });
+    // Sin `source`, la lectura (que no escribe) sí cae a lo local, marcada.
+    expect(await runReadVersion(await fresh(), { id, versionId }, deps)).toMatchObject({
+      source: 'local',
+      sourceReason: 'not_found',
+      body: VERSIONED_OLD_BODY
+    });
+  });
+
+  it('authors con más de 500 versiones no lee los sobres: authorRuns null y too_large', async () => {
+    const { id, relay, deps } = await setup();
+    for (let rev = 100; rev < 600; rev += 1) {
+      relay.listOnly({ rev, body: '', ydoc: null, savedAt: '2026-11-12T09:00:00.000Z', writers: [] });
+    }
+    const read = await runReadVersion(await fresh(), { id, versionId: 9, authors: true }, deps);
+    expect(read).toMatchObject({
+      source: 'server',
+      versionId: 9,
+      body: `${VERSIONED_OLD_BODY}\nAñadido por el agente.`,
+      authorRuns: null,
+      changedBy: null,
+      authorsReason: 'too_large'
+    });
+    // Solo se leyó el sobre de la versión pedida.
+    expect(relay.reads).toEqual([[9]]);
+  });
+
+  it('authors con sobres que suman más del tope no los lee: too_large (y un tamaño desconocido cuenta como el máximo)', async () => {
+    const { id, relay, deps } = await setup();
+    relay.byteLengthOf = (rev) => (rev === 4 ? 2 * 1024 * 1024 : 100);
+    const big = await runReadVersion(await fresh(), { id, versionId: 9, authors: true }, deps);
+    expect(big).toMatchObject({ authorRuns: null, changedBy: null, authorsReason: 'too_large' });
+    expect(relay.reads).toEqual([[9]]);
+
+    relay.reads = [];
+    relay.byteLengthOf = (rev) => (rev === 4 ? undefined : 100);
+    const unknown = await runReadVersion(await fresh(), { id, versionId: 9, authors: true }, deps);
+    expect(unknown).toMatchObject({ authorRuns: null, authorsReason: 'too_large' });
+    expect(relay.reads).toEqual([[9]]);
+
+    // Dentro del tope, los autores de siempre.
+    relay.reads = [];
+    relay.byteLengthOf = () => 100;
+    const small = await runReadVersion(await fresh(), { id, versionId: 9, authors: true }, deps);
+    expect((small as { authorRuns: unknown[] }).authorRuns).toHaveLength(2);
+    expect(small).not.toHaveProperty('authorsReason');
+  });
+
+  it('como mucho una lectura de autores a la vez por cuenta: la otra sale con busy', async () => {
+    const { id, relay, deps } = await setup();
+    let release!: () => void;
+    relay.hold = new Promise<void>((resolve) => { release = resolve; });
+    const reached = new Promise<void>((resolve) => { relay.onRead = resolve; });
+    const first = runReadVersion(await fresh(), { id, versionId: 9, authors: true }, deps);
+    await reached;
+    // La misma cuenta en otro espacio (otro acceso al historial, la misma `account`): ocupada.
+    const otherSpace: SpaceVersionsDeps = { ...deps, history: { ...deps.history } };
+    const second = await runReadVersion(await fresh(), { id, versionId: 4, authors: true }, otherSpace);
+    expect(second).toMatchObject({ source: 'server', versionId: 4, authorRuns: null, changedBy: null, authorsReason: 'busy' });
+    release();
+    expect((await first as { authorRuns: unknown[] }).authorRuns).toHaveLength(2);
+    // Acabada la primera, la cuenta vuelve a poder.
+    const third = await runReadVersion(await fresh(), { id, versionId: 4, authors: true }, deps);
+    expect(third).not.toHaveProperty('authorsReason');
+  });
+
+  it('con 30 versiones privadas recientes y limit 1, la página trae la visible y el cursor sigue', async () => {
+    const { id, relay, deps } = await setup();
+    for (let rev = 10; rev < 40; rev += 1) {
+      await relay.add({
+        rev, body: `# Secreta ${rev}\n\n#secreto/personal ${BAIT_TAG}\n`, ydoc: null,
+        savedAt: '2026-11-12T11:00:00.000Z', writers: [{ accountId: ANA, actorKind: 'app' }]
+      });
+    }
+    const page = await runListVersions(await fresh(), { id, limit: 1 }, deps);
+    expect(page.versions.map((version) => version.versionId)).toEqual([9]);
+    expect(page.nextCursor).toMatch(/^vs1\./u);
+    // Una sola página del relé: la ya bajada se reutiliza mientras queden entradas.
+    expect(relay.calls.filter((route) => route === 'history')).toHaveLength(1);
+    const rest = await runListVersions(await fresh(), { id, limit: 1, cursor: page.nextCursor! }, deps);
+    expect(rest.versions.map((version) => version.versionId)).toEqual([4]);
+    expect(rest.nextCursor).toBeNull();
+  });
+
+  it('si se agota el presupuesto de páginas del relé, devuelve el cursor en vez de null', async () => {
+    const { id, relay, deps } = await setup();
+    relay.pageSize = 1;
+    for (let rev = 10; rev < 40; rev += 1) {
+      await relay.add({
+        rev, body: `# Secreta ${rev}\n\n#secreto/personal ${BAIT_TAG}\n`, ydoc: null,
+        savedAt: '2026-11-12T11:00:00.000Z', writers: [{ accountId: ANA, actorKind: 'app' }]
+      });
+    }
+    const seen: number[] = [];
+    let cursor: string | undefined;
+    let calls = 0;
+    do {
+      const page = await runListVersions(await fresh(), { id, limit: 1, ...(cursor ? { cursor } : {}) }, deps);
+      if (calls === 0) {
+        // 12 páginas de una entrada, todas privadas: nada visible todavía, pero NO es el final.
+        expect(page.versions).toEqual([]);
+        expect(page.nextCursor).toMatch(/^vs1\./u);
+      }
+      seen.push(...page.versions.map((version) => version.versionId));
+      cursor = page.nextCursor ?? undefined;
+      calls += 1;
+    } while (cursor !== undefined && calls < 10);
+    expect(seen).toEqual([9, 4]);
+    expect(cursor).toBeUndefined();
   });
 
   it('sin space todo sigue como hoy: sin source, y source "server" no vale', async () => {

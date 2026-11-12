@@ -15,6 +15,9 @@ export type ToolErrorCode =
   | 'space_not_supported'
   // El directorio del agente no está disponible (D22, `src/spaces/directory.ts`).
   | 'organizations_unavailable'
+  // El historial del espacio en el relé no dio la versión pedida (D26): restaurar sin
+  // `source: "local"`, o leer con `source: "server"`. Lleva `sourceReason`; no se escribió nada.
+  | 'history_unavailable'
   | 'not_found'
   | 'ambiguous_title'
   | 'privacy_config_unresolved'

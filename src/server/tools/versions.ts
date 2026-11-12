@@ -32,9 +32,12 @@
  * En un espacio compartido (`space`, HS-5, 12 nov 2026), las tres van por defecto al historial
  * del espacio en el relé (`./space-versions.ts`, §28 de Hebra): `versionId` es entonces el
  * `rev` de la versión y cada una dice quién la editó. Si el relé no lo da (404 con la función
- * apagada, sin red…), caen a estas versiones locales y la respuesta lo dice (`source: "local"`,
- * `sourceReason`). Con `source: "local"` se piden las locales a propósito (las de un listado
- * que ya cayó a ellas: sus `versionId` no son `rev` del relé).
+ * apagada, sin red…), listar y leer sin `source` caen a estas versiones locales y la respuesta lo
+ * dice (`source: "local"`, `sourceReason`). Con `source: "local"` se piden las locales a
+ * propósito (las de un listado que ya cayó a ellas: sus `versionId` no son `rev` del relé).
+ * Restaurar sin `source` (o con `"server"`) y leer con `source: "server"` nunca caen a lo
+ * local: `history_unavailable` con `sourceReason`, porque la versión local con ese número es
+ * otra, y restaurarla guardaría un texto que el agente no vio.
  */
 import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
@@ -209,6 +212,9 @@ export async function runReadVersion(
     await requireLoadedVisibleNote(ctx, input.id);
     const server = await readServerVersion(ctx, space, input);
     if (!('unavailable' in server)) return server;
+    // Pedida al servidor a propósito: nunca otra versión con el mismo número (D26).
+    if (input.source === 'server') throw historyUnavailable('hebra_read_version', server.unavailable);
+    // Sin `source`, una lectura (no escribe) cae a la de este dispositivo y lo dice.
     logEvent({ event: 'space.history_local', tool: 'hebra_read_version', reason: server.unavailable });
     return { ...(await readLocalVersion(ctx, input)), source: 'local', sourceReason: server.unavailable };
   }
@@ -218,6 +224,14 @@ export async function runReadVersion(
 
 /** De dónde sale la versión en un espacio: el historial del relé o este dispositivo. */
 export type VersionSource = 'server' | 'local';
+
+/** El relé no dio la versión que se pidió al servidor (D26): `history_unavailable` con el
+ *  motivo, en vez de tomar la versión local con el mismo número, que es otra (los `versionId`
+ *  locales y los `rev` del relé no son del mismo espacio de nombres). */
+function historyUnavailable(tool: string, sourceReason: LocalSourceReason): ToolError {
+  logEvent({ event: 'space.history_unavailable', tool, reason: sourceReason });
+  return new ToolError('history_unavailable', { sourceReason });
+}
 
 async function readLocalVersion(
   ctx: ToolContext,
@@ -235,7 +249,9 @@ async function readLocalVersion(
 }
 
 /** `hebra_restore_version`: deja el cuerpo de la versión como una edición nueva sobre la
- *  revisión leída. La misma salida y los mismos errores que `hebra_edit_note`. */
+ *  revisión leída. La misma salida y los mismos errores que `hebra_edit_note`. En un espacio,
+ *  una versión local solo con `source: "local"` explícito: sin `source` o con `"server"`, si el
+ *  relé no la da, `history_unavailable` sin escribir nada (D26). */
 export async function runRestoreVersion(
   ctx: ToolContext,
   input: {
@@ -246,7 +262,7 @@ export async function runRestoreVersion(
     source?: VersionSource;
   },
   space?: SpaceVersionsDeps
-): Promise<EditNoteOutcome | (EditNoteOutcome & { source: VersionSource; sourceReason?: LocalSourceReason })> {
+): Promise<EditNoteOutcome | (EditNoteOutcome & { source: VersionSource })> {
   if (!ctx.write) throw new ToolError('invalid_input');
   if (!space && input.source === 'server') throw new ToolError('invalid_input');
   requireValidOperationId(input.operationId);
@@ -254,14 +270,13 @@ export async function runRestoreVersion(
 
   // HS-5: en un espacio, la versión del relé (por defecto) se lee y descifra aquí y el
   // escritor la restaura como una edición nueva, con las mismas comprobaciones que una local.
+  // Si el relé no la da, NO se cae a la local con el mismo número: sería otra versión, y el
+  // escritor guardaría un texto que el agente nunca vio.
   let serverVersion: { body: string } | undefined;
-  let sourceReason: LocalSourceReason | undefined;
   if (space && input.source !== 'local') {
     const read = await serverVersionBody(ctx, space, input);
-    if ('unavailable' in read) {
-      sourceReason = read.unavailable;
-      logEvent({ event: 'space.history_local', tool: 'hebra_restore_version', reason: sourceReason });
-    } else serverVersion = read;
+    if ('unavailable' in read) throw historyUnavailable('hebra_restore_version', read.unavailable);
+    serverVersion = read;
   }
 
   let result: EditNoteOutcome;
@@ -288,9 +303,5 @@ export async function runRestoreVersion(
   // (C3 de la revisión de Codex; la escritura ya está hecha). Lo juzga la puerta final.
   declareWriteUsage(ctx, result);
   if (!space) return result;
-  return {
-    ...result,
-    source: serverVersion ? 'server' : 'local',
-    ...(sourceReason !== undefined ? { sourceReason } : {})
-  };
+  return { ...result, source: serverVersion ? 'server' : 'local' };
 }

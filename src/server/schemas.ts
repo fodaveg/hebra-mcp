@@ -535,7 +535,7 @@ const VERSION_SOURCE = z
   .enum(['server', 'local'])
   .optional()
   .describe(
-    'Solo con `space`: `server` (por defecto), el historial del espacio en el servidor; `local`, las versiones de este dispositivo. Pasa el `source` que devolvió hebra_list_versions.'
+    'Solo con `space`: `server` (por defecto), el historial del espacio en el servidor; `local`, las versiones de este dispositivo. Pasa el `source` que devolvió hebra_list_versions: restaurar solo usa una local con `local` explícito.'
   );
 
 export const readVersionInputShape = {
@@ -545,7 +545,7 @@ export const readVersionInputShape = {
     .boolean()
     .optional()
     .describe(
-      'Solo con `space` y una versión del servidor: devuelve además `authorRuns`, el texto de la versión en tramos con su autor. Lee todas las versiones de la nota: más lento.'
+      'Solo con `space` y una versión del servidor: devuelve además `authorRuns`, el texto de la versión en tramos con su autor. Lee todas las versiones de la nota: más lento, y con demasiadas (o una a la vez ya en curso) sale `authorRuns: null` con `authorsReason`.'
     ),
   source: VERSION_SOURCE
 };
