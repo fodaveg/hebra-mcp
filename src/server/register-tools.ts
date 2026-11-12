@@ -140,6 +140,7 @@ import { runJdMove } from './tools/jd-move';
 import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
 import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
+import type { SpaceVersionsDeps } from './tools/space-versions';
 
 /** `annotations` MCP: ninguna herramienta toca el mundo exterior, y solo
  *  `hebra_replace_file_text` (D15) es destructiva. */
@@ -611,6 +612,18 @@ export function registerTools(
     return (input) => (ctx.trackInvocation ? ctx.trackInvocation(() => invoke(input)) : invoke(input));
   }
 
+  /** HS-5: lo que las herramientas de versiones necesitan para el historial del relé; solo
+   *  existe si `space` eligió un espacio compartido. Los nombres, del directorio de la
+   *  persona (el del contexto raíz, como `hebra_note_authors`). */
+  const spaceVersionsDeps = (selected: ServerContext): SpaceVersionsDeps | undefined =>
+    selected.spaceHistory
+      ? {
+          history: selected.spaceHistory,
+          ...(ctx.directory ? { directory: ctx.directory } : {}),
+          ...(selected.spaceId !== undefined ? { spaceId: selected.spaceId } : {})
+        }
+      : undefined;
+
   server.registerTool('hebra_list_spaces', {
     title: 'Espacios que vería la persona',
     description: 'Lista los espacios que vería la persona de este agente, con `spaceId`, `name` (null si no se puede leer), `organization` ({orgId, name} o null) y `granted`. Solo con `granted: true` se puede usar spaceId como selector space; con false responde space_access_denied, aunque seas miembro de la organización. Omitir space siempre elige personal. Si `organizationsAvailable` es false, el directorio no está disponible y salen solo los espacios con concesión. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
@@ -1023,22 +1036,31 @@ export function registerTools(
     {
       title: 'Versiones anteriores de una nota',
       description:
-        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. Son las de este dispositivo: las 5 más recientes de cada nota se conservan siempre y las demás caducan a los 7 días. Paginada (`limit`, `cursor`, `nextCursor`); 50 por página por defecto.',
+        'Lista las versiones anteriores guardadas de una nota (sin cuerpo), la más reciente primero. En la biblioteca personal son las de este dispositivo: las 5 más recientes de cada nota se conservan siempre y las demás caducan a los 7 días. Con `space`, las del historial del espacio en el servidor, que ven todos los miembros (`source: "server"`): `versionId` es la versión del servidor y cada una trae `editedBy` ({accountId, actorKind, name, isSelf}; `name` del directorio de la organización, "<nombre> (agente)" para un agente, "Antiguo miembro" si ya no está, null sin directorio), con `recording` ("quota": no se está guardando por falta de sitio) y `purged`. Si el servidor no da el historial, las de este dispositivo con `source: "local"` y `sourceReason` (not_found, offline, rate_limited, failed, locked): pásale ese `source` a hebra_read_version y hebra_restore_version. Paginada (`limit`, `cursor`, `nextCursor`); 50 por página por defecto.',
       inputSchema: scoped(listVersionsInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_list_versions', (toolCtx, input) => runListVersions(toolCtx, input), { privacyLoad: 'lazy' })
+    gated(
+      'hebra_list_versions',
+      (toolCtx, input, selected) => runListVersions(toolCtx, input, spaceVersionsDeps(selected)),
+      { privacyLoad: 'lazy' }
+    )
   );
 
   server.registerTool(
     'hebra_read_version',
     {
       title: 'Leer una versión anterior',
-      description: 'Lee el cuerpo de una versión anterior de una nota (versionId de hebra_list_versions).',
+      description:
+        'Lee el cuerpo de una versión anterior de una nota (versionId de hebra_list_versions). Con `space`, la del historial del espacio en el servidor, con `editedBy`; con `authors: true`, además `authorRuns` (el texto en tramos, cada uno con `author`, `kind` account/unconfirmedOwner/previousText y `confirmed`: false es "sin confirmar") y `changedBy`. Si el servidor no la da, la de este dispositivo con `source: "local"` y `sourceReason`.',
       inputSchema: scoped(readVersionInputShape),
       annotations: READ_ONLY
     },
-    gated('hebra_read_version', (toolCtx, input) => runReadVersion(toolCtx, input), { privacyLoad: 'lazy' })
+    gated(
+      'hebra_read_version',
+      (toolCtx, input, selected) => runReadVersion(toolCtx, input, spaceVersionsDeps(selected)),
+      { privacyLoad: 'lazy' }
+    )
   );
 
   server.registerTool(
@@ -1046,11 +1068,15 @@ export function registerTools(
     {
       title: 'Restaurar una versión anterior',
       description:
-        'Deja el cuerpo de una versión anterior como una edición nueva de la nota, sobre la revisión leída con hebra_read_note (expectedRevision). Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Lo que había queda como versión anterior. Reintentar con el mismo operationId no la repite. En un espacio compartido, un cambio de otro miembro llegado justo antes de guardar se combina con la versión restaurada en la misma nota (`outcome: "merged"`, sin copia): el texto guardado no es exactamente el de la versión; si no encaja, copia de conflicto como siempre.',
+        'Deja el cuerpo de una versión anterior como una edición nueva de la nota, sobre la revisión leída con hebra_read_note (expectedRevision). Si la nota cambió desde la lectura, revision_conflict: vuelve a leerla. Lo que había queda como versión anterior. Reintentar con el mismo operationId no la repite. En un espacio compartido, un cambio de otro miembro llegado justo antes de guardar se combina con la versión restaurada en la misma nota (`outcome: "merged"`, sin copia): el texto guardado no es exactamente el de la versión; si no encaja, copia de conflicto como siempre. Con `space`, restaura una versión del historial del servidor (o, con `source: "local"` o si el servidor no la da, una de este dispositivo) y la respuesta dice cuál (`source`, `sourceReason`).',
       inputSchema: scoped(restoreVersionInputShape),
       annotations: WRITE_IDEMPOTENT
     },
-    gated('hebra_restore_version', (toolCtx, input) => runRestoreVersion(toolCtx, input), { privacyLoad: 'lazy' })
+    gated(
+      'hebra_restore_version',
+      (toolCtx, input, selected) => runRestoreVersion(toolCtx, input, spaceVersionsDeps(selected)),
+      { privacyLoad: 'lazy' }
+    )
   );
 
   server.registerTool(

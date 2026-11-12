@@ -1,4 +1,5 @@
 import type { AdmissionTicket } from '../accounts/capacity';
+import type { SpaceHistoryTransport } from '../hebra';
 import type { Clock } from '../accounts/lifecycle';
 import type { HebraLibraryPort } from '../store/types';
 import type { PrivacyFilter } from '../privacy/filter';
@@ -57,6 +58,19 @@ export interface SpaceLifecycleControl {
   beginShutdown(): void;
 }
 
+/**
+ * El historial compartido de un espacio en el relé (HS-5, §28 de Hebra), para
+ * `hebra_list_versions`, `hebra_read_version` y `hebra_restore_version` con `space`. Solo lo
+ * lleva el `ServerContext` de un espacio abierto: el transporte con la credencial y la
+ * comprobación del catálogo de su sync, y la identidad que piden `listSpaceHistory` y
+ * `readSpaceHistory` (bóveda vigente y su clave). `identity` lanza `space_access_denied` si el
+ * espacio ya se cerró: la clave se borra al cerrarlo.
+ */
+export interface SpaceHistoryAccess {
+  transport: SpaceHistoryTransport;
+  identity(): { syncVaultId: string; vaultKeyHex: string };
+}
+
 /** Lo que devuelve el relé, y qué miembro es la persona (el `accountId` de su registro). */
 export interface DirectoryView {
   selfAccountId: string;
@@ -72,6 +86,8 @@ export interface ServerContext {
   spaceId?: string;
   /** Nombre del espacio compartido (cacheado; `null` si no se pudo leer). Contenido del usuario: nunca a logs. */
   spaceName?: () => string | null;
+  /** Solo en un espacio (HS-5): su historial en el relé. */
+  spaceHistory?: SpaceHistoryAccess;
   authorize?(): Promise<void>;
   port: HebraLibraryPort;
   /** La configuración de privados; con `privacyConfigSource`, la del arranque. */

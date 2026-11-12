@@ -88,13 +88,17 @@ y [Johnny.Decimal](johnny-decimal.md).
 | Herramienta | Entrada | Salida y notas |
 |---|---|---|
 | `hebra_list_versions` | `id`, `limit?` 1-200 (50), `cursor?` | `{id, versions: [{versionId, createdAt, byteLength}], nextCursor}`, la más reciente primero. Un cursor cuya versión ya no existe da `invalid_input`. |
-| `hebra_read_version` | `id`, `versionId` | El cuerpo de esa versión. |
-| `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId` | Como `hebra_edit_note` pero con el cuerpo entero de la versión (sin `applied`). Lo que había queda como versión. En un espacio puede volver `merged`. |
+| `hebra_read_version` | `id`, `versionId`, `authors?`, `source?` | El cuerpo de esa versión. Con `space` y `authors: true`, también `authorRuns`: el texto en tramos con su autor. |
+| `hebra_restore_version` | `id`, `versionId`, `expectedRevision`, `operationId`, `source?` | Como `hebra_edit_note` pero con el cuerpo entero de la versión (sin `applied`). Lo que había queda como versión. En un espacio puede volver `merged`. |
 
 Para "recupera cómo estaba la nota": `hebra_list_versions`, `hebra_read_version` para enseñarle
 la que elija, `hebra_read_note` (por la `revision`) y `hebra_restore_version` con un
-`operationId` nuevo. Las versiones son las de este dispositivo: si la que busca no está (las de
-otros dispositivos no llegan aquí), que la restaure desde Hebra.
+`operationId` nuevo. En la biblioteca personal las versiones son las de este dispositivo: si la
+que busca no está (las de otros dispositivos no llegan aquí), que la restaure desde Hebra. Con
+`space` son las del historial del espacio en el servidor, las que ven todos los miembros, con
+quién editó cada una (`editedBy`; un agente sale como "<nombre> (agente)"). Si la respuesta dice
+`source: "local"` (el servidor no las dio), son las de este dispositivo: pasa ese mismo `source`
+a `hebra_read_version` y `hebra_restore_version`.
 
 ## Adjuntos de una nota
 

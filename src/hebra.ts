@@ -48,3 +48,26 @@ export { renameFileEmbedInMarkdown } from '../vendor/hebra/src/lib/library-ui/dr
 // El nombre de un espacio vive cifrado en su registro de alta; se lee con la sonda de Hebra.
 export { readSpaceMeta } from '../vendor/hebra/src/lib/spaces/space-key-check';
 export { openAgentSpaceGrant, agentDeviceKeyId, parseAgentSpaceGrant } from '../vendor/hebra/src/lib/spaces/agent-space-grant';
+
+// HS-5 (§28 de Hebra): el historial compartido de las notas de un espacio. La lectura y el
+// descifrado (`space-history-client.ts`) y los autores (`space-history.ts`) son los de la app;
+// aquí solo se cablean a las herramientas de versiones (`src/server/tools/space-versions.ts`).
+export {
+  listSpaceHistory,
+  readSpaceHistory,
+  spaceHistoryTransport,
+  type SpaceHistoryListing,
+  type SpaceHistoryTransport,
+  type SpaceHistoryUnavailableReason,
+  type SpaceHistoryVersion
+} from '../vendor/hebra/src/lib/library/space-history-client';
+export {
+  authorRuns,
+  buildHistoryContext,
+  versionSummaries,
+  type AuthorRun,
+  type HistoryActorKind,
+  type HistoryWriter,
+  type RunOwner,
+  type SpaceHistoryEntry
+} from '../vendor/hebra/src/lib/library/space-history';

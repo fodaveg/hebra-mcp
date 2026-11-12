@@ -67,6 +67,14 @@ export function createSyncStorePort(
     syncBlobsRemoteOnly: (after, limit) => read(() => engine.syncBlobsRemoteOnly(after, limit)),
     syncBlobsMarkUploaded: (sha256s) => write(() => engine.syncBlobsMarkUploaded(sha256s)),
     syncBlobsMarkTooLarge: (sha256s) => write(() => engine.syncBlobsMarkTooLarge(sha256s)),
+    // §28.3 de Hebra (HS-5): los `clientID` de Yjs que este escritor creó al guardar con
+    // `noteSave` (el motor los apunta en `space_own_clients`) se declaran al relé desde la
+    // ronda (`LibrarySyncEngine.declareOwnClients`). Sin estos dos, el motor no declara nada
+    // y el texto del agente saldría como «Texto anterior» en el historial del espacio. El
+    // tercero del puerto, `spaceOwnClientRecord`, es del editor de la app (`space-ydoc-session`):
+    // aquí nadie lo llama.
+    spaceOwnClientsDue: (input) => read(() => engine.spaceOwnClientsDue(input)),
+    spaceOwnClientsSettle: (input) => write(() => engine.spaceOwnClientsSettle(input)),
     // En memoria del motor: no escribe en la base, pero solo el escritor sincroniza.
     syncLeaseAcquire: (ownerId, ttlMs) =>
       writable() ? read(() => engine.syncLeaseAcquire(ownerId, ttlMs)) : Promise.resolve(false),

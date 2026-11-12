@@ -28,6 +28,13 @@
  * 'lazy'` y solo cargan en el filtro la nota `id` (`requireLoadedVisibleNote`); lo que se juzga
  * de una versión (`versionIsHidden`) solo mira la configuración. Equivalencia con `'all'` en
  * `test/tools/note-writes-lazy.test.ts`.
+ *
+ * En un espacio compartido (`space`, HS-5, 12 nov 2026), las tres van por defecto al historial
+ * del espacio en el relé (`./space-versions.ts`, §28 de Hebra): `versionId` es entonces el
+ * `rev` de la versión y cada una dice quién la editó. Si el relé no lo da (404 con la función
+ * apagada, sin red…), caen a estas versiones locales y la respuesta lo dice (`source: "local"`,
+ * `sourceReason`). Con `source: "local"` se piden las locales a propósito (las de un listado
+ * que ya cayó a ellas: sus `versionId` no son `rev` del relé).
  */
 import { deriveNote } from '../../hebra';
 import { logEvent } from '../../log/logger';
@@ -39,6 +46,16 @@ import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination'
 import { usageOf, type ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
 import { declareWriteUsage, requireLoadedVisibleNote, requireValidOperationId } from './guards';
+import {
+  isServerCursor,
+  listServerVersions,
+  readServerVersion,
+  serverVersionBody,
+  type LocalSourceReason,
+  type ServerListOutput,
+  type ServerReadOutput,
+  type SpaceVersionsDeps
+} from './space-versions';
 import { mapWriteError } from './write-errors';
 
 export interface ListedVersion {
@@ -50,6 +67,9 @@ export interface ListedVersion {
 export interface ReadVersionOutput extends ListedVersion {
   id: string;
   body: string;
+  /** Solo en un espacio (HS-5): la versión es de este dispositivo, y por qué. */
+  source?: 'local';
+  sourceReason?: LocalSourceReason;
 }
 
 /** Hebra no guarda versiones de una nota bloqueada; si alguna lo pareciera, no sale.
@@ -80,9 +100,41 @@ function listed(version: NoteVersion): ListedVersion {
  */
 export async function runListVersions(
   ctx: ToolContext,
-  input: { id: string; limit?: number; cursor?: string }
-): Promise<{ id: string; versions: ListedVersion[]; nextCursor: string | null }> {
+  input: { id: string; limit?: number; cursor?: string },
+  space?: SpaceVersionsDeps
+): Promise<LocalListOutput | ServerListOutput> {
   const limit = effectiveLimit(input.limit, LIMITS.listVersions);
+  if (space && isServerCursor(input.cursor)) {
+    await requireLoadedVisibleNote(ctx, input.id);
+    const server = await listServerVersions(ctx, space, { id: input.id, limit, cursor: input.cursor });
+    if (!('unavailable' in server)) return server;
+    logEvent({ event: 'space.history_local', tool: 'hebra_list_versions', reason: server.unavailable });
+    return {
+      ...(await listLocalVersions(ctx, { id: input.id, limit })),
+      source: 'local',
+      sourceReason: server.unavailable
+    };
+  }
+  // Con `space` y un cursor `v1.…`: se sigue con las locales de la página anterior.
+  const local = await listLocalVersions(ctx, { id: input.id, limit, cursor: input.cursor });
+  return space ? { ...local, source: 'local' } : local;
+}
+
+/** Lo que sale de las versiones locales; en un espacio, con `source` y el motivo. */
+export interface LocalListOutput {
+  id: string;
+  versions: ListedVersion[];
+  nextCursor: string | null;
+  source?: 'local';
+  sourceReason?: LocalSourceReason;
+}
+
+/** Las versiones locales (la herramienta de siempre, sin `space`). */
+async function listLocalVersions(
+  ctx: ToolContext,
+  input: { id: string; limit: number; cursor?: string }
+): Promise<{ id: string; versions: ListedVersion[]; nextCursor: string | null }> {
+  const limit = input.limit;
   const after = input.cursor !== undefined ? Number(unwrapCursor('v1', input.cursor)) : null;
   if (after !== null && !Number.isInteger(after)) throw new ToolError('invalid_input');
   await requireLoadedVisibleNote(ctx, input.id);
@@ -149,6 +201,26 @@ export async function runListVersions(
  *  si la versión no existe o es de otra nota, o si su cuerpo es privado. */
 export async function runReadVersion(
   ctx: ToolContext,
+  input: { id: string; versionId: number; authors?: boolean; source?: VersionSource },
+  space?: SpaceVersionsDeps
+): Promise<ReadVersionOutput | ServerReadOutput> {
+  if (!space && input.source === 'server') throw new ToolError('invalid_input');
+  if (space && input.source !== 'local') {
+    await requireLoadedVisibleNote(ctx, input.id);
+    const server = await readServerVersion(ctx, space, input);
+    if (!('unavailable' in server)) return server;
+    logEvent({ event: 'space.history_local', tool: 'hebra_read_version', reason: server.unavailable });
+    return { ...(await readLocalVersion(ctx, input)), source: 'local', sourceReason: server.unavailable };
+  }
+  const local = await readLocalVersion(ctx, input);
+  return space ? { ...local, source: 'local' } : local;
+}
+
+/** De dónde sale la versión en un espacio: el historial del relé o este dispositivo. */
+export type VersionSource = 'server' | 'local';
+
+async function readLocalVersion(
+  ctx: ToolContext,
   input: { id: string; versionId: number }
 ): Promise<ReadVersionOutput> {
   await requireLoadedVisibleNote(ctx, input.id);
@@ -166,11 +238,31 @@ export async function runReadVersion(
  *  revisión leída. La misma salida y los mismos errores que `hebra_edit_note`. */
 export async function runRestoreVersion(
   ctx: ToolContext,
-  input: { id: string; versionId: number; expectedRevision: string; operationId: string }
-): Promise<EditNoteOutcome> {
+  input: {
+    id: string;
+    versionId: number;
+    expectedRevision: string;
+    operationId: string;
+    source?: VersionSource;
+  },
+  space?: SpaceVersionsDeps
+): Promise<EditNoteOutcome | (EditNoteOutcome & { source: VersionSource; sourceReason?: LocalSourceReason })> {
   if (!ctx.write) throw new ToolError('invalid_input');
+  if (!space && input.source === 'server') throw new ToolError('invalid_input');
   requireValidOperationId(input.operationId);
   await requireLoadedVisibleNote(ctx, input.id);
+
+  // HS-5: en un espacio, la versión del relé (por defecto) se lee y descifra aquí y el
+  // escritor la restaura como una edición nueva, con las mismas comprobaciones que una local.
+  let serverVersion: { body: string } | undefined;
+  let sourceReason: LocalSourceReason | undefined;
+  if (space && input.source !== 'local') {
+    const read = await serverVersionBody(ctx, space, input);
+    if ('unavailable' in read) {
+      sourceReason = read.unavailable;
+      logEvent({ event: 'space.history_local', tool: 'hebra_restore_version', reason: sourceReason });
+    } else serverVersion = read;
+  }
 
   let result: EditNoteOutcome;
   try {
@@ -179,7 +271,8 @@ export async function runRestoreVersion(
       versionId: input.versionId,
       expectedRevision: input.expectedRevision,
       operationId: input.operationId,
-      privacy: ctx.privacyConfig
+      privacy: ctx.privacyConfig,
+      ...(serverVersion ? { serverVersion } : {})
     });
   } catch (error) {
     throw mapWriteError(error);
@@ -194,5 +287,10 @@ export async function runRestoreVersion(
   // Tras la ronda, la nota puede haber pasado a oculta: la respuesta de una que no existe
   // (C3 de la revisión de Codex; la escritura ya está hecha). Lo juzga la puerta final.
   declareWriteUsage(ctx, result);
-  return result;
+  if (!space) return result;
+  return {
+    ...result,
+    source: serverVersion ? 'server' : 'local',
+    ...(sourceReason !== undefined ? { sourceReason } : {})
+  };
 }

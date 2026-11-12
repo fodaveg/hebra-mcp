@@ -463,6 +463,13 @@ export interface RestoreVersionInput {
   operationId: string;
   /** Igual que `EditNoteInput.privacy`. */
   privacy: PrivacyConfig;
+  /**
+   * HS-5: una versión del historial del ESPACIO en el relé (`versionId` es entonces su `rev`),
+   * ya leída y descifrada por la herramienta (`src/server/tools/space-versions.ts`). Sin él,
+   * `versionId` es una versión local (`note_versions`). El cuerpo pasa por las mismas
+   * comprobaciones que el de una local (bloqueado, etiquetas privadas) dentro del turno.
+   */
+  serverVersion?: { body: string };
 }
 
 /** Crear una carpeta (D9): dentro de `parentId` (`ROOT_FOLDER_ID` es la raíz). */
@@ -777,8 +784,13 @@ export function hiddenOperationTarget(
 /** Igual que `editFingerprint`: comparten registro, así que la operación va en la huella
  *  y un `operationId` de una edición no vale para restaurar (`operation_id_reused`). */
 function restoreVersionFingerprint(input: RestoreVersionInput): string {
+  // HS-5: una versión del relé lleva su cuerpo en la huella; la de una local no cambia.
   return sha256Hex(
-    JSON.stringify(['restoreVersion', input.id, input.expectedRevision, input.versionId])
+    JSON.stringify(
+      input.serverVersion
+        ? ['restoreVersion', input.id, input.expectedRevision, 'server', input.versionId, sha256Hex(input.serverVersion.body)]
+        : ['restoreVersion', input.id, input.expectedRevision, input.versionId]
+    )
   );
 }
 
@@ -1274,7 +1286,9 @@ export class NoteWriter {
       if (revision.libraryId !== libraryId || revision.bodySha256 !== note.bodySha256) {
         throw writeRejected('revision_conflict');
       }
-      const version = store.noteVersionRead(input.versionId);
+      const version = input.serverVersion
+        ? { noteId: input.id, body: input.serverVersion.body }
+        : store.noteVersionRead(input.versionId);
       if (!version || version.noteId !== input.id) throw writeRejected('not_found');
       if (version.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
       const saveInput = saveInputFor(note, version.body, { ...revision, baseBody: note.body });

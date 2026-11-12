@@ -939,7 +939,9 @@ export function buildRoutedWriteContext(
           versionId: input.versionId,
           expectedRevision: input.expectedRevision,
           operationId: input.operationId,
-          privacy: input.privacy
+          privacy: input.privacy,
+          // HS-5: la versión del relé ya leída por el lector (el escritor no la vuelve a pedir).
+          ...(input.serverVersion ? { serverVersion: { body: input.serverVersion.body } } : {})
         },
         (value) => asEditOutcome(value, input.id),
         () => local.restoreVersion(input)

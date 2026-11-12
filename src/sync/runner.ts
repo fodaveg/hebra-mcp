@@ -228,8 +228,10 @@ export interface SyncRunnerOptions {
   vaultKey: Uint8Array;
   /** `keyEpoch` está fijo a 1 en todo Hebra (SPEC.md §6.2). */
   keyEpoch?: number;
-  /** H-L7: cuenta del miembro, dentro del sobre de espacio. El relé sella al agente. */
-  spaceEnvelope?: { authorId: string } | null;
+  /** H-L7: cuenta del miembro, dentro del sobre de espacio. El relé sella al agente.
+   *  `actorKind: 'agent'` (HS-5, §28.12 de Hebra): el motor no manda nunca `historyPurge`
+   *  (el relé se lo rechaza a un agente) y el autor local de cada ack sale como agente. */
+  spaceEnvelope?: { authorId: string; actorKind?: 'app' | 'agent' } | null;
   /** Transporte inyectado (tests: `InMemoryLibraryRelay` de Hebra). Si falta, se usa
    *  `HttpLibraryTransport` con `connection`. */
   transport?: LibraryTransport;

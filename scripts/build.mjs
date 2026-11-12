@@ -18,8 +18,27 @@ import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
+/**
+ * HS-5 (12 nov 2026): `space-history-client.ts` de Hebra importa `recordDiagnostic` del
+ * registro de diagnóstico de la app (`lib/diagnostics/index.ts`), que trae los sumideros de
+ * IndexedDB y Tauri y lee `localStorage`. hebra-mcp le pasa su propio `diagnostic` y nunca lo
+ * llama: en `dist/` ese import, y SOLO desde ese fichero, va a `src/shims/hebra-diagnostics.ts`.
+ * Cualquier otro import del registro sigue entrando tal cual y `check:bundle` lo vería.
+ */
+const hebraDiagnosticsShim = {
+  name: 'hebra-diagnostics-shim',
+  setup(builder) {
+    builder.onResolve({ filter: /^\.\.\/diagnostics$/ }, (args) =>
+      args.importer.endsWith(join('vendor', 'hebra', 'src', 'lib', 'library', 'space-history-client.ts'))
+        ? { path: join(root, 'src', 'shims', 'hebra-diagnostics.ts') }
+        : undefined
+    );
+  }
+};
+
 const shared = {
   bundle: true,
+  plugins: [hebraDiagnosticsShim],
   platform: 'node',
   format: 'esm',
   target: 'node24',

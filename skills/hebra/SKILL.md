@@ -56,7 +56,7 @@ va a la papelera puede volver, y la papelera no se vacía desde aquí.
 | Consultar propiedades del frontmatter (claves, valores, notas que cumplen filtros) | Renombrar una etiqueta en toda la biblioteca (sí: sustituir el texto con un lote) |
 | Crear notas; añadir al final de una nota o de un apartado; editar con `{find, replace}`; sustituir en hasta 200 notas (simular, aplicar, deshacer) | Aplicar un lote sin simularlo antes |
 | Mover una nota a una carpeta que existe; favorita; archivar; ocultar del listado general; quitar la marca de copia de conflicto | Editar una nota bloqueada (`note_locked`); sí organizarla |
-| Papelera de notas: mandar, sacar, listar (también sus carpetas); ver y restaurar versiones anteriores (las de este dispositivo) | Purgar ni vaciar la papelera; ver versiones de otros dispositivos |
+| Papelera de notas: mandar, sacar, listar (también sus carpetas); ver y restaurar versiones anteriores (las de este dispositivo; en un espacio, las del historial del servidor, con quién las editó) | Purgar ni vaciar la papelera; ver versiones de otros dispositivos en la biblioteca personal |
 | Leer y añadir adjuntos (imágenes, PDF, texto, Markdown, CSV, JSON; hasta 5 MiB) | Cambiar o borrar un adjunto; más de 5 MiB u otros tipos (ZIP, vídeo, audio, Office...) |
 | Crear y renombrar carpetas | Borrar carpetas, o moverlas salvo dentro de un ID con `hebra_jd_move` |
 | Ficheros sueltos: listar, leer, reemplazar el texto de uno de texto, crear de texto, renombrar, mover, duplicar, papelera | Purgarlos; reemplazar o crear uno que no sea de texto; leer uno de la papelera; cambiar la extensión |

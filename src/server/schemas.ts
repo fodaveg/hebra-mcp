@@ -530,9 +530,24 @@ export const listVersionsInputShape = {
   cursor: cursorField
 };
 
+/** HS-5: de dónde sale la versión en un espacio compartido. */
+const VERSION_SOURCE = z
+  .enum(['server', 'local'])
+  .optional()
+  .describe(
+    'Solo con `space`: `server` (por defecto), el historial del espacio en el servidor; `local`, las versiones de este dispositivo. Pasa el `source` que devolvió hebra_list_versions.'
+  );
+
 export const readVersionInputShape = {
   id: z.string(),
-  versionId: VERSION_ID
+  versionId: VERSION_ID,
+  authors: z
+    .boolean()
+    .optional()
+    .describe(
+      'Solo con `space` y una versión del servidor: devuelve además `authorRuns`, el texto de la versión en tramos con su autor. Lee todas las versiones de la nota: más lento.'
+    ),
+  source: VERSION_SOURCE
 };
 
 /** Sin `.min()`/`.max()` en `operationId`: como `editNoteInputShape`, lo aplica
@@ -543,7 +558,8 @@ export const restoreVersionInputShape = {
   expectedRevision: z.string().describe('La `revision` que devolvió hebra_read_note.'),
   operationId: z
     .string()
-    .describe('Id único de esta restauración (un UUID). Reintentar con el mismo no la repite.')
+    .describe('Id único de esta restauración (un UUID). Reintentar con el mismo no la repite.'),
+  source: VERSION_SOURCE
 };
 
 /** Adjuntos en solo lectura (ampliación de D2, 30 sep 2026). */

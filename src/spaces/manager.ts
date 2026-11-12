@@ -24,7 +24,7 @@ import {
   RoutedStatusSource,
   writerSocketHandlers
 } from '../server/forward';
-import { HttpLibraryTransport, readSpaceMeta } from '../hebra';
+import { HttpLibraryTransport, readSpaceMeta, spaceHistoryTransport } from '../hebra';
 import { AgentDevice } from './device';
 import { directoryRevoked, fetchAgentDirectory } from './directory';
 import { catalogueSchema, type AgentSpaceAccess } from './protocol';
@@ -554,7 +554,8 @@ export class AgentSpaceManager implements SpaceRouter {
           vaultKey,
           connection,
           fetcher: guardedFetch,
-          spaceEnvelope: { authorId: accountId },
+          // HS-5 (§28.12 de Hebra): una credencial de agente; el motor no manda `historyPurge`.
+          spaceEnvelope: { authorId: accountId, actorKind: 'agent' },
           ...(this.intervalMs === undefined ? {} : { intervalMs: this.intervalMs })
         },
         // Lo que llega por writer.sock viene de otro proceso: aquí no hay una invocación
@@ -593,6 +594,20 @@ export class AgentSpaceManager implements SpaceRouter {
       privacyConfigSource: privacySource,
       spaceId: entry.access.spaceId,
       spaceName: () => this.names.get(nameKey)?.last ?? null,
+      // HS-5: el historial del relé con la misma credencial, el mismo `fetch` vigilado por el
+      // catálogo y la misma bóveda que su sync. La clave se lee en cada uso: al cerrar el
+      // espacio se borra (`closeInstance`) y el historial deja de poder abrirse.
+      spaceHistory: {
+        transport: spaceHistoryTransport(connection, guardedFetch),
+        identity: () => {
+          const key = entry.vaultKey;
+          if (!key) throw new ToolError('space_access_denied');
+          return {
+            syncVaultId: entry.access.syncVaultId,
+            vaultKeyHex: Buffer.from(key).toString('hex')
+          };
+        }
+      },
       // La segunda validación fresca de cada invocación (`runTool`, al aceptar).
       authorize,
       status: new RoutedStatusSource(instance, true),

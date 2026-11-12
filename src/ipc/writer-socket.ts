@@ -28,8 +28,9 @@
  *   archivar y, desde el 30 sep 2026, `trashNote`/`restoreNote`), igual: ronda esperada
  *   y privacidad del lector. Sin acciones de carpetas (opción A de David, 28 sep 2026)
  *   ni de purga: una acción desconocida es `invalid_request`.
- * - `restoreVersion` `{id, versionId, expectedRevision, operationId, privacy}` → lo
- *   mismo que `editNote` (`EditNoteOutcome`), restaurando una versión anterior.
+ * - `restoreVersion` `{id, versionId, expectedRevision, operationId, privacy,
+ *   serverVersion?}` → lo mismo que `editNote` (`EditNoteOutcome`), restaurando una versión
+ *   anterior (con `serverVersion: {body}`, una del historial del espacio en el relé, HS-5).
  * - `fetchAttachment` `{noteId, sha256, privacy}` → `{available}`: el escritor baja al
  *   disco compartido los bytes de un adjunto de una nota visible (adjuntos en solo
  *   lectura, 30 sep 2026). La respuesta NUNCA lleva los bytes: el lector los lee del
@@ -564,7 +565,20 @@ function restoreVersionInputOf(params: Record<string, unknown>): RestoreVersionI
   if (typeof versionId !== 'number' || !Number.isSafeInteger(versionId) || versionId < 1) {
     throw new InvalidRequest();
   }
-  return { id, versionId, ...revisionFieldsOf(params), privacy: privacyOf(params.privacy) };
+  const restore: RestoreVersionInput = {
+    id,
+    versionId,
+    ...revisionFieldsOf(params),
+    privacy: privacyOf(params.privacy)
+  };
+  // HS-5: una versión del historial del espacio, ya leída por el lector. Su tamaño lo acota
+  // `MAX_WRITE_MESSAGE_BYTES`, como el resto del mensaje.
+  const { serverVersion } = params;
+  if (serverVersion !== undefined) {
+    if (!isPlainObject(serverVersion) || typeof serverVersion.body !== 'string') throw new InvalidRequest();
+    restore.serverVersion = { body: serverVersion.body };
+  }
+  return restore;
 }
 
 function editInputOf(params: Record<string, unknown>): EditNoteInput {
