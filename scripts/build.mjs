@@ -73,3 +73,12 @@ await build({
   outfile: join(root, 'dist', 'cli.mjs'),
   banner: { js: '#!/usr/bin/env node' }
 });
+
+// Hilo de la conversión de ofimática (C-27, C-38): `runOfficeConversion` lo arranca con
+// `new Worker(new URL('./office-worker.mjs', import.meta.url))`, o sea `dist/office-worker.mjs`
+// junto a `cli.mjs`. Entrada propia y autónoma (sin `splitting`), igual que las otras.
+await build({
+  ...shared,
+  entryPoints: [join(root, 'src', 'office-worker.ts')],
+  outfile: join(root, 'dist', 'office-worker.mjs')
+});

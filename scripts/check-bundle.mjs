@@ -65,6 +65,9 @@ import { build } from 'esbuild';
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(root, 'dist');
 
+/** Entrada del hilo de ofimática (C-27, C-38): `runOfficeConversion` la arranca como Worker. */
+const OFFICE_WORKER = join(distDir, 'office-worker.mjs');
+
 /** Texto que no puede aparecer en `dist/` (imports que llegaran como cadena). */
 const FORBIDDEN_TEXT = ['@tauri-apps', '$app/'];
 /** Especificadores de import prohibidos (metafile). */
@@ -134,6 +137,7 @@ const fail = (message) => {
   console.error(`check:bundle: ${message}`);
   failed = true;
 };
+if (!files.includes(OFFICE_WORKER)) fail(`falta ${relative(root, OFFICE_WORKER)}, la entrada del hilo de ofimática`);
 
 const define = {};
 for (const name of DOM_GLOBALS) {
@@ -223,6 +227,28 @@ const modules = [];
 for (const url of urls) modules.push(await import(url));
 const withDerive = modules.find((mod) => typeof mod.deriveNote === 'function');
 if (!withDerive) throw new Error('ningún fichero de dist/ exporta deriveNote');
+// C-38: el hilo de ofimática carga sin DOM (en el hilo principal parentPort es null y no
+// arranca solo) y exporta su manejador.
+const officeUrl = ${JSON.stringify(pathToFileURL(OFFICE_WORKER).href)};
+const officeModule = await import(officeUrl);
+if (typeof officeModule.handleOfficeJob !== 'function') {
+  throw new Error('dist/office-worker.mjs no exporta handleOfficeJob');
+}
+// Y arranca de verdad como hilo: con el registro vacío o con convertidor, debe responder UN
+// mensaje cerrado ({ ok } y, si falla, un código), no colgarse ni morir.
+const { Worker } = await import('node:worker_threads');
+const reply = await new Promise((resolve, reject) => {
+  const worker = new Worker(new URL(officeUrl), {
+    execArgv: [],
+    workerData: { kind: 'analyze', input: { format: 'docx', bytes: new Uint8Array(0), fileName: 'x.docx' } }
+  });
+  const timer = setTimeout(() => reject(new Error('el hilo no respondió en 20 s')), 20000);
+  worker.once('message', (message) => { clearTimeout(timer); resolve(message); void worker.terminate(); });
+  worker.once('error', (error) => { clearTimeout(timer); reject(error); });
+});
+if (typeof reply?.ok !== 'boolean' || (reply.ok === false && typeof reply.code !== 'string')) {
+  throw new Error('respuesta inesperada del hilo: ' + JSON.stringify(reply));
+}
 process.stdout.write(JSON.stringify(withDerive.deriveNote(${JSON.stringify(SAMPLE)})));
 `;
 try {
