@@ -143,6 +143,10 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
    *  fila de `blobs`). Solo lo llama `NoteWriter.addAttachment`, en el mismo turno en que
    *  la nota pasa a referenciarlo. */
   blobPut(bytes: Uint8Array, options: BlobPutOptions): Promise<BlobPutResult>;
+  /** Importación idempotente del motor (`libraryImportBatch`, §9): una nota con SU id y su cuerpo
+   *  en una sola transacción, y un reintento con el mismo id no duplica. Solo la llama
+   *  `./office-writes.ts` (C-26), con el id que sale del `operationId`. */
+  libraryImportBatch: SqliteLibraryEngine['libraryImportBatch'];
   /** Ficheros sueltos (D10, 9 oct 2026): mandar a la papelera y sacar, los métodos del
    *  mismo nombre del motor, reversibles. Solo los llama `NoteWriter.organizeFileLocal`,
    *  que corta antes si el fichero ya está en ese estado: el motor los marca sucios y

@@ -47,6 +47,7 @@ import type {
   ReplaceFileTextSaved
 } from '../store/file-writes';
 import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
+import type { OfficeImportInput, OfficeImportSaved } from '../store/office-writes';
 import type { NoteStateInput, NoteStateSaved } from '../store/note-state';
 import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
 import type { JdMoveApplyReport, JdMoveRequest, JdMoveResult, JdMoveUndoReport } from '../store/jd-move';
@@ -273,6 +274,11 @@ export interface WriteContext {
    *  la ronda si cambiaron algo y devuelven el estado de sync. En un lector, todo ocurre en el
    *  escritor (`./forward.ts`). Opcional. */
   jdMove?(request: JdMoveRequest): Promise<JdMoveOutcome>;
+  /** `hebra_import_office` (C-26, `../store/office-writes.ts`): convierte fuera del turno y
+   *  escribe el original y la conversión dentro de uno; espera la ronda si escribió algo y
+   *  devuelve el estado de sync (con `preview`, ninguno). El cableado del escritor y del
+   *  reenvío desde un lector es de C-37. Opcional. */
+  importOffice?(input: OfficeImportInput): Promise<OfficeImportSaved & Partial<SyncFields>>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */

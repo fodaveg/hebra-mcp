@@ -1006,6 +1006,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         folderMoveIfUnchanged: (id, parentId, expected) => this.engine.folderMoveIfUnchanged(id, parentId, expected),
         folderRenameIfUnchanged: (id, name, expected) => this.engine.folderRenameIfUnchanged(id, name, expected),
         blobPut: (bytes, options) => this.engine.blobPut(bytes, options),
+        // C-26: una nota importada con id fijo, en una transacción (`./office-writes.ts`).
+        libraryImportBatch: (batch) => this.engine.libraryImportBatch(batch),
         // D10: mandar un fichero suelto a la papelera y sacarlo, igual: solo aquí. Purgar
         // (`filePurge`) no está en ningún sitio.
         fileTrash: (id) => this.engine.fileTrash(id),
@@ -1056,7 +1058,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       // y tras una revocación ya vista no se registra ni se repite nada de esa base.
       if (this.spaceAccess || this.assertAccountActive) {
         const mutations = new Set(['noteCreate', 'noteSave', 'folderCreate', 'folderRename',
-          'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut',
+          'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut', 'libraryImportBatch',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
           'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot',
           'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink']);

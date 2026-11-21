@@ -241,7 +241,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
           'src/store/writes.ts',
           'src/store/sync-port.ts',
           'src/store/file-writes.ts',
-          'src/store/file-verbs.ts'
+          'src/store/file-verbs.ts',
+          // C-26: el original y la conversión de `hebra_import_office`, en el turno del escritor.
+          'src/store/office-writes.ts'
         ]
       ]
     ];
@@ -316,7 +318,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
    * sale de `filesIndex`, propia. Del turno no sale nada más de ficheros.
    */
   it('ficheros sueltos (D10): fileTrash y fileRestore solo en el turno del escritor, y ningún otro file* en src', async () => {
-    const allowed = ['src/store/node-port.ts', 'src/store/writes.ts'];
+    // C-26: `office-writes.ts` manda a la papelera el origen de `convert-only`.
+    const allowed = ['src/store/node-port.ts', 'src/store/writes.ts', 'src/store/office-writes.ts'];
     // Con todas las formas de alcanzarlos (`reachPattern`), no solo `.nombre(`.
     const otherFile = reachPattern(FORBIDDEN_FILE);
     const engineLists = reachPattern(
@@ -408,7 +411,13 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
   it('crear, renombrar y mover un fichero suelto (D17): solo en el turno del escritor y en file-verbs.ts', () => {
     // D19: mover a un ID renombra y mueve ficheros sueltos con el filtro del turno. Renombrar con
     // los enlaces (D23), con su propio test.
-    const allowed = ['src/store/node-port.ts', 'src/store/file-verbs.ts', 'src/store/jd-move-port.ts'];
+    // C-26: `office-writes.ts` crea el original y la conversión de `hebra_import_office`.
+    const allowed = [
+      'src/store/node-port.ts',
+      'src/store/file-verbs.ts',
+      'src/store/jd-move-port.ts',
+      'src/store/office-writes.ts'
+    ];
     const verbCall = reachPattern('fileCreate|fileRename|fileMove');
     for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
       for (const form of reachForms(name)) expect(verbCall.test(form), form).toBe(true);
