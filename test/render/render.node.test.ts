@@ -2,21 +2,25 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { describe, expect, it } from 'vitest';
+import { ContextUnavailableError, type AdmissionTicket } from '../../src/accounts/capacity';
 import {
   RENDER_IMAGE_HREF_PREFIX,
   RENDER_MODULES_ENV,
   RenderError,
   imageDimensions,
+  renderReserveBytes,
   renderSvgToPng,
-  type RenderImage
+  type RenderImage,
+  type RenderSvgInput
 } from '../../src/render/render';
 
 /**
- * `B-LR20`. El motor (`@napi-rs/canvas`) no está en `package.json` hasta `B-LR21`: se
- * resuelve desde `HEBRA_RENDER_MODULES`. Sin él, los tests que pintan de verdad se saltan y
- * el resto (cabeceras, saneado, plazo, abortos) corre igual.
+ * `B-LR20` y `B-LR21`. El motor (`@napi-rs/canvas` 1.2.0) está en `dependencies`: se resuelve
+ * desde el `node_modules` del repo, o desde `HEBRA_RENDER_MODULES` si se pone. Si el paquete
+ * no se puede cargar (otra plataforma sin su binario), los tests que pintan de verdad se
+ * saltan y el resto (cabeceras, saneado, plazo, abortos, reserva) corre igual.
  */
-const MODULES = process.env[RENDER_MODULES_ENV] ?? join(tmpdir(), 'hebra-render-modules');
+const MODULES = process.env[RENDER_MODULES_ENV] ?? process.cwd();
 function engineAvailable(): boolean {
   try {
     createRequire(join(MODULES, 'x.js'))('@napi-rs/canvas');
@@ -28,6 +32,34 @@ function engineAvailable(): boolean {
 const withEngine = engineAvailable() ? it : it.skip;
 
 const never = new AbortController().signal;
+
+/** Compuerta de pruebas: apunta cada reserva y cuántas siguen sin soltar. */
+function fakeGate(refuse = false) {
+  const asked: number[] = [];
+  let pending = 0;
+  return {
+    asked,
+    get pending(): number {
+      return pending;
+    },
+    admit: async (_signal?: AbortSignal, bytes?: number): Promise<AdmissionTicket> => {
+      if (refuse) throw new ContextUnavailableError('capacity_wait_timeout', 1);
+      asked.push(bytes ?? 0);
+      pending += 1;
+      let released = false;
+      return {
+        done: () => {
+          if (released) return;
+          released = true;
+          pending -= 1;
+        }
+      } as AdmissionTicket;
+    }
+  };
+}
+
+/** La compuerta y la cuenta que exige `RenderSvgInput`. */
+const held = (gate: ReturnType<typeof fakeGate> = fakeGate()): Pick<RenderSvgInput, 'gate' | 'key'> => ({ gate, key: 'a' });
 const enc = (s: string): Uint8Array => new TextEncoder().encode(s);
 
 /** PNG real, vacío de datos útiles pero válido para el motor: lo crea el propio motor. */
@@ -74,14 +106,14 @@ describe('cabeceras de imagen', () => {
 
 describe('renderSvgToPng: entradas', () => {
   it('rechaza un ancho fuera de rango, un SVG vacío y un DOCTYPE', async () => {
-    await expect(renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 100, signal: never })).rejects.toMatchObject({
+    await expect(renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 100, signal: never, ...held() })).rejects.toMatchObject({
       code: 'document_invalid'
     });
-    await expect(renderSvgToPng({ svg: new Uint8Array(0), images: [], widthPx: 960, signal: never })).rejects.toBeInstanceOf(
+    await expect(renderSvgToPng({ svg: new Uint8Array(0), images: [], widthPx: 960, signal: never, ...held() })).rejects.toBeInstanceOf(
       RenderError
     );
     const hostile = '<!DOCTYPE svg [<!ENTITY a "b">]>' + frame('<text>&a;</text>');
-    await expect(renderSvgToPng({ svg: enc(hostile), images: [], widthPx: 960, signal: never })).rejects.toMatchObject({
+    await expect(renderSvgToPng({ svg: enc(hostile), images: [], widthPx: 960, signal: never, ...held() })).rejects.toMatchObject({
       code: 'document_invalid'
     });
   });
@@ -92,7 +124,8 @@ describe('renderSvgToPng: entradas', () => {
       svg: enc(`<!DOCTYPE x>${secreto}`),
       images: [],
       widthPx: 960,
-      signal: never
+      signal: never,
+      ...held()
     }).catch((e: unknown) => e)) as RenderError;
     expect(JSON.stringify({ code: error.code, message: error.message })).not.toContain(secreto);
   });
@@ -105,7 +138,7 @@ describe('renderSvgToPng: imágenes', () => {
     const big: RenderImage = { id: 'enorme', mime: 'image/png', bytes: pngHeader(6000, 5000) };
     const svg = frame(`<image href="${RENDER_IMAGE_HREF_PREFIX}enorme" x="0" y="0" width="100" height="100"/>`);
     const result = await renderSvgToPng(
-      { svg: enc(svg), images: [big], widthPx: 960, signal: never },
+      { svg: enc(svg), images: [big], widthPx: 960, signal: never, ...held() },
       { jobSource: "require('node:worker_threads').parentPort.postMessage({ ok: true, png: new Uint8Array([1]) });" }
     );
     expect(result.imagesOmitted).toEqual([{ id: 'enorme', reason: 'too_many_pixels' }]);
@@ -115,7 +148,7 @@ describe('renderSvgToPng: imágenes', () => {
     const ok: RenderImage = { id: 'a', mime: 'image/png', bytes: pngHeader(4096, 4096) };
     const extra: RenderImage = { id: 'b', mime: 'image/png', bytes: pngHeader(10, 10) };
     const result = await renderSvgToPng(
-      { svg: enc(frame('')), images: [ok, extra], widthPx: 960, signal: never },
+      { svg: enc(frame('')), images: [ok, extra], widthPx: 960, signal: never, ...held() },
       { jobSource: "require('node:worker_threads').parentPort.postMessage({ ok: true, png: new Uint8Array([1]) });" }
     );
     expect(result.imagesOmitted).toEqual([{ id: 'b', reason: 'too_many_pixels' }]);
@@ -124,7 +157,7 @@ describe('renderSvgToPng: imágenes', () => {
   it('un tipo que no coincide con la cabecera es unsupported', async () => {
     const lie: RenderImage = { id: 'x', mime: 'image/jpeg', bytes: pngHeader(10, 10) };
     const result = await renderSvgToPng(
-      { svg: enc(frame('')), images: [lie, { id: 'y', mime: 'image/gif', bytes: new Uint8Array(5) }], widthPx: 960, signal: never },
+      { svg: enc(frame('')), images: [lie, { id: 'y', mime: 'image/gif', bytes: new Uint8Array(5) }], widthPx: 960, signal: never, ...held() },
       { jobSource: "require('node:worker_threads').parentPort.postMessage({ ok: true, png: new Uint8Array([1]) });" }
     );
     expect(result.imagesOmitted).toEqual([
@@ -154,7 +187,7 @@ describe('renderSvgToPng: saneado (lo que recibe el motor)', () => {
         '<use href="#local"/>'
       ].join('')
     );
-    const result = await renderSvgToPng({ svg: enc(hostile), images: [], widthPx: 960, signal: never }, { jobSource: echo });
+    const result = await renderSvgToPng({ svg: enc(hostile), images: [], widthPx: 960, signal: never, ...held() }, { jobSource: echo });
     // Los espacios de nombres de la raíz son identificadores, no direcciones que se abran.
     const seen = new TextDecoder().decode(result.png).replace(/\sxmlns(?::\w+)?="[^"]*"/g, '');
     expect(seen).not.toMatch(/http:|https:|file:|javascript:|data:image\/svg|<image|<script|foreignObject|evil/i);
@@ -166,7 +199,7 @@ describe('renderSvgToPng: saneado (lo que recibe el motor)', () => {
     const svg = frame(
       `<image href="${RENDER_IMAGE_HREF_PREFIX}mia" x="1" y="2" width="10" height="10"/><image href="https://x.test/a.png" width="1" height="1"/>`
     );
-    const result = await renderSvgToPng({ svg: enc(svg), images: [own], widthPx: 960, signal: never }, { jobSource: echo });
+    const result = await renderSvgToPng({ svg: enc(svg), images: [own], widthPx: 960, signal: never, ...held() }, { jobSource: echo });
     const seen = new TextDecoder().decode(result.png);
     expect(seen.match(/<image/g)).toHaveLength(1);
     expect(seen).toContain('href="data:image/png;base64,');
@@ -174,10 +207,10 @@ describe('renderSvgToPng: saneado (lo que recibe el motor)', () => {
   });
 
   it('el tamaño final respeta el lado largo de 1.568 px', async () => {
-    const tall = await renderSvgToPng({ svg: enc(frame('', 100, 1000)), images: [], widthPx: 960, signal: never }, { jobSource: echo });
+    const tall = await renderSvgToPng({ svg: enc(frame('', 100, 1000)), images: [], widthPx: 960, signal: never, ...held() }, { jobSource: echo });
     expect(tall.height).toBe(1568);
     expect(tall.width).toBe(157);
-    const wide = await renderSvgToPng({ svg: enc(frame('', 800, 400)), images: [], widthPx: 960, signal: never }, { jobSource: echo });
+    const wide = await renderSvgToPng({ svg: enc(frame('', 800, 400)), images: [], widthPx: 960, signal: never, ...held() }, { jobSource: echo });
     expect([wide.width, wide.height]).toEqual([960, 480]);
   });
 });
@@ -186,7 +219,7 @@ describe('renderSvgToPng: plazo, aborto y cola', () => {
   it('un hilo que no acaba termina con terminate() y document_too_complex', async () => {
     const started = Date.now();
     await expect(
-      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never }, { timeoutMs: 300, jobSource: 'for (;;) {}' })
+      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held() }, { timeoutMs: 300, jobSource: 'for (;;) {}' })
     ).rejects.toMatchObject({ code: 'document_too_complex' });
     expect(Date.now() - started).toBeLessThan(5000);
   });
@@ -194,7 +227,7 @@ describe('renderSvgToPng: plazo, aborto y cola', () => {
   it('abortar la señal corta el hilo', async () => {
     const controller = new AbortController();
     const pending = renderSvgToPng(
-      { svg: enc(frame('')), images: [], widthPx: 960, signal: controller.signal },
+      { svg: enc(frame('')), images: [], widthPx: 960, signal: controller.signal, ...held() },
       { timeoutMs: 20_000, jobSource: 'for (;;) {}' }
     );
     setTimeout(() => controller.abort(new Error('cancelado')), 100);
@@ -203,11 +236,11 @@ describe('renderSvgToPng: plazo, aborto y cola', () => {
 
   it('un segundo render que no consigue turno responde document_busy', async () => {
     const first = renderSvgToPng(
-      { svg: enc(frame('')), images: [], widthPx: 960, signal: never },
+      { svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held() },
       { timeoutMs: 800, jobSource: 'for (;;) {}' }
     ).catch((e: unknown) => e);
     const second = renderSvgToPng(
-      { svg: enc(frame('')), images: [], widthPx: 960, signal: never },
+      { svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held() },
       { queueWaitMs: 100, jobSource: 'for (;;) {}' }
     );
     await expect(second).rejects.toMatchObject({ code: 'document_busy' });
@@ -216,17 +249,59 @@ describe('renderSvgToPng: plazo, aborto y cola', () => {
 
   it('sin el paquete del motor responde file_unavailable', async () => {
     await expect(
-      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never }, { modulesDir: join(tmpdir(), 'no-existe-render') })
+      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held() }, { modulesDir: join(tmpdir(), 'no-existe-render') })
     ).rejects.toMatchObject({ code: 'file_unavailable' });
   });
 });
 
-describe('run (entrada de document-worker)', () => {
-  withEngine('pinta en el propio hilo y falla sin el paquete', async () => {
-    const { run } = await import('../../src/render/resvg-job');
-    const png = await run({ svg: frame('<rect width="10" height="10" fill="#0000ff"/>', 100, 100), width: 100, height: 100, modulesDir: MODULES });
-    expect(Buffer.from(png).subarray(1, 4).toString('latin1')).toBe('PNG');
-    await expect(run({ svg: frame(''), width: 10, height: 10, modulesDir: join(tmpdir(), 'no-existe-render') })).rejects.toThrow('render_unavailable');
+describe('renderSvgToPng: reserva en la compuerta (B-LR21)', () => {
+  const okJob = "require('node:worker_threads').parentPort.postMessage({ ok: true, png: new Uint8Array([1]) });";
+
+  it('aparta antes de pintar, según los píxeles, y suelta al acabar', async () => {
+    const gate = fakeGate();
+    const own: RenderImage = { id: 'i', mime: 'image/png', bytes: pngHeader(1000, 1000) };
+    const result = await renderSvgToPng(
+      { svg: enc(frame('')), images: [own], widthPx: 960, signal: never, ...held(gate) },
+      { jobSource: okJob }
+    );
+    expect(gate.asked).toEqual([renderReserveBytes(1000 * 1000, result.width, result.height)]);
+    expect(gate.pending).toBe(0);
+    expect(renderReserveBytes(16 * 1024 * 1024, 1568, 882)).toBeGreaterThan(renderReserveBytes(0, 1568, 882));
+  });
+
+  it('suelta la reserva por plazo, por aborto y cuando el hilo falla', async () => {
+    const gate = fakeGate();
+    await expect(
+      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held(gate) }, { timeoutMs: 200, jobSource: 'for (;;) {}' })
+    ).rejects.toMatchObject({ code: 'document_too_complex' });
+    expect(gate.pending).toBe(0);
+    const controller = new AbortController();
+    const waiting = renderSvgToPng(
+      { svg: enc(frame('')), images: [], widthPx: 960, signal: controller.signal, ...held(gate) },
+      { timeoutMs: 20_000, jobSource: 'for (;;) {}' }
+    );
+    setTimeout(() => controller.abort(new Error('cancelado')), 100);
+    await expect(waiting).rejects.toThrow('cancelado');
+    expect(gate.pending).toBe(0);
+    await expect(
+      renderSvgToPng(
+        { svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held(gate) },
+        { jobSource: "require('node:worker_threads').parentPort.postMessage({ ok: false, reason: 'failed' });" }
+      )
+    ).rejects.toMatchObject({ code: 'document_invalid' });
+    expect(gate.pending).toBe(0);
+    expect(gate.asked).toHaveLength(3);
+  });
+
+  it('sin hueco en la compuerta responde document_busy y no arranca el hilo', async () => {
+    const gate = fakeGate(true);
+    await expect(
+      renderSvgToPng(
+        { svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held(gate) },
+        { jobSource: "throw new Error('no debe arrancar');" }
+      )
+    ).rejects.toMatchObject({ code: 'document_busy' });
+    expect(gate.pending).toBe(0);
   });
 });
 
@@ -238,10 +313,10 @@ describe('renderSvgToPng: con el motor real', () => {
     );
     // Un render muerto por plazo antes: el siguiente debe salir bien.
     await expect(
-      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never }, { timeoutMs: 200, jobSource: 'for (;;) {}' })
+      renderSvgToPng({ svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held() }, { timeoutMs: 200, jobSource: 'for (;;) {}' })
     ).rejects.toMatchObject({ code: 'document_too_complex' });
 
-    const result = await renderSvgToPng({ svg: enc(svg), images: [own], widthPx: 800, signal: never }, { modulesDir: MODULES });
+    const result = await renderSvgToPng({ svg: enc(svg), images: [own], widthPx: 800, signal: never, ...held() }, { modulesDir: MODULES });
     expect(result).toMatchObject({ width: 800, height: 600, imagesOmitted: [], renderer: '@napi-rs/canvas 1.2.0' });
     expect(Buffer.from(result.png).subarray(1, 4).toString('latin1')).toBe('PNG');
     const red = await pixel(result.png, 100, 100);
@@ -262,7 +337,7 @@ describe('renderSvgToPng: con el motor real', () => {
       const bytes = new Uint8Array(await surface.encode(format));
       const svg = frame(`<image href="${RENDER_IMAGE_HREF_PREFIX}i" x="0" y="0" width="100" height="100"/>`);
       const result = await renderSvgToPng(
-        { svg: enc(svg), images: [{ id: 'i', mime, bytes }], widthPx: 400, signal: never },
+        { svg: enc(svg), images: [{ id: 'i', mime, bytes }], widthPx: 400, signal: never, ...held() },
         { modulesDir: MODULES }
       );
       expect(result.imagesOmitted).toEqual([]);

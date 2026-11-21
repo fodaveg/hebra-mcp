@@ -13,6 +13,7 @@
  * de resolución se quitó con él.
  */
 import { build } from 'esbuild';
+import { cpSync, existsSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -82,3 +83,23 @@ await build({
   entryPoints: [join(root, 'src', 'office-worker.ts')],
   outfile: join(root, 'dist', 'office-worker.mjs')
 });
+
+// Hilo de los trabajos de documentos (B-LR21, B-I01): `runDocumentJob` lo arranca con
+// `new Worker(new URL('./document-worker.mjs', import.meta.url))`, o sea `dist/document-worker.mjs`
+// junto a `cli.mjs`. Entrada propia y autónoma, igual que `office-worker.mjs`. Los paquetes
+// nativos (`@napi-rs/canvas`) quedan externos y los resuelve `node_modules` de la imagen.
+await build({
+  ...shared,
+  entryPoints: [join(root, 'src', 'document-worker.ts')],
+  outfile: join(root, 'dist', 'document-worker.mjs')
+});
+
+// Fuentes de los documentos (B-LR11): las mismas del submódulo, junto a su licencia. Se maqueta
+// SIEMPRE con ellas, así que un `dist/` sin la carpeta no sirve: se falla aquí y no al pintar.
+const fontsSource = join(root, 'vendor', 'hebra', 'static', 'fonts', 'documents');
+const fontsTarget = join(root, 'dist', 'fonts', 'documents');
+if (!existsSync(fontsSource)) {
+  throw new Error(`build: faltan las fuentes de documentos en ${fontsSource} (¿está inicializado el submódulo vendor/hebra?)`);
+}
+rmSync(fontsTarget, { recursive: true, force: true });
+cpSync(fontsSource, fontsTarget, { recursive: true });

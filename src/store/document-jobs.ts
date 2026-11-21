@@ -29,8 +29,8 @@ import {
 
 const MIB = 1024 * 1024;
 
-/** Tipos de trabajo. `render` carga `./render/resvg-job.js` en el hilo. */
-export type DocumentJobKind = 'read' | 'edit' | 'render';
+/** Tipos de trabajo. El render no está aquí: `renderSvgToPng` tiene su propio hilo (B-LR21). */
+export type DocumentJobKind = 'read' | 'edit';
 
 export type DocumentJobErrorCode = 'document_busy' | 'document_timeout' | 'document_job_failed';
 

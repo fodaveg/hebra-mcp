@@ -14,6 +14,7 @@
     "@lezer/highlight": "1.2.5",
     "@lezer/markdown": "1.8.1",
     "@modelcontextprotocol/sdk": "1.32.2",
+    "@napi-rs/canvas": "1.2.0",
     "@napi-rs/keyring": "2.1.2",
     "@noble/hashes": "2.4.0",
     "@sanity/diff-match-patch": "3.2.1",

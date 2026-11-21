@@ -7,12 +7,11 @@
  * incrustadas como `data:`) y devuelve el PNG. Skia no abre `file:` ni `http:`, pero eso no
  * se da por bueno aquí: el saneado lo hace el hilo principal antes de que el SVG llegue.
  *
- * El paquete nativo se resuelve desde un directorio aparte (`modulesDir`) hasta que `B-LR21`
- * lo meta en `dependencies`. Es código fuente en cadena, como en `replace-worker`, para
- * que el hilo no dependa de cómo se empaquete el resto del servidor.
+ * El paquete nativo (`@napi-rs/canvas`, en `dependencies` desde `B-LR21`) se resuelve desde
+ * `modulesDir`, que por defecto es la carpeta de este módulo (en `dist/` sube a `node_modules`
+ * de la imagen). Es el ÚNICO camino de pintado: es código fuente en cadena, como en
+ * `replace-worker`, para que el hilo no dependa de cómo se empaquete el resto del servidor.
  */
-import { createRequire } from 'node:module';
-import { join } from 'node:path';
 import { DOCUMENT_WORKER_HEAP_MAX_BYTES } from '../store/document-limits';
 
 /** Memoria del hilo para el montón de JS (la nativa de Skia no cuenta aquí). */
@@ -52,24 +51,3 @@ const { join } = require('node:path');
   }
 })();
 `;
-
-/**
- * Entrada para `src/document-worker.ts` (`kind: 'render'`): pinta dentro del hilo que ya
- * lanzó `runDocumentJob`, que es quien lo mata. Mismo trabajo que `RENDER_JOB_SOURCE`.
- * Rechaza con un `Error` sin texto del documento.
- */
-export async function run(input: RenderJobIn): Promise<Uint8Array> {
-  let canvas: any;
-  try {
-    canvas = createRequire(join(input.modulesDir, 'x.js'))('@napi-rs/canvas');
-  } catch {
-    throw new Error('render_unavailable');
-  }
-  const image = await canvas.loadImage(Buffer.from(input.svg, 'utf8'));
-  const surface = canvas.createCanvas(input.width, input.height);
-  const context = surface.getContext('2d');
-  context.fillStyle = '#ffffff';
-  context.fillRect(0, 0, input.width, input.height);
-  context.drawImage(image, 0, 0, input.width, input.height);
-  return new Uint8Array(await surface.encode('png'));
-}

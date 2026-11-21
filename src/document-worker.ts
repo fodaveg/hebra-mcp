@@ -8,22 +8,18 @@
  *
  * Es un punto de entrada propio del empaquetado (`dist/document-worker.mjs`, B-I01). Cada
  * tipo de trabajo carga su módulo bajo demanda, así que un hilo de lectura no paga el coste
- * del motor de render. Los módulos de lectura y edición los añaden sus paquetes.
+ * del motor de lectura o edición. Los módulos de lectura y edición los añaden sus paquetes.
+ *
+ * El render (`renderSvgToPng`, `../render/render.ts`) NO pasa por aquí (B-LR21): tiene un solo
+ * camino de pintado, su propio hilo, y reserva su memoria en la misma compuerta.
  */
 import { parentPort, workerData } from 'node:worker_threads';
 
 /** Lo que un módulo de trabajo exporta: una función de entrada a resultado. */
 type JobModule = { run(input: unknown): unknown | Promise<unknown> };
 
-/**
- * Cargadores por tipo. El especificador de `render` va en una constante para que la
- * comprobación de tipos no exija el módulo antes de que exista (`B-LR20`); el empaquetado
- * lo resuelve en `B-I01`.
- */
-const RENDER_MODULE = './render/resvg-job.js';
-const LOADERS: Record<string, (() => Promise<JobModule>) | undefined> = {
-  render: () => import(RENDER_MODULE) as Promise<JobModule>
-};
+/** Cargadores por tipo (`read`, `edit`): los registran sus paquetes con un `import()` literal. */
+const LOADERS: Record<string, (() => Promise<JobModule>) | undefined> = {};
 
 /** Resultado de un trabajo; `code` es siempre uno de un conjunto cerrado de la capa de llamada. */
 export type DocumentJobReply = { ok: true; result: unknown } | { ok: false; code: string };

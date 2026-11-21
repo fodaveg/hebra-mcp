@@ -143,7 +143,6 @@ describe('reserva en la compuerta', () => {
 describe('plazo', () => {
   it.each<[DocumentJobKind, number]>([
     ['read', DOCUMENT_READ_TIMEOUT_MS],
-    ['render', DOCUMENT_READ_TIMEOUT_MS],
     ['edit', DOCUMENT_EDIT_TIMEOUT_MS]
   ])('un %s colgado se mata a los %i ms y suelta todo', async (kind, timeout) => {
     const { clock, gate, runner, started, exited } = harness({ job: 'hang' });

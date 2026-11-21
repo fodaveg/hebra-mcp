@@ -56,7 +56,8 @@
  *   llama (solo usa `Y.Text`); la prueba de humo del paso 3 lo carga sin DOM.
  */
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { builtinModules } from 'node:module';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
@@ -67,6 +68,13 @@ const distDir = join(root, 'dist');
 
 /** Entrada del hilo de ofimática (C-27, C-38): `runOfficeConversion` la arranca como Worker. */
 const OFFICE_WORKER = join(distDir, 'office-worker.mjs');
+/** Entrada del hilo de documentos (B-LR21, B-I01): `runDocumentJob` la arranca como Worker. */
+const DOCUMENT_WORKER = join(distDir, 'document-worker.mjs');
+/** Fuentes de los documentos, junto a su licencia (B-LR11): se maqueta siempre con ellas. */
+const FONTS_DIR = join(distDir, 'fonts', 'documents');
+/** Paquetes que `dist/` carga sin que un `import` estático los delate (el hilo de render los
+ *  resuelve con `createRequire`): deben figurar igualmente en `dependencies` (R27). */
+const RUNTIME_ONLY_DEPENDENCIES = ['@napi-rs/canvas'];
 
 /** Texto que no puede aparecer en `dist/` (imports que llegaran como cadena). */
 const FORBIDDEN_TEXT = ['@tauri-apps', '$app/'];
@@ -83,7 +91,12 @@ const DOM_EXEMPT_PACKAGES = [
   'yjs',
   'yjs/*',
   'lib0',
-  'lib0/*'
+  'lib0/*',
+  // B-LR21: `harfbuzzjs` (medida de texto de los documentos) trae un cargador de WASM de
+  // Emscripten que mira `window`/`document` solo tras comprobar el entorno. Es la ÚNICA
+  // exención nueva; si el paquete aún no está instalado, no cambia nada.
+  'harfbuzzjs',
+  'harfbuzzjs/*'
 ];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */
@@ -91,7 +104,7 @@ const FORBIDDEN_EXTERNALS = ['@tauri-apps/*', '$app/*', 'svelte', 'svelte/*', '@
 /** Externos en el reempaquetado porque son módulos NATIVOS (`.node`), que esbuild no
  *  sabe cargar: `@napi-rs/keyring` (llavero del SO, L2) y su binario por plataforma. No
  *  llevan JS de navegador que mirar: el cargador de `index.js` solo elige el `.node`. */
-const NATIVE_EXTERNALS = ['@napi-rs/keyring', '@napi-rs/keyring-*'];
+const NATIVE_EXTERNALS = ['@napi-rs/keyring', '@napi-rs/keyring-*', '@napi-rs/canvas', '@napi-rs/canvas-*'];
 const DOM_GLOBALS = [
   'window',
   'document',
@@ -138,6 +151,39 @@ const fail = (message) => {
   failed = true;
 };
 if (!files.includes(OFFICE_WORKER)) fail(`falta ${relative(root, OFFICE_WORKER)}, la entrada del hilo de ofimática`);
+if (!files.includes(DOCUMENT_WORKER)) fail(`falta ${relative(root, DOCUMENT_WORKER)}, la entrada del hilo de documentos`);
+if (!existsSync(join(FONTS_DIR, 'OFL-carlito.txt')) || readdirSync(FONTS_DIR).filter((n) => n.endsWith('.woff')).length === 0) {
+  fail(`faltan las fuentes (.woff) y sus licencias en ${relative(root, FONTS_DIR)}`);
+}
+
+// R27: todo paquete que `dist/` importa, y los que carga sin `import` estático, figuran en
+// `dependencies` (la imagen instala con `npm ci --omit=dev`: un paquete en `devDependencies` no llega).
+const declared = new Set(Object.keys(JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).dependencies ?? {}));
+const packageOf = (specifier) => (specifier.startsWith('@') ? specifier.split('/').slice(0, 2).join('/') : specifier.split('/')[0]);
+for (const name of RUNTIME_ONLY_DEPENDENCIES) {
+  if (!declared.has(name)) fail(`"${name}" no está en dependencies de package.json y dist/ lo carga en el hilo de render`);
+}
+for (const file of files) {
+  const shallow = await build({
+    entryPoints: [file],
+    bundle: true,
+    packages: 'external',
+    platform: 'node',
+    format: 'esm',
+    write: false,
+    metafile: true,
+    logLevel: 'silent'
+  });
+  for (const info of Object.values(shallow.metafile.outputs)) {
+    for (const entry of info.imports) {
+      if (!entry.external || entry.path.startsWith('node:') || entry.path.startsWith('.') || entry.path.startsWith('/')) continue;
+      const pkg = packageOf(entry.path);
+      if (!declared.has(pkg) && !builtinModules.includes(pkg)) {
+        fail(`${relative(root, file)} importa "${pkg}", que no figura en dependencies de package.json`);
+      }
+    }
+  }
+}
 
 const define = {};
 for (const name of DOM_GLOBALS) {
@@ -233,6 +279,15 @@ const officeUrl = ${JSON.stringify(pathToFileURL(OFFICE_WORKER).href)};
 const officeModule = await import(officeUrl);
 if (typeof officeModule.handleOfficeJob !== 'function') {
   throw new Error('dist/office-worker.mjs no exporta handleOfficeJob');
+}
+// B-LR21: el hilo de documentos carga sin DOM y responde con un código cerrado.
+const documentModule = await import(${JSON.stringify(pathToFileURL(DOCUMENT_WORKER).href)});
+if (typeof documentModule.handleDocumentJob !== 'function') {
+  throw new Error('dist/document-worker.mjs no exporta handleDocumentJob');
+}
+const unknownReply = await documentModule.handleDocumentJob('no-existe', null);
+if (unknownReply?.ok !== false || unknownReply.code !== 'document_job_unknown_kind') {
+  throw new Error('respuesta inesperada del hilo de documentos: ' + JSON.stringify(unknownReply));
 }
 // Y arranca de verdad como hilo: con el registro vacío o con convertidor, debe responder UN
 // mensaje cerrado ({ ok } y, si falla, un código), no colgarse ni morir.

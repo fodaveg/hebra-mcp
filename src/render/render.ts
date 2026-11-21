@@ -13,11 +13,14 @@
  *    sustituye por su `data:` y no hay red ni disco en ningún caso.
  *
  * El motor corre en un hilo (`./resvg-job.ts`) con plazo: al agotarse, o al abortar la
- * señal, `Worker.terminate()` lo corta en seco. Un render a la vez por proceso.
+ * señal, `Worker.terminate()` lo corta en seco. Un render a la vez por proceso, y antes de
+ * pintar aparta su memoria en el `CapacityGate` de la cuenta (la misma compuerta que la
+ * lectura y la conversión de ofimática, B-LR21): sin hueco, `document_busy`.
  */
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
+import { ContextUnavailableError, type AdmissionTicket, type CapacityGate } from '../accounts/capacity';
 import {
   DOCUMENT_QUEUE_WAIT_MS,
   DOCUMENT_READ_TIMEOUT_MS,
@@ -34,7 +37,10 @@ export const RENDER_DECODED_MAX_PIXELS = 16 * 1024 * 1024;
 export const RENDER_SVG_MAX_BYTES = 8 * 1024 * 1024;
 /** Prefijo del `href` con el que un SVG pide una imagen propia. */
 export const RENDER_IMAGE_HREF_PREFIX = 'hebra-image:';
-/** Variable de entorno con el directorio donde está `node_modules/@napi-rs/canvas` (hasta `B-LR21`). */
+/**
+ * Variable de entorno con el directorio desde el que se resuelve `@napi-rs/canvas`. Sin ella,
+ * la carpeta de este módulo: `node_modules` del repo, o el de la imagen desde `dist/` (B-LR21).
+ */
 export const RENDER_MODULES_ENV = 'HEBRA_RENDER_MODULES';
 
 export type RenderImage = {
@@ -50,6 +56,10 @@ export type RenderSvgInput = {
   images: readonly RenderImage[];
   widthPx: number;
   signal: AbortSignal;
+  /** La compuerta de capacidad de la cuenta: el render aparta aquí su memoria antes de pintar. */
+  gate: Pick<CapacityGate, 'admit'>;
+  /** La cuenta que pide, para el turno rotatorio de la compuerta. */
+  key: string;
 };
 
 export type RenderSvgResult = {
@@ -69,6 +79,18 @@ export class RenderError extends Error {
     super(code);
     this.name = 'RenderError';
   }
+}
+
+const MIB = 1024 * 1024;
+
+/**
+ * Lo que aparta un render en la compuerta: el montón del hilo (`RENDER_WORKER_HEAP_MB`), las
+ * imágenes decodificadas (4 bytes por píxel, dos veces: la decodificada y la copia de Skia) y la
+ * superficie final con su PNG (otras dos). Con 16 MP son unos 267 MiB, que cuadra con el pico
+ * medido en `B-LR20` (500 MiB de cgroup con 220 de lastre). Es un cálculo, no una medida nueva.
+ */
+export function renderReserveBytes(decodedPixels: number, width: number, height: number): number {
+  return RENDER_WORKER_HEAP_MB * MIB + 2 * 4 * Math.max(0, decodedPixels) + 2 * 4 * Math.max(0, width * height);
 }
 
 export const RENDERER_NAME = '@napi-rs/canvas 1.2.0';
@@ -325,10 +347,22 @@ export async function renderSvgToPng(input: RenderSvgInput, options: RenderOptio
     svg: clean,
     width,
     height,
-    modulesDir: options.modulesDir ?? process.env[RENDER_MODULES_ENV] ?? join(tmpdir(), 'hebra-render-modules')
+    modulesDir: options.modulesDir ?? process.env[RENDER_MODULES_ENV] ?? dirname(fileURLToPath(import.meta.url))
   };
-  const png = await inTurn(options.queueWaitMs ?? DOCUMENT_QUEUE_WAIT_MS, signal, () =>
-    runJob(job, options.timeoutMs ?? DOCUMENT_READ_TIMEOUT_MS, signal, options.jobSource ?? RENDER_JOB_SOURCE)
-  );
+  const png = await inTurn(options.queueWaitMs ?? DOCUMENT_QUEUE_WAIT_MS, signal, async () => {
+    // Antes de pintar: la reserva en la compuerta, soltada en todos los caminos (bien, mal,
+    // plazo o aborto). La compuerta tiene su propia espera: agotarla es lo mismo que no tener turno.
+    let ticket: AdmissionTicket;
+    try {
+      ticket = await input.gate.admit(signal, renderReserveBytes(decodedPixels, width, height), input.key);
+    } catch (error) {
+      throw error instanceof ContextUnavailableError ? new RenderError('document_busy') : error;
+    }
+    try {
+      return await runJob(job, options.timeoutMs ?? DOCUMENT_READ_TIMEOUT_MS, signal, options.jobSource ?? RENDER_JOB_SOURCE);
+    } finally {
+      ticket.done();
+    }
+  });
   return { png, width, height, imagesOmitted, renderer: RENDERER_NAME };
 }
