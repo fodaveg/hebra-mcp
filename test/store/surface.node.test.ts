@@ -245,7 +245,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
           // C-26: el original y la conversión de `hebra_import_office`, en el turno del escritor.
           'src/store/office-writes.ts',
           // B-N20: el documento `.ods` o `.odp` que crea `createDocumentFile`, en el turno del escritor.
-          'src/store/document-create.ts'
+          'src/store/document-create.ts',
+          // B-N14: el blob del punto de control, en el turno que antes aplica la regla (b).
+          'src/store/document-checkpoint.ts'
         ]
       ]
     ];
