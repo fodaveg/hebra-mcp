@@ -622,6 +622,31 @@ describe('propiedades del frontmatter (D23)', () => {
   });
 });
 
+describe('canal del escritor de hebra_import_office (C-37)', () => {
+  /**
+   * El canal (op del socket, reenvío, contexto de escritura y `serve`) solo mueve la petición y
+   * el resultado: ninguna escritura del almacén sale de ellos. Las hace `office-writes.ts`, el
+   * único fichero nuevo admitido para `blobPut`, en el turno del escritor.
+   */
+  it('socket, reenvío, write-context y serve no llaman a ninguna escritura del almacén', () => {
+    const writes = reachPattern(
+      'blobPut|blobPutFromPath|fileCreate|fileTrash|fileRestore|fileReplace|noteCreate|noteSave|libraryImportBatch|writeExclusive'
+    );
+    // El patrón ve cada forma de llamada (si no, la comprobación de abajo no probaría nada).
+    for (const name of ['blobPut', 'fileCreate', 'noteSave', 'writeExclusive']) {
+      for (const form of reachForms(name)) expect(writes.test(form), form).toBe(true);
+    }
+    for (const path of [
+      'src/ipc/writer-socket.ts',
+      'src/server/forward.ts',
+      'src/server/write-context.ts',
+      'src/server/serve.ts'
+    ]) {
+      expect(writes.test(readFileSync(join(root, path), 'utf8')), path).toBe(false);
+    }
+  });
+});
+
 /** Todas las fuentes de `src`, recorriendo sus carpetas. */
 function allSourceFiles(dir = join(root, 'src')): string[] {
   const out: string[] = [];

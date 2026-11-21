@@ -90,6 +90,12 @@
  *   `simulate` `{source: {kind, id}, toId, subfolder?, as?, systemId?, jdexFolderId?}`,
  *   `apply` y `undo` `{planId, operationId}` (ronda ya esperada) o `discard` `{planId}`. Como
  *   `jdNewId`: el plan no viaja, y un escritor sin ella responde `invalid_request`.
+ * - `importOffice` `{fileName, format, mode, preview, folderId, sourceFileId?, operationId?,
+ *   dataBase64, privacy}` (C-37, 21 nov 2026) → `OfficeImportOutcome` (`src/store/office-writes.ts`
+ *   más el estado de sync si escribió, ronda ya esperada). La conversión corre en el escritor,
+ *   fuera de su turno (hilo con reserva en el `CapacityGate`). Los bytes van en base64 del
+ *   lector al escritor: caben 5 MiB; más es `file_too_large`. Op propia: un escritor
+ *   anterior la rechaza en `parseEnvelope` y el lector lo traduce a `writer_outdated`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -142,6 +148,7 @@ import type {
   JdNewIdOutcome,
   LooseFileOutcome,
   NoteStateOutcome,
+  OfficeImportOutcome,
   OrganizeOutcome,
   ReplaceFileTextOutcome,
   ReplaceOutcome,
@@ -175,6 +182,8 @@ import { REVISION_MAX_LENGTH } from '../store/revision';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from '../store/file-content';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
+import type { OfficeImportInput } from '../store/office-writes';
+import type { OfficeFormat, OfficeImportMode } from '../../vendor/hebra/src/lib/office-import/types';
 import type { NoteStateInput } from '../store/note-state';
 import {
   APPEND_TEXT_MAX_LENGTH,
@@ -253,6 +262,7 @@ export type WriterSocketOp =
   | 'replaceFileText'
   | 'looseFileWrite'
   | 'renameFileRelinking'
+  | 'importOffice'
   | 'noteState'
   | 'jdNewId'
   | 'jdMove'
@@ -266,6 +276,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'replaceFileText',
   'looseFileWrite',
   'renameFileRelinking',
+  'importOffice',
   'noteState',
   'jdNewId',
   'jdMove',
@@ -345,6 +356,10 @@ export interface WriterSocketHandlers {
   /** Crear, renombrar, mover o duplicar un fichero suelto (D17, 12 oct 2026), con la ronda
    *  ya esperada. Opcional: un escritor sin él responde `invalid_request`. */
   looseFileWrite?(input: LooseFileWriteInput): Promise<LooseFileOutcome>;
+  /** `hebra_import_office` (C-37): convertir un Office y guardarlo, con la ronda ya esperada.
+   *  Opcional: un escritor sin él responde `invalid_request` (el lector lo traduce a
+   *  `writer_outdated`). */
+  importOffice?(input: OfficeImportInput): Promise<OfficeImportOutcome>;
   /** Cambios de estado de una nota de D23, con la ronda ya esperada. Opcional: un escritor
    *  sin él responde `invalid_request`. */
   noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
@@ -631,6 +646,43 @@ function organizeFileInputOf(params: Record<string, unknown>): OrganizeFileInput
     default:
       throw new InvalidRequest();
   }
+}
+
+const OFFICE_FORMATS: readonly OfficeFormat[] = ['xlsx', 'pptx', 'docx'];
+const OFFICE_MODES: readonly OfficeImportMode[] = ['convert-and-keep', 'convert-only', 'keep-only'];
+
+/** `importOffice` (C-37): los bytes van en base64 con la regla estricta de los adjuntos, así
+ *  que por el socket caben 5 MiB (el mensaje máximo, `MAX_MESSAGE_BYTES`); uno mayor es
+ *  `file_too_large`. Lo demás lo vuelve a comprobar `importOfficeLocal` dentro de su turno
+ *  (nombre, tamaño, `operationId`, privacidad); aquí solo se acota la forma. */
+function officeImportInputOf(params: Record<string, unknown>): OfficeImportInput {
+  const { fileName, format, mode, preview, folderId, sourceFileId, operationId, dataBase64 } = params;
+  if (!isName(fileName) || fileName.length === 0 || typeof dataBase64 !== 'string') throw new InvalidRequest();
+  if (!OFFICE_FORMATS.includes(format as OfficeFormat) || !OFFICE_MODES.includes(mode as OfficeImportMode)) {
+    throw new InvalidRequest();
+  }
+  if (typeof preview !== 'boolean' || !isId(folderId)) throw new InvalidRequest();
+  if (sourceFileId !== undefined && !isId(sourceFileId)) throw new InvalidRequest();
+  // Sin `operationId` solo se puede analizar: una escritura sin él no se podría reintentar.
+  if (operationId === undefined && !preview) throw new InvalidRequest();
+  const validOperationId = operationId === undefined ? undefined : operationIdOf(operationId);
+  const privacy = privacyOf(params.privacy);
+  const decoded = decodeAttachmentBase64(dataBase64);
+  if (!decoded.ok) {
+    if (decoded.code === 'attachment_too_large') throw writeRejected('file_too_large');
+    throw new InvalidRequest();
+  }
+  return {
+    bytes: decoded.bytes,
+    fileName,
+    format: format as OfficeFormat,
+    mode: mode as OfficeImportMode,
+    preview,
+    folderId,
+    ...(sourceFileId !== undefined ? { sourceFileId } : {}),
+    ...(validOperationId !== undefined ? { operationId: validOperationId } : {}),
+    privacy
+  };
 }
 
 /** `fetchFile` (D15): solo el id del fichero; el escritor decide qué bytes con su filtro. */
@@ -1233,6 +1285,12 @@ export class WriterSocketServer {
           const input = looseFileWriteInputOf(envelope.params);
           if (input.action !== 'renameFile' || !handlers.looseFileWrite) throw new InvalidRequest();
           result = await handlers.looseFileWrite(input);
+          break;
+        }
+        case 'importOffice': {
+          const input = officeImportInputOf(envelope.params);
+          if (!handlers.importOffice) throw new InvalidRequest();
+          result = await handlers.importOffice(input);
           break;
         }
         case 'noteState': {

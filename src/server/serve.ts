@@ -14,6 +14,16 @@
  *   (`./forward.ts`), y toman el relevo si ya no responde.
  */
 import { accountAccessGuard } from '../accounts/registry';
+import {
+  ANONYMOUS_TURN,
+  CapacityGate,
+  DEFAULT_HIGH_WATER,
+  DEFAULT_OPEN_WAIT_MS,
+  readMemoryUsage
+} from '../accounts/capacity';
+import { realClock } from '../accounts/lifecycle';
+import { runOfficeConversion } from '../store/office-runner';
+import { importOfficeLocal, type OfficeConversionRunner } from '../store/office-writes';
 import { StoreError } from '../store/errors';
 import { AgentDevice } from '../spaces/device';
 import { AgentSpaceManager } from '../spaces/manager';
@@ -81,6 +91,11 @@ export interface OpenServeOptions {
   credentialRevoked?: () => boolean;
   /** Tests: temporizadores del runner de la biblioteca personal (bucle y reintento, D24). */
   syncScheduler?: SyncScheduler;
+  /**
+   * `hebra_import_office` (C-37): dónde reserva memoria la conversión y con qué ejecutor. Sin
+   * él, la compuerta del proceso (`processCapacityGate`), que es lo que corresponde a stdio.
+   */
+  office?: OfficeWiring;
 }
 
 /** `writerOnly` y el bloqueo es de otro proceso vivo. */
@@ -100,6 +115,61 @@ export interface ServeContext {
 }
 
 /**
+ * Dónde se aparta la memoria de una conversión de ofimática (C-27): la compuerta y la cuenta en
+ * cuyo turno espera (`CapacityGate.admit(signal, bytes, key)`).
+ */
+export interface OfficeCapacity {
+  gate: Pick<CapacityGate, 'admit'>;
+  key: string;
+}
+
+/** Cómo conecta `localWriteContext` el hilo de conversión. Todo opcional: sin él, la compuerta
+ *  del proceso y `runOfficeConversion`. Los tests pasan una compuerta y un ejecutor propios. */
+export interface OfficeWiring {
+  capacity?: OfficeCapacity;
+  run?: typeof runOfficeConversion;
+}
+
+let processGate: CapacityGate | undefined;
+
+/**
+ * La compuerta de memoria del proceso, con la lectura real del cgroup. La usa `serve` por
+ * stdio, que no tiene `AccountContexts`. `serve-http` multiusuario debe pasar la suya
+ * (`OpenServeOptions.office`) para que la conversión comparta compuerta con las peticiones.
+ */
+export function processCapacityGate(): CapacityGate {
+  processGate ??= new CapacityGate({
+    readMemory: () => readMemoryUsage(),
+    highWater: DEFAULT_HIGH_WATER,
+    waitMs: DEFAULT_OPEN_WAIT_MS,
+    clock: realClock,
+    reclaim: async () => undefined
+  });
+  return processGate;
+}
+
+function processOfficeCapacity(): OfficeCapacity {
+  return { gate: processCapacityGate(), key: ANONYMOUS_TURN };
+}
+
+/**
+ * El convertidor de `importOfficeLocal` sobre el hilo de C-27: cada análisis o conversión
+ * reserva `OFFICE_CONVERSION_RESERVE_BYTES` más el tamaño del fichero en la compuerta y la
+ * suelta al terminar. Un fallo llega como `ConversionError` (la clase real de Hebra, la misma
+ * que `office-writes.ts` comprueba con `instanceof`).
+ */
+export function officeConversionRunner(
+  capacity: OfficeCapacity,
+  run: typeof runOfficeConversion = runOfficeConversion
+): OfficeConversionRunner {
+  const context = { gate: capacity.gate, key: capacity.key };
+  return {
+    analyze: (job) => run('analyze', job, context),
+    convert: (job) => run('convert', job, context)
+  };
+}
+
+/**
  * Las escrituras sobre esta instancia, sin reenvío: las del escritor.
  *
  * `isLinked`: hay runner de sync; así una escritura que no escribió nada (y no pide
@@ -111,9 +181,14 @@ export interface ServeContext {
 export function localWriteContext(
   instance: LibraryInstance,
   authorize?: () => Promise<void>,
-  options: { denyJdex?: boolean } = {}
+  options: { denyJdex?: boolean; office?: OfficeWiring } = {}
 ): WriteContext {
+  const office = options.office ?? {};
   const context = buildWriteContext({
+    importOffice: (input) =>
+      importOfficeLocal(instance, input, {
+        converter: officeConversionRunner(office.capacity ?? processOfficeCapacity(), office.run)
+      }),
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
     editNote: (input) => instance.editNoteLocal(input),
@@ -249,7 +324,8 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       : null,
     // Mientras esta instancia sea el escritor, atiende en `writer.sock` las escrituras
     // que le reenvían las demás sesiones (`./forward.ts`, SPEC.md §8).
-    writerSocket: (opened) => writerSocketHandlers(localWriteContext(opened, authorize), opened),
+    writerSocket: (opened) =>
+      writerSocketHandlers(localWriteContext(opened, authorize, { office: options.office }), opened),
     beforeSyncRound: async (port) => {
       assertActive();
       // Una configuración rota no anota nada (las herramientas ya responden
@@ -301,7 +377,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       status: new LibraryInstanceStatusSource(instance, linked !== null),
       authorize,
       firstRound: () => firstRound,
-      write: localWriteContext(instance, authorize)
+      write: localWriteContext(instance, authorize, { office: options.office })
     };
     return { ctx, instance, linked: linked !== null, close };
   }
@@ -312,7 +388,11 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   // resuelve ya y las escrituras siguen funcionando sobre la SQLite local.
   // En un lector, las escrituras se reenvían al escritor (o toman el relevo si ya no
   // está), y `hebra_status` le pregunta a él por el sync.
-  const write = buildRoutedWriteContext(instance, localWriteContext(instance, authorize), options.forward);
+  const write = buildRoutedWriteContext(
+    instance,
+    localWriteContext(instance, authorize, { office: options.office }),
+    options.forward
+  );
   const ctx: ServerContext = {
     spaces,
     directory,

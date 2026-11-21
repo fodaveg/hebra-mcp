@@ -100,6 +100,9 @@ export interface WriteContextSources {
   /** `hebra_jd_move` en local (D19, `LibraryInstance.jdMoveLocal`): simular, aplicar,
    *  deshacer o descartar, sin esperar ronda. Opcional, como `jdNewId`. */
   jdMove?(request: JdMoveRequest): Promise<LocalWrite<JdMoveResult>>;
+  /** `hebra_import_office` en local (C-26, `importOfficeLocal` de `../store/office-writes.ts`),
+   *  sin esperar ronda. Opcional: sin él, la herramienta responde `invalid_input`. */
+  importOffice?(input: OfficeImportInput): Promise<LocalWrite<OfficeImportSaved>>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -176,6 +179,9 @@ export type FileOutcome = FileSaved & SyncFields;
 /** `hebra_replace_file_text` (D15): la prueba de lo guardado y el estado de sync (`uploaded`
  *  exige la fila del fichero limpia y el blob nuevo ya subido). */
 export type ReplaceFileTextOutcome = ReplaceFileTextSaved & SyncFields;
+
+/** Lo que devuelve `importOffice`: con `preview` no se escribe y no hay estado de sync. */
+export type OfficeImportOutcome = OfficeImportSaved & Partial<SyncFields>;
 
 /** Crear, renombrar, mover o duplicar un fichero suelto (D17), antes de poner la ruta:
  *  la prueba de lo guardado y el estado de sync (`uploaded` exige la fila del fichero
@@ -276,9 +282,9 @@ export interface WriteContext {
   jdMove?(request: JdMoveRequest): Promise<JdMoveOutcome>;
   /** `hebra_import_office` (C-26, `../store/office-writes.ts`): convierte fuera del turno y
    *  escribe el original y la conversión dentro de uno; espera la ronda si escribió algo y
-   *  devuelve el estado de sync (con `preview`, ninguno). El cableado del escritor y del
-   *  reenvío desde un lector es de C-37. Opcional. */
-  importOffice?(input: OfficeImportInput): Promise<OfficeImportSaved & Partial<SyncFields>>;
+   *  devuelve el estado de sync (con `preview`, ninguno). En un lector, todo ocurre en el
+   *  escritor (`./forward.ts`, op `importOffice`). Opcional. */
+  importOffice?(input: OfficeImportInput): Promise<OfficeImportOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -655,7 +661,39 @@ export function buildWriteContext(
 
   const jdMove = sources.jdMove?.bind(sources);
 
+  /** `hebra_import_office` (C-26): el análisis (`preview`) tal cual, sin ronda. Con escritura,
+   *  UNA ronda al final y el estado de sync de todo lo que nombra el resultado: la nota (su
+   *  fila) y los ficheros (su fila y su blob). Sin escritura (reintento, `keep-only` ya hecho),
+   *  sin ronda. */
+  async function importOfficeWrite(
+    run: NonNullable<WriteContextSources['importOffice']>,
+    input: OfficeImportInput
+  ): Promise<OfficeImportOutcome> {
+    const { result, wrote } = await run(input);
+    if (result.outcome === 'preview') return result;
+    const anyDirty = async (): Promise<boolean | null> => {
+      const parts: Array<boolean | null> = [];
+      if (result.note) parts.push(await dirtyOf(result.note.id));
+      for (const file of [result.convertedFile, result.original]) {
+        if (file) parts.push(await replacedFileDirtyOf(file.sha256)(file.id));
+      }
+      if (parts.includes(true)) return true;
+      return parts.includes(null) ? null : false;
+    };
+    if (!wrote) {
+      if (!sources.isLinked()) return { ...result, sync: 'not_linked' };
+      return { ...result, sync: (await anyDirty()) === false ? 'uploaded' : 'pending' };
+    }
+    const wait = await awaitRound(roundTimeoutMs);
+    return { ...result, ...syncFieldsOf(wait, await anyDirty()) };
+  }
+
+  const importOffice = sources.importOffice?.bind(sources);
+
   return {
+    ...(importOffice
+      ? { importOffice: (input: OfficeImportInput) => importOfficeWrite(importOffice, input) }
+      : {}),
     ...(jd ? { jdNewId: (request: JdNewIdRequest) => jdWrite(jd, request) } : {}),
     ...(jdMove ? { jdMove: (request: JdMoveRequest) => jdMoveWrite(jdMove, request) } : {}),
     ...(looseFile

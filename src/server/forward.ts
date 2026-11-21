@@ -62,7 +62,7 @@ import type {
   TrashConflictCopiesInput,
   TrashConflictCopiesResult
 } from '../store/body-writes';
-import { busyOtherInstance } from '../store/errors';
+import { busyOtherInstance, writeRejected } from '../store/errors';
 import {
   REPLACE_APPLY_BUDGET_MS,
   type ReplaceApplyReport,
@@ -95,6 +95,13 @@ import type {
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import { RELINKED_NOTES_MAX } from '../store/file-content';
 import type { LooseFileWriteInput } from '../store/file-verbs';
+import { ATTACHMENT_MAX_BYTES } from '../store/attachment-content';
+import {
+  OFFICE_CONVERT_BUDGET_MS,
+  OFFICE_HARD_CUT_GRACE_MS,
+  OFFICE_QUEUE_WAIT_MS
+} from '../store/office-runner';
+import type { OfficeImportInput } from '../store/office-writes';
 import type { NoteStateInput } from '../store/note-state';
 import type { JdNewIdRequest } from '../store/jd-new-id';
 import type { JdMoveItem, JdMoveRequest } from '../store/jd-move';
@@ -111,6 +118,7 @@ import {
   type JdNewIdOutcome,
   type LooseFileOutcome,
   type NoteStateOutcome,
+  type OfficeImportOutcome,
   type OrganizeOutcome,
   type ReplaceFileTextOutcome,
   type ReplaceOutcome,
@@ -147,6 +155,9 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   looseFileWrite: AWAIT_ROUND_TIMEOUT_MS + 60_000,
   // D23: renombrar con las notas que lo incrustan, en una transacción, y la ronda.
   renameFileRelinking: AWAIT_ROUND_TIMEOUT_MS + 60_000,
+  // C-37: la cola del hilo, la conversión con su corte duro, los `blobPut` y la ronda.
+  importOffice:
+    OFFICE_QUEUE_WAIT_MS + OFFICE_CONVERT_BUDGET_MS + OFFICE_HARD_CUT_GRACE_MS + AWAIT_ROUND_TIMEOUT_MS + 30_000,
   noteState: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
   jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
@@ -337,6 +348,53 @@ function asReplaceFileTextOutcome(value: unknown, id: string): ReplaceFileTextOu
     previousSha256: value.previousSha256,
     ...(value.replayed === true ? { replayed: true as const } : {}),
     ...syncFieldsFrom(value)
+  };
+}
+
+const OFFICE_REASONS = ['encrypted', 'corrupt', 'too_large', 'unsupported_version'] as const;
+/** Pérdidas de una conversión que se aceptan del escritor: acotadas, nunca para la respuesta
+ *  sin pasar por aquí. */
+const OFFICE_LOSSES_MAX = 200;
+
+/** Un fichero que nombra el resultado de `importOffice`: id, nombre y hash. */
+function asOfficeFile(value: unknown): { id: string; name: string; sha256: string } {
+  const record = asRecordValue(value);
+  if (typeof record.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(record.sha256)) {
+    throw new Error('writer_protocol');
+  }
+  return { id: asString(record.id), name: asString(record.name), sha256: record.sha256 };
+}
+
+/** Valida el `OfficeImportOutcome` que devuelve el escritor (C-37), campo a campo. Con `preview`
+ *  no hay estado de sync; con cualquier otro resultado, sí. */
+function asOfficeOutcome(value: unknown): OfficeImportOutcome {
+  const record = asRecordValue(value);
+  const outcome = oneOfValues(record.outcome, ['converted', 'kept_original', 'already', 'preview'] as const);
+  if (typeof record.convertible !== 'boolean') throw new Error('writer_protocol');
+  const losses = asArray(record.losses);
+  if (losses.length > OFFICE_LOSSES_MAX) throw new Error('writer_protocol');
+  const note = record.note === undefined ? undefined : asRecordValue(record.note);
+  const original = record.original === undefined ? undefined : asRecordValue(record.original);
+  return {
+    outcome,
+    convertible: record.convertible,
+    ...(record.reason !== undefined ? { reason: oneOfValues(record.reason, OFFICE_REASONS) } : {}),
+    losses: losses.map((entry) => {
+      const loss = asRecordValue(entry);
+      return { kind: asString(loss.kind), count: asCount(loss.count), label: asString(loss.label) };
+    }),
+    ...(note ? { note: { id: asString(note.id), title: asString(note.title) } } : {}),
+    ...(record.convertedFile !== undefined ? { convertedFile: asOfficeFile(record.convertedFile) } : {}),
+    ...(original
+      ? {
+          original: {
+            ...asOfficeFile(original),
+            ...(typeof original.trashed === 'boolean' ? { trashed: original.trashed } : {})
+          }
+        }
+      : {}),
+    ...(record.replayed === true ? { replayed: true as const } : {}),
+    ...(outcome === 'preview' ? {} : syncFieldsFrom(record))
   };
 }
 
@@ -1099,6 +1157,41 @@ export function buildRoutedWriteContext(
           }
         }
       : {}),
+    // `hebra_import_office` (C-37): la conversión y la escritura ocurren en el escritor, con la
+    // privacidad de ESTE lector; los bytes viajan en base64 (caben 5 MiB, el tope del mensaje:
+    // más es `file_too_large` sin tocar el socket). Si la conexión se corta tras enviarla, no
+    // se repite: el agente reintenta con el mismo `operationId` y no duplica. Op propia: un
+    // escritor anterior la rechaza sin escribir (`invalid_request`) y eso es `writer_outdated`.
+    ...(local.importOffice
+      ? {
+          importOffice: (input: OfficeImportInput) => {
+            if (instance.role !== 'this' && input.bytes.length > ATTACHMENT_MAX_BYTES) {
+              return Promise.reject(writeRejected('file_too_large'));
+            }
+            return routed(
+              'importOffice',
+              {
+                fileName: input.fileName,
+                format: input.format,
+                mode: input.mode,
+                preview: input.preview,
+                folderId: input.folderId,
+                ...(input.sourceFileId !== undefined ? { sourceFileId: input.sourceFileId } : {}),
+                ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
+                dataBase64: Buffer.from(input.bytes).toString('base64'),
+                privacy: input.privacy
+              },
+              asOfficeOutcome,
+              () => local.importOffice!(input)
+            ).catch((error: unknown) => {
+              if (error instanceof WriterRemoteError && error.code === 'invalid_request') {
+                throw new ToolError('writer_outdated');
+              }
+              throw error;
+            });
+          }
+        }
+      : {}),
     // Cambios de estado de una nota (D23): op propia, para fallar cerrado igual. Un escritor
     // anterior ignoraría `expectedRevision` y movería la nota sin guarda.
     ...(local.noteState
@@ -1185,6 +1278,10 @@ export function writerSocketHandlers(
     // D17: crear, renombrar, mover o duplicar, con la privacidad del lector y la ronda aquí.
     ...(local.looseFileWrite
       ? { looseFileWrite: (input: LooseFileWriteInput) => local.looseFileWrite!(input) }
+      : {}),
+    // C-37: importar un Office, con la privacidad del lector y la ronda aquí.
+    ...(local.importOffice
+      ? { importOffice: (input: OfficeImportInput) => local.importOffice!(input) }
       : {}),
     // D23: cambios de estado de una nota, con la privacidad del lector y la ronda aquí.
     ...(local.noteState ? { noteState: (input: NoteStateInput) => local.noteState!(input) } : {}),
