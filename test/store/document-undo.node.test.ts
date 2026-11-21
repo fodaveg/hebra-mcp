@@ -476,3 +476,40 @@ describe('registro de deshacer: topes', () => {
     expect(h.undoStore.lookup('pasado', h.clock)).toBeNull();
   });
 });
+
+describe('registro de deshacer: pasos del formato (B-M04b)', () => {
+  const steps = [{ op: { type: 'cell.set', value: 1 }, expect: [{ map: 'cells', key: 's0/b0:b0', values: ['2'] }] }];
+
+  it('guarda y devuelve los pasos tal cual; una entrada sin pasos no los lleva', () => {
+    const db = new DatabaseSync(':memory:');
+    ensureDocumentUndoTable(db);
+    const store = sqliteDocumentUndoStore(db);
+    store.record({ operationId: 'con', documentId: 'd', inverse: [{ a: 1 }], steps, revision: 'r', createdAt: 1000 });
+    store.record({ operationId: 'sin', documentId: 'd', inverse: [{ a: 1 }], revision: 'r', createdAt: 1000 });
+    expect(store.lookup('con', 1000)?.steps).toEqual(steps);
+    expect(store.lookup('sin', 1000)).not.toHaveProperty('steps');
+  });
+
+  it('los pasos cuentan para el tope de bytes de la entrada', () => {
+    const db = new DatabaseSync(':memory:');
+    ensureDocumentUndoTable(db);
+    const store = sqliteDocumentUndoStore(db, { maxEntries: 10, maxEntryBytes: 100 });
+    store.record({ operationId: 'grande', documentId: 'd', inverse: [], steps: ['x'.repeat(200)], revision: 'r', createdAt: 1000 });
+    expect(store.lookup('grande', 1000)).toBeNull();
+  });
+
+  it('una tabla de antes de B-M04b (sin columna steps) se actualiza y conserva sus entradas', () => {
+    const db = new DatabaseSync(':memory:');
+    db.exec(`CREATE TABLE hebra_mcp_document_undo (
+      operation_id TEXT PRIMARY KEY, document_id TEXT NOT NULL, revision TEXT NOT NULL,
+      inverse TEXT NOT NULL, inverse_bytes INTEGER NOT NULL, created_at INTEGER NOT NULL
+    ) WITHOUT ROWID`);
+    db.prepare('INSERT INTO hebra_mcp_document_undo VALUES (?, ?, ?, ?, ?, ?)').run('vieja', 'd', 'r', '[{"a":1}]', 9, 1000);
+    ensureDocumentUndoTable(db);
+    ensureDocumentUndoTable(db);
+    const store = sqliteDocumentUndoStore(db);
+    expect(store.lookup('vieja', 1000)).toMatchObject({ inverse: [{ a: 1 }] });
+    store.record({ operationId: 'nueva', documentId: 'd', inverse: [], steps, revision: 'r', createdAt: 1000 });
+    expect(store.lookup('nueva', 1000)?.steps).toEqual(steps);
+  });
+});

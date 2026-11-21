@@ -106,6 +106,8 @@ import {
   type ReplacePlanStore
 } from './replace-plans';
 import { ensureFilePreviousTable, sqliteFilePreviousStore, type FilePreviousStore } from './file-previous';
+import { ensureDocumentUndoTable, sqliteDocumentUndoStore, type DocumentUndoStore } from './document-undo';
+import { openSessionInTurn } from './document-channel';
 import { openJdPlansDatabase, sqliteJdPlanStore, type JdPlanStore } from './jd-plans';
 import { blobNoteRefRows, nameLinkNoteRefRows } from './file-sql';
 import { noteStateEngineOf } from './note-state-engine';
@@ -258,6 +260,8 @@ export async function openNodeLibraryPort(
   if (mode === 'readWrite') ensureOperationsTable(db);
   // Contenido anterior de los ficheros sueltos reemplazados (D15, `./file-previous.ts`).
   if (mode === 'readWrite') ensureFilePreviousTable(db);
+  // Inversas de los lotes de documentos, para deshacer (B-M04, `./document-undo.ts`).
+  if (mode === 'readWrite') ensureDocumentUndoTable(db);
   // Memoria de las carpetas privadas (A3 del audit de privacidad, `./private-folders.ts`).
   if (mode === 'readWrite') ensurePrivateFoldersTable(db);
   // Índices de la época de privacidad de la puerta final (`./privacy-sql.ts`).
@@ -323,6 +327,7 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private operationStore: OperationStore | null = null;
   private replacePlanStore: ReplacePlanStore | null = null;
   private looseFilePreviousStore: FilePreviousStore | null = null;
+  private documentUndoStore: DocumentUndoStore | null = null;
   /** `meta.library_id`: lo escribe `bootstrapLibraryId` al abrir y nada lo cambia
    *  mientras la conexión vive (`libraryReset` solo borra `binding` y `since_seq`). */
   private libraryIdCache: string | null = null;
@@ -1048,6 +1053,20 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         noteAttachments: (noteId) => this.attachmentRows(noteId),
         conflictCopyIds: (noteId) => this.conflictCopyRows(noteId),
         operations: (this.operationStore ??= sqliteOperationStore(this.db)),
+        documentUndo: (this.documentUndoStore ??= sqliteDocumentUndoStore(this.db)),
+        // B-M04b: la sesión del documento escribe en la conexión de ESTE turno, sin entrar en
+        // la cola (entrar desde dentro se esperaría a sí misma), y avisa al canal tras el commit.
+        openDocumentSession: (fileId, adapter, signal) =>
+          openSessionInTurn(
+            {
+              engine: this.engine,
+              guard: () => this.assertSpaceUserWrite(),
+              notify: (id) => this.documents?.wiring?.channel.notifyLocalChange(id)
+            },
+            fileId,
+            adapter,
+            signal
+          ),
         // Con getters: la base de cada registro se abre cuando alguien lo toca, no en cada turno.
         get replacePlans() { return replacePlans(); },
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.
@@ -1063,8 +1082,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut', 'libraryImportBatch',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
           'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot',
-          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink']);
-        const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious']);
+          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink', 'openDocumentSession']);
+        const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious', 'documentUndo']);
         // Síncrona: no cambia el tipo de lo que devuelve cada método (los registros lo son).
         const guard = <T extends object>(target: T, all: boolean): T => new Proxy(target, { get: (object, property) => {
           const value = Reflect.get(object, property);

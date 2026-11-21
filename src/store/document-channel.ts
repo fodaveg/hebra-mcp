@@ -25,7 +25,14 @@ import * as Y from 'yjs';
 import type { SqliteConn, SqliteLibraryEngine } from '../hebra';
 import type { BlobPutOptions, BlobPutResult, FileRow } from './writes';
 import { syncDocClearExternal, syncDocExternalMarks } from '../../vendor/hebra/src/lib/library/sync-store';
-import type { DocHeadRecord, DocStoreAtomicPort, DocStorePort } from '../../vendor/hebra/src/lib/documents/contract';
+import type {
+  DocFormatAdapter,
+  DocHeadRecord,
+  DocSession,
+  DocStoreAtomicPort,
+  DocStorePort
+} from '../../vendor/hebra/src/lib/documents/contract';
+import { createDocSession } from '../../vendor/hebra/src/lib/documents/session';
 import type { ExportedDocument } from '../../vendor/hebra/src/lib/documents/sync/checkpoint';
 import {
   createDocumentSyncWiring,
@@ -287,6 +294,74 @@ export function sessionPortOf(source: DocumentChannelSource): DocStoreAtomicPort
   const port = wiring.sessionStore as Partial<DocStoreAtomicPort>;
   if (typeof port.docAppendWith !== 'function') throw new Error('document-channel-without-atomic-append');
   return port as DocStoreAtomicPort;
+}
+
+/**
+ * Abre la sesión de un documento ATADA al turno en curso de la cola del almacén (B-M04b). La
+ * sesión de `sessionPortOf` escribe con `docAppendWith` por `host.write`, que entra por la cola:
+ * dentro de un turno de `writeExclusive` se esperaría a sí misma. Esta llama directo a
+ * `engine.docAppendWith`, en la conexión del turno, así que el update y lo que escriba `inTx`
+ * (el registro de operaciones y el de deshacer) se confirman juntos.
+ *
+ * El estado sale de `docRead` del motor (segmentos y pendientes en V2) y la base, del punto de
+ * control más reciente (o de la base de la que nació). Tras cada append confirmado avisa al canal
+ * (`notifyLocalChange`, si hay cableado) para que la edición suba. Solo para quien ya está dentro
+ * de un turno; fuera de él, `sessionPortOf`. No toma el cerrojo de escritura del cableado: el
+ * turno de la cola ya es exclusivo y entrar en el cerrojo desde dentro podría esperar a un punto
+ * de control que a su vez espera a la cola.
+ */
+export async function openSessionInTurn<Model, Op>(
+  turn: {
+    engine: Pick<SqliteLibraryEngine, 'docRead' | 'docAppendWith' | 'blobRead'>;
+    /** Revalida la cuenta y el espacio (`assertSpaceUserWrite`), síncrono. */
+    guard(): void;
+    /** El aviso al canal tras el commit; sin cableado, no hace nada. */
+    notify(fileId: string): void;
+  },
+  fileId: string,
+  adapter: DocFormatAdapter<Model, Op>,
+  signal: AbortSignal
+): Promise<DocSession<Model, Op>> {
+  const stored = await turn.engine.docRead(fileId);
+  const head = stored.head;
+  if (!head) throw new Error('doc_head_missing');
+  const base = await turn.engine.blobRead(head.checkpointSha256 ?? head.baseSha256);
+  if (!base) throw new Error('blob_missing');
+  const doc = new Y.Doc();
+  try {
+    for (const piece of [...stored.segments, ...stored.pending]) Y.applyUpdateV2(doc, piece);
+  } catch (error) {
+    doc.destroy();
+    throw error;
+  }
+  const port: DocStoreAtomicPort = {
+    docRead: (id) => turn.engine.docRead(id),
+    docAppend: () => Promise.reject(new Error('document_turn_session_append_only_with')),
+    docAppendWith: async (id, generation, update, inTx) => {
+      turn.guard();
+      await turn.engine.docAppendWith(id, generation, update, inTx);
+      turn.notify(id);
+    },
+    docCompact: () => Promise.reject(new Error('document_turn_session_read_write_only')),
+    docSetHead: () => Promise.reject(new Error('document_turn_session_read_write_only')),
+    docDrop: () => Promise.reject(new Error('document_turn_session_read_write_only'))
+  };
+  const session = createDocSession<Model, Op>({
+    fileId,
+    doc,
+    generation: head.generation,
+    adapter,
+    port,
+    base,
+    signal
+  });
+  const close = session.close.bind(session);
+  return Object.assign(session, {
+    close: async () => {
+      await close();
+      doc.destroy();
+    }
+  });
 }
 
 /**

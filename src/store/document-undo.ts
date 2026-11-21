@@ -17,18 +17,25 @@
  *   `session.apply(inverse, 'agent')`, y en la MISMA transacción del `docAppend` consume la
  *   entrada y cierra el registro (como R18 en el lote).
  *
- * Exactitud: la inversa que guarda el lote lleva un `expect` sobre lo que ESCRIBIÓ el lote, y la
- * sesión lo evalúa contra el estado de ahora. Si otra persona (o un lote posterior) cambió lo
- * mismo, sale `precondition_failed` y no se escribe nada. Esa guarda es la que hace exacto el
- * deshacer, así que aquí no se quita ni se reescribe: si una inversa llegara sin `expect`, pisaría
- * el cambio ajeno. No se compara la revisión del documento a propósito: con ella no se podrían
- * deshacer dos lotes seguidos, de más nuevo a más antiguo, que tocaron celdas distintas.
+ * Exactitud: la guarda es un `expect` sobre lo que ESCRIBIÓ el lote, evaluado contra el estado de
+ * ahora. Si otra persona (o un lote posterior) cambió lo mismo, sale `precondition_failed` y no se
+ * escribe nada. Hay dos formas de llevarla, y aquí no se quita ni se reescribe ninguna:
+ * - Formato con `captureUndo` y `prepareUndo` (hojas, B-M04b): el lote guarda los pasos (`steps`,
+ *   datos planos con sus `expect`), y al deshacer `prepareUndo` los comprueba sobre el `Y.Doc` de
+ *   la sesión de ahora y entrega las operaciones con su guarda. La guarda que ata `prepareUndo` a
+ *   las operaciones es por identidad y no sobrevive a guardarlas, por eso no se guardan las
+ *   operaciones entregadas sino los pasos.
+ * - Formato sin ellos (contrato genérico): la inversa del recibo, tal cual, con el `expect` que
+ *   lleve; sin él pisaría el cambio ajeno.
+ * No se compara la revisión del documento a propósito: con ella no se podrían deshacer dos lotes
+ * seguidos, de más nuevo a más antiguo, que tocaron celdas distintas.
  *
  * Sin entrada (no existe, caducó, ya se deshizo o es de otro documento) sale `not_found`: no hay
  * un código propio y no revela nada del documento.
  *
- * El cableado real (la tabla en el puerto y `turn.undo` y `turn.openSession`) es de B-I01 o
- * `node-port`; aquí solo se prueba con dobles de sesión sobre una SQLite real.
+ * El cableado real (B-M04b): `node-port` crea la tabla y pone el registro y la sesión atada al
+ * turno en `NoteWriteStore` (`documentUndo`, `openDocumentSession`); `documentTurnOf` arma con
+ * ellos el turno de `runDocumentOps` y de `undoDocumentOps`.
  */
 import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
@@ -36,7 +43,9 @@ import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/cont
 import { UNDO_ENTRY_MAX_BYTES, UNDO_MAX_AGE_DAYS, UNDO_MAX_ENTRIES } from './document-limits';
 import type { DocumentOpsResult, DocumentOpsTurn, DocumentUndoEntry, DocumentUndoSink } from './document-ops';
 import { guardDocumentWrite } from './document-privacy';
-import type { DocumentError, EditIn, WriteOut } from './document-types';
+import type { PrivacyConfig } from '../privacy/config';
+import type { NoteWriteStore } from './writes';
+import { undoCapable, type DocumentError, type EditIn, type WriteOut } from './document-types';
 import { OPERATION_ID_MAX_LENGTH, type OperationRecord } from './operations';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -49,7 +58,8 @@ const TABLE_SQL = `CREATE TABLE IF NOT EXISTS hebra_mcp_document_undo (
   revision TEXT NOT NULL,
   inverse TEXT NOT NULL,
   inverse_bytes INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  steps TEXT
 ) WITHOUT ROWID`;
 
 /** Topes del almacén; los tests los bajan para medir el recorte. */
@@ -71,6 +81,11 @@ export interface DocumentUndoStore extends DocumentUndoSink {
 /** Crea la tabla si falta. Solo en la conexión de lectura-escritura del escritor. */
 export function ensureDocumentUndoTable(db: DatabaseSync): void {
   db.exec(TABLE_SQL);
+  // Una tabla de antes de B-M04b no tiene `steps`: se añade (las entradas viejas siguen con su inversa).
+  const columns = db.prepare('PRAGMA table_info(hebra_mcp_document_undo)').all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === 'steps')) {
+    db.exec('ALTER TABLE hebra_mcp_document_undo ADD COLUMN steps TEXT');
+  }
 }
 
 /**
@@ -93,14 +108,15 @@ export function sqliteDocumentUndoStore(
   return {
     record(entry) {
       const inverse = JSON.stringify(entry.inverse);
-      const bytes = Buffer.byteLength(inverse, 'utf8');
+      const steps = entry.steps === undefined ? null : JSON.stringify(entry.steps);
+      const bytes = Buffer.byteLength(inverse, 'utf8') + (steps === null ? 0 : Buffer.byteLength(steps, 'utf8'));
       // Una inversa que no cabe no se guarda: el lote ya respondió `undoAvailable: false`.
       if (bytes > limits.maxEntryBytes) return;
       statement(
         `INSERT OR REPLACE INTO hebra_mcp_document_undo
-           (operation_id, document_id, revision, inverse, inverse_bytes, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      ).run(entry.operationId, entry.documentId, entry.revision, inverse, bytes, entry.createdAt);
+           (operation_id, document_id, revision, inverse, inverse_bytes, created_at, steps)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(entry.operationId, entry.documentId, entry.revision, inverse, bytes, entry.createdAt, steps);
       // La recién guardada se queda siempre; de las demás, las más recientes hasta el tope.
       const rows = statement(
         `SELECT operation_id FROM hebra_mcp_document_undo
@@ -115,7 +131,7 @@ export function sqliteDocumentUndoStore(
     },
     lookup(operationId, now) {
       const row = statement(
-        `SELECT operation_id, document_id, revision, inverse, created_at
+        `SELECT operation_id, document_id, revision, inverse, created_at, steps
          FROM hebra_mcp_document_undo WHERE operation_id = ? AND created_at >= ?`
       ).get(operationId, now - UNDO_TTL_MS) as Record<string, unknown> | undefined;
       if (!row) return null;
@@ -124,6 +140,7 @@ export function sqliteDocumentUndoStore(
         documentId: String(row.document_id),
         revision: String(row.revision),
         inverse: JSON.parse(String(row.inverse)) as unknown[],
+        ...(typeof row.steps === 'string' ? { steps: JSON.parse(row.steps) as unknown[] } : {}),
         createdAt: Number(row.created_at)
       };
     },
@@ -139,6 +156,21 @@ export function sqliteDocumentUndoStore(
 /** El turno del deshacer: el de las escrituras, con el registro de deshacer que además lee. */
 export interface DocumentUndoTurn extends Omit<DocumentOpsTurn, 'undo'> {
   undo: DocumentUndoStore;
+}
+
+/**
+ * El turno de un documento sobre el almacén de `writeExclusive` (B-M04b): el registro de
+ * operaciones, el de deshacer y la sesión atada al turno son los del propio `store`, es decir,
+ * los de la conexión del turno. Sirve para escribir (`runDocumentOps`) y para deshacer.
+ */
+export function documentTurnOf(store: NoteWriteStore, privacy: PrivacyConfig): DocumentUndoTurn {
+  return {
+    store,
+    privacy,
+    operations: store.operations,
+    undo: store.documentUndo,
+    openSession: (fileId, adapter, signal) => store.openDocumentSession(fileId, adapter, signal)
+  };
 }
 
 /** Lo que `undoDocumentOps` necesita de quien cablea. */
@@ -277,9 +309,30 @@ async function undoIn<Model, Op>(
       return refuse({ code: 'precondition_failed', opIndex: 0, target: 'expectedLayout' });
     }
 
+    // Con pasos guardados, la guarda se reconstruye sobre el `Y.Doc` de ahora: `prepareUndo`
+    // comprueba todos los `expect` antes de devolver nada y ata la guarda a las operaciones que
+    // entrega (por identidad, así que se pasan tal cual a `apply`). Sin pasos, la inversa genérica.
+    let inverse = entry.inverse as readonly Op[];
+    const undoer = entry.steps !== undefined ? undoCapable<Op>(adapter) : null;
+    if (entry.steps !== undefined) {
+      if (!undoer || !session.doc) return refuse({ code: 'op_invalid' });
+      try {
+        inverse = undoer.prepareUndo(session.doc, entry.steps);
+      } catch (error) {
+        const code = (error as { name?: string; code?: string } | null)?.name === 'DocOpError'
+          ? (error as { code: string }).code
+          : null;
+        if (code === 'precondition_failed') {
+          return refuse({ code: 'precondition_failed', opIndex: 0, target: 'inverse[0]' });
+        }
+        if (code === 'op_invalid') return refuse({ code: 'op_invalid' });
+        throw error;
+      }
+    }
+
     const withLayout = adapter.format === 'ods';
     const done: { out: WriteOut | null } = { out: null };
-    const result = await session.apply(entry.inverse as readonly Op[], 'agent', {
+    const result = await session.apply(inverse, 'agent', {
       // Determinista: el reintento de un deshacer que no llegó a confirmarse da los mismos ids.
       seed: input.operationId,
       project: false,

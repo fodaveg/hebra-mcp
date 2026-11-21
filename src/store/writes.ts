@@ -92,6 +92,9 @@ import {
 } from './sections';
 import { FILE_TEXT_REPLACE_MAX_BYTES } from './file-content';
 import type { FilePreviousStore } from './file-previous';
+import type { DocumentUndoStore } from './document-undo';
+import type { DocSessionLike } from './document-types';
+import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import type { FolderNoteTitle } from './visible-sql';
 import type {
   BlobNoteRef,
@@ -223,6 +226,15 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
   conflictCopyIds(noteId: string): string[];
   /** Registro de idempotencia de las escrituras con `operationId`. */
   operations: OperationStore;
+  /** Registro de deshacer de los lotes de documentos (`./document-undo.ts`, B-M04b). */
+  documentUndo: DocumentUndoStore;
+  /** Abre la sesión de un documento atada a ESTE turno (`openSessionInTurn`, B-M04b): su
+   *  `docAppendWith` va directo al motor, en la conexión del turno, sin entrar en la cola. */
+  openDocumentSession<Model, Op>(
+    fileId: string,
+    adapter: DocFormatAdapter<Model, Op>,
+    signal: AbortSignal
+  ): Promise<DocSessionLike<Model, Op>>;
   /** Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo los usa
    *  `./replace-batch.ts`. */
   replacePlans: ReplacePlanStore;

@@ -132,6 +132,7 @@ export type DocumentError<C extends DocumentErrorCode = DocumentErrorCode> = {
   [K in C]: { code: K } & DocumentErrorDetail[K];
 }[C];
 
+import type * as Y from 'yjs';
 import type { DocSession } from '../../vendor/hebra/src/lib/documents/contract';
 
 /**
@@ -149,7 +150,36 @@ export type { DocApplyOptions, DocApplyResult, DocFailure } from '../../vendor/h
 export type DocSessionLike<Model = unknown, Op = unknown> = Pick<
   DocSession<Model, Op>,
   'revision' | 'layoutRevision' | 'apply' | 'flush' | 'close'
->;
+> & {
+  /**
+   * El `Y.Doc` vivo de la sesión real. Los dobles no lo tienen. Solo lo usan los formatos que
+   * saben deshacer con guarda (`UndoCapableAdapter`): se lee dentro de `inTx` y al deshacer.
+   */
+  doc?: Y.Doc;
+};
+
+/**
+ * Lo que un formato añade al contrato para deshacer con exactitud (el adaptador de hojas,
+ * `captureUndo` y `prepareUndo` de `sheet-adapter.ts`). Los pasos (`steps`) son datos planos
+ * (cada uno, una operación y sus `expect` como cadenas), así que se guardan en JSON; la guarda
+ * que `prepareUndo` ata a las operaciones es por identidad y no sobrevive a serializarlas, por
+ * eso se reconstruye al deshacer sobre el `Y.Doc` de ahora. Un formato sin estos dos métodos
+ * deshace con la inversa tal cual (el contrato genérico).
+ */
+export interface UndoCapableAdapter<Op> {
+  /** Con el documento justo después de aplicar el lote. */
+  captureUndo(doc: Y.Doc, ops: readonly Op[], inverse: readonly Op[]): unknown[];
+  /** Lanza `DocOpError('precondition_failed')` sin escribir si otra persona cambió lo mismo. */
+  prepareUndo(doc: Y.Doc, steps: readonly unknown[]): Op[];
+}
+
+/** El adaptador, si sabe deshacer con guarda. */
+export function undoCapable<Op>(adapter: unknown): UndoCapableAdapter<Op> | null {
+  const candidate = adapter as Partial<UndoCapableAdapter<Op>> | null;
+  return typeof candidate?.captureUndo === 'function' && typeof candidate.prepareUndo === 'function'
+    ? (candidate as UndoCapableAdapter<Op>)
+    : null;
+}
 
 /**
  * Entrada del registro de herramientas de documentos: nombre, tipo de fichero y si escribe.

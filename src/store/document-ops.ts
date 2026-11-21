@@ -18,8 +18,9 @@
  *
  * Qué pone cada capa: el `DocumentOpsStore` lo aporta quien cablea (el puerto del almacén y el
  * hilo de `./document-jobs.ts`); la sesión de la fase 3 la abre el propio turno
- * (`turn.openSession`) para que su `docAppendWith` escriba DENTRO del turno en curso: una sesión
- * que entrara por la cola (`sessionPortOf`) se esperaría a sí misma.
+ * (`turn.openSession`, en el puerto real `openSessionInTurn` de `./document-channel.ts`) para que
+ * su `docAppendWith` escriba DENTRO del turno en curso: una sesión que entrara por la cola
+ * (`sessionPortOf`) se esperaría a sí misma.
  *
  * Los errores recuperables salen como `{ ok: false, error }` (`DocumentError`). Los rechazos del
  * almacén (`not_found`, `space_access_denied`) y los del hilo (`DocumentJobError`) se lanzan:
@@ -38,6 +39,7 @@ import type {
   GuardedOp,
   WriteOut
 } from './document-types';
+import { undoCapable } from './document-types';
 import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import { OPERATION_ID_MAX_LENGTH, type OperationRecord, type OperationStore } from './operations';
 
@@ -49,6 +51,12 @@ export interface DocumentUndoEntry<Op = unknown> {
   documentId: string;
   /** Las inversas, en el orden en que hay que aplicarlas. */
   inverse: readonly Op[];
+  /**
+   * Los pasos de deshacer del formato (`captureUndo`), con su guarda `expect` en datos planos.
+   * Solo los lleva un formato que sabe deshacer con guarda (hojas); sin ellos se aplica la
+   * inversa tal cual.
+   */
+  steps?: readonly unknown[];
   /** Revisión que dejó el lote: la inversa solo vale mientras siga siendo la de ahora. */
   revision: string;
   createdAt: number;
@@ -290,6 +298,7 @@ async function applyIn<Model, Op>(
     }
 
     const withLayout = adapter.format === 'ods';
+    const undoer = undoCapable<Op>(adapter);
     const done: { out: WriteOut | null } = { out: null };
     const result = await session.apply(input.ops as readonly Op[], 'agent', {
       // Determinista: el reintento de un lote que no llegó a confirmarse da los mismos ids.
@@ -305,14 +314,18 @@ async function applyIn<Model, Op>(
           sync: 'pending'
         };
         if (turn.undo) {
+          // Un formato con deshacer exacto aporta sus pasos, leídos en el estado de después del
+          // lote (el `Y.Doc` de la sesión ya tiene el update aplicado dentro de `inTx`).
+          const steps = session.doc && undoer ? undoer.captureUndo(session.doc, input.ops as readonly Op[], receipt.inverse) : undefined;
           const entry: DocumentUndoEntry<Op> = {
             operationId: input.operationId,
             documentId: input.id,
             inverse: receipt.inverse,
+            ...(steps ? { steps } : {}),
             revision: receipt.revision,
             createdAt: store.now()
           };
-          if (JSON.stringify(entry.inverse).length <= UNDO_ENTRY_MAX_BYTES) {
+          if (JSON.stringify(entry.inverse).length + (steps ? JSON.stringify(steps).length : 0) <= UNDO_ENTRY_MAX_BYTES) {
             turn.undo.record(entry);
             out.undoAvailable = true;
             out.undoUntil = new Date(store.now() + UNDO_MAX_AGE_DAYS * DAY_MS).toISOString();
