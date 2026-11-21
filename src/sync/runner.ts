@@ -379,7 +379,6 @@ export class SyncRunner implements SyncStatusSource {
       })();
     // El runner necesita a sí mismo en `onEvent`, que se fija al crear el motor.
     let runner: SyncRunner | null = null;
-    let created: LibrarySyncEngine | null = null;
     // B-D15: el canal de documentos, uno por motor (el personal y cada espacio). Sus ganchos
     // se evalúan tarde: el motor y el runner se crean después del cableado.
     const source = documentSourceOf(options.port);
@@ -389,7 +388,8 @@ export class SyncRunner implements SyncStatusSource {
             if (!runner) throw new Error('sync-runner-not-ready');
             await runner.requestRound();
           },
-          readBlob: async (sha256) => (created ? created.readBlob(sha256) : null)
+          // Por la compuerta de descargas del runner, como el resto de bajadas de blobs.
+          readBlob: async (sha256) => (runner ? runner.readBlobBytes(sha256) : null)
         })
       : null;
     const engine = await LibrarySyncEngine.create({
@@ -418,7 +418,6 @@ export class SyncRunner implements SyncStatusSource {
       now: options.now,
       onEvent: (event) => runner?.handleEngineEvent(event)
     });
-    created = engine;
     runner = new SyncRunner(engine, options);
     runner.wiring = wiring;
     // Antes de la primera ronda: recupera lo que un corte dejó a medias y registra los documentos.
@@ -725,25 +724,44 @@ export class SyncRunner implements SyncStatusSource {
    */
   async readBlob(sha256: string): Promise<boolean> {
     let outcome: 'ok' | 'missing' | 'error' | 'revoked' = 'revoked';
+    try {
+      const result = await this.fetchBlob(sha256);
+      outcome = result.outcome;
+      return result.bytes !== null;
+    } finally {
+      try {
+        this.options.emitAttachment?.(outcome);
+      } catch {
+        // Un logger que lanza no cambia el resultado.
+      }
+    }
+  }
+
+  /**
+   * Los bytes de un blob por la misma compuerta de descargas que `readBlob` (tope de
+   * `BLOB_DOWNLOAD_CONCURRENCY` en todo el proceso, turno por cuenta, reintento por 429). Es lo
+   * que usa el canal de documentos del cableado (B-D15b). No cuenta como `attachment.fetch`,
+   * que es el log de adjuntos. Nunca lanza: `null` si no hay bytes (revocado, sin red, ausente).
+   */
+  async readBlobBytes(sha256: string): Promise<Uint8Array | null> {
+    return (await this.fetchBlob(sha256)).bytes;
+  }
+
+  private async fetchBlob(
+    sha256: string
+  ): Promise<{ outcome: 'ok' | 'missing' | 'error' | 'revoked'; bytes: Uint8Array | null }> {
     let release: (() => void) | null = null;
     try {
       for (let retry = 0; ; retry += 1) {
         release = (await this.gates.downloads.acquire(undefined, this.accountKey))!;
-        if (this.stopped || this.revokedFlag) {
-          outcome = 'revoked';
-          return false;
-        }
+        if (this.stopped || this.revokedFlag) return { outcome: 'revoked', bytes: null };
         let waitMs: number;
         try {
           const bytes = await this.engine.readBlob(sha256);
-          outcome = bytes ? 'ok' : 'missing';
-          return bytes !== null;
+          return { outcome: bytes ? 'ok' : 'missing', bytes: bytes ?? null };
         } catch (error) {
           const limited = rateLimitOf(error);
-          if (!limited || retry >= BLOB_DOWNLOAD_RETRIES) {
-            outcome = 'error';
-            return false;
-          }
+          if (!limited || retry >= BLOB_DOWNLOAD_RETRIES) return { outcome: 'error', bytes: null };
           waitMs =
             limited.retryAfterMs !== undefined
               ? Math.min(Math.max(limited.retryAfterMs, 0), BLOB_RETRY_AFTER_MAX_MS)
@@ -756,11 +774,6 @@ export class SyncRunner implements SyncStatusSource {
       }
     } finally {
       release?.();
-      try {
-        this.options.emitAttachment?.(outcome);
-      } catch {
-        // Un logger que lanza no cambia el resultado.
-      }
     }
   }
 

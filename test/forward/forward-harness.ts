@@ -134,6 +134,9 @@ export function useForwardHarness(): void {
   });
 }
 
+/** `whenReady` sin plazo de pared: el mayor que admite `setTimeout`. */
+const WAIT_FOR_SIGNAL_MS = 2 ** 31 - 1;
+
 export async function pair(options: { blobs?: boolean } = {}) {
   const dataDir = tempDataDir();
   const relay = new InMemoryLibraryRelay();
@@ -153,7 +156,8 @@ export async function pair(options: { blobs?: boolean } = {}) {
       writerSocketHandlers(localWriteContext(opened), opened),
   });
   instances.push(writer);
-  await writer.whenReady(5_000);
+  // Sin plazo de pared: la ronda inicial es la señal, no un reloj que la carga puede adelantar.
+  await writer.whenReady(WAIT_FOR_SIGNAL_MS);
   const reader = await LibraryInstance.open({
     dataDir,
     sync,

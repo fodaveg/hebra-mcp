@@ -326,7 +326,9 @@ describe('LibraryInstance: escritor único', () => {
   it('el relevo llega entre dos páginas de una búsqueda con `props`: termina bien y el cierre va después', async () => {
     const dataDir = tempDataDir();
     const creator = await open(dataDir, { lock: { releaseOnExit: false } });
-    for (let index = 0; index < 450; index += 1) {
+    // Tres notas bastan: las "páginas" del recorrido las fabrica el espía de abajo, así que el
+    // test no depende de cuánto tarde en crear cientos de notas con la máquina cargada.
+    for (let index = 0; index < 3; index += 1) {
       await creator.createNote({ body: `---\nclave: ${index === 0 ? 'si' : 'no'}\n---\n# Nota ${index}\ngarbanzos\n`, privacy });
     }
     await creator.close();
@@ -350,9 +352,11 @@ describe('LibraryInstance: escritor único', () => {
     const search = vi.spyOn(reading.engine, 'search').mockImplementation((...args: unknown[]) => {
       calls += 1;
       closedDuringWalk ||= reading.closed;
-      const result = real(...args);
       if (calls === 1) takeover = reader.checkWriter();
-      return result;
+      // Las dos primeras páginas vienen vacías y con cursor (como las de 200 notas sin la
+      // propiedad); la tercera es la búsqueda real, desde el principio, con las tres notas.
+      if (calls < 3) return { items: [], nextCursor: `pagina-${calls}` };
+      return real(args[0], null, ...args.slice(2));
     });
     // Sin medir tiempos: el segundo turno del recorrido espera a que el relevo pida el cierre, así
     // que siempre llega entre dos páginas por muy rápido que vaya la búsqueda.
@@ -396,7 +400,8 @@ describe('LibraryInstance: escritor único', () => {
     const relay = new InMemoryLibraryRelay();
     const sync = { transport: relay, identity: IDENTITY, vaultKey: VAULT_KEY, intervalMs: null };
     const writer = await open(dataDir, { sync });
-    await writer.whenReady(5_000);
+    // Sin plazo de pared: la ronda inicial es la señal, no un reloj que la carga puede adelantar.
+    await writer.whenReady(2 ** 31 - 1);
     const child = liveProcess();
     const reader = await open(dataDir, { sync, lock: { pid: child.pid! } });
     expect(reader.syncRunner).toBeNull();

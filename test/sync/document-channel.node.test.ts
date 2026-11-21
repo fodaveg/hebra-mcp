@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 import { LibrarySyncEngine, SqliteLibraryEngine } from '../../src/hebra';
 import { InMemoryLibraryRelay, LocalLibraryPort } from '../hebra-testing';
@@ -14,6 +14,7 @@ import {
 } from '../../src/store/document-channel';
 import type { DocSessionLike } from '../../src/store/document-types';
 import { SyncRunner } from '../../src/sync/runner';
+import { createSyncGates, type SyncGates } from '../../src/sync/gates';
 import { IDENTITY, VAULT_KEY } from './devices';
 import { createDocSession } from '../../vendor/hebra/src/lib/documents/session';
 import type { DocSession } from '../../vendor/hebra/src/lib/documents/contract';
@@ -76,14 +77,24 @@ interface Person {
   conflicts: string[];
 }
 
+const ACCOUNT = 'c4'.repeat(32);
+/** Un espacio compartido: su id es el libraryId del canal. */
+interface SpaceOptions {
+  spaceId: string;
+}
+interface McpOptions {
+  space?: SpaceOptions;
+  gates?: SyncGates;
+}
+
 /** La persona: la app de Hebra con su canal de documentos. */
-async function person(relay: InMemoryLibraryRelay): Promise<Person> {
+async function person(relay: InMemoryLibraryRelay, space?: SpaceOptions): Promise<Person> {
   const { conn } = openNodeSqliteConn(':memory:');
   const engine = await SqliteLibraryEngine.open(conn, 'Mac');
   const port = new LocalLibraryPort(engine);
   const conflicts: string[] = [];
   let sync!: LibrarySyncEngine;
-  const wiring = createDocumentSyncWiring({ libraryId: 'personal' }, port as unknown as DocumentSyncPort, {
+  const wiring = createDocumentSyncWiring({ libraryId: space?.spaceId ?? 'personal' }, port as unknown as DocumentSyncPort, {
     exportDocument: async (fileId) => ({ bytes: bytesOf(`export:${fileId}`), referencedBlobs: [] }),
     requestRound: () => sync.runRound(),
     externalMarks: async () => [],
@@ -97,6 +108,7 @@ async function person(relay: InMemoryLibraryRelay): Promise<Person> {
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
     keyEpoch: 1,
+    ...(space ? { spaceEnvelope: { authorId: ACCOUNT } } : {}),
     leaseOwnerId: `persona-${crypto.randomUUID()}`,
     reservedRecords: wiring.reservedRecords,
     filesRetention: wiring.retention,
@@ -142,19 +154,25 @@ async function tempDir(): Promise<string> {
 }
 
 /** El MCP tal cual corre: `NodeLibraryPort` y `SyncRunner`. Con `dir`, sobre ficheros (reinicio). */
-async function mcp(relay: InMemoryLibraryRelay, dir?: string): Promise<Mcp> {
-  const port = await openNodeLibraryPort(
-    dir
+async function mcp(relay: InMemoryLibraryRelay, dir?: string, extra: McpOptions = {}): Promise<Mcp> {
+  const spaceAccess = extra.space
+    ? { spaceId: extra.space.spaceId, scope: 'fixture', authorize: async () => {}, assertActive: () => {} }
+    : undefined;
+  const port = await openNodeLibraryPort({
+    ...(dir
       ? { sqlitePath: join(dir, 'library.sqlite'), dataDir: dir, deviceLabel: 'Claude' }
-      : { sqlitePath: ':memory:', deviceLabel: 'Claude' }
-  );
+      : { sqlitePath: ':memory:', deviceLabel: 'Claude' }),
+    ...(spaceAccess ? { spaceAccess } : {})
+  });
   const runner = await SyncRunner.create({
     port: port.syncStorePort(),
     transport: relay,
     blobTransport: relay,
     identity: IDENTITY,
     vaultKey: VAULT_KEY,
-    intervalMs: null
+    intervalMs: null,
+    ...(extra.space ? { spaceEnvelope: { authorId: ACCOUNT } } : {}),
+    ...(extra.gates ? { gates: extra.gates } : {})
   });
   cleanups.push(async () => {
     await runner.stop().catch(() => undefined);
@@ -345,6 +363,73 @@ describe('canal de documentos del MCP (B-D15)', () => {
     const reopened = await openNodeLibraryPort({ sqlitePath: join(dir, 'library.sqlite'), dataDir: dir });
     cleanups.push(async () => void (await reopened.closeWhenIdle().catch(() => undefined)));
     expect(reopened.documentSource().storage.getItem(key)).toBe(saved);
+  });
+
+  it('en un espacio compartido la edición sube, llega a otro dispositivo del espacio y no se cruza con la biblioteca personal', async () => {
+    const spaceId = '955480b0-c2c3-471f-aa5d-3f37ed46fe68';
+    const space = { spaceId };
+    const spaceRelay = newRelay();
+    const personalRelay = newRelay();
+    const spacePerson = await person(spaceRelay, space);
+    const personalPerson = await person(personalRelay);
+    const spaceAgent = await mcp(spaceRelay, undefined, { space });
+    const personalAgent = await mcp(personalRelay);
+    expect(spaceAgent.port.documentSource().libraryId).toBe(spaceId);
+    expect(personalAgent.port.documentSource().libraryId).toBe('personal');
+
+    const spaceFile = await createDocument(spacePerson);
+    const personalFile = await createDocument(personalPerson);
+    await rounds(spacePerson, spaceAgent);
+    await rounds(personalPerson, personalAgent);
+    const spaceSource = spaceAgent.port.documentSource();
+    const personalSource = personalAgent.port.documentSource();
+    expect(await cellsOf(spaceSource.port, spaceFile)).toEqual({ A1: 'base' });
+
+    // El LLM edita en el espacio: sube y llega al otro dispositivo del espacio.
+    const open = await openAgentDoc(spaceSource, spaceFile);
+    await open.edit('C3', 'llm-espacio');
+    await rounds(spacePerson, spaceAgent);
+    expect(await cellsOf(spacePerson.port, spaceFile)).toEqual({ A1: 'base', C3: 'llm-espacio' });
+
+    // Ninguna edición ni documento cruza de un contexto al otro.
+    const personalOpen = await openAgentDoc(personalSource, personalFile);
+    await personalOpen.edit('Z9', 'llm-personal');
+    await rounds(personalPerson, personalAgent);
+    await rounds(spacePerson, spaceAgent);
+    expect(await cellsOf(personalPerson.port, personalFile)).toEqual({ A1: 'base', Z9: 'llm-personal' });
+    expect(await cellsOf(spacePerson.port, spaceFile)).toEqual({ A1: 'base', C3: 'llm-espacio' });
+    expect((await spaceSource.port.docRead(personalFile)).head).toBeNull();
+    expect((await personalSource.port.docRead(spaceFile)).head).toBeNull();
+    expect(await spaceSource.port.fileRead(personalFile)).toBeNull();
+    expect(await personalSource.port.fileRead(spaceFile)).toBeNull();
+    // El vínculo del canal se guarda con la clave de SU contexto.
+    expect(spaceSource.storage.getItem(documentSyncStateKey(spaceId))).toContain('binding');
+    expect(spaceSource.storage.getItem(documentSyncStateKey('personal'))).toBeNull();
+  });
+
+  it('readBlob del canal pasa por la compuerta de descargas: con la plaza ocupada espera, y la suelta al acabar', async () => {
+    const relay = newRelay();
+    const gates = createSyncGates(2, 1);
+    const who = await person(relay);
+    const agent = await mcp(relay, undefined, { gates });
+    const fileId = await createDocument(who);
+    await rounds(who, agent);
+    const source = agent.port.documentSource();
+    // Un documento con ediciones pendientes no es "pristine": restaurar su base pide los bytes
+    // por el gancho `readBlob` del cableado.
+    const open = await openAgentDoc(source, fileId);
+    await open.edit('C3', 'llm');
+    const head = (await source.port.docRead(fileId)).head!;
+
+    // La única plaza de descargas del proceso está cogida.
+    const held = (await gates.downloads.acquire(undefined, 'otra-cuenta'))!;
+    const restoring = source.wiring!.restore(fileId, head.baseSha256).catch(() => undefined);
+    // La descarga del cableado hace cola en la compuerta en vez de ir directa al motor.
+    await vi.waitFor(() => expect(gates.downloads.queued).toBe(1));
+    held();
+    await restoring;
+    expect(gates.downloads.queued).toBe(0);
+    expect(gates.downloads.inUse).toBe(0);
   });
 
   it('un lector no monta canal de documentos y no escribe', async () => {
