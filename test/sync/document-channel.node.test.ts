@@ -304,12 +304,7 @@ describe('canal de documentos del MCP (B-D15)', () => {
     expect(source.sessions.openDocuments()).toEqual(['f2']);
   });
 
-  it.fails('la sesión real de Hebra cumple DocSessionLike y escribe updates V2 como espera el almacén', async () => {
-    // HALLAZGO (vendor/hebra/src/lib/documents/session.ts, líneas 193, 196 y 237): `createDocSession`
-    // saca el update de `copy.on('update')` y lo aplica con `Y.applyUpdate`, es decir, V1. El
-    // almacén, el canal y `generation-flow.ts` leen todo como V2 (`Y.applyUpdateV2`): un update V1
-    // lanza «Unexpected end of array». Mientras no se arregle en Hebra, este test falla a propósito
-    // (`it.fails`); al arreglarlo pasará a rojo y hay que quitar el `.fails`.
+  it('la sesión real de Hebra cumple DocSessionLike y escribe updates V2 como espera el almacén', async () => {
     const relay = newRelay();
     const who = await person(relay);
     const agent = await mcp(relay);
