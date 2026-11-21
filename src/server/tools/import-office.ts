@@ -15,35 +15,30 @@
  * `not_found`. El escritor lo repite dentro de su turno (C-29) y rechaza sin escribir un
  * espacio de solo lectura o una nota que quedaría oculta por sus etiquetas.
  *
- * Escritor: aún no existe en `WriteContext` (lo añade C-37 con `office-writes.ts` de C-26).
- * Mientras, esta herramienta trabaja contra `OfficeImportWriter`, que es el contrato que ese
- * paquete cumplirá; los tipos del contrato salen de `office-types-double.ts`. C-36 cambia el
- * doble por el import real sin tocar la lógica de aquí.
+ * Escritor: `WriteContext.importOffice` (`../write-context.ts`), que en local es
+ * `importOfficeLocal` (`../../store/office-writes.ts`) y en un lector se reenvía al escritor.
+ * Con `fileId` la herramienta NO lee los bytes: manda `sourceFileId` y el escritor los lee de su
+ * disco con la privacidad de quien pide, así un lector no sube 25 MiB para que se descarten.
  *
  * Logs (§6.4): `import.office` con el id (de la nota o del fichero convertido), el resultado y
  * el formato. Nunca el nombre, el hash ni el contenido.
  */
 import { ROOT_FOLDER_ID } from '../../hebra';
-import { logEvent, type ToolErrorCode } from '../../log/logger';
+import { logEvent } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';
-import type { PrivacyConfig } from '../../privacy/config';
 import { nameExtension, validFileName } from '../../store/file-content';
-import { usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
-import { syncOf, type SyncFields, type WriteContext } from '../write-context';
-import { requireValidOperationId } from './guards';
-import { OFFICE_DATA_MAX_BYTES, OFFICE_FILE_ID_MAX_BYTES } from './office-limits';
 import type {
   ConversionBlockReason,
   ConversionLoss,
   OfficeFormat,
   OfficeImportMode
-} from './office-types-double';
+} from '../../../vendor/hebra/src/lib/office-import/types';
+import { usageOf, type ToolContext } from '../context';
+import { ToolError } from '../errors';
+import { syncOf, type OfficeImportOutcome, type SyncFields } from '../write-context';
+import { requireValidOperationId } from './guards';
+import { OFFICE_DATA_MAX_BYTES, OFFICE_FILE_ID_MAX_BYTES } from './office-limits';
 import { mapWriteError } from './write-errors';
-
-/** Código nuevo del contrato. Falta en `ToolErrorCode` (`src/log/logger.ts`), que es de C-36:
- *  allí se añade a la unión y esta conversión sobra. */
-const UNSUPPORTED_FORMAT = 'unsupported_format' as ToolErrorCode;
 
 const FORMATS: Record<string, OfficeFormat> = { xlsx: 'xlsx', pptx: 'pptx', docx: 'docx' };
 const MODES: readonly OfficeImportMode[] = ['convert-and-keep', 'convert-only', 'keep-only'];
@@ -61,42 +56,10 @@ export type ImportOfficeInput = {
   space?: string;
 };
 
-/** Lo que recibe el escritor. `sourceFileId` solo cuando el origen es un fichero de la
- *  biblioteca (para que lo conserve o lo mande a la papelera según `mode`). */
-export interface OfficeImportWriteInput {
-  bytes: Uint8Array;
-  fileName: string;
-  format: OfficeFormat;
-  mode: OfficeImportMode;
-  preview: boolean;
-  folderId: string;
-  sourceFileId?: string;
-  operationId?: string;
-  privacy: PrivacyConfig;
-}
-
-export type OfficeImportSaved = {
-  outcome: 'converted' | 'kept_original' | 'already' | 'preview';
-  convertible: boolean;
-  reason?: ConversionBlockReason;
-  losses: ConversionLoss[];
-  note?: { id: string; title: string };
-  convertedFile?: { id: string; name: string; sha256: string };
-  original?: { id: string; name: string; sha256: string; trashed?: boolean };
-  replayed?: true;
-};
-
-/** Con `preview` no se escribe y no hay estado de sync. */
-export type OfficeImportOutcome = OfficeImportSaved & Partial<SyncFields>;
-
-export interface OfficeImportWriter {
-  importOffice(input: OfficeImportWriteInput): Promise<OfficeImportOutcome>;
-}
-
 export type ImportOfficeOutput = {
   format: OfficeFormat;
   mode: OfficeImportMode;
-  outcome: OfficeImportSaved['outcome'];
+  outcome: OfficeImportOutcome['outcome'];
   convertible: boolean;
   reason?: ConversionBlockReason;
   losses: ConversionLoss[];
@@ -106,16 +69,10 @@ export type ImportOfficeOutput = {
   replayed?: true;
 } & Partial<SyncFields>;
 
-/** El escritor de importación del contexto, o `undefined`. Hasta C-37 solo lo ponen los tests. */
-function officeWriterOf(ctx: ToolContext): OfficeImportWriter | undefined {
-  const write = ctx.write as (WriteContext & Partial<OfficeImportWriter>) | undefined;
-  return write?.importOffice ? { importOffice: (input) => write.importOffice!(input) } : undefined;
-}
-
 function formatOf(name: string): OfficeFormat {
   const extension = nameExtension(name);
   const format = extension === null ? undefined : FORMATS[extension];
-  if (!format) throw new ToolError(UNSUPPORTED_FORMAT);
+  if (!format) throw new ToolError('unsupported_format');
   return format;
 }
 
@@ -154,46 +111,20 @@ function destinationOf(ctx: ToolContext, input: ImportOfficeInput, fallback: str
   return id;
 }
 
-async function localBytes(ctx: ToolContext, sha256: string): Promise<Uint8Array | null> {
-  try {
-    return await ctx.port.blobRead(sha256);
-  } catch {
-    return null;
-  }
-}
-
-/** El fichero de origen: visible y vivo con el filtro de esta llamada (si no, `not_found`),
- *  de tamaño dentro del tope ANTES de leer, y con sus bytes (los baja el escritor si hace
- *  falta). */
+/** El fichero de origen: visible y vivo con el filtro de esta llamada (si no, `not_found`), de
+ *  tamaño dentro del tope si ya se conoce y con formato de Office. No lee bytes: los lee el
+ *  escritor de su disco (`sourceFileId`), con la privacidad de quien pide, y él comprueba el
+ *  tamaño real. */
 async function readSource(ctx: ToolContext, id: string) {
   const content = (await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig)).contentOf(id);
   if (!content || content.file.trashedAt !== null) throw new ToolError('not_found');
   usageOf(ctx).file(id);
-  const tooLarge = (byteLength: number): ToolError =>
-    new ToolError('file_too_large', { byteLength, maxBytes: OFFICE_FILE_ID_MAX_BYTES });
   const known = content.file.byteLength;
-  if (known !== null && known > OFFICE_FILE_ID_MAX_BYTES) throw tooLarge(known);
-  // Formato antes de traer bytes: un fichero que no es Office no cuesta lectura.
-  const format = formatOf(content.file.name);
-  let bytes = await localBytes(ctx, content.sha256);
-  if (!bytes) {
-    if (!ctx.write?.fetchFile) throw new ToolError('file_unavailable');
-    try {
-      const { available } = await ctx.write.fetchFile({ id, privacy: ctx.privacyConfig });
-      if (!available) throw new ToolError('file_unavailable');
-    } catch (error) {
-      const mapped = mapWriteError(error);
-      throw mapped.code === 'not_found' ||
-        mapped.code === 'busy_other_instance' ||
-        mapped.code === 'privacy_config_unresolved'
-        ? mapped
-        : new ToolError('file_unavailable');
-    }
-    bytes = await localBytes(ctx, content.sha256);
+  if (known !== null && known > OFFICE_FILE_ID_MAX_BYTES) {
+    throw new ToolError('file_too_large', { byteLength: known, maxBytes: OFFICE_FILE_ID_MAX_BYTES });
   }
-  if (!bytes) throw new ToolError('file_unavailable');
-  if (bytes.length > OFFICE_FILE_ID_MAX_BYTES) throw tooLarge(bytes.length);
-  return { bytes, format, name: content.file.name, folderId: content.file.folderId };
+  // Formato antes de nada más: un fichero que no es Office no llega al escritor.
+  return { format: formatOf(content.file.name), name: content.file.name, folderId: content.file.folderId };
 }
 
 /** `hebra_import_office`: ver la cabecera. */
@@ -202,8 +133,8 @@ export async function runImportOffice(
   input: ImportOfficeInput
 ): Promise<ImportOfficeOutput> {
   // 1. Solo la entrada, sin tocar el almacén.
-  const writer = officeWriterOf(ctx);
-  if (!writer) throw new ToolError('invalid_input');
+  const write = ctx.write;
+  if (!write?.importOffice) throw new ToolError('invalid_input');
   const preview = input.preview === true;
   if ((input.dataBase64 === undefined) === (input.fileId === undefined)) {
     throw new ToolError('invalid_input');
@@ -237,7 +168,6 @@ export async function runImportOffice(
   let fallbackFolder = ROOT_FOLDER_ID;
   if (input.fileId !== undefined) {
     const source = await readSource(ctx, input.fileId);
-    bytes = source.bytes;
     fileName = source.name;
     format = source.format;
     sourceFileId = input.fileId;
@@ -248,8 +178,8 @@ export async function runImportOffice(
   // 3. El escritor lo vuelve a comprobar todo dentro de su turno.
   let result: OfficeImportOutcome;
   try {
-    result = await writer.importOffice({
-      bytes: bytes!,
+    result = await write.importOffice({
+      ...(bytes !== undefined ? { bytes } : {}),
       fileName,
       format,
       mode,

@@ -26,6 +26,8 @@ import { ReplaceBatch } from '../../src/store/replace-batch';
 import { fetchFileBytes, replaceFileText } from '../../src/store/file-writes';
 import { writeLooseFile } from '../../src/store/file-verbs';
 import { writeNoteState } from '../../src/store/note-state';
+import { importOfficeLocal, type OfficeConversionRunner } from '../../src/store/office-writes';
+import { ConversionError } from '../../vendor/hebra/src/lib/office-import/types';
 import { runJdNewId } from '../../src/store/jd-new-id';
 import { runJdMove } from '../../src/store/jd-move';
 import { PrivacyFilter, type PrivacyConfig } from '../../src/privacy';
@@ -47,6 +49,14 @@ export interface TestContext {
   sqlitePath: string;
   close(): Promise<void>;
 }
+
+/** Convertidor de prueba: todo documento es ilegible (`corrupt`), así que se guarda el original. */
+const CORRUPT_CONVERTER: OfficeConversionRunner = {
+  analyze: async (job) => ({ format: job.format, convertible: false, reason: 'corrupt', losses: [] }),
+  convert: async () => {
+    throw new ConversionError('corrupt', 'Documento ilegible.');
+  }
+};
 
 /** `WriteContext` sin sync, sobre `port`: sin ronda que pedir (`sync: "not_linked"`).
  *  También lo usa el arnés de las sondas del audit de privacidad (`test/privacy/`). */
@@ -80,6 +90,9 @@ export function testWriteContext(port: NodeLibraryPort): WriteContext {
     jdNewId: (request) => runJdNewId(port, request, () => {}),
     // Mover a un ID (D19): igual, sobre el mismo puerto.
     jdMove: (request) => runJdMove(port, request, () => {}),
+    // Importar un Office (C-26/C-36): sin sync y con un convertidor que no convierte nada
+    // (documento corrupto): lo que se prueba aquí es la privacidad, no la conversión.
+    importOffice: (input) => importOfficeLocal(port, input, { converter: CORRUPT_CONVERTER }),
     noteRead: (id) => port.noteRead(id),
     folderDirty: (id) => port.folderDirty(id),
     blobUploaded: (sha256) => port.blobUploaded(sha256),

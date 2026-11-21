@@ -90,6 +90,9 @@ Las listas se paginan con el `nextCursor` recibido; `null` es el final.
 - Ficheros sueltos ([ficheros sueltos](references/ficheros-sueltos.md)): `hebra_list_files`,
   `hebra_read_file`, `hebra_replace_file_text`, `hebra_create_file`, `hebra_rename_file`,
   `hebra_move_file`, `hebra_duplicate_file`, `hebra_trash_file`, `hebra_restore_file`.
+- Importar Office: `hebra_import_office` convierte un `.xlsx`, `.pptx` o `.docx` (en `dataBase64`
+  o un fichero de la biblioteca en `fileId`) y, según `mode`, conserva el original. Pide un
+  `operationId` nuevo, salvo con `preview: true`, que solo analiza y dice qué se perdería.
 - Espacios: `hebra_list_spaces`, `hebra_list_organizations`, `hebra_note_authors`. Estado:
   `hebra_status` (vínculo, sync y `capabilities`).
 - Johnny.Decimal, solo en la personal ([Johnny.Decimal](references/johnny-decimal.md)):

@@ -1,16 +1,13 @@
 /**
  * `hebra_import_office` (C-25) contra un doble del escritor: esquema, base64, formatos
  * retirados, `preview`, privacidad de origen y destino, y que nada llega al escritor (ni al
- * almacén) si la entrada no vale. Los tipos del contrato son los del doble; C-36 los cambia.
+ * almacén) si la entrada no vale. Los tipos son los reales (`office-writes.ts`, `vendor/hebra`).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ToolError } from '../../src/server/errors';
-import {
-  runImportOffice,
-  type ImportOfficeInput,
-  type OfficeImportOutcome,
-  type OfficeImportWriteInput
-} from '../../src/server/tools/import-office';
+import { runImportOffice, type ImportOfficeInput } from '../../src/server/tools/import-office';
+import type { OfficeImportInput } from '../../src/store/office-writes';
+import type { OfficeImportOutcome } from '../../src/server/write-context';
 import { OFFICE_DATA_MAX_BYTES } from '../../src/server/tools/office-limits';
 import { BAIT_FOLDER } from '../fixtures/test-library';
 import { startLooseFiles, type LooseFilesHarness } from '../fixtures/loose-files';
@@ -39,8 +36,8 @@ describe('hebra_import_office (C-25)', () => {
   /** El contexto de prueba con un escritor de importación doble que registra lo recibido. */
   async function setup(outcome: OfficeImportOutcome | Error = CONVERTED) {
     harness = await startLooseFiles();
-    const calls: OfficeImportWriteInput[] = [];
-    const importOffice = vi.fn(async (input: OfficeImportWriteInput) => {
+    const calls: OfficeImportInput[] = [];
+    const importOffice = vi.fn(async (input: OfficeImportInput) => {
       calls.push(input);
       if (outcome instanceof Error) throw outcome;
       return outcome;
@@ -80,7 +77,7 @@ describe('hebra_import_office (C-25)', () => {
       folderId: 'root',
       operationId: 'op-1'
     });
-    expect(Buffer.from(calls[0]!.bytes).equals(ZIP)).toBe(true);
+    expect(Buffer.from(calls[0]!.bytes!).equals(ZIP)).toBe(true);
     expect(out).toEqual({ format: 'xlsx', mode: 'convert-and-keep', ...CONVERTED });
   });
 
@@ -141,7 +138,9 @@ describe('hebra_import_office (C-25)', () => {
 
     it('sin escritor de importación: invalid_input', async () => {
       harness = await startLooseFiles();
-      await expectCode(runImportOffice(harness.test.ctx, valid), 'invalid_input');
+      const { importOffice: _omitted, ...write } = harness.test.ctx.write!;
+      const ctx = { ...harness.test.ctx, write } as ToolContext;
+      await expectCode(runImportOffice(ctx, valid), 'invalid_input');
     });
   });
 
@@ -194,17 +193,26 @@ describe('hebra_import_office (C-25)', () => {
       expect(importOffice).not.toHaveBeenCalled();
     });
 
-    it('fileId visible: sus bytes y su carpeta llegan al escritor', async () => {
+    it('fileId visible: llega su id y su carpeta, sin leer sus bytes (los lee el escritor)', async () => {
       const { ctx, calls } = await setup();
       const id = await harness!.engineFile(harness!.test.library.folders.proyectos, 'Plan.xlsx', ZIP);
-      await runImportOffice(ctx, { fileId: id, operationId: 'op-f' });
+      const reads = vi.fn(ctx.port.blobRead.bind(ctx.port));
+      const fetches = vi.fn(ctx.write!.fetchFile!);
+      const spied = {
+        ...ctx,
+        port: new Proxy(ctx.port, { get: (target, key) => (key === 'blobRead' ? reads : Reflect.get(target, key)) }),
+        write: { ...ctx.write!, fetchFile: fetches }
+      } as ToolContext;
+      await runImportOffice(spied, { fileId: id, operationId: 'op-f' });
+      expect(reads).not.toHaveBeenCalled();
+      expect(fetches).not.toHaveBeenCalled();
       expect(calls[0]).toMatchObject({
         fileName: 'Plan.xlsx',
         format: 'xlsx',
         sourceFileId: id,
         folderId: harness!.test.library.folders.proyectos
       });
-      expect(Buffer.from(calls[0]!.bytes).equals(ZIP)).toBe(true);
+      expect(calls[0]).not.toHaveProperty('bytes');
     });
 
     it('fileId oculto, de la papelera o inexistente: not_found sin eco del cebo', async () => {

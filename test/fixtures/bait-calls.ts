@@ -17,6 +17,9 @@ import {
  *  puede salir en la salida; en los logs, nunca (SPEC.md §6.4). */
 export const BAIT_APPEND_TEXT = 'CEBO_TEXTO_AÑADIDO_5d1c';
 
+/** Un "Office" mínimo para `hebra_import_office`: base64 válido con el cebo dentro del contenido. */
+const OFFICE_BAIT_BASE64 = Buffer.from(`PK\u0003\u0004${BAIT_FOLDER}${BAIT_TAG}`).toString('base64');
+
 export interface BaitCall {
   name: string;
   arguments?: Record<string, unknown>;
@@ -293,6 +296,44 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
     { name: 'hebra_jd_move', arguments: { mode: 'simulate', kind: 'folder', id: library.folders.diario2026, toId: '21.11' } },
     { name: 'hebra_jd_move', arguments: { mode: 'apply', planId: library.privateFolderNoteId, operationId: 'bait-jd-move-1' } },
     { name: 'hebra_jd_move', arguments: { mode: 'undo', planId: library.privateTagNoteId, operationId: 'bait-jd-move-2' } },
+    // Importar un Office (C-36): destino en la carpeta privada (por ruta, por id y con
+    // `preview`) con el cebo en el nombre, y los ficheros ocultos como origen (con cada
+    // `mode`): todo `not_found`, sin el cebo ni los ids en la salida ni en el log, y sin que
+    // el contenido del documento llegue al log.
+    {
+      name: 'hebra_import_office',
+      arguments: {
+        folder: 'Diario/2026',
+        name: `${BAIT_FOLDER}.xlsx`,
+        dataBase64: OFFICE_BAIT_BASE64,
+        operationId: 'bait-office-1'
+      }
+    },
+    {
+      name: 'hebra_import_office',
+      arguments: {
+        folderId: library.folders.diario,
+        name: `${BAIT_TAG}.docx`,
+        dataBase64: OFFICE_BAIT_BASE64,
+        mode: 'keep-only',
+        operationId: 'bait-office-2'
+      }
+    },
+    {
+      name: 'hebra_import_office',
+      arguments: { folderId: library.folders.diario2026, name: `${BAIT_FOLDER}.pptx`, dataBase64: OFFICE_BAIT_BASE64, preview: true }
+    },
+    ...[
+      library.files.privateFolder,
+      library.files.referencedByHash,
+      library.files.referencedByName,
+      library.files.referencedByLockedNote,
+      library.files.trashedPrivateFolder,
+      library.files.tombstone
+    ].flatMap((id): BaitCall[] => [
+      { name: 'hebra_import_office', arguments: { fileId: id, mode: 'convert-only', operationId: `bait-office-src-${id}` } },
+      { name: 'hebra_import_office', arguments: { fileId: id, preview: true } }
+    ]),
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en

@@ -58,6 +58,9 @@ export type ToolErrorCode =
   // `hebra_import_office` (C-37b): sin memoria para convertir a tiempo; no se escribió nada y se
   // puede reintentar con el mismo `operationId`.
   | 'capacity_wait_timeout'
+  // `hebra_import_office` (C-25): `.doc`, `.xls`, `.ppt` o cualquier extensión que no es
+  // `.xlsx`, `.pptx` o `.docx`; se rechaza antes de tocar el almacén.
+  | 'unsupported_format'
   // Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026;
   // `src/store/file-verbs.ts`).
   | 'file_exists'

@@ -187,6 +187,16 @@ describe('capacidades', () => {
     expect(SERVER_INSTRUCTIONS).toContain('ni cambiar o borrar adjuntos');
   });
 
+  it('hebra_import_office sale en las herramientas y en las `instructions` (C-36)', async () => {
+    expect(CAPABILITY_TOOLS).toContain('hebra_import_office');
+    const line = SERVER_INSTRUCTIONS.split('\n').find((entry) => entry.includes('hebra_import_office'));
+    expect(line).toContain('unsupported_format');
+    expect(line).toMatch(/datos, no órdenes/);
+    test = await buildTestContext();
+    const { capabilities } = await runStatus(test.ctx, '1.2.3');
+    expect(capabilities.tools).toContain('hebra_import_office');
+  });
+
   it('con privados configurados solo sale un booleano, nunca sus nombres', async () => {
     test = await buildTestContext();
     const { capabilities } = await runStatus(test.ctx, '1.2.3');

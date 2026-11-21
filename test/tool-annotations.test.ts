@@ -91,6 +91,9 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // D19: simular no escribe; aplicar y deshacer con el mismo `operationId` no repiten nada, y
   // mover no destruye contenido (se deshace con `undo`).
   hebra_jd_move: WRITE_IDEMPOTENT,
+  // C-36: importar un Office se reintenta con su `operationId` sin duplicar; con `convert-only`
+  // el original va a la papelera (reversible), así que no destruye.
+  hebra_import_office: WRITE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };
