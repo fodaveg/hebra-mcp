@@ -5,7 +5,7 @@ por apartados, editar por sustituciones puntuales, mover a carpetas existentes, 
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
 añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
 la papelera o sacarlos, leer su contenido, reemplazar el texto de uno, crear uno de texto
-y renombrarlos, moverlos o duplicarlos, crear un ID nuevo del JDex, auditar el sistema
+y renombrarlos, moverlos o duplicarlos, importar un .xlsx, .pptx o .docx, crear un ID nuevo del JDex, auditar el sistema
 Johnny.Decimal y archivar notas, ficheros o carpetas dentro de un ID; nunca purgar ni vaciar
 la papelera, borrar carpetas ni moverlas fuera de un ID, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
@@ -14,7 +14,7 @@ vincula como un dispositivo más de la biblioteca. En el conector remoto, el ser
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 5 de noviembre de 2026: el servidor MCP tiene 46 herramientas
+Estado a 21 de noviembre de 2026: el servidor MCP tiene 47 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -77,6 +77,11 @@ Estado a 5 de noviembre de 2026: el servidor MCP tiene 46 herramientas
   carpeta y `hebra_duplicate_file` lo copia (mismos bytes, hasta 5 MiB) con otro nombre. Las
   cuatro llevan `operationId`; un nombre que ya usa otro fichero visible de la carpeta
   responde `file_exists` con su id, y lo privado responde como lo inexistente.
+- Importar Office (D27, 21 nov 2026): `hebra_import_office` convierte un `.xlsx`, `.pptx` o
+  `.docx` a una nota o a un fichero suelto y, según `mode` (`convert-and-keep`, `convert-only`
+  o `keep-only`), conserva el original; `preview` solo analiza. Pide `operationId` salvo con
+  `preview`. Todavía no hay ningún convertidor registrado: una importación guarda solo el
+  original. Límites y errores: `SPEC.md` (D27) y la skill (`herramientas.md`).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`

@@ -5,7 +5,7 @@ description: >-
   con sync cifrado) mediante el MCP `hebra` (hebra-mcp): buscar, listar y leer notas,
   etiquetas, carpetas, enlaces y propiedades del frontmatter; crear notas, editarlas
   por sustituciones exactas, añadir texto (al final o por apartados), mover, archivar,
-  papelera, versiones y adjuntos; gestionar carpetas y ficheros sueltos (crear,
+  papelera, versiones y adjuntos; importar un .xlsx, .pptx o .docx; gestionar carpetas y ficheros sueltos (crear,
   renombrar, mover, duplicar, papelera); trabajar en espacios compartidos; en
   Johnny.Decimal, crear IDs del JDex, archivar en un ID y auditar el sistema. Usar
   cuando el usuario nombre Hebra o sus notas: "busca en Hebra", "apúntalo en Hebra",
@@ -59,7 +59,8 @@ va a la papelera puede volver, y la papelera no se vacía desde aquí.
 | Papelera de notas: mandar, sacar, listar (también sus carpetas); ver y restaurar versiones anteriores (las de este dispositivo; en un espacio, las del historial del servidor, con quién las editó) | Purgar ni vaciar la papelera; ver versiones de otros dispositivos en la biblioteca personal |
 | Leer y añadir adjuntos (imágenes, PDF, texto, Markdown, CSV, JSON; hasta 5 MiB) | Cambiar o borrar un adjunto; más de 5 MiB u otros tipos (ZIP, vídeo, audio, Office...) |
 | Crear y renombrar carpetas | Borrar carpetas, o moverlas salvo dentro de un ID con `hebra_jd_move` |
-| Ficheros sueltos: listar, leer, reemplazar el texto de uno de texto, crear de texto, renombrar, mover, duplicar, papelera | Purgarlos; reemplazar o crear uno que no sea de texto; leer uno de la papelera; cambiar la extensión |
+| Ficheros sueltos: listar, leer, reemplazar el texto de uno de texto, crear de texto, renombrar, mover, duplicar, papelera | Purgarlos; reemplazar uno que no sea de texto; crear con `hebra_create_file` uno que no sea de texto; leer uno de la papelera; cambiar la extensión |
+| Importar un `.xlsx`, `.pptx` o `.docx` con `hebra_import_office`: nota o fichero convertido y original, según `mode` | Importar `.doc`, `.xls`, `.ppt` u otra extensión; convertir un formato sin convertidor (hoy, todos) |
 | Espacios con concesión; ver organizaciones, miembros y autores | Entrar sin `granted: true`; mover entre bibliotecas; Johnny.Decimal o ficheros de trabajo en un espacio |
 | Johnny.Decimal: ID nuevo, archivar nota, fichero o carpeta en un ID, auditar | Crear categorías, áreas o hijos "+"; que la auditoría arregle algo |
 
@@ -91,8 +92,11 @@ Las listas se paginan con el `nextCursor` recibido; `null` es el final.
   `hebra_read_file`, `hebra_replace_file_text`, `hebra_create_file`, `hebra_rename_file`,
   `hebra_move_file`, `hebra_duplicate_file`, `hebra_trash_file`, `hebra_restore_file`.
 - Importar Office: `hebra_import_office` convierte un `.xlsx`, `.pptx` o `.docx` (en `dataBase64`
-  o un fichero de la biblioteca en `fileId`) y, según `mode`, conserva el original. Pide un
-  `operationId` nuevo, salvo con `preview: true`, que solo analiza y dice qué se perdería.
+  o un fichero de la biblioteca en `fileId`) a una nota o un fichero suelto y, según `mode`,
+  conserva el original. Pide un `operationId` nuevo, salvo con `preview: true`, que solo analiza.
+  Todavía no hay ningún convertidor registrado: con `preview` la respuesta trae
+  `convertible: false`, y una importación guarda solo el original (`outcome: kept_original`).
+  `.doc`, `.xls` y `.ppt` dan `unsupported_format`. Detalle en [herramientas](references/herramientas.md).
 - Espacios: `hebra_list_spaces`, `hebra_list_organizations`, `hebra_note_authors`. Estado:
   `hebra_status` (vínculo, sync y `capabilities`).
 - Johnny.Decimal, solo en la personal ([Johnny.Decimal](references/johnny-decimal.md)):

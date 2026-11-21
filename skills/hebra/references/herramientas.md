@@ -117,6 +117,22 @@ servidor no da la versión, `history_unavailable` sin escribir nada. Con `author
 | `hebra_create_folder` | `name` (hasta 255, sin `/`), `parent?` (ruta) **o** `parentId?` (`"root"` = raíz); sin ninguno, la raíz | `{id, path, created, sync}`. Si ya hay una con ese nombre ahí (sin distinguir mayúsculas), la devuelve con `created: false`: sirve para replicar una estructura sin comprobar antes. Para anidar, encadena con el `id` devuelto (`parentId`), de arriba abajo. |
 | `hebra_rename_folder` | `folderId`, `name` | `{id, path, renamed, sync}`. El mismo nombre: `renamed: false`. Lo que el MCP no ve dentro de la carpeta se queda dentro, oculto. |
 
+## Importar Office
+
+| Herramienta | Entrada | Salida y notas |
+|---|---|---|
+| `hebra_import_office` (D27) | `dataBase64` (con `name`, con extensión) **o** `fileId`, exactamente uno; `folder` **o** `folderId`, como mucho uno (sin ninguno, la carpeta del `fileId` o la raíz); `mode` (`convert-and-keep` por defecto, `convert-only`, `keep-only`); `preview`; `operationId` (obligatorio salvo con `preview`) | `{format, mode, outcome, convertible, reason?, losses, note?, convertedFile?, original?, replayed?, sync, syncError?}`. `outcome`: `converted`, `kept_original` (solo el original), `already` (con `keep-only`, si no hay nada que escribir) o `preview`. |
+
+- Formatos: `.xlsx`, `.pptx` y `.docx`. `.doc`, `.xls`, `.ppt` y cualquier otra extensión dan `unsupported_format`.
+- `convert-only`: si la conversión sale bien y el origen es un `fileId`, el original va a la papelera, que es reversible. Con `dataBase64` y conversión correcta no se guarda original.
+- Si la conversión falla, el original se conserva: con `fileId` queda donde estaba, y con `dataBase64` se guarda como fichero suelto.
+- `losses`: lo que se pierde al convertir, con `kind`, `count` y `label`. `reason` sale solo si el convertidor bloquea el archivo: `encrypted`, `corrupt`, `too_large` o `unsupported_version`.
+- `preview` no escribe nada: dice si el archivo es convertible y, si lo es, qué se perdería (`losses`).
+- Todavía no hay ningún convertidor registrado. La respuesta trae `convertible: false`, y fuera de `preview` se guarda solo el original (`outcome: kept_original`).
+- Límites: `fileId` hasta 25 MiB; `dataBase64` hasta 5 MiB (más, `file_too_large`); 12 MiB de XML expandido por conversión. Una conversión a la vez. Los topes no salen en `capabilities.limits` de `hebra_status`; están aquí y en `SPEC.md` del repo hebra-mcp (D27).
+- Privacidad: la carpeta de destino y el origen tienen que verse, si no `not_found`. Un espacio de solo lectura como destino, y una nota que quedaría oculta por sus etiquetas, se rechazan sin escribir.
+- `sync` y `syncError` van como en las demás escrituras.
+
 ## Estado
 
 `hebra_status` (sin argumentos aparte de `space`) devuelve el vínculo y el sync, sin contenido:
