@@ -344,6 +344,27 @@ describe('undoDocumentOps: idempotencia y registro', () => {
     expect(h.document.cells.A1).toBe('base');
   });
 
+  it('una inversa que no cambia nada responde already, no escribe y no pide ronda', async () => {
+    const h = await harness();
+    h.undoStore.record({
+      operationId: 'lote-1',
+      documentId: h.fileId,
+      inverse: [set('A1', 'base')],
+      revision: 'r1',
+      createdAt: h.clock
+    });
+    const updates = h.document.updates;
+    let rounds = 0;
+    h.undo.afterCommit = async () => {
+      rounds += 1;
+      return { sync: 'uploaded' };
+    };
+    const result = await undoDocumentOps(h.undo, undoInput(h, 'des-1', 'lote-1'), adapter);
+    expect(result).toMatchObject({ ok: true, out: { outcome: 'already', undoAvailable: false } });
+    expect(h.document.updates).toBe(updates);
+    expect(rounds).toBe(0);
+  });
+
   it('la ronda de sync informa del estado sin cambiar el resultado', async () => {
     const h = await harness();
     await apply(h, 'lote-1', [set('A1', 'uno')]);

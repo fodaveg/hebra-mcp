@@ -303,7 +303,7 @@ describe('runDocumentOps: tres fases', () => {
   it('un lote que no cambia nada queda registrado y no escribe', async () => {
     const h = await harness();
     const result = await runDocumentOps(h.store, input(h, [set('A1', 'base')], { expectedRevision: 'r1' }), adapter);
-    expect(result).toMatchObject({ ok: true, out: { outcome: 'saved', revision: 'r1', previousRevision: 'r1' } });
+    expect(result).toMatchObject({ ok: true, out: { outcome: 'already', revision: 'r1', previousRevision: 'r1' } });
     expect(h.document.updates).toBe(0);
     expect(operationState(h)).toBe('done');
   });

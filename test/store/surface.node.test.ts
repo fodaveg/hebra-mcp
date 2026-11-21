@@ -173,7 +173,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       const bad = Object.keys(mod).filter((name) => FORBIDDEN_NAME.test(name));
       expect(bad, relative(root, file)).toEqual([]);
     }
-  });
+    // Importa y transforma todos los módulos: lo que comprueba son sus nombres, no lo que tarda.
+  }, 120_000);
 
   it('ni el puerto, ni su vista de sync, ni la instancia tienen métodos prohibidos', async () => {
     const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });

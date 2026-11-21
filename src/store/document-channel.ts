@@ -23,6 +23,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import * as Y from 'yjs';
 import type { SqliteConn, SqliteLibraryEngine } from '../hebra';
+import { writeRejected } from './errors';
 import type { BlobPutOptions, BlobPutResult, FileRow } from './writes';
 import { syncDocClearExternal, syncDocExternalMarks } from '../../vendor/hebra/src/lib/library/sync-store';
 import type {
@@ -82,6 +83,8 @@ export interface DocumentHost {
   /** Revalida la cuenta y el espacio dentro del turno (`assertSpaceUserWrite`). */
   guard(): void;
   files: DocumentFileWrites;
+  /** Dónde limpiar los blobs sustituidos (B-N21); opcional: sin él no se limpia. */
+  cleanup?: DocumentCleanupStores | null;
 }
 
 /** Las filas de `files` que lee el cableado, con las columnas y la forma de `FileRow`. */
@@ -156,11 +159,19 @@ let exporter: DocumentExporter = async () => {
  * segmentos y arranca (el cableado tolera un documento que no se deja exportar).
  */
 export function setDocumentExporter(next: DocumentExporter | null): void {
+  registeredExporter = next;
   exporter =
     next ??
     (async () => {
       throw new Error('document-export-unavailable');
     });
+}
+
+let registeredExporter: DocumentExporter | null = null;
+
+/** El exportador registrado, o `null`: lo que `checkpointAfterBatch` recibe como dependencia. */
+export function getDocumentExporter(): DocumentExporter | null {
+  return registeredExporter;
 }
 
 /** Todo lo de un contexto que hace falta para montar el canal. */
@@ -171,8 +182,22 @@ export interface DocumentChannelSource {
   readonly sessions: DocumentSessions;
   externalMarks(): Promise<{ fileId: string; sha256: string }[]>;
   clearExternalMark(fileId: string): Promise<void>;
+  /**
+   * Los hashes que fijan en `doc_pins` los DEMÁS documentos de este contexto (B-N21). Cada
+   * contexto tiene su `blobs/`, así que otro espacio no puede retener un blob de este.
+   */
+  otherPins(fileId: string): Promise<ReadonlySet<string>>;
+  /** Dónde limpia los blobs sustituidos; sin directorio de datos (tests en memoria), `null`. */
+  readonly cleanup: DocumentCleanupStores | null;
   /** El cableado montado por el runner de este contexto; `null` hasta entonces. */
   wiring: DocumentSyncWiring | null;
+}
+
+/** El almacén de bytes del contexto y la carpeta del diario de candidatos a borrar. */
+export interface DocumentCleanupStores {
+  blobs: { remove(sha256: string): Promise<void> };
+  /** Raíz del diario (`FsSupersededJournal`). */
+  root: string;
 }
 
 /** Un `Storage` síncrono sobre `meta`: la lectura es de caché y la escritura entra en la cola. */
@@ -278,6 +303,14 @@ export function createDocumentSource(host: DocumentHost): DocumentChannelSource 
     sessions: new DocumentSessions(),
     externalMarks: () => host.read(() => syncDocExternalMarks(context())),
     clearExternalMark: (fileId) => host.write(() => syncDocClearExternal(context(), fileId)),
+    otherPins: (fileId) =>
+      host.read(() => {
+        const rows = host.db
+          .prepare('SELECT DISTINCT sha256 FROM doc_pins WHERE file_id <> ?')
+          .all(fileId) as Array<{ sha256: string }>;
+        return new Set(rows.map((row) => row.sha256.toLowerCase()));
+      }),
+    cleanup: host.cleanup ?? null,
     wiring: null
   };
 }
@@ -325,6 +358,8 @@ export async function openSessionInTurn<Model, Op>(
   const stored = await turn.engine.docRead(fileId);
   const head = stored.head;
   if (!head) throw new Error('doc_head_missing');
+  // Un `.odp` no se edita con el adaptador de hojas ni al revés.
+  if (head.format !== adapter.format) throw writeRejected('file_type_not_allowed');
   const base = await turn.engine.blobRead(head.checkpointSha256 ?? head.baseSha256);
   if (!base) throw new Error('blob_missing');
   const doc = new Y.Doc();

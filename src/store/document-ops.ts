@@ -28,8 +28,13 @@
  */
 import { createHash } from 'node:crypto';
 import { assertAddressRule, DocumentAddressError } from './document-address';
-import { UNDO_ENTRY_MAX_BYTES, UNDO_MAX_AGE_DAYS } from './document-limits';
-import { guardAsset, guardDocumentWrite, type DocumentGuardTurn } from './document-privacy';
+import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES, UNDO_ENTRY_MAX_BYTES, UNDO_MAX_AGE_DAYS } from './document-limits';
+import {
+  documentAssetsRefusal,
+  guardAsset,
+  guardDocumentWrite,
+  type DocumentGuardTurn
+} from './document-privacy';
 import type {
   BatchIssue,
   DocSessionLike,
@@ -129,17 +134,39 @@ type Gate = { kind: 'replay'; out: WriteOut } | { kind: 'go'; sha256: string } |
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
-/** Huella de la petición: la acción va en ella, así que otro uso del `operationId` es `operation_id_reused`. */
-function fingerprintOf<Op>(input: DocumentOpsInput<Op>): string {
-  const parts = [
+/** El valor con las claves de cada objeto ordenadas y sin los `undefined`, para serializarlo. */
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (typeof value !== 'object' || value === null) return value;
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (record[key] !== undefined) out[key] = canonical(record[key]);
+  }
+  return out;
+}
+
+/**
+ * Huella de una petición de documento (D28, protección 7), sobre su forma CANÓNICA: el mismo
+ * lote con las claves en otro orden es el mismo lote, y un reintento no da `operation_id_reused`.
+ * Quien llama pone la acción y el tipo de documento en `parts`: el mismo `operationId` en otra
+ * acción u otro formato sí lo da.
+ */
+export function documentFingerprint(parts: readonly unknown[]): string {
+  return createHash('sha256').update(JSON.stringify(canonical(parts)), 'utf8').digest('hex');
+}
+
+/** Huella del lote: acción, formato, documento, condiciones, operaciones e imágenes. */
+function fingerprintOf<Op>(input: DocumentOpsInput<Op>, format: string): string {
+  return documentFingerprint([
     'documentOps',
+    format,
     input.id,
     input.expectedRevision ?? null,
     input.expectedLayout ?? null,
     input.ops,
     input.assets ?? []
-  ];
-  return createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
+  ]);
 }
 
 /** Un `WriteOut` del registro (no se fía de su forma). */
@@ -164,7 +191,15 @@ function validate<Op>(input: DocumentOpsInput<Op>): DocumentOpsResult | null {
   if (!Array.isArray(input.ops) || input.ops.length === 0) {
     return invalid('ops', 'sin operaciones', 'ops con al menos una operacion');
   }
-  return null;
+  if (input.ops.length > EDIT_OPS_MAX) {
+    return invalid('ops', 'demasiadas operaciones', `como mucho ${EDIT_OPS_MAX}`);
+  }
+  if (Buffer.byteLength(JSON.stringify(input.ops), 'utf8') > EDIT_OPS_MAX_BYTES) {
+    const detail = { maxBytes: EDIT_OPS_MAX_BYTES };
+    return { ok: false, error: { code: 'too_large', ...detail } };
+  }
+  const assets = documentAssetsRefusal(input.assets ?? []);
+  return assets ? { ok: false, error: assets } : null;
 }
 
 /** El resultado de un reintento: lo guardado, marcado como repetido. */
@@ -231,7 +266,7 @@ export async function runDocumentOps<Model, Op>(
     }
   }
   const signal = options.signal ?? new AbortController().signal;
-  const fingerprint = fingerprintOf(input);
+  const fingerprint = fingerprintOf(input, adapter.format);
 
   // Fase 1.
   const first = await store.turn((turn) => gateIn(turn, input, fingerprint, store.now()));
@@ -265,6 +300,8 @@ export async function runDocumentOps<Model, Op>(
   // Fase 3.
   const applied = await store.turn((turn) => applyIn(turn, store, input, adapter, fingerprint, signal));
   if (!applied.ok || applied.out.replayed) return applied;
+  // Sin cambios no se escribió nada: ni ronda ni punto de control.
+  if (applied.out.outcome === 'already') return { ok: true, out: applied.out, report: computed.report };
 
   // Fase 4.
   const sync = (await store.afterCommit?.().catch(() => undefined)) ?? { sync: 'pending' };
@@ -355,11 +392,12 @@ async function applyIn<Model, Op>(
       }
     }
 
-    // Un lote que no cambia nada no escribe update y `inTx` no corre: se registra aquí.
+    // Un lote que no cambia nada no escribe update y `inTx` no corre: se registra aquí, como
+    // `already` (D28, protección 11): decir `saved` afirmaría una escritura que no hubo.
     const registered = done.out;
     const base: WriteOut = registered ?? {
       id: input.id,
-      outcome: 'saved',
+      outcome: 'already',
       revision: result.revision,
       previousRevision,
       sync: 'pending'

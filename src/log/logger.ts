@@ -4,9 +4,13 @@
  * `logToolCall`/`logToolError` no reciben nada del `input` de la llamada, solo el
  * nombre de la herramienta, si salió bien y, si no, un código cerrado.
  */
+import type { CheckpointOutcome } from '../store/document-checkpoint';
+import type { DocumentErrorCode } from '../store/document-types';
 import type { JdRejectionCode } from '../store/errors';
 
 export type ToolErrorCode =
+  // Hojas y presentaciones (D28, 21 nov 2026; `DOCUMENT_ERROR_CODES` de `src/store/document-types.ts`).
+  | DocumentErrorCode
   | 'client_outdated'
   | 'space_not_ready'
   | 'space_access_denied'
@@ -102,5 +106,62 @@ export function logToolError(tool: string, code: ToolErrorCode): void {
 }
 
 export function logEvent(entry: LogEvent): void {
+  write(entry);
+}
+
+/**
+ * Lo que un documento (`.ods`, `.odp`) deja en el log (D28, protección 13). La lista es
+ * cerrada: acción, formato, resultado, un código y recuentos. Nunca ids, nombres, hashes,
+ * operaciones ni valores de celda.
+ */
+export type DocumentLogEntry =
+  | {
+      event: 'document.write';
+      action: 'edit' | 'undo' | 'create';
+      format: 'ods' | 'odp';
+      outcome: 'saved' | 'already' | 'validated' | 'error';
+      code?: DocumentLogCode;
+      /** Operaciones del lote. */
+      ops?: number;
+      replayed?: true;
+    }
+  | { event: 'document.read'; outcome: 'ok' | 'error'; code?: DocumentLogCode }
+  | { event: 'document.copy'; outcome: 'ok' | 'error'; code?: DocumentLogCode }
+  | { event: 'document.checkpoint'; status: CheckpointOutcome['status']; removed: number; kept: number };
+
+/** Los códigos que puede llevar un evento de documento; cualquier otro sale como `internal`. */
+export type DocumentLogCode = DocumentErrorCode | 'file_type_not_allowed' | 'file_name_unavailable' | 'invalid_input' | 'internal';
+
+const DOCUMENT_LOG_CODES: ReadonlySet<string> = new Set<DocumentLogCode>([
+  'precondition_failed',
+  'generation_changed',
+  'batch_invalid',
+  'op_unsupported',
+  'document_invalid',
+  'document_too_complex',
+  'document_busy',
+  'too_large',
+  'op_invalid',
+  'file_too_large',
+  'file_unavailable',
+  'file_exists',
+  'operation_id_reused',
+  'writer_outdated',
+  'not_found',
+  'space_access_denied',
+  'doc_head_invalid',
+  'file_type_not_allowed',
+  'file_name_unavailable',
+  'invalid_input',
+  'internal'
+]);
+
+/** El código de log de un fallo: el suyo si está en la lista cerrada; si no, `internal`. */
+export function documentLogCode(error: unknown): DocumentLogCode {
+  const code = (error as { code?: unknown } | null)?.code;
+  return typeof code === 'string' && DOCUMENT_LOG_CODES.has(code) ? (code as DocumentLogCode) : 'internal';
+}
+
+export function logDocumentEvent(entry: DocumentLogEntry): void {
   write(entry);
 }

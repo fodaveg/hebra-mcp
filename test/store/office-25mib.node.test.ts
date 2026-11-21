@@ -37,9 +37,9 @@ function ctxConEscritor() {
 }
 
 describe('office-limits (C-07)', () => {
-  it('fileId y dataBase64 admiten 25 MiB; el ZIP expandido, 12 MiB', () => {
+  it('fileId admite 25 MiB, dataBase64 los 5 MiB del socket; el ZIP expandido, 12 MiB', () => {
     expect(OFFICE_FILE_ID_MAX_BYTES).toBe(25 * MIB);
-    expect(OFFICE_DATA_MAX_BYTES).toBe(25 * MIB);
+    expect(OFFICE_DATA_MAX_BYTES).toBe(5 * MIB);
     expect(OFFICE_ZIP_LIMITS.maxArchiveBytes).toBe(OFFICE_FILE_ID_MAX_BYTES);
     expect(OFFICE_ZIP_LIMITS.maxExpandedBytes).toBe(12 * MIB);
     expect(OFFICE_ZIP_LIMITS.maxFileBytes).toBeLessThanOrEqual(OFFICE_ZIP_LIMITS.maxExpandedBytes);
@@ -62,7 +62,7 @@ describe('office-limits (C-07)', () => {
     const big = 'A'.repeat((Math.ceil(OFFICE_DATA_MAX_BYTES / 3) + 4) * 4);
     await expect(
       runImportOffice(ctxConEscritor(), { name: 'Libro.xlsx', dataBase64: big, operationId: 'op-1' })
-    ).rejects.toMatchObject({ code: 'file_too_large', extra: { maxBytes: OFFICE_FILE_ID_MAX_BYTES } });
+    ).rejects.toMatchObject({ code: 'file_too_large', extra: { maxBytes: OFFICE_DATA_MAX_BYTES } });
   });
 });
 

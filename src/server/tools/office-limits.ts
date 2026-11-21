@@ -28,8 +28,9 @@ const MIB = 1024 * 1024;
  *  compartir. Cumple el criterio de memoria de C-07 si los topes del ZIP son `OFFICE_ZIP_LIMITS`. */
 export const OFFICE_FILE_ID_MAX_BYTES = 25 * MIB;
 
-/** Lo máximo que acepta `dataBase64` una vez decodificado. Hoy, el mismo tope que `fileId`. */
-export const OFFICE_DATA_MAX_BYTES = OFFICE_FILE_ID_MAX_BYTES;
+/** Lo máximo que acepta `dataBase64` una vez decodificado: 5 MiB, lo que cabe por `writer.sock`
+ *  (`MAX_MESSAGE_BYTES`). Es el mismo tope en el escritor y en un lector; más, por `fileId`. */
+export const OFFICE_DATA_MAX_BYTES = 5 * MIB;
 
 /**
  * Topes de descompresión de un Office para `readSafeZip` (C-27 los pasa). Mismos campos que

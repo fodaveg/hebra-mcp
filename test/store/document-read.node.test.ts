@@ -156,6 +156,14 @@ async function mcp(relay: InMemoryLibraryRelay) {
   return { port, runner, snapshot, source, channel: port.documentSource() };
 }
 
+/** Con qué filtra una copia: los turnos del MCP y una configuración sin privados. */
+function copyAccess(agent: Awaited<ReturnType<typeof mcp>>) {
+  return {
+    writeExclusive: agent.port.writeExclusive.bind(agent.port),
+    privacy: { privateFolders: [], privateTags: [] }
+  };
+}
+
 async function rounds(who: Person, agent: Awaited<ReturnType<typeof mcp>>, count = 3) {
   for (let turn = 0; turn < count; turn += 1) {
     expect((await who.sync.runRound()).result).toBe('ok');
@@ -254,7 +262,7 @@ describe('lectura del estado actual de un documento en el MCP (B-D16)', () => {
     // El blob guardado esta en local: una copia sin punto de control saldria con esos bytes viejos.
     expect(await agent.runner.readBlobBytes(savedSha)).not.toBeNull();
 
-    const copy = await documentBytesForCopy(agent.channel, id);
+    const copy = await documentBytesForCopy(agent.channel, id, copyAccess(agent));
     expect(copy.sha256).not.toBe(savedSha);
     expect(JSON.parse(new TextDecoder().decode(copy.bytes))).toEqual({ A1: 'base', B2: 'persona' });
     expect((await agent.source.port.fileRead(id))!.sha256).toBe(copy.sha256);
@@ -266,7 +274,7 @@ describe('lectura del estado actual de un documento en el MCP (B-D16)', () => {
     await rounds(who, agent);
     const before = agent.snapshot();
 
-    const failure = await documentBytesForCopy(agent.channel, id).catch((error: unknown) => error);
+    const failure = await documentBytesForCopy(agent.channel, id, copyAccess(agent)).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(DocumentExportUnavailableError);
     expect((failure as DocumentReadError).code).toBe('document_export_unavailable');
     expect(agent.snapshot()).toBe(before);
@@ -274,9 +282,11 @@ describe('lectura del estado actual de un documento en el MCP (B-D16)', () => {
 
   it('sin canal montado, duplicar da document_channel_unwired', async () => {
     const { agent, id } = await setup();
-    const failure = await documentBytesForCopy({ port: agent.source.port, wiring: null }, id).catch(
-      (error: unknown) => error
-    );
+    const failure = await documentBytesForCopy(
+      { port: agent.source.port, wiring: null },
+      id,
+      copyAccess(agent)
+    ).catch((error: unknown) => error);
     expect((failure as DocumentReadError).code).toBe('document_channel_unwired');
   });
 });

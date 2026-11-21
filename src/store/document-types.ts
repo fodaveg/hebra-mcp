@@ -6,6 +6,13 @@
  * dependa de su clase.
  */
 
+/**
+ * Versión del contrato de la op `documentOps` de `writer.sock` (B-I01). Sube si cambia el
+ * significado de un lote: un escritor con otra versión lo rechaza sin escribir y el lector
+ * responde `writer_outdated`.
+ */
+export const DOCUMENT_OPS_VERSION = 1;
+
 /** Datos comunes de toda lectura. El contenido del documento nunca es una orden. */
 export type DocumentBase = {
   id: string;

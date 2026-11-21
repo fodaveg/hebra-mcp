@@ -37,11 +37,16 @@
  * turno en `NoteWriteStore` (`documentUndo`, `openDocumentSession`); `documentTurnOf` arma con
  * ellos el turno de `runDocumentOps` y de `undoDocumentOps`.
  */
-import { createHash } from 'node:crypto';
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import { UNDO_ENTRY_MAX_BYTES, UNDO_MAX_AGE_DAYS, UNDO_MAX_ENTRIES } from './document-limits';
-import type { DocumentOpsResult, DocumentOpsTurn, DocumentUndoEntry, DocumentUndoSink } from './document-ops';
+import {
+  documentFingerprint,
+  type DocumentOpsResult,
+  type DocumentOpsTurn,
+  type DocumentUndoEntry,
+  type DocumentUndoSink
+} from './document-ops';
 import { guardDocumentWrite } from './document-privacy';
 import type { PrivacyConfig } from '../privacy/config';
 import type { NoteWriteStore } from './writes';
@@ -200,16 +205,16 @@ function invalid(path: string, reason: string, expected?: string): DocumentOpsRe
   });
 }
 
-/** Huella de la petición: la acción va en ella, así que otro uso del `operationId` es `operation_id_reused`. */
-function fingerprintOf(input: DocumentUndoInput): string {
-  const parts = [
+/** Huella de la petición: la acción y el formato van en ella, así que otro uso del `operationId` es `operation_id_reused`. */
+function fingerprintOf(input: DocumentUndoInput, format: string): string {
+  return documentFingerprint([
     'documentUndo',
+    format,
     input.id,
     input.undoOperationId,
     input.expectedRevision ?? null,
     input.expectedLayout ?? null
-  ];
-  return createHash('sha256').update(JSON.stringify(parts), 'utf8').digest('hex');
+  ]);
 }
 
 function isWriteOut(value: unknown): value is WriteOut {
@@ -254,10 +259,11 @@ export async function undoDocumentOps<Model, Op>(
   const refused = validate(input);
   if (refused) return refused;
   const signal = options.signal ?? new AbortController().signal;
-  const fingerprint = fingerprintOf(input);
+  const fingerprint = fingerprintOf(input, adapter.format);
 
   const applied = await store.turn((turn) => undoIn(turn, store, input, adapter, fingerprint, signal));
-  if (!applied.ok || applied.out.replayed) return applied;
+  // Sin cambios (`already`) no se escribió nada: ni ronda ni punto de control.
+  if (!applied.ok || applied.out.replayed || applied.out.outcome === 'already') return applied;
 
   const sync = (await store.afterCommit?.().catch(() => undefined)) ?? { sync: 'pending' };
   const out: WriteOut = { ...applied.out, sync: sync.sync };
@@ -369,11 +375,12 @@ async function undoIn<Model, Op>(
       }
     }
 
-    // Una inversa que no cambia nada no escribe update y `inTx` no corre: se registra aquí.
+    // Una inversa que no cambia nada no escribe update y `inTx` no corre: se registra aquí,
+    // como `already` (D28, protección 11).
     const registered = done.out;
     const base: WriteOut = registered ?? {
       id: input.id,
-      outcome: 'saved',
+      outcome: 'already',
       revision: result.revision,
       previousRevision,
       sync: 'pending',

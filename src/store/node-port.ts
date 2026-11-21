@@ -286,7 +286,7 @@ export async function openNodeLibraryPort(
       throw error;
     }
   }
-  return new NodeLibraryPort(engine, db, mode, conn, null, replacePlansDb, options.sqlitePath, options.spaceAccess, options.assertActive);
+  return new NodeLibraryPort(engine, db, mode, conn, null, replacePlansDb, options.sqlitePath, options.spaceAccess, options.assertActive, options.dataDir);
 }
 
 /**
@@ -353,7 +353,9 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
     /** Ruta de `library.sqlite` (o `:memory:`): de ella cuelga el fichero de los planes que lee un lector. */
     private readonly librarySqlitePath: string = ':memory:',
     private readonly spaceAccess?: SpaceStoreAccess,
-    private readonly assertAccountActive?: () => void
+    private readonly assertAccountActive?: () => void,
+    /** Directorio de datos, de donde cuelgan `blobs/` y el diario de blobs sustituidos (B-N21). */
+    private readonly dataDir?: string
   ) {}
 
   /** `true` si esta instancia es el escritor único y la conexión sigue abierta. */
@@ -1186,6 +1188,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
       read: (operation) => this.read(operation),
       write: (operation) => this.write(operation),
       guard: () => this.assertSpaceUserWrite(),
+      // Solo el escritor limpia blobs, y solo si los guarda en disco.
+      cleanup:
+        this.mode === 'readWrite' && this.dataDir
+          ? { blobs: new FsBlobStore(this.dataDir), root: this.dataDir }
+          : null,
       // Las escrituras de ficheros del cableado, con la revalidación de la cuenta en el turno.
       files: {
         create: (folderId, name, sha256, options) => this.guardedWrite(() => this.engine.fileCreate(folderId, name, sha256, options)),

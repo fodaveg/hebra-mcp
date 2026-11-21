@@ -13,6 +13,11 @@
  *   última edición. Es lo que pide duplicar. Escribe (blob, `/h`, `files`), así que va aparte y
  *   nunca la llama una lectura.
  *
+ * Privacidad (D28, protecciones 1 y 2). `openDocumentRead` no filtra: quien la llama comprueba
+ * antes que el documento se ve (`visibleDocumentOf` de `./document-privacy.ts`).
+ * `documentBytesForCopy` filtra siempre: antes de pedir el punto de control el documento tiene
+ * que verse, y después de pedirlo, sus bytes no pueden ser los de algo oculto (regla (b) de D10).
+ *
  * Punto de unión pendiente: `ensureCheckpoint` exporta con el exportador de formatos que se
  * registra con `setDocumentExporter` (`./document-channel`). Mientras nadie lo registre, duplicar
  * falla con `DocumentExportUnavailableError` y no escribe nada. Cuando exista, no hay que tocar
@@ -21,7 +26,10 @@
 import * as Y from 'yjs';
 import type { DocFormatAdapter, DocHeadRecord, DocStoreAtomicPort } from '../../vendor/hebra/src/lib/documents/contract';
 import { createDocSession } from '../../vendor/hebra/src/lib/documents/session';
+import type { PrivacyConfig } from '../privacy/config';
 import type { DocumentChannelSource } from './document-channel';
+import { guardDocumentRead, guardDocumentWrite } from './document-privacy';
+import type { NoteWriteStore } from './writes';
 
 /** Por qué una lectura no se pudo servir. El `message` es el código, como en `errors.ts`. */
 export type DocumentReadCode =
@@ -142,15 +150,27 @@ export async function openDocumentRead<Model, Op>(
   }
 }
 
+/** Con qué se filtra una copia: los turnos del almacén y los privados de quien la pide. */
+export interface DocumentCopyAccess {
+  writeExclusive<T>(operation: (store: NoteWriteStore) => Promise<T>): Promise<T>;
+  privacy: PrivacyConfig;
+}
+
 /**
  * Los bytes de fichero al día de un documento, para duplicarlo o copiarlo (R8). Pide
  * `ensureCheckpoint` del canal: escribe un punto de control si hay ediciones sin exportar.
  * Sin exportador registrado lanza `DocumentExportUnavailableError` sin escribir nada.
+ *
+ * Un documento oculto da `not_found` antes de pedir nada. Si el punto de control sale con unos
+ * bytes que enlaza una nota oculta, también `not_found`: esos bytes no se entregan.
  */
 export async function documentBytesForCopy(
   source: Pick<DocumentChannelSource, 'port' | 'wiring'>,
-  fileId: string
+  fileId: string,
+  access: DocumentCopyAccess
 ): Promise<{ sha256: string; bytes: Uint8Array }> {
+  const { privacy } = access;
+  await access.writeExclusive(async (store) => guardDocumentRead({ store, privacy }, fileId));
   const wiring = source.wiring;
   if (!wiring) throw new DocumentReadError('document_channel_unwired');
   let sha256: string;
@@ -162,6 +182,7 @@ export async function documentBytesForCopy(
     }
     throw error;
   }
+  await access.writeExclusive(async (store) => guardDocumentWrite({ store, privacy }, fileId, sha256));
   const bytes = await source.port.blobRead(sha256);
   if (!bytes) throw new DocumentReadError('blob_missing');
   return { sha256, bytes };

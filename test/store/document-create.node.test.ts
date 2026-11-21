@@ -103,10 +103,11 @@ async function filesIn(port: NodeLibraryPort, folderId: string) {
 
 function create(
   port: NodeLibraryPort,
-  input: Parameters<typeof createDocumentFile>[1],
+  input: Omit<Parameters<typeof createDocumentFile>[1], 'operationId'> & { operationId?: string },
   privacy: PrivacyConfig = CONFIG
 ) {
-  return port.writeExclusive(async (store) => createDocumentFile({ store, privacy }, input));
+  const operationId = input.operationId ?? crypto.randomUUID();
+  return port.writeExclusive(async (store) => createDocumentFile({ store, privacy }, { ...input, operationId }));
 }
 
 describe('createDocumentFile (B-N20)', () => {
@@ -158,6 +159,70 @@ describe('createDocumentFile (B-N20)', () => {
       { format: 'ods' as const, name: 'Vacio.ods', bytes: new Uint8Array() }
     ]) {
       await expect(create(port, { ...input, folderId: publica })).rejects.toMatchObject({ code: 'invalid_input' });
+    }
+    expect(await snapshot(port)).toBe(before);
+  });
+
+  it('operationId: obligatorio, el reintento no crea otro y otra petición con él se rechaza', async () => {
+    const { port, publica } = await world();
+    const bytes = odfPackage('ods', 'idempotente');
+    const input = { format: 'ods' as const, folderId: publica, name: 'Una.ods', bytes };
+    await expect(create(port, { ...input, operationId: '' })).rejects.toMatchObject({ code: 'invalid_input' });
+    const first = await create(port, { ...input, operationId: 'op-1' });
+    expect(first.replayed).toBeUndefined();
+    const again = await create(port, { ...input, operationId: 'op-1' });
+    expect(again).toEqual({ fileId: first.fileId, sha256: first.sha256, replayed: true });
+    expect(await filesIn(port, publica)).toHaveLength(1);
+    await expect(
+      create(port, { ...input, name: 'Otra.ods', operationId: 'op-1' })
+    ).rejects.toMatchObject({ code: 'operation_id_reused' });
+    expect(await filesIn(port, publica)).toHaveLength(1);
+  });
+
+  it('reintentar sobre lo creado que ya está en la papelera da not_found y no crea otro', async () => {
+    const { port, publica } = await world();
+    const input = { format: 'ods' as const, folderId: publica, name: 'Una.ods', bytes: odfPackage('ods', 'p'), operationId: 'op-1' };
+    const made = await create(port, input);
+    await port.writeExclusive(async (store) => store.fileTrash(made.fileId));
+    await expect(create(port, input)).rejects.toMatchObject({ code: 'not_found' });
+    expect(await filesIn(port, publica)).toEqual([]);
+  });
+
+  it('un corte entre fileCreate y el registro: el reintento reconoce su fichero y no crea otro', async () => {
+    const { port, publica } = await world();
+    const input = { format: 'ods' as const, folderId: publica, name: 'Una.ods', bytes: odfPackage('ods', 'c'), operationId: 'op-1' };
+    await expect(
+      port.writeExclusive(async (store) => {
+        const cut = new Proxy(store, {
+          get(target, key) {
+            const value = Reflect.get(target, key);
+            if (key === 'operations') {
+              return {
+                ...target.operations,
+                finish() {
+                  throw new Error('corte');
+                }
+              };
+            }
+            return typeof value === 'function' ? value.bind(target) : value;
+          }
+        });
+        return createDocumentFile({ store: cut, privacy: CONFIG }, input);
+      })
+    ).rejects.toThrow('corte');
+    const [written] = await filesIn(port, publica);
+    const retry = await create(port, input);
+    expect(retry).toMatchObject({ fileId: written!.id, replayed: true });
+    expect(await filesIn(port, publica)).toHaveLength(1);
+  });
+
+  it('el tipo sale del contenido: un ZIP sin mimetype ODF o de otro formato es invalid_input', async () => {
+    const { port, publica } = await world();
+    const before = await snapshot(port);
+    for (const bytes of [text('PK\u0003\u0004 no es un ODF, aunque se llame .ods'), odfPackage('odp', 'otro')]) {
+      await expect(
+        create(port, { format: 'ods', folderId: publica, name: 'Falso.ods', bytes })
+      ).rejects.toMatchObject({ code: 'invalid_input' });
     }
     expect(await snapshot(port)).toBe(before);
   });

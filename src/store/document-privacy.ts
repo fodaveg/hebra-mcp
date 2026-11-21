@@ -13,12 +13,21 @@
  *   filtro; los bytes en base64 no tienen nada que filtrar. Un adjunto cuyos bytes son
  *   también de algo oculto responde `not_found`, como `fetchAttachment`.
  *
+ * - `visibleDocumentOf`: la misma regla de lectura sobre un `FileFilter` ya construido, para
+ *   quien lee fuera de un turno (una herramienta en un proceso lector no puede abrir uno).
+ * - `documentAssetsRefusal`: los bytes en base64 de un lote (D28, protección 3). Tienen que
+ *   ser de verdad PNG, JPEG, GIF o WebP por su firma; un SVG o unos bytes con otro tipo
+ *   declarado se rechazan antes de abrir el documento.
+ *
  * Nada de esto escribe ni llama al puerto: solo lee el almacén del turno (llamar a
  * `libraryOpen()` desde dentro del turno lo dejaría esperándose a sí mismo). El rol de
  * escritura del espacio ya lo comprueba el turno (ver `./office-guards.ts`, punto 4).
  */
 import type { PrivacyConfig } from '../privacy/config';
-import type { DocumentAsset } from './document-types';
+import type { FileFilter } from '../privacy/file-filter';
+import { decodeAttachmentBase64, typeBySignature } from './attachment-content';
+import { ASSETS_MAX_BYTES } from './document-limits';
+import type { DocumentAsset, DocumentAssetMime, DocumentError } from './document-types';
 import { writeRejected } from './errors';
 import {
   LOCKED_BODY_PREFIX,
@@ -58,10 +67,55 @@ function judge(turn: DocumentGuardTurn, extraNoteIds: readonly string[] = []) {
  * para un id oculto, inexistente, borrado (lápida) o en la papelera.
  */
 export function guardDocumentRead(turn: DocumentGuardTurn, id: string): GuardedDocument {
-  const { files } = judge(turn);
+  return visibleDocumentOf(judge(turn).files, id);
+}
+
+/** La regla de `guardDocumentRead` sobre un filtro ya construido, dentro o fuera de un turno. */
+export function visibleDocumentOf(files: Pick<FileFilter, 'contentOf'>, id: string): GuardedDocument {
   const content = files.contentOf(id);
   if (!content || content.file.trashedAt !== null) throw writeRejected('not_found');
   return { id, sha256: content.sha256, name: content.file.name };
+}
+
+/** Los únicos tipos de imagen de un lote (`DocumentAssetMime`). SVG no está, a propósito. */
+const ASSET_MIMES: ReadonlySet<string> = new Set<DocumentAssetMime>([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp'
+]);
+
+/**
+ * Por qué no valen los bytes en base64 de un lote, o `null` si valen. Base64 estricto, firma
+ * igual al tipo declarado (un SVG no tiene firma de imagen y nunca pasa) y la suma bajo
+ * `ASSETS_MAX_BYTES`. El error nombra el recurso por su posición: nunca repite sus bytes.
+ */
+export function documentAssetsRefusal(assets: readonly DocumentAsset[]): DocumentError | null {
+  let total = 0;
+  for (const [index, asset] of assets.entries()) {
+    if (!('dataBase64' in asset)) continue;
+    const path = `assets[${index}].dataBase64`;
+    const invalid = (reason: string): DocumentError => ({
+      code: 'batch_invalid',
+      issues: [{ opIndex: 0, path, reason, expected: 'PNG, JPEG, GIF o WebP' }]
+    });
+    if (typeof asset.dataBase64 !== 'string') return invalid('no es base64');
+    const decoded = decodeAttachmentBase64(asset.dataBase64);
+    if (!decoded.ok) {
+      return decoded.code === 'attachment_too_large'
+        ? { code: 'file_too_large', byteLength: decoded.byteLength, maxBytes: ASSETS_MAX_BYTES }
+        : invalid('no es base64 estricto');
+    }
+    total += decoded.bytes.length;
+    if (total > ASSETS_MAX_BYTES) {
+      return { code: 'file_too_large', byteLength: total, maxBytes: ASSETS_MAX_BYTES };
+    }
+    if (!ASSET_MIMES.has(asset.mimeType)) return invalid('tipo de imagen no admitido');
+    if (typeBySignature(decoded.bytes) !== asset.mimeType) {
+      return invalid('la firma de los bytes no es la del tipo declarado');
+    }
+  }
+  return null;
 }
 
 /**
