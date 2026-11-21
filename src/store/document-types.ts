@@ -99,28 +99,33 @@ export const DOCUMENT_ERROR_CODES = [
   'operation_id_reused',
   'writer_outdated',
   'not_found',
-  'space_access_denied'
+  'space_access_denied',
+  'doc_head_invalid'
 ] as const;
 export type DocumentErrorCode = (typeof DOCUMENT_ERROR_CODES)[number];
+
+/** Sin campos extra. No es `Record<string, never>`: al intersecar con `{ code }` no compila. */
+type NoDetail = Record<never, never>;
 
 /** Campos extra que lleva cada código; los que no aparecen no llevan ninguno. */
 export type DocumentErrorDetail = {
   precondition_failed: { opIndex: number; target: string };
-  generation_changed: Record<string, never>;
+  generation_changed: NoDetail;
   batch_invalid: { issues: BatchIssue[] };
   op_unsupported: { opIndex?: number };
-  document_invalid: Record<string, never>;
-  document_too_complex: Record<string, never>;
+  document_invalid: NoDetail;
+  document_too_complex: NoDetail;
   document_busy: { retryAfterSeconds: number };
   too_large: object;
   op_invalid: object;
   file_too_large: { byteLength: number; maxBytes: number };
-  file_unavailable: Record<string, never>;
+  file_unavailable: NoDetail;
   file_exists: { id: string };
-  operation_id_reused: Record<string, never>;
-  writer_outdated: Record<string, never>;
-  not_found: Record<string, never>;
-  space_access_denied: Record<string, never>;
+  operation_id_reused: NoDetail;
+  writer_outdated: NoDetail;
+  not_found: NoDetail;
+  space_access_denied: NoDetail;
+  doc_head_invalid: NoDetail;
 };
 
 export type DocumentError<C extends DocumentErrorCode = DocumentErrorCode> = {
