@@ -562,6 +562,11 @@ function organizeFileRejection(error: unknown): unknown {
   return error;
 }
 
+/** Vuelve a leer una nota en el mismo turno de escritura, para sacar la prueba del cuerpo GUARDADO. */
+function readNoteRow(store: NoteWriteStore, id: string) {
+  return store.noteRead(id);
+}
+
 function noteSaved(row: NoteRow): OrganizeSaved {
   return {
     id: row.id,
@@ -1063,7 +1068,7 @@ export class NoteWriter {
       } else {
         // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este mismo turno), no de
         // la entrada: si el almacén cambiara algo, se vería aquí.
-        const row = await store.noteRead(input.id);
+        const row = await readNoteRow(store, input.id);
         const savedBody = row?.body ?? insertion.body;
         // Con `merged` (D25) el cuerpo guardado es la combinación: el texto insertado se
         // busca en él por su posición calculada sobre el cuerpo leído, que ya no vale, así
@@ -1204,7 +1209,7 @@ export class NoteWriter {
         // La prueba sale del cuerpo GUARDADO (se vuelve a leer en este turno), no de las
         // sustituciones pedidas (D11). Con `merged` (D25) es la combinación con lo que
         // cambió por debajo, y `editProof` ya sabe ubicar un `replace` que se desplazó.
-        const row = await store.noteRead(input.id);
+        const row = await readNoteRow(store, input.id);
         const savedBody = row?.body ?? body;
         outcome = {
           id: input.id,
@@ -1637,7 +1642,7 @@ export class NoteWriter {
       if (section && saved.outcome === 'saved') {
         // Como en `appendToNote`: la línea sale del cuerpo GUARDADO (se vuelve a leer en
         // este turno), no del candidato.
-        const row = await store.noteRead(input.id);
+        const row = await readNoteRow(store, input.id);
         placed = {
           line: lineAt(row?.body ?? body, withAttachment.referenceStart),
           heading: capHeading(section.heading)
