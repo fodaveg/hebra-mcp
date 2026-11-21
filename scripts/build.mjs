@@ -56,8 +56,10 @@ await build({
   // Un fichero por punto de entrada: `dist/store/index.js`, `dist/sync/index.js` (motor
   // de sync e instancia, L3) y `dist/lock/index.js` (escritor único, L3). Sin
   // `splitting`: cada uno es autónomo (el servidor de L1 importa de las FUENTES,
-  // `src/store`/`src/sync`, no de estos `dist/*`).
-  entryPoints: ['store', 'sync', 'lock'].map((dir) => join(root, 'src', dir, 'index.ts')),
+  // `src/store`/`src/sync`, no de estos `dist/*`). `dist/sheets/index.js` es el núcleo de
+  // hojas de Hebra (H-173): entra aquí para que `check:bundle` lo cargue sin DOM y compruebe
+  // sus dependencias aunque ninguna herramienta lo use todavía.
+  entryPoints: ['store', 'sync', 'lock', 'sheets'].map((dir) => join(root, 'src', dir, 'index.ts')),
   outdir: join(root, 'dist'),
   outbase: join(root, 'src')
 });
@@ -92,6 +94,16 @@ await build({
   ...shared,
   entryPoints: [join(root, 'src', 'document-worker.ts')],
   outfile: join(root, 'dist', 'document-worker.mjs')
+});
+
+// Hilo del motor de fórmulas de hojas (H-173): `createNodeFormulaEngine` lo arranca con la URL
+// que recibe (`new URL('./sheet-engine-worker.mjs', import.meta.url)` desde `dist/`). Entrada
+// propia y autónoma: el hilo no puede cargar el servidor entero. `@ironcalc/wasm` queda externo
+// y su wasm se lee de `node_modules`.
+await build({
+  ...shared,
+  entryPoints: [join(root, 'src', 'sheet-engine-worker.ts')],
+  outfile: join(root, 'dist', 'sheet-engine-worker.mjs')
 });
 
 // Fuentes de los documentos (B-LR11): las mismas del submódulo, junto a su licencia. Se maqueta

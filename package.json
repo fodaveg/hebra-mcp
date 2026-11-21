@@ -10,6 +10,7 @@
     "hebra-mcp": "dist/cli.mjs"
   },
   "dependencies": {
+    "@ironcalc/wasm": "0.9.1",
     "@lezer/common": "1.5.5",
     "@lezer/highlight": "1.2.5",
     "@lezer/markdown": "1.8.1",
@@ -20,7 +21,9 @@
     "@sanity/diff-match-patch": "3.2.1",
     "express": "5.3.0",
     "fflate": "0.8.3",
+    "harfbuzzjs": "1.6.4",
     "jose": "6.2.15",
+    "linebreak": "2.0.0",
     "yjs": "13.6.33",
     "zod": "4.6.7"
   },

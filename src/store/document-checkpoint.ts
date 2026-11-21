@@ -32,7 +32,12 @@
  * mismo exportador que registre.
  */
 import { createHash } from 'node:crypto';
-import type { DocHeadRecord, DocFormat } from '../../vendor/hebra/src/lib/documents/contract';
+import type {
+  DocHeadRecord,
+  DocFormat,
+  DocStoreHeadIfGenerationPort,
+  DocStorePort
+} from '../../vendor/hebra/src/lib/documents/contract';
 import {
   autoCheckpointDue,
   takeCheckpoint,
@@ -116,6 +121,20 @@ class HiddenCheckpoint extends Error {}
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
+ * El almacén del cableado (`wiring.store`) se declara como `DocStorePort`, pero es el puerto del
+ * canal con la guarda de purga de Hebra, que conserva `docSetHeadIfGeneration` si el puerto lo
+ * tiene (`documentPortOf` lo da). `takeCheckpoint` lo exige: sin él no se escribe nada.
+ */
+function storeWithHeadIfGeneration(
+  store: DocStorePort
+): (DocStorePort & DocStoreHeadIfGenerationPort) | null {
+  const candidate = store as DocStorePort & Partial<DocStoreHeadIfGenerationPort>;
+  return typeof candidate.docSetHeadIfGeneration === 'function'
+    ? (candidate as DocStorePort & DocStoreHeadIfGenerationPort)
+    : null;
+}
+
+/**
  * Tras un lote del LLM sobre `fileId`: crea un punto de control si el último tiene 30 minutos o
  * más. No lanza nunca.
  */
@@ -126,6 +145,8 @@ export async function checkpointAfterBatch(
   const { source } = deps;
   const wiring = source.wiring;
   if (!wiring) return { status: 'pending', reason: 'channel-not-wired' };
+  const store = storeWithHeadIfGeneration(wiring.store);
+  if (!store) return { status: 'failed', message: 'doc_store_without_head_if_generation' };
   const now = deps.now ?? (() => Date.now());
 
   try {
@@ -140,7 +161,7 @@ export async function checkpointAfterBatch(
       const reference = fingerprint(before);
 
       const checkpointDeps: CheckpointDeps = {
-        store: wiring.store,
+        store,
         retention: wiring.retention,
         notifyLocalChange: (id) => wiring.channel.notifyLocalChange(id),
         now,

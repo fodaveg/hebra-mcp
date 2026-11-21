@@ -134,6 +134,13 @@ async function world(): Promise<World> {
             docRead: async () => ({ head, segments: [], pending: [], pendingSeqs: [] }),
             docSetHead: async (_id: string, next: DocHeadRecord) => {
               head = next;
+            },
+            // H-ALMACEN-REVISION de Hebra: el punto de control escribe solo sobre la generación
+            // que exportó. Aquí nadie más escribe, así que coincide siempre.
+            docSetHeadIfGeneration: async (_id: string, expected: string, next: DocHeadRecord) => {
+              if (head.generation !== expected) return { written: false, head };
+              head = next;
+              return { written: true, head };
             }
           } as never,
           library: {

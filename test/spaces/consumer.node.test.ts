@@ -307,7 +307,8 @@ describe('nombre de los espacios', () => {
 describe('herramientas MCP por espacio', () => {
   it('todas las herramientas de contenido anuncian selector y conservan la puerta común', async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(46);
+    // 47 desde C-36 (`hebra_import_office`), que no actualizó esta cuenta.
+    expect(tools).toHaveLength(47);
     for (const tool of tools) {
       if (tool.name !== 'hebra_list_spaces' && tool.name !== 'hebra_list_organizations')
         expect(tool.inputSchema.properties, tool.name).toHaveProperty('space');

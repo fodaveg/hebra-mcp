@@ -248,6 +248,12 @@ function documentPortOf(host: DocumentHost): DocumentPort {
     docCompact: (fileId, generation, part, state, throughSeq) =>
       guarded(() => engine.docCompact(fileId, generation, part, state, throughSeq)),
     docSetHead: (fileId, head, pinned) => guarded(() => engine.docSetHead(fileId, head, pinned)),
+    // Las dos cabeceras condicionales (H-HEAD-CAS y H-ALMACEN-REVISION de Hebra) comprueban y
+    // escriben en la misma transacción del motor: `ensureHead` y el punto de control no pisan un
+    // `/h` que otro escritor guardó mientras tanto. Son escrituras como `docSetHead`.
+    docSetHeadIfAbsent: (fileId, head, pinned) => guarded(() => engine.docSetHeadIfAbsent(fileId, head, pinned)),
+    docSetHeadIfGeneration: (fileId, expectedGeneration, head, pinned) =>
+      guarded(() => engine.docSetHeadIfGeneration(fileId, expectedGeneration, head, pinned)),
     // Lo que llega de la sync (una purga ajena, la retención, el libro) no es una escritura
     // del usuario: sin la revalidación, como el resto de lo que aplica una ronda.
     docDrop: (fileId) => host.write(() => engine.docDrop(fileId)),

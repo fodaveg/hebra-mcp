@@ -32,6 +32,11 @@
  *    borra el `navigator` que trae Node 24 y se comprueba que `window`, `document` y
  *    `navigator` son `undefined`) y ejecuta `deriveNote` sobre un Markdown con H1,
  *    `#etiqueta/anidada` y `[[enlace]]`, comparando con la salida esperada de Hebra.
+ *    Desde H-173 carga también el núcleo de hojas (`dist/sheets/index.js`), comprueba que
+ *    exporta una pieza de cada paquete de Hebra que lo forma (`SHEETS_CORE_EXPORTS`) y arranca
+ *    el motor de fórmulas en su hilo empaquetado (`dist/sheet-engine-worker.mjs`), que tiene que
+ *    calcular una fórmula. Las dependencias del núcleo (`@ironcalc/wasm`, `harfbuzzjs`,
+ *    `linebreak`) las vigila R27 como las demás: pasar una a `devDependencies` da rojo aquí.
  *
  * `zod` (peer del SDK de MCP, L1) queda exento: `zod/v4/core/util.js` tiene
  * `if (typeof navigator !== "undefined" && navigator?.userAgent?.includes("Cloudflare"))`
@@ -70,6 +75,24 @@ const distDir = join(root, 'dist');
 const OFFICE_WORKER = join(distDir, 'office-worker.mjs');
 /** Entrada del hilo de documentos (B-LR21, B-I01): `runDocumentJob` la arranca como Worker. */
 const DOCUMENT_WORKER = join(distDir, 'document-worker.mjs');
+/** Núcleo de hojas de Hebra (H-173): lo que usan las herramientas de hojas, sin DOM. */
+const SHEETS_CORE = join(distDir, 'sheets', 'index.js');
+/** Hilo del motor de fórmulas de hojas (H-173): `createNodeFormulaEngine` lo arranca por su URL. */
+const SHEET_ENGINE_WORKER = join(distDir, 'sheet-engine-worker.mjs');
+/** Lo que `dist/sheets/index.js` tiene que exportar: una pieza por paquete de Hebra del núcleo. */
+const SHEETS_CORE_EXPORTS = [
+  'createSheetAdapter', // H-31
+  'prepareSheetBase', // H-31
+  'applySheetOp', // H-31
+  'compileBatch', // H-30
+  'layoutRevision', // H-176
+  'checkExpectedLayout', // H-176
+  'writeNewOds', // H-23
+  'createSheetEngineProjection', // H-29
+  'createNodeFormulaEngine', // H-09
+  'layoutDrawList', // H-76
+  'drawToSvg' // H-77
+];
 /** Fuentes de los documentos, junto a su licencia (B-LR11): se maqueta siempre con ellas. */
 const FONTS_DIR = join(distDir, 'fonts', 'documents');
 /** Paquetes que `dist/` carga sin que un `import` estático los delate (el hilo de render los
@@ -152,6 +175,10 @@ const fail = (message) => {
 };
 if (!files.includes(OFFICE_WORKER)) fail(`falta ${relative(root, OFFICE_WORKER)}, la entrada del hilo de ofimática`);
 if (!files.includes(DOCUMENT_WORKER)) fail(`falta ${relative(root, DOCUMENT_WORKER)}, la entrada del hilo de documentos`);
+if (!files.includes(SHEETS_CORE)) fail(`falta ${relative(root, SHEETS_CORE)}, el núcleo de hojas`);
+if (!files.includes(SHEET_ENGINE_WORKER)) {
+  fail(`falta ${relative(root, SHEET_ENGINE_WORKER)}, la entrada del hilo del motor de hojas`);
+}
 if (!existsSync(join(FONTS_DIR, 'OFL-carlito.txt')) || readdirSync(FONTS_DIR).filter((n) => n.endsWith('.woff')).length === 0) {
   fail(`faltan las fuentes (.woff) y sus licencias en ${relative(root, FONTS_DIR)}`);
 }
@@ -306,6 +333,43 @@ if (typeof reply?.ok !== 'boolean' || (reply.ok === false && typeof reply.code !
 }
 process.stdout.write(JSON.stringify(withDerive.deriveNote(${JSON.stringify(SAMPLE)})));
 `;
+// H-173: el núcleo de hojas carga sin DOM con sus piezas, y el motor calcula de verdad en su hilo
+// empaquetado (el wasm de IronCalc se resuelve desde node_modules, como en la imagen). Va en otro
+// proceso, sin `--input-type=module`: el hilo del motor hereda los `execArgv` del proceso y
+// `createNodeFormulaEngine` no deja quitarlos, así que con esa opción el hilo no arrancaría
+// (`ERR_INPUT_TYPE_NOT_ALLOWED`). El servidor de verdad no la lleva.
+const sheetsSmoke = `
+delete globalThis.navigator;
+(async () => {
+  for (const name of ['window', 'document', 'navigator']) {
+    if (typeof globalThis[name] !== 'undefined') throw new Error('global del DOM presente: ' + name);
+  }
+  const sheets = await import(${JSON.stringify(pathToFileURL(SHEETS_CORE).href)});
+  for (const name of ${JSON.stringify(SHEETS_CORE_EXPORTS)}) {
+    if (typeof sheets[name] !== 'function') throw new Error('dist/sheets/index.js no exporta ' + name);
+  }
+  const engine = sheets.createNodeFormulaEngine({
+    workerUrl: new URL(${JSON.stringify(pathToFileURL(SHEET_ENGINE_WORKER).href)})
+  });
+  try {
+    const book = {
+      locale: 'en',
+      timezone: 'UTC',
+      sheets: [{ name: 'Hoja 1', cells: [{ row: 0, col: 0, input: '2' }, { row: 0, col: 1, input: '=A1*21' }] }]
+    };
+    await engine.load(book, { locale: book.locale, timezone: book.timezone }, new AbortController().signal);
+    const values = await engine.readValues(0, { from: { row: 0, col: 1 }, to: { row: 0, col: 1 } });
+    if (values.length !== 1 || values[0].value !== 42) {
+      throw new Error('el motor de hojas de dist/ no calculó =A1*21: ' + JSON.stringify(values));
+    }
+  } finally {
+    engine.dispose();
+  }
+})().catch((error) => {
+  process.stderr.write(String(error && error.stack ? error.stack : error));
+  process.exit(1);
+});
+`;
 try {
   const stdout = execFileSync(
     process.execPath,
@@ -321,8 +385,20 @@ try {
 } catch (error) {
   fail(`la prueba de humo (cargar dist/ sin DOM y derivar) falló:\n${error.stderr ?? error.message}`);
 }
+try {
+  execFileSync(process.execPath, ['--no-warnings', '-e', sheetsSmoke], {
+    cwd: root,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    // Por encima del plazo de carga del motor (`ENGINE_LOAD_MS`, 60 s): un hilo que no responde
+    // lo rechaza el propio motor con su código, no este corte.
+    timeout: 120_000
+  });
+} catch (error) {
+  fail(`la prueba de humo del núcleo de hojas (cargar sin DOM y calcular en el hilo del motor) falló:\n${error.stderr || error.message}`);
+}
 
 if (failed) process.exit(1);
 console.log(
-  `check:bundle: ${files.length} fichero(s) de dist/ sin imports de Tauri/$app/svelte, sin globales del DOM fuera de ${DOM_EXEMPT_PACKAGES.join(' y ')}, y deriveNote carga y deriva en Node sin DOM.`
+  `check:bundle: ${files.length} fichero(s) de dist/ sin imports de Tauri/$app/svelte, sin globales del DOM fuera de ${DOM_EXEMPT_PACKAGES.join(' y ')}, deriveNote carga y deriva en Node sin DOM, y el núcleo de hojas carga y su motor calcula en su hilo.`
 );
