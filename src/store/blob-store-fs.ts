@@ -15,10 +15,16 @@
  * `libraryReset` que ya comprometió la base no acabe rechazando la promesa entera y
  * pareciendo fallido cuando la base sí quedó vacía.
  */
-import { mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { mkdir, open, readFile, rename, rm, stat, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { BlobBytesStore } from '../hebra';
+
+/** ¿Es un SHA-256 en hexadecimal minúscula? Lo que llega de datos sincronizados se valida con esto
+ *  ANTES de construir una ruta: un `../` o una longitud distinta nunca debe llegar al disco. */
+export function isSha256Hex(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
 
 /** Ruta relativa del adjunto dentro del directorio de datos: `blobs/aa/bb/<sha256>`. */
 export function blobStorePath(root: string, sha256: string): string {
@@ -58,6 +64,21 @@ export class FsBlobStore implements BlobBytesStore {
       return info.size;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  /**
+   * Borra los bytes de UN hash (`BlobBytesStore.remove?` de Hebra, que también usa el GC del
+   * motor). Un hash ausente no es un error. Un hash mal formado lanza `invalid_blob_hash` sin
+   * tocar el disco. Solo borra el fichero: las carpetas `aa/bb` se quedan.
+   */
+  async remove(sha256: string): Promise<void> {
+    if (!isSha256Hex(sha256)) throw new Error('invalid_blob_hash');
+    try {
+      await unlink(blobStorePath(this.root, sha256));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       throw error;
     }
   }
