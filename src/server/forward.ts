@@ -1165,7 +1165,14 @@ export function buildRoutedWriteContext(
     ...(local.importOffice
       ? {
           importOffice: (input: OfficeImportInput) => {
-            if (instance.role !== 'this' && input.bytes.length > ATTACHMENT_MAX_BYTES) {
+            // Con `sourceFileId` el lector manda solo el id y el escritor lee los bytes de su
+            // disco (C-37b): caben hasta 25 MiB. El tope de 5 MiB es de los bytes en base64.
+            const byId = input.sourceFileId !== undefined;
+            if (
+              instance.role !== 'this' &&
+              !byId &&
+              (input.bytes?.length ?? 0) > ATTACHMENT_MAX_BYTES
+            ) {
               return Promise.reject(writeRejected('file_too_large'));
             }
             return routed(
@@ -1178,7 +1185,9 @@ export function buildRoutedWriteContext(
                 folderId: input.folderId,
                 ...(input.sourceFileId !== undefined ? { sourceFileId: input.sourceFileId } : {}),
                 ...(input.operationId !== undefined ? { operationId: input.operationId } : {}),
-                dataBase64: Buffer.from(input.bytes).toString('base64'),
+                ...(byId || input.bytes === undefined
+                  ? {}
+                  : { dataBase64: Buffer.from(input.bytes).toString('base64') }),
                 privacy: input.privacy
               },
               asOfficeOutcome,

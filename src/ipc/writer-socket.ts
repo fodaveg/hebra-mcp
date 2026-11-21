@@ -91,10 +91,11 @@
  *   `apply` y `undo` `{planId, operationId}` (ronda ya esperada) o `discard` `{planId}`. Como
  *   `jdNewId`: el plan no viaja, y un escritor sin ella responde `invalid_request`.
  * - `importOffice` `{fileName, format, mode, preview, folderId, sourceFileId?, operationId?,
- *   dataBase64, privacy}` (C-37, 21 nov 2026) → `OfficeImportOutcome` (`src/store/office-writes.ts`
+ *   dataBase64?, privacy}` (C-37, 21 nov 2026) → `OfficeImportOutcome` (`src/store/office-writes.ts`
  *   más el estado de sync si escribió, ronda ya esperada). La conversión corre en el escritor,
  *   fuera de su turno (hilo con reserva en el `CapacityGate`). Los bytes van en base64 del
- *   lector al escritor: caben 5 MiB; más es `file_too_large`. Op propia: un escritor
+ *   lector al escritor: caben 5 MiB; más es `file_too_large`. Con `sourceFileId` (C-37b) no
+ *   hay `dataBase64`: el escritor lee el fichero de su disco, hasta 25 MiB. Op propia: un escritor
  *   anterior la rechaza en `parseEnvelope` y el lector lo traduce a `writer_outdated`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
@@ -653,11 +654,17 @@ const OFFICE_MODES: readonly OfficeImportMode[] = ['convert-and-keep', 'convert-
 
 /** `importOffice` (C-37): los bytes van en base64 con la regla estricta de los adjuntos, así
  *  que por el socket caben 5 MiB (el mensaje máximo, `MAX_MESSAGE_BYTES`); uno mayor es
- *  `file_too_large`. Lo demás lo vuelve a comprobar `importOfficeLocal` dentro de su turno
+ *  `file_too_large`. Con `sourceFileId` (C-37b) pueden faltar: el escritor lee el fichero de su
+ *  disco, hasta 25 MiB, con la privacidad de quien pide. Lo demás lo vuelve a comprobar `importOfficeLocal` dentro de su turno
  *  (nombre, tamaño, `operationId`, privacidad); aquí solo se acota la forma. */
 function officeImportInputOf(params: Record<string, unknown>): OfficeImportInput {
   const { fileName, format, mode, preview, folderId, sourceFileId, operationId, dataBase64 } = params;
-  if (!isName(fileName) || fileName.length === 0 || typeof dataBase64 !== 'string') throw new InvalidRequest();
+  if (!isName(fileName) || fileName.length === 0) throw new InvalidRequest();
+  // Sin `dataBase64` el contenido es el del `sourceFileId`, que el escritor lee de su disco.
+  // Un escritor anterior exige `dataBase64` y responde `invalid_request` (`writer_outdated`).
+  if (dataBase64 === undefined ? sourceFileId === undefined : typeof dataBase64 !== 'string') {
+    throw new InvalidRequest();
+  }
   if (!OFFICE_FORMATS.includes(format as OfficeFormat) || !OFFICE_MODES.includes(mode as OfficeImportMode)) {
     throw new InvalidRequest();
   }
@@ -667,13 +674,17 @@ function officeImportInputOf(params: Record<string, unknown>): OfficeImportInput
   if (operationId === undefined && !preview) throw new InvalidRequest();
   const validOperationId = operationId === undefined ? undefined : operationIdOf(operationId);
   const privacy = privacyOf(params.privacy);
-  const decoded = decodeAttachmentBase64(dataBase64);
-  if (!decoded.ok) {
-    if (decoded.code === 'attachment_too_large') throw writeRejected('file_too_large');
-    throw new InvalidRequest();
+  let bytes: Uint8Array | undefined;
+  if (dataBase64 !== undefined) {
+    const decoded = decodeAttachmentBase64(dataBase64 as string);
+    if (!decoded.ok) {
+      if (decoded.code === 'attachment_too_large') throw writeRejected('file_too_large');
+      throw new InvalidRequest();
+    }
+    bytes = decoded.bytes;
   }
   return {
-    bytes: decoded.bytes,
+    ...(bytes !== undefined ? { bytes } : {}),
     fileName,
     format: format as OfficeFormat,
     mode: mode as OfficeImportMode,

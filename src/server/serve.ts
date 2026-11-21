@@ -23,7 +23,7 @@ import {
 } from '../accounts/capacity';
 import { realClock } from '../accounts/lifecycle';
 import { runOfficeConversion } from '../store/office-runner';
-import { importOfficeLocal, type OfficeConversionRunner } from '../store/office-writes';
+import type { OfficeConversionRunner } from '../store/office-writes';
 import { StoreError } from '../store/errors';
 import { AgentDevice } from '../spaces/device';
 import { AgentSpaceManager } from '../spaces/manager';
@@ -186,9 +186,10 @@ export function localWriteContext(
   const office = options.office ?? {};
   const context = buildWriteContext({
     importOffice: (input) =>
-      importOfficeLocal(instance, input, {
-        converter: officeConversionRunner(office.capacity ?? processOfficeCapacity(), office.run)
-      }),
+      instance.importOfficeLocal(
+        input,
+        officeConversionRunner(office.capacity ?? processOfficeCapacity(), office.run)
+      ),
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
     editNote: (input) => instance.editNoteLocal(input),
@@ -285,7 +286,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
   };
   const spaces = device
     ? new AgentSpaceManager(device, dataDir, options.fetcher, options.syncIntervalMs, spaceInstance, assertActive,
-        undefined, credentialRevoked)
+        undefined, credentialRevoked, options.office)
     : undefined;
   const directory = spaces ? () => spaces.directory() : undefined;
   const linked = paired

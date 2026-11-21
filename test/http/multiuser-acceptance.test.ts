@@ -21,6 +21,9 @@ import type { ActiveGrant } from '../../src/oauth/backchannel';
 import { GrantSecrets } from '../../src/oauth/grants';
 import { TokenStore, type IssuedTokens } from '../../src/oauth/token-store';
 import { MemorySecretStore, openFileSecretStore, writePairedSecrets } from '../../src/secrets';
+import { CapacityGate } from '../../src/accounts/capacity';
+import { processCapacityGate } from '../../src/server/serve';
+import { OFFICE_CONVERSION_RESERVE_BYTES } from '../../src/server/tools/office-limits';
 import { accountTurnKey, processSyncGates } from '../../src/sync/gates';
 import { connectHttpClient, textOf } from '../fixtures/http-app';
 import { startJd, type JdHarness } from '../fixtures/jd-library';
@@ -316,6 +319,48 @@ describe('acceptance multiusuario por HTTP, con bibliotecas reales y relé sint�
     expect(denied.text).not.toContain('COMPARTIDO_PERMITIDO');
     expect((await call('david', 'hebra_read_note', { id, space: SHARED_SPACE })).value.body).toContain('COMPARTIDO_PERMITIDO');
     expect((await call('mikel', 'hebra_read_note', { id })).isError).toBe(false);
+  });
+
+  it('hebra_import_office: la conversión espera en el turno de la cuenta real, en su personal y en un espacio, y suelta la reserva aunque falle', async () => {
+    relayOnline = true;
+    const sharedVault = '22'.repeat(16);
+    for (const who of ['david', 'mikel'] as const) {
+      expect((await call(who, 'hebra_list_spaces')).isError).toBe(false);
+      const registered = relay!.agentKeys.get(connections[who].credentialId)!;
+      const grant = await sealAgentSpaceGrant({ binding: { spaceId: SHARED_SPACE, syncVaultId: sharedVault,
+        accountId: registered.accountId, credentialId: connections[who].credentialId,
+        deviceId: registered.deviceId, keyId: registered.keyId },
+        publicKey: validatePublicJwk(registered.publicKey), spaceKey: new Uint8Array(32).fill(22) });
+      relay!.agentSpaces.set(connections[who].credentialId,
+        [{ spaceId: SHARED_SPACE, syncVaultId: sharedVault, grant }]);
+    }
+    const admits: Array<{ process: boolean; bytes: number | undefined; key: string | undefined }> = [];
+    const original = CapacityGate.prototype.admit;
+    const spy = vi.spyOn(CapacityGate.prototype, 'admit').mockImplementation(function (this: CapacityGate, signal, bytes, key) {
+      admits.push({ process: this === processCapacityGate(), bytes, key });
+      return original.call(this, signal, bytes, key);
+    });
+    try {
+      for (const who of ['david', 'mikel'] as const) {
+        for (const space of [undefined, SHARED_SPACE]) {
+          // Un Office que no se puede abrir: la conversión falla y la reserva debe soltarse igual.
+          const input = { bytes: new TextEncoder().encode('no es un xlsx'), fileName: 'Libro.xlsx', format: 'xlsx' as const,
+            mode: 'convert-and-keep' as const, preview: true, folderId: 'root', privacy: { privateFolders: [], privateTags: [] } };
+          const result = await handle!.contexts!.use(records[who], async (ctx) => {
+            const target = space ? await ctx.spaces!.resolve(space) : ctx;
+            return target.write!.importOffice!(input);
+          });
+          expect(result.outcome).toBe('preview');
+          const mine = admits.splice(0).filter((entry) => (entry.bytes ?? 0) >= OFFICE_CONVERSION_RESERVE_BYTES);
+          expect(mine).toHaveLength(1);
+          expect(mine[0]).toMatchObject({ process: false, key: records[who].id });
+        }
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    // Nada queda apartado en la compuerta de las cuentas.
+    expect(handle!.contexts!.reservedBytes).toBe(0);
   });
 
   it('refresh de A mientras B escribe: al retirar A durante renew no se emite otro token ni se corta B', async () => {

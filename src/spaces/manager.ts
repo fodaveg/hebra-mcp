@@ -18,7 +18,7 @@ import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/librar
 import { registerLinkedDevice } from '../sync/linked';
 import { PrivacyConfigSource } from '../privacy/config-source';
 import { StoreError } from '../store/errors';
-import { localWriteContext } from '../server/serve';
+import { localWriteContext, type OfficeWiring } from '../server/serve';
 import {
   buildRoutedWriteContext,
   RoutedStatusSource,
@@ -174,7 +174,10 @@ export class AgentSpaceManager implements SpaceRouter {
      * responde `space_access_denied` sin red ni caché y el listado no ofrece ninguno. Si lanza,
      * cuenta como revocada (cerrado ante la duda).
      */
-    private readonly credentialRevoked?: () => boolean
+    private readonly credentialRevoked?: () => boolean,
+    /** Dónde reserva memoria la conversión de `hebra_import_office` en los espacios (C-37b): la
+     *  compuerta y la cuenta de la biblioteca personal. Sin él, la compuerta del proceso. */
+    private readonly office?: OfficeWiring
   ) {}
 
   private revokedNow(): boolean {
@@ -562,7 +565,7 @@ export class AgentSpaceManager implements SpaceRouter {
         // propia que lo haya validado, así que cada petición consulta el catálogo al
         // entrar y antes de contestar (fuera del turno FIFO).
         writerSocket: (opened) =>
-          writerSocketHandlers(localWriteContext(opened, authorize, { denyJdex: true }), {
+          writerSocketHandlers(localWriteContext(opened, authorize, { denyJdex: true, office: this.office }), {
             // El IPC compartido no expone los verbos de workdir (cuerpo completo/JDex).
             status: async () => {
               await authorize();
@@ -615,7 +618,7 @@ export class AgentSpaceManager implements SpaceRouter {
       // Si esta instancia es lectora, el escritor vuelve a consultar el catálogo.
       write: buildRoutedWriteContext(
         instance,
-        localWriteContext(instance, assertActive, { denyJdex: true })
+        localWriteContext(instance, assertActive, { denyJdex: true, office: this.office })
       )
     };
   }

@@ -55,6 +55,9 @@ export type ToolErrorCode =
   | 'file_too_large'
   | 'file_type_not_allowed'
   | 'file_unavailable'
+  // `hebra_import_office` (C-37b): sin memoria para convertir a tiempo; no se escribió nada y se
+  // puede reintentar con el mismo `operationId`.
+  | 'capacity_wait_timeout'
   // Crear, renombrar, mover y duplicar ficheros sueltos (D17, 12 oct 2026;
   // `src/store/file-verbs.ts`).
   | 'file_exists'

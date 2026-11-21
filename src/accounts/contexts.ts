@@ -259,6 +259,15 @@ export class AccountContexts {
     return this.gate.waitingCount;
   }
 
+  /**
+   * La compuerta de memoria de las cuentas con la clave de ESTA cuenta, para la conversión de
+   * `hebra_import_office` (C-37b): espera en el turno de su cuenta, como el resto de sus
+   * llamadas, y no en el anónimo del proceso. Sirve a la biblioteca personal y a sus espacios.
+   */
+  officeCapacity(account: Pick<AuthorizedAccount, 'id'>): { gate: Pick<CapacityGate, 'admit'>; key: string } {
+    return { gate: this.gate, key: account.id };
+  }
+
   async acquire(account: AuthorizedAccount): Promise<AccountContextLease> {
     for (;;) {
       if (this.closed) throw new Error('contexts_closed');

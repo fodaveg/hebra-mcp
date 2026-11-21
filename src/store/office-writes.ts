@@ -58,6 +58,7 @@ import {
 import { validateConversion } from '../../vendor/hebra/src/lib/office-import/validate-output';
 import { MAX_NOTE_MARKDOWN_BYTES, markdownByteLength } from '../../vendor/hebra/src/lib/notes/limits';
 import type { PrivacyConfig } from '../privacy/config';
+import { ContextUnavailableError } from '../accounts/capacity';
 import { OFFICE_FILE_ID_MAX_BYTES } from '../server/tools/office-limits';
 import { existingFileRejected, writeRejected } from './errors';
 import { nameExtension, validFileName } from './file-content';
@@ -91,7 +92,9 @@ export interface OfficeConversionRunner {
 
 /** Lo que recibe el escritor (el `OfficeImportWriteInput` de `hebra_import_office`). */
 export interface OfficeImportInput {
-  bytes: Uint8Array;
+  /** El contenido. Sin él, con `sourceFileId`, el escritor lee los bytes de ese fichero de su
+   *  disco (C-37b): así un lector no manda por el socket un fichero de más de 5 MiB. */
+  bytes?: Uint8Array;
   fileName: string;
   format: OfficeFormat;
   mode: OfficeImportMode;
@@ -124,7 +127,13 @@ export interface OfficeImportSaved {
 
 export interface OfficeImportDeps {
   converter: OfficeConversionRunner;
+  /** Trae al disco los bytes de un fichero que este escritor aún no tiene (`readBlob` del motor
+   *  de sync). Sin él, un `sourceFileId` sin bytes locales es `file_unavailable`. */
+  download?: ((sha256: string) => Promise<boolean>) | null;
 }
+
+/** La entrada ya con sus bytes (los que mandó quien pide o los del fichero de origen). */
+type ResolvedInput = OfficeImportInput & { bytes: Uint8Array };
 
 const BLOCK_REASONS: readonly string[] = ['encrypted', 'corrupt', 'too_large', 'unsupported_version'];
 const MODES: readonly OfficeImportMode[] = ['convert-and-keep', 'convert-only', 'keep-only'];
@@ -163,8 +172,13 @@ function validate(input: OfficeImportInput): void {
   if (name === null || name !== input.fileName || nameExtension(name) !== input.format) {
     throw writeRejected('invalid_input');
   }
-  if (input.bytes.length === 0) throw writeRejected('invalid_input');
-  if (input.bytes.length > OFFICE_FILE_ID_MAX_BYTES) throw writeRejected('file_too_large');
+  if (input.bytes === undefined) {
+    // Sin bytes, el contenido es el del fichero de origen.
+    if (input.sourceFileId === undefined) throw writeRejected('invalid_input');
+  } else {
+    if (input.bytes.length === 0) throw writeRejected('invalid_input');
+    if (input.bytes.length > OFFICE_FILE_ID_MAX_BYTES) throw writeRejected('file_too_large');
+  }
   if (!input.preview) {
     const id = input.operationId;
     if (id === undefined || id.length === 0 || id.length > OPERATION_ID_MAX_LENGTH) {
@@ -175,7 +189,7 @@ function validate(input: OfficeImportInput): void {
 
 /** Huella de la petición (comparte registro con las demás escrituras): la acción va en ella,
  *  así que un `operationId` de otra operación da `operation_id_reused`. Los bytes, por su hash. */
-function fingerprintOf(input: OfficeImportInput): string {
+function fingerprintOf(input: ResolvedInput): string {
   const parts = [
     'officeImport',
     input.mode,
@@ -212,7 +226,16 @@ export function isOfficeImportSaved(value: unknown): value is OfficeImportSaved 
 /** El intento de conversión, con el motivo de bloqueo si lo hay (cifrado, corrupto...). */
 type Attempt = ConversionAttempt & { reason?: ConversionBlockReason };
 
-/** Convierte y valida la salida. Nunca lanza: un fallo es el motivo con que se guarda el original. */
+/** Sin memoria para convertir a tiempo: no es un fallo de la conversión. Se devuelve al cliente
+ *  sin escribir nada (ni el original), para que reintente con el mismo `operationId`. */
+function rethrowCapacity(error: unknown): void {
+  if (error instanceof ContextUnavailableError && error.reason === 'capacity_wait_timeout') {
+    throw writeRejected('capacity_wait_timeout');
+  }
+}
+
+/** Convierte y valida la salida. Un fallo de la conversión no lanza: es el motivo con que se
+ *  guarda el original. Solo lanza `capacity_wait_timeout` (ver `rethrowCapacity`). */
 async function attemptConversion(
   job: OfficeConversionJob,
   runner: OfficeConversionRunner
@@ -221,6 +244,7 @@ async function attemptConversion(
   try {
     result = await runner.convert(job);
   } catch (error) {
+    rethrowCapacity(error);
     if (error instanceof ConversionError) {
       const reason = blockReasonOf(error.code);
       return {
@@ -244,7 +268,7 @@ async function attemptConversion(
 }
 
 /** `preview`: el análisis, sin escribir. Un fallo del análisis es "no convertible". */
-async function previewOf(input: OfficeImportInput, runner: OfficeConversionRunner): Promise<OfficeImportSaved> {
+async function previewOf(input: ResolvedInput, runner: OfficeConversionRunner): Promise<OfficeImportSaved> {
   const job = { bytes: input.bytes, fileName: input.fileName, format: input.format };
   try {
     const preview = await runner.analyze(job);
@@ -252,9 +276,48 @@ async function previewOf(input: OfficeImportInput, runner: OfficeConversionRunne
       ? { outcome: 'preview', convertible: true, losses: [...preview.losses] }
       : { outcome: 'preview', convertible: false, reason: preview.reason, losses: [] };
   } catch (error) {
+    rethrowCapacity(error);
     const reason = error instanceof ConversionError ? blockReasonOf(error.code) : undefined;
     return { outcome: 'preview', convertible: false, ...(reason ? { reason } : {}), losses: [] };
   }
+}
+
+/**
+ * Los bytes del fichero de origen (`sourceFileId` sin `bytes`), leídos del disco de este escritor.
+ * El id se busca en la biblioteca y el espacio de esta petición (el `target`) con el filtro de
+ * privados de quien pide, igual que al leerlo: uno que no existe, está en la papelera, es de otra
+ * biblioteca o está oculto es `not_found`, todos iguales. Un tamaño ya sabido por encima de
+ * `OFFICE_FILE_ID_MAX_BYTES` es `file_too_large` sin leer. Si los bytes no están aquí, se bajan
+ * con `download` (fuera del turno) y se vuelve a mirar todo.
+ */
+async function readSourceBytes(
+  target: NoteWriteTarget,
+  input: OfficeImportInput,
+  download: ((sha256: string) => Promise<boolean>) | null
+): Promise<Uint8Array> {
+  const sourceFileId = input.sourceFileId!;
+  const look = () =>
+    target.writeExclusive(async (store) => {
+      const { files } = looseFilesFilterInTurn(store, input.privacy, store.filesIndex());
+      const content = files.contentOf(sourceFileId);
+      if (!content || content.file.trashedAt !== null) throw writeRejected('not_found');
+      const known = content.file.byteLength;
+      if (known !== null && known > OFFICE_FILE_ID_MAX_BYTES) throw writeRejected('file_too_large');
+      return { sha256: content.sha256, bytes: await store.blobRead(content.sha256) };
+    });
+  let found = await look();
+  if (found.bytes === null && download) {
+    try {
+      await download(found.sha256);
+    } catch {
+      throw writeRejected('file_unavailable');
+    }
+    found = await look();
+  }
+  if (found.bytes === null) throw writeRejected('file_unavailable');
+  if (found.bytes.length === 0) throw writeRejected('invalid_input');
+  if (found.bytes.length > OFFICE_FILE_ID_MAX_BYTES) throw writeRejected('file_too_large');
+  return found.bytes;
 }
 
 /** El nombre y los bytes de un fichero nuevo, ya vistos. */
@@ -269,11 +332,15 @@ interface NewFile {
  */
 export async function importOfficeLocal(
   target: NoteWriteTarget,
-  input: OfficeImportInput,
+  given: OfficeImportInput,
   deps: OfficeImportDeps,
   onWritten: () => void = () => {}
 ): Promise<LocalWrite<OfficeImportSaved>> {
-  validate(input);
+  validate(given);
+  const input: ResolvedInput =
+    given.bytes === undefined
+      ? { ...given, bytes: await readSourceBytes(target, given, deps.download ?? null) }
+      : (given as ResolvedInput);
   if (input.preview) {
     return { result: await previewOf(input, deps.converter), wrote: false };
   }

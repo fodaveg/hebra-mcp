@@ -89,6 +89,7 @@ export type WriteRejectionCode =
   | 'file_too_large'
   | 'file_type_not_allowed'
   | 'file_unavailable'
+  | 'capacity_wait_timeout'
   | 'file_exists'
   | 'file_name_unavailable'
   | 'too_many_linked_notes'
@@ -149,6 +150,7 @@ export const WRITE_REJECTION_CODES: ReadonlySet<WriteRejectionCode> = new Set<Wr
   'file_too_large',
   'file_type_not_allowed',
   'file_unavailable',
+  'capacity_wait_timeout',
   'file_exists',
   'file_name_unavailable',
   'too_many_linked_notes',

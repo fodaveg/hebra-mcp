@@ -63,6 +63,12 @@ import {
   type ReplaceFileTextSaved
 } from '../store/file-writes';
 import {
+  importOfficeLocal,
+  type OfficeConversionRunner,
+  type OfficeImportInput,
+  type OfficeImportSaved
+} from '../store/office-writes';
+import {
   writeLooseFile,
   type LooseFileSaved,
   type LooseFileWriteInput
@@ -761,6 +767,23 @@ export class LibraryInstance implements NoteWriteTarget {
       this,
       input,
       runner ? (sha256) => runner.readBlob(sha256) : null,
+      () => this.afterWrite()
+    );
+  }
+
+  /** `hebra_import_office` (C-37b, `../store/office-writes.ts`). Si escribió algo, anota la
+   *  subida pendiente (`uploadLedger`) y pide la ronda de después sin esperarla. Sin `bytes`,
+   *  con `sourceFileId`, lee el fichero de su disco y, si no lo tiene, lo baja con su motor
+   *  de sync. */
+  importOfficeLocal(
+    input: OfficeImportInput,
+    converter: OfficeConversionRunner
+  ): Promise<LocalWrite<OfficeImportSaved>> {
+    const runner = this.runner;
+    return importOfficeLocal(
+      this,
+      input,
+      { converter, download: runner ? (sha256) => runner.readBlob(sha256) : null },
       () => this.afterWrite()
     );
   }

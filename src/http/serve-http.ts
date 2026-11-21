@@ -258,7 +258,10 @@ export async function startServeHttp(options: StartServeHttpOptions): Promise<Se
           credentialRevoked: () => pairing.isRevoked(account.binding.pairedCredentialId),
           // El turno de los topes de sync es por cuenta: la clave sale del id de la cuenta (un
           // hash, sin `sub` ni email), no del directorio, y la comparten personal y espacios.
-          accountKey: accountTurnKey(account.id) });
+          accountKey: accountTurnKey(account.id),
+          // La conversión de `hebra_import_office` espera en el turno de esta cuenta, en la
+          // compuerta de las cuentas y no en la anónima del proceso; los espacios la heredan.
+          ...(contexts ? { office: { capacity: contexts.officeCapacity(account) } } : {}) });
         opened.instance.deferSignalRelease();
         const bound = bindPairingRevocation(opened, pairing, account.binding.pairedCredentialId);
         const tracked: ServeContext = { ...bound, close: async () => {
