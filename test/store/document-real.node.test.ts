@@ -321,17 +321,85 @@ describe('deshacer con la sesión y el adaptador reales', () => {
 });
 
 describe('ejes: lo que hace la inversa (medido)', () => {
-  it('insertar una fila: la inversa la borra, sin guarda, y deshacer no falla aunque alguien escribiera en ella', async () => {
-    const h = await harness();
-    const before = await rowCount(h);
-    const lote = await applied(h, [{ type: 'axis.insert', sheet: 's0', axis: 'row', after: 'b0', ids: ['n'] }]);
-    expect(await rowCount(h)).toBe(before + 1);
+  const INSERT_ROW: SheetOp = { type: 'axis.insert', sheet: 's0', axis: 'row', after: 'b0', ids: ['n'] };
+  const ADD_SHEET: SheetOp = { type: 'sheet.add', sheet: 's9', name: 'Nueva' };
+
+  /** El id de la fila recién insertada (la segunda de `Datos`). */
+  async function insertedRow(h: Harness): Promise<string> {
     const { doc } = await stored(h);
     const model = await h.adapter.project(h.bytes, doc, live);
-    const inserted = model.sheets[0]!.rows.idAt(1);
+    const id = model.sheets[0]!.rows.idAt(1);
     doc.destroy();
-    // Otra persona escribe en la fila nueva: la inversa de insertar no lo comprueba (decisión de H-28).
+    return id;
+  }
+
+  async function sheetCount(h: Harness): Promise<number> {
+    const { doc } = await stored(h);
+    const model = await h.adapter.project(h.bytes, doc, live);
+    doc.destroy();
+    return model.sheets.length;
+  }
+
+  it('insertar una fila: si otra persona escribió en ella, deshacer da precondition_failed, no escribe y la fila y su celda siguen', async () => {
+    const h = await harness();
+    const before = await rowCount(h);
+    const lote = await applied(h, [INSERT_ROW]);
+    const inserted = await insertedRow(h);
+    const ajena = { sheet: 's0', row: inserted, col: 'b0' };
+    await personEdits(h, setCell(ajena, 'ajena'));
+    const pending = (await stored(h)).pending;
+
+    expect(await undo(h, lote)).toEqual({ ok: false, error: precondition() });
+    expect((await stored(h)).pending).toBe(pending);
+    expect(await rowCount(h)).toBe(before + 1);
+    expect(await cell(h, ajena)).toBe('ajena');
+  });
+
+  it('insertar una fila: si nadie escribió en ella, deshacer la borra', async () => {
+    const h = await harness();
+    const before = await rowCount(h);
+    const lote = await applied(h, [INSERT_ROW]);
+    expect(await rowCount(h)).toBe(before + 1);
+    expect((await undo(h, lote)).ok).toBe(true);
+    expect(await rowCount(h)).toBe(before);
+  });
+
+  it('hoja creada por el lote: si otra persona escribió en ella, deshacer da precondition_failed y la hoja sigue', async () => {
+    const h = await harness();
+    const before = await sheetCount(h);
+    const lote = await applied(h, [ADD_SHEET]);
+    expect(await sheetCount(h)).toBe(before + 1);
+    await personEdits(h, setCell({ sheet: 's9', row: 'b0', col: 'b0' }, 'ajena'));
+
+    expect(await undo(h, lote)).toEqual({ ok: false, error: precondition() });
+    expect(await sheetCount(h)).toBe(before + 1);
+  });
+
+  it('hoja creada por el lote: si nadie escribió en ella, deshacer la borra', async () => {
+    const h = await harness();
+    const before = await sheetCount(h);
+    const lote = await applied(h, [ADD_SHEET]);
+    expect((await undo(h, lote)).ok).toBe(true);
+    expect(await sheetCount(h)).toBe(before);
+  });
+
+  it('la protección de lo creado sobrevive a cerrar y reabrir la base (created llega al registro SQLite)', async () => {
+    const h = await harness();
+    const before = await rowCount(h);
+    const lote = await applied(h, [INSERT_ROW]);
+    const inserted = await insertedRow(h);
     await personEdits(h, setCell({ sheet: 's0', row: inserted, col: 'b0' }, 'ajena'));
+    await reopen(h);
+
+    expect(await undo(h, lote)).toEqual({ ok: false, error: precondition() });
+    expect(await rowCount(h)).toBe(before + 1);
+  });
+
+  it('tras reabrir la base, una fila creada que nadie tocó se sigue borrando al deshacer', async () => {
+    const h = await harness();
+    const before = await rowCount(h);
+    const lote = await applied(h, [INSERT_ROW]);
+    await reopen(h);
     expect((await undo(h, lote)).ok).toBe(true);
     expect(await rowCount(h)).toBe(before);
   });
