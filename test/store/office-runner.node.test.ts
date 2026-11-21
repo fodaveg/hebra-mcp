@@ -7,7 +7,11 @@ import { describe, expect, it } from 'vitest';
 import { CapacityGate, ContextUnavailableError } from '../../src/accounts/capacity';
 import type { Clock } from '../../src/accounts/lifecycle';
 import { handleOfficeJob } from '../../src/office-worker';
-import { OFFICE_CONVERSION_RESERVE_BYTES, OFFICE_FILE_ID_MAX_BYTES } from '../../src/server/tools/office-limits';
+import {
+  OFFICE_CONVERSION_RESERVE_BYTES,
+  OFFICE_FILE_ID_MAX_BYTES,
+  OFFICE_ZIP_LIMITS
+} from '../../src/server/tools/office-limits';
 import {
   createOfficeRunner,
   OFFICE_ANALYZE_BUDGET_MS,
@@ -16,7 +20,7 @@ import {
   OFFICE_QUEUE_WAIT_MS,
   type OfficeJobData
 } from '../../src/store/office-runner';
-import { ConversionError, type OfficeConverter } from '../../vendor/hebra/src/lib/office-import/types';
+import { ConversionError, type ConversionInput, type OfficeConverter } from '../../vendor/hebra/src/lib/office-import/types';
 
 const MIB = 1024 * 1024;
 
@@ -353,6 +357,19 @@ describe('hilo de conversión', () => {
       ok: true,
       result: { format: 'xlsx', convertible: true, losses: [] }
     });
+  });
+
+  it('el convertidor recibe OFFICE_ZIP_LIMITS en el ConversionInput (C-07c)', async () => {
+    let recibido: ConversionInput | undefined;
+    const espia: OfficeConverter = {
+      ...converter,
+      analyze: async (entrada) => {
+        recibido = entrada;
+        return { format: 'xlsx', convertible: true, losses: [] };
+      }
+    };
+    await handleOfficeJob(job('analyze'), async () => espia);
+    expect(recibido?.limits).toEqual(OFFICE_ZIP_LIMITS);
   });
 
   it('un ConversionError viaja con su código y su texto', async () => {

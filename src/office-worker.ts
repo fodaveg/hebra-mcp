@@ -22,6 +22,7 @@ import {
   type OfficeConverter,
   type OfficeFormat
 } from '../vendor/hebra/src/lib/office-import/types';
+import { OFFICE_ZIP_LIMITS } from './server/tools/office-limits';
 import type { OfficeJobData } from './store/office-runner';
 
 /** Respuesta del hilo; `code` es siempre un código cerrado del contrato. */
@@ -43,7 +44,8 @@ export async function handleOfficeJob(
   try {
     const converter = await load(job.input.format);
     // El hilo muere con `terminate()`: no hay quien aborte esta señal, solo la pide el contrato.
-    const input = { ...job.input, signal: new AbortController().signal };
+    // `limits` es el presupuesto de memoria del MCP (C-07c): el convertidor lo pasa a `readSafeZip`.
+    const input = { ...job.input, signal: new AbortController().signal, limits: OFFICE_ZIP_LIMITS };
     const result = job.kind === 'analyze' ? await converter.analyze(input) : await converter.convert(input);
     return { ok: true, result };
   } catch (error) {
