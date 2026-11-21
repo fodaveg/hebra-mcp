@@ -283,11 +283,12 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     expect(stderrText()).not.toContain('"heading":"');
   });
 
-  it('50 títulos repetidos de 6 000 caracteres: ambiguous_heading llega con candidatos de 200 como mucho (D11)', async () => {
+  it('50 títulos repetidos de 1 100 caracteres: ambiguous_heading llega con candidatos de 200 como mucho (D11)', async () => {
     const { writer, client } = await pair();
-    // Seis mil caracteres que se normalizan a 'T T' (espacios colapsados): el cliente puede
-    // pedirlo con un `heading` corto, pero el título guardado es largo.
-    const long = `T${' '.repeat(5_998)}T`;
+    // 1 100 caracteres (más que el máximo de 1 024 de un `heading` pedido y cinco veces el corte de 200)
+    // que se normalizan a 'T T' (espacios colapsados): el cliente puede pedirlo con un `heading` corto,
+    // pero el título guardado es largo. Con 6 000 la normalización cuesta más de un segundo por llamada.
+    const long = `T${' '.repeat(1_098)}T`;
     const short = 'T T';
     const body = Array.from({ length: 50 }, () => `## ${long}\ntexto\n`).join('\n');
     const created = await writer.createNote({ body, privacy: OPEN });
@@ -312,7 +313,7 @@ describe('escritor y lector en proceso, con sync sobre el relé en memoria', () 
     // La lectura directa no cruza el socket: `section.heading` sale entero.
     const read = await call(client, 'hebra_read_note', { id: created.id, heading: short, headingOccurrence: 1 });
     expect((read.value.section as { heading: string }).heading).toBe(long);
-  }, 30_000); // 50 notas de 6 000 caracteres y una ronda de sync: unos 5,6 s en el Mac (12 oct 2026).
+  });
 
   it('candidates solo se adjunta a ambiguous_heading: con otro código se descartan (D11)', async () => {
     const dataDir = tempDataDir();

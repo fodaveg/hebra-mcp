@@ -4,7 +4,7 @@
  * rama de subcadenas lleva `linksTo` en su SQL. Aquí se compara con el motor, llamándolo directamente
  * con el par con valor: el mismo orden, el mismo cursor y los mismos resultados, caso a caso.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { SearchFilters, SearchPage, SqliteLibraryEngine } from '../../src/hebra';
 import { auditHarness, createNote } from '../privacy/audit-harness';
 
@@ -60,76 +60,66 @@ async function library() {
 const ids = (page: { items: Array<{ id: string }> }): string[] => page.items.map((item) => item.id).sort();
 
 describe('la rama de subcadenas aplica `props` y `linksTo` como el motor', () => {
+  // Una sola biblioteca para todo el fichero: cada test solo lee, y montarla (unas veinte
+  // escrituras con fsync) por caso multiplicaba el trabajo por las 60 veces que se repetía.
+  let h: Awaited<ReturnType<typeof library>>;
+  beforeAll(async () => {
+    h = await library();
+  });
+  afterAll(async () => {
+    await h.close();
+  });
+
   it.each(FILTERS)('%s', async (_name, filters) => {
-    const h = await library();
-    try {
-      for (const query of ['arbanz', 'garbanzos', 'anzos -siete']) {
-        const safe = await h.port.search(query, null, 50, filters, null);
-        const engine = await h.port.search(query, null, 50, filters, null, { embedded: true });
-        expect(ids(safe), query).toEqual(ids(engine));
-      }
-    } finally {
-      await h.close();
+    for (const query of ['arbanz', 'garbanzos', 'anzos -siete']) {
+      const safe = await h.port.search(query, null, 50, filters, null);
+      const engine = await h.port.search(query, null, 50, filters, null, { embedded: true });
+      expect(ids(safe), query).toEqual(ids(engine));
     }
   });
 
   it('los casos no están vacíos: hay de los dos', async () => {
-    const h = await library();
-    try {
-      const counts = new Map<string, number>();
-      for (const [name, filters] of FILTERS) {
-        counts.set(name, (await h.port.search('arbanz', null, 50, filters, null)).items.length);
-      }
-      expect(counts.get('valor sin acentos contra uno con ellos')).toBe(3);
-      expect(counts.get('ñ y diéresis')).toBe(1);
-      expect(counts.get('enlace con título sin acentos')).toBeGreaterThan(0);
-      expect(counts.get('un trozo del valor no vale')).toBe(0);
-    } finally {
-      await h.close();
+    const counts = new Map<string, number>();
+    for (const [name, filters] of FILTERS) {
+      counts.set(name, (await h.port.search('arbanz', null, 50, filters, null)).items.length);
     }
+    expect(counts.get('valor sin acentos contra uno con ellos')).toBe(3);
+    expect(counts.get('ñ y diéresis')).toBe(1);
+    expect(counts.get('enlace con título sin acentos')).toBeGreaterThan(0);
+    expect(counts.get('un trozo del valor no vale')).toBe(0);
   });
 
   it.each(FILTERS.filter(([, filters]) => filters.props?.some((prop) => prop.value !== null)))(
     'comprobar los pares fuera del motor da su mismo orden, cursor y resultados, por los dos caminos: %s',
     async (_name, filters) => {
-      const h = await library();
-      try {
-        const { engine } = h.port as unknown as { engine: SqliteLibraryEngine };
-        for (const embedded of [true, false]) {
-          for (const query of ['garbanzos', 'arbanz', '', '   ']) {
-            for (const want of [1, 2, 50]) {
-              const label = `${embedded ? 'motor' : 'segura'} ${JSON.stringify(query)} ${want}`;
-              let cursor: string | null = null;
-              do {
-                const own: SearchPage = await h.port.search(query, cursor, want, filters, null, { embedded });
-                const direct: SearchPage = await engine.search(query, cursor, want, filters, null);
-                expect(own.items.map((item) => item.id), label).toEqual(direct.items.map((item) => item.id));
-                expect(own.nextCursor, label).toBe(direct.nextCursor);
-                cursor = own.nextCursor;
-              } while (cursor);
-            }
+      const { engine } = h.port as unknown as { engine: SqliteLibraryEngine };
+      for (const embedded of [true, false]) {
+        for (const query of ['garbanzos', 'arbanz', '', '   ']) {
+          for (const want of [1, 2, 50]) {
+            const label = `${embedded ? 'motor' : 'segura'} ${JSON.stringify(query)} ${want}`;
+            let cursor: string | null = null;
+            do {
+              const own: SearchPage = await h.port.search(query, cursor, want, filters, null, { embedded });
+              const direct: SearchPage = await engine.search(query, cursor, want, filters, null);
+              expect(own.items.map((item) => item.id), label).toEqual(direct.items.map((item) => item.id));
+              expect(own.nextCursor, label).toBe(direct.nextCursor);
+              cursor = own.nextCursor;
+            } while (cursor);
           }
         }
-      } finally {
-        await h.close();
       }
     }
   );
 
   it('no recorre la búsqueda sin texto del motor: una consulta por página, con y sin filtros', async () => {
-    const h = await library();
+    const engine = (h.port as unknown as { engine: SqliteLibraryEngine }).engine;
+    const search = vi.spyOn(engine, 'search');
     try {
-      const engine = (h.port as unknown as { engine: SqliteLibraryEngine }).engine;
-      const search = vi.spyOn(engine, 'search');
-      try {
-        await h.port.search('arbanz', null, 2, { props: [{ key: 'ciudad', value: 'cadiz' }], linksTo: ['Destino'] }, null);
-        expect(search).toHaveBeenCalledTimes(1);
-        expect(search.mock.calls[0]![0]).toBe('arbanz');
-      } finally {
-        search.mockRestore();
-      }
+      await h.port.search('arbanz', null, 2, { props: [{ key: 'ciudad', value: 'cadiz' }], linksTo: ['Destino'] }, null);
+      expect(search).toHaveBeenCalledTimes(1);
+      expect(search.mock.calls[0]![0]).toBe('arbanz');
     } finally {
-      await h.close();
+      search.mockRestore();
     }
   });
 });
