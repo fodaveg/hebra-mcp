@@ -47,6 +47,8 @@ import {
   type SyncRoundResult
 } from '../hebra';
 import type { SyncStorePort } from '../store/sync-port';
+import { documentSourceOf, wireDocuments } from '../store/document-channel';
+import type { DocumentSyncWiring } from '../../vendor/hebra/src/lib/documents/sync/wiring';
 import {
   BLOB_DOWNLOAD_CONCURRENCY,
   DEFAULT_ACCOUNT_KEY,
@@ -348,6 +350,9 @@ export class SyncRunner implements SyncStatusSource {
   private readonly accountKey: string;
   /** Se aborta en `stop()`: una ronda en cola de turno sale sin ejecutarse. */
   private readonly closing = new AbortController();
+  /** El canal de documentos de este motor (B-D15), o `null` si el puerto no tiene fuente. */
+  private wiring: DocumentSyncWiring | null = null;
+  private documentsState: 'idle' | 'starting' | 'ready' = 'idle';
 
   private constructor(
     private readonly engine: LibrarySyncEngine,
@@ -374,7 +379,27 @@ export class SyncRunner implements SyncStatusSource {
       })();
     // El runner necesita a sí mismo en `onEvent`, que se fija al crear el motor.
     let runner: SyncRunner | null = null;
+    let created: LibrarySyncEngine | null = null;
+    // B-D15: el canal de documentos, uno por motor (el personal y cada espacio). Sus ganchos
+    // se evalúan tarde: el motor y el runner se crean después del cableado.
+    const source = documentSourceOf(options.port);
+    const wiring = source
+      ? wireDocuments(source, {
+          requestRound: async () => {
+            if (!runner) throw new Error('sync-runner-not-ready');
+            await runner.requestRound();
+          },
+          readBlob: async (sha256) => (created ? created.readBlob(sha256) : null)
+        })
+      : null;
     const engine = await LibrarySyncEngine.create({
+      ...(wiring
+        ? {
+            reservedRecords: wiring.reservedRecords,
+            filesRetention: wiring.retention,
+            onAfterApplyPage: wiring.onAfterApplyPage
+          }
+        : {}),
       port: options.port,
       transport,
       identity: options.identity,
@@ -393,8 +418,33 @@ export class SyncRunner implements SyncStatusSource {
       now: options.now,
       onEvent: (event) => runner?.handleEngineEvent(event)
     });
+    created = engine;
     runner = new SyncRunner(engine, options);
+    runner.wiring = wiring;
+    // Antes de la primera ronda: recupera lo que un corte dejó a medias y registra los documentos.
+    await runner.startDocuments();
     return runner;
+  }
+
+  /** El canal de documentos de este motor (`null` sin fuente en el puerto). */
+  get documents(): DocumentSyncWiring | null {
+    return this.wiring;
+  }
+
+  /**
+   * `wiring.start()`: recupera purgas cortadas y registra en el canal cada documento. Se llama
+   * al crear y, si falló (el almacén no respondía), antes de cada ronda hasta que pase: sin él
+   * el `/h` de un documento no se vuelve a ofrecer. Un fallo aquí no para la sync de notas.
+   */
+  private async startDocuments(): Promise<void> {
+    if (!this.wiring || this.documentsState !== 'idle') return;
+    this.documentsState = 'starting';
+    try {
+      await this.wiring.start();
+      this.documentsState = 'ready';
+    } catch {
+      this.documentsState = 'idle';
+    }
   }
 
   private now(): number {
@@ -624,6 +674,7 @@ export class SyncRunner implements SyncStatusSource {
 
   private async executeRound(retry: boolean): Promise<SyncRoundResult | null> {
     let round: SyncRoundResult | null = null;
+    await this.startDocuments();
     try {
       await this.options.beforeRound?.();
     } catch {

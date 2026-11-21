@@ -128,6 +128,7 @@ import {
   type NoteStateRow
 } from './state-reads';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
+import { attachDocumentSource, createDocumentSource, type DocumentChannelSource } from './document-channel';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -314,6 +315,7 @@ async function secureSqliteFileModes(sqlitePath: string): Promise<void> {
 export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
   private readonly queue = new SerialQueue();
   private syncView: SyncStorePort | null = null;
+  private documents: DocumentChannelSource | null = null;
   private jdPlanStore: JdPlanStore | null = null;
   private closed = false;
   /** Consultas propias ya preparadas (una vez por conexión; `close` las suelta). */
@@ -1138,7 +1140,43 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         this.resets += 1;
       }
     );
+    // B-D15: el runner del escritor monta el canal de documentos con esta fuente (una por contexto).
+    if (this.mode === 'readWrite') attachDocumentSource(this.syncView, this.documentSource());
     return this.syncView;
+  }
+
+  /** Una escritura del cableado de documentos: un turno de la cola con la cuenta revalidada. */
+  private guardedWrite<T>(operation: () => T | Promise<T>): Promise<T> {
+    return this.write(() => {
+      this.assertSpaceUserWrite();
+      return operation();
+    });
+  }
+
+  /**
+   * El canal de documentos de este contexto (`./document-channel.ts`): su puerto del almacén,
+   * el `Storage` del vínculo sobre `meta` y las sesiones abiertas. Una por puerto. No es una
+   * vista para las herramientas: lo usan el runner y, después, la capa de documentos.
+   */
+  documentSource(): DocumentChannelSource {
+    this.documents ??= createDocumentSource({
+      libraryId: this.spaceAccess?.spaceId ?? 'personal',
+      engine: this.engine,
+      db: this.db,
+      conn: this.conn,
+      read: (operation) => this.read(operation),
+      write: (operation) => this.write(operation),
+      guard: () => this.assertSpaceUserWrite(),
+      // Las escrituras de ficheros del cableado, con la revalidación de la cuenta en el turno.
+      files: {
+        create: (folderId, name, sha256, options) => this.guardedWrite(() => this.engine.fileCreate(folderId, name, sha256, options)),
+        replace: (id, sha256, expected) => this.guardedWrite(() => this.engine.fileReplace(id, sha256, expected)),
+        trash: (id) => this.guardedWrite(() => this.engine.fileTrash(id)),
+        restore: (id) => this.guardedWrite(() => this.engine.fileRestore(id)),
+        putBlob: (bytes, options) => this.guardedWrite(() => this.engine.blobPut(bytes, options))
+      }
+    });
+    return this.documents;
   }
 
   /** Espera a que terminen los recorridos en curso y lo que haya en cola, y cierra la conexión. No
