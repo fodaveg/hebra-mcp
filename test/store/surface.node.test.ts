@@ -243,7 +243,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
           'src/store/file-writes.ts',
           'src/store/file-verbs.ts',
           // C-26: el original y la conversión de `hebra_import_office`, en el turno del escritor.
-          'src/store/office-writes.ts'
+          'src/store/office-writes.ts',
+          // B-N20: el documento `.ods` o `.odp` que crea `createDocumentFile`, en el turno del escritor.
+          'src/store/document-create.ts'
         ]
       ]
     ];
@@ -416,7 +418,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'src/store/node-port.ts',
       'src/store/file-verbs.ts',
       'src/store/jd-move-port.ts',
-      'src/store/office-writes.ts'
+      'src/store/office-writes.ts',
+      // B-N20: `document-create.ts` crea el `.ods` o `.odp` con las guardas de C-29.
+      'src/store/document-create.ts'
     ];
     const verbCall = reachPattern('fileCreate|fileRename|fileMove');
     for (const name of ['fileCreate', 'fileRename', 'fileMove']) {
