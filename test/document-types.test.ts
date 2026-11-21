@@ -1,7 +1,9 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { DocSession } from '../vendor/hebra/src/lib/documents/contract';
 import * as limits from '../src/store/document-limits';
 import {
   DOCUMENT_ERROR_CODES,
+  type DocApplyResult,
   type DocSessionLike,
   type DocumentError,
   type DocumentErrorCode,
@@ -49,13 +51,41 @@ describe('tipos y topes de documentos del MCP', () => {
     expect(mal.code).toBe('file_too_large');
   });
 
-  it('DocSessionLike es estructural: un objeto suelto la cumple', () => {
-    const sesion: DocSessionLike = {
+  it('DocSessionLike es estructural: un objeto suelto la cumple', async () => {
+    const sesion: DocSessionLike<string, Op> = {
       revision: () => 'r',
-      apply: async () => ({ revision: 'r2', changed: {} }),
-      close: () => {}
+      layoutRevision: () => 'l',
+      apply: async () => ({
+        ok: true,
+        changed: true,
+        revision: 'r2',
+        layoutRevision: 'l',
+        inverse: []
+      }),
+      flush: async () => {},
+      close: async () => {}
     };
     expect(sesion.revision()).toBe('r');
+    const r = await sesion.apply([], 'agent', { seed: 's' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('la firma de apply coincide con la de la DocSession real', () => {
+    type Real = DocSession<string, Op>;
+    expectTypeOf<DocSessionLike<string, Op>['apply']>().toEqualTypeOf<Real['apply']>();
+    expectTypeOf<DocSessionLike<string, Op>['layoutRevision']>().toEqualTypeOf<() => string>();
+    expectTypeOf<DocSessionLike<string, Op>['close']>().toEqualTypeOf<() => Promise<void>>();
+    expectTypeOf<DocSessionLike<string, Op>['flush']>().toEqualTypeOf<() => Promise<void>>();
+    expectTypeOf<DocApplyResult<string, Op>>().toEqualTypeOf<
+      Awaited<ReturnType<Real['apply']>>
+    >();
+  });
+
+  it('too_large y op_invalid son códigos de error', () => {
+    expect(DOCUMENT_ERROR_CODES).toContain('too_large');
+    expect(DOCUMENT_ERROR_CODES).toContain('op_invalid');
+    const e: DocumentError<'op_invalid'> = { code: 'op_invalid' };
+    expect(e.code).toBe('op_invalid');
   });
 
   it('topes: cifras del estudio', () => {

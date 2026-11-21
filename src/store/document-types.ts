@@ -1,6 +1,7 @@
 /**
  * Tipos de las herramientas de documentos (`.ods`, `.odp`) del MCP (estudio MCP de
- * documentos, apartados 4 y 5). Solo tipos y constantes: no importa nada de `vendor/hebra`.
+ * documentos, apartados 4 y 5). Solo tipos y constantes: de `vendor/hebra` solo toma tipos
+ * (`import type`).
  * `DocSessionLike` es estructural, para que el núcleo de la app lo cumpla sin que el MCP
  * dependa de su clase.
  */
@@ -90,6 +91,8 @@ export const DOCUMENT_ERROR_CODES = [
   'document_invalid',
   'document_too_complex',
   'document_busy',
+  'too_large',
+  'op_invalid',
   'file_too_large',
   'file_unavailable',
   'file_exists',
@@ -109,6 +112,8 @@ export type DocumentErrorDetail = {
   document_invalid: Record<string, never>;
   document_too_complex: Record<string, never>;
   document_busy: { retryAfterSeconds: number };
+  too_large: object;
+  op_invalid: object;
   file_too_large: { byteLength: number; maxBytes: number };
   file_unavailable: Record<string, never>;
   file_exists: { id: string };
@@ -122,32 +127,24 @@ export type DocumentError<C extends DocumentErrorCode = DocumentErrorCode> = {
   [K in C]: { code: K } & DocumentErrorDetail[K];
 }[C];
 
-/** Resultado de aplicar un lote sobre la sesión. */
-export type DocApplyResult = {
-  revision: string;
-  layoutRevision?: string;
-  changed: Record<string, number>;
-};
+import type { DocSession } from '../../vendor/hebra/src/lib/documents/contract';
 
 /**
- * Lo que el MCP exige de la sesión de un documento. Estructural: la implementa el núcleo de
- * la app (`DocSession`) y los dobles de los tests. `apply` confirma sin devolver el modelo,
- * para no proyectar dentro del turno.
+ * Tipos de la sesión real. Son `import type`: no arrastran DOM ni código de Hebra al paquete
+ * (`yjs` solo aparece en el campo `doc`, que `DocSessionLike` no exige).
  */
-export interface DocSessionLike {
-  /** Revisión del contenido; cambia con cada edición. */
-  revision(): string;
-  /** Revisión de la disposición de la hoja (decisión 18). Las presentaciones no la tienen. */
-  layoutRevision?(): string;
-  apply(input: {
-    ops: readonly unknown[];
-    expectedRevision?: string;
-    expectedLayout?: string;
-    dryRun?: boolean;
-  }): Promise<DocApplyResult>;
-  /** Libera la sesión. */
-  close(): void;
-}
+export type { DocApplyOptions, DocApplyResult, DocFailure } from '../../vendor/hebra/src/lib/documents/contract';
+
+/**
+ * Lo que el MCP exige de la sesión de un documento: la `DocSession` real sin `fileId`, `doc`
+ * ni `generation`, para que los dobles de los tests no tengan que fabricar un `Y.Doc`. La firma
+ * de `apply` es la real: `expectedRevision`, `expectedLayout` y `dryRun` no son de la sesión,
+ * los comprueba la capa del MCP antes de llamar.
+ */
+export type DocSessionLike<Model = unknown, Op = unknown> = Pick<
+  DocSession<Model, Op>,
+  'revision' | 'layoutRevision' | 'apply' | 'flush' | 'close'
+>;
 
 /**
  * Entrada del registro de herramientas de documentos: nombre, tipo de fichero y si escribe.
