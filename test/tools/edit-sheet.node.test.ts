@@ -29,6 +29,8 @@
  * - escribir en `dryRun` (quitar la salida temprana de `runDocumentOps`): cae «dryRun sobre un
  *   documento con cabecera»;
  * - un error de uno en la búsqueda de `commandLocator`: cae su test.
+ * - quitar el tope `max(MAX_AXIS_PX)` del esquema de `setAxisSize` (H-VENDOR-2): cae «una medida
+ *   fuera de tope» (el lote llega al escritor y lo rechaza `compileBatch`, no el esquema).
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -51,7 +53,7 @@ import {
   type SheetEditOp
 } from '../../src/server/tools/edit-sheet';
 import { openSheetRead } from '../../src/server/tools/sheet-read';
-import type { SheetCommand, SheetModel, SheetModelSheet } from '../../src/sheets';
+import { createEditorData, type SheetCommand, type SheetModel, type SheetModelSheet } from '../../src/sheets';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { assertAddressRule, DocumentAddressError } from '../../src/store/document-address';
 import { registerDocumentFormat, runDocumentRequest } from '../../src/store/document-service';
@@ -490,6 +492,84 @@ describe('deshacer', () => {
     await expectCode(h.edit({ operationId: 'op-u', undoOperationId: 'op-1', dryRun: true }), 'invalid_input');
     await expectCode(h.edit({ operationId: 'op-u', undoOperationId: 'op-1', expectedLayout: 'x' }), 'invalid_input');
     expect(h.calls()).toBe(0);
+  });
+});
+
+/**
+ * Anchos y altos de la hoja `Datos` como los pinta la rejilla (y `hebra_render_sheet`): los datos
+ * del editor (`createEditorData`) sobre la lectura común. `visibleSize` es la medida en píxeles CSS.
+ */
+async function axisSizes(h: { port: NodeLibraryPort; fileId: string; bytes: Uint8Array }) {
+  const opened = await openSheetRead(h.port.documentSource(), { id: h.fileId, sha256: sha(h.bytes) }, live, 'empty');
+  const data = await createEditorData({ doc: opened.read.doc, base: opened.base });
+  try {
+    const sheet = opened.read.model.sheets.find((s) => s.name === 'Datos')!;
+    const cols = data.colsAxis(sheet.id);
+    const rows = data.rowsAxis(sheet.id);
+    return { colA: cols.visibleSize(0), colB: cols.visibleSize(1), colC: cols.visibleSize(2), row1: rows.visibleSize(0), row2: rows.visibleSize(1) };
+  } finally {
+    data.dispose();
+    await opened.close();
+  }
+}
+
+describe('medidas de filas y columnas (setAxisSize)', () => {
+  it('cambia el ancho de una columna y el alto de una fila en puntos, y una lectura lo ve', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const sizes = await axisSizes(h);
+    expect(sizes.colB).not.toBe(150);
+    const out = await h.edit({
+      operationId: 'op-1',
+      expectedRevision: before.revision,
+      ops: [
+        { type: 'setAxisSize', sheet: 'Datos', axis: 'col', at: 2, count: 1, size: 150 },
+        // 30 pt son 40 px (96 por pulgada contra 72).
+        { type: 'setAxisSize', sheet: 'Datos', axis: 'row', at: 2, count: 1, size: 30, unit: 'pt' }
+      ]
+    });
+    expect(out).toMatchObject({ outcome: 'saved' });
+    const after = await axisSizes(h);
+    expect(after).toEqual({ ...sizes, colB: 150, row2: 40 });
+    // Las celdas no se mueven y la revisión de la lectura es la de la respuesta.
+    const read = await readState(h);
+    expect(read.cells).toEqual(before.cells);
+    expect(read.revision).toBe(out.revision);
+  });
+
+  it('un tramo de columnas sale con una sola medida y deshacer devuelve la del fichero', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const sizes = await axisSizes(h);
+    await h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [{ type: 'setAxisSize', sheet: 'Datos', axis: 'col', at: 1, count: 3, size: 90 }] });
+    expect(await axisSizes(h)).toEqual({ ...sizes, colA: 90, colB: 90, colC: 90 });
+    await h.edit({ operationId: 'op-u', undoOperationId: 'op-1' });
+    expect(await axisSizes(h)).toEqual(sizes);
+  });
+
+  it('una medida fuera de tope es batch_invalid y no escribe: por esquema en px, por compileBatch en pt', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const sizes = await axisSizes(h);
+    await expectCode(
+      h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [{ type: 'setAxisSize', sheet: 'Datos', axis: 'col', at: 1, count: 1, size: 10_001 }] }),
+      'batch_invalid'
+    );
+    // La forma la rechaza el esquema, antes de llegar al escritor.
+    expect(h.calls()).toBe(0);
+    // 7.600 pt son 10.133 px: pasa la forma, pero no el tope del núcleo.
+    await expectCode(
+      h.edit({ operationId: 'op-2', expectedRevision: before.revision, ops: [{ type: 'setAxisSize', sheet: 'Datos', axis: 'col', at: 1, count: 1, size: 7600, unit: 'pt' }] }),
+      'batch_invalid'
+    );
+    await expectCode(
+      h.edit({ operationId: 'op-3', ops: [{ type: 'setAxisSize', sheet: 'Datos', axis: 'col', at: 1, count: 1, size: 80 }] }),
+      'batch_invalid'
+    );
+    // Sin `expect` ni `expectedRevision`, la regla de direcciones también vale para las medidas.
+    // Ningún lote escribe un update (la cabecera puede quedar, como en el resto de rechazos).
+    expect((await stored(h)).updates).toBe(0);
+    expect(await axisSizes(h)).toEqual(sizes);
   });
 });
 

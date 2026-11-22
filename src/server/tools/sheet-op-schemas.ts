@@ -25,7 +25,7 @@
  * un motivo fijo (`BatchIssue`), hasta `BATCH_INVALID_ISSUES_MAX`.
  */
 import { z } from 'zod';
-import type { SheetCommand, SheetOpType } from '../../sheets';
+import { MAX_AXIS_PX, type SheetCommand, type SheetOpType } from '../../sheets';
 import {
   ASSETS_MAX_BYTES,
   BATCH_INVALID_ISSUES_MAX,
@@ -189,6 +189,21 @@ export const SHEET_COMMAND_SCHEMAS = {
   deleteAxis: axisCommand('deleteAxis'),
   hideAxis: axisCommand('hideAxis'),
   showAxis: axisCommand('showAxis'),
+  setAxisSize: z.strictObject({
+    type: z.literal('setAxisSize'),
+    sheet: sheetRefSchema,
+    axis: axisSchema,
+    /** Desde 1: la fila 1 o la columna A. */
+    at: z.number().int().min(1),
+    count: z.number().int().min(1),
+    /**
+     * Ancho o alto en píxeles CSS (o en puntos con `unit: 'pt'`), mayor que 0; `null` quita la
+     * medida propia. El tope en puntos (7.500) lo mira `compileBatch` tras convertir.
+     */
+    size: z.number().positive().max(MAX_AXIS_PX).nullable(),
+    unit: z.enum(['px', 'pt']).optional(),
+    expect: expectSchema.optional()
+  }),
   addSheet: sheetCommand('addSheet'),
   deleteSheet: sheetCommand('deleteSheet'),
   renameSheet: sheetCommand('renameSheet'),
@@ -221,6 +236,7 @@ export const sheetCommandSchema = z.discriminatedUnion('type', [
   SHEET_COMMAND_SCHEMAS.deleteAxis,
   SHEET_COMMAND_SCHEMAS.hideAxis,
   SHEET_COMMAND_SCHEMAS.showAxis,
+  SHEET_COMMAND_SCHEMAS.setAxisSize,
   SHEET_COMMAND_SCHEMAS.addSheet,
   SHEET_COMMAND_SCHEMAS.deleteSheet,
   SHEET_COMMAND_SCHEMAS.renameSheet,
@@ -249,12 +265,10 @@ export const SHEET_OP_COVERAGE = {
   'axis.restore': { excluded: 'Solo la genera una inversa al deshacer un borrado de filas o columnas.' },
   'axis.hide': { command: 'hideAxis' },
   'axis.show': { command: 'showAxis' },
-  'axis.size': {
-    excluded: 'Medir filas y columnas no tiene comando en compileBatch (H-30) todavía: queda para cuando el núcleo lo añada.'
-  },
-  'axis.sizeRun': {
-    excluded: 'Medir un tramo de filas o columnas no tiene comando en compileBatch (H-30) todavía.'
-  },
+  // `setAxisSize` compila siempre a un `axis.sizeRun` (también para una sola fila o columna); los
+  // dos ponen una medida propia, así que la rejilla y el MCP llegan a lo mismo en el `.ods`.
+  'axis.size': { command: 'setAxisSize' },
+  'axis.sizeRun': { command: 'setAxisSize' },
   'axis.hideRun': { command: 'hideAxis' },
   'axis.runs': { excluded: 'Solo la genera una inversa de axis.sizeRun o axis.hideRun.' },
   'sheet.add': { command: 'addSheet' },
@@ -458,6 +472,7 @@ export const SHEET_OPS_DESCRIPTION =
   '`setCells` {sheet, start:"A1", rows:[[valor,…],…]} (un texto que empieza por "=" es una fórmula, en inglés y con coma: "=SUM(A1:A3)"); ' +
   '`setFormat` {sheet, range:"A1:B3", format:{bold,italic,underline,strike,wrap:"true"|"false", fill,color:"#rrggbb", halign, valign, numberFormatCode, fontFamily, fontSize, "border.top"…, link}}; ' +
   '`insertAxis`, `deleteAxis`, `hideAxis`, `showAxis` {sheet, axis:"row"|"col", at (desde 1), count}; ' +
+  '`setAxisSize` {sheet, axis, at, count, size (px, o pt con unit:"pt"; null quita la medida), unit?}; ' +
   '`addSheet` {sheet:nombre, as?}, `deleteSheet` {sheet}, `renameSheet` {sheet, name}, `moveSheet` {sheet, to (desde 0)}, `freeze` {sheet, rows, cols}; ' +
   '`merge`, `unmerge` {sheet, range}; `putRule`, `deleteRule` {kind:"name"|"filter"|"validation"|"conditional"|"comment", id?, body?, as?}. ' +
   'Una hoja creada en el lote se cita como "$alias". Ninguna fórmula puede usar WEBSERVICE, IMAGE, RTD ni DDE.';

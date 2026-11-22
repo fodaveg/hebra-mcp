@@ -31,6 +31,7 @@ const EXAMPLES: { [T in SheetCommand['type']]: SheetCommand & { type: T } } = {
   deleteAxis: { type: 'deleteAxis', sheet: 'Ventas', axis: 'col', at: 1, count: 1, expect: { 'A:A': null } },
   hideAxis: { type: 'hideAxis', sheet: 'Ventas', axis: 'col', at: 4, count: 2 },
   showAxis: { type: 'showAxis', sheet: 'Ventas', axis: 'row', at: 1, count: 1 },
+  setAxisSize: { type: 'setAxisSize', sheet: 'Ventas', axis: 'col', at: 2, count: 3, size: 120, expect: { 'B:D': null } },
   addSheet: { type: 'addSheet', sheet: 'Resumen', as: 'resumen' },
   deleteSheet: { type: 'deleteSheet', sheet: 'Viejo' },
   renameSheet: { type: 'renameSheet', sheet: '$resumen', name: 'Total' },
@@ -93,6 +94,10 @@ describe('forma de cada comando', () => {
     ['color sin forma #rrggbb', { type: 'setFormat', sheet: 'A', range: 'A1', format: { fill: 'red' } }, 'ops.0.format.fill'],
     ['eje que no es row ni col', { type: 'insertAxis', sheet: 'A', axis: 'fila', at: 1, count: 1 }, 'ops.0.axis'],
     ['at desde 0', { type: 'insertAxis', sheet: 'A', axis: 'row', at: 0, count: 1 }, 'ops.0.at'],
+    ['medida 0', { type: 'setAxisSize', sheet: 'A', axis: 'col', at: 1, count: 1, size: 0 }, 'ops.0.size'],
+    ['medida por encima de 10.000 px', { type: 'setAxisSize', sheet: 'A', axis: 'row', at: 1, count: 1, size: 10_001 }, 'ops.0.size'],
+    ['medida sin size', { type: 'setAxisSize', sheet: 'A', axis: 'row', at: 1, count: 1 }, 'ops.0.size'],
+    ['unidad que no es px ni pt', { type: 'setAxisSize', sheet: 'A', axis: 'col', at: 1, count: 1, size: 2, unit: 'cm' }, 'ops.0.unit'],
     ['tipo de regla desconocido', { type: 'putRule', kind: 'macro', body: 'x' }, 'ops.0.kind'],
     ['alias con espacios', { type: 'addSheet', sheet: 'A', as: 'mi hoja' }, 'ops.0.as']
   ];
