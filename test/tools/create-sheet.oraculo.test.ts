@@ -60,7 +60,8 @@ describe.runIf(ORACULO)('hebra_create_sheet contra LibreOffice', () => {
     const built = await buildSheetFile(LOTE, new AbortController().signal);
     if ('code' in built) throw new Error(`el lote no compiló: ${built.code}`);
     const { hojas } = abrir('creado.ods', built.bytes);
-    expect(Object.keys(hojas)).toEqual(['Ventas', 'Resumen']);
+    // El volcado de oraculo-uno.py sale con `sort_keys`: da qué hojas hay, no su orden.
+    expect(Object.keys(hojas)).toEqual(['Resumen', 'Ventas']);
     expect(hojas.Ventas!.celdas.A1).toMatchObject({ tipo: 'texto', valor: 'Mes' });
     expect(hojas.Ventas!.celdas.B3).toMatchObject({ tipo: 'numero', valor: 1350 });
     // Sin caché: LibreOffice calcula al abrir (sonda S1 de H-06).
