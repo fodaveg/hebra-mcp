@@ -26,6 +26,7 @@ import { PrivacyFilter } from '../../src/privacy/filter';
 import type { ToolContext } from '../../src/server/context';
 import { createSheetDocumentFormat, runEditSheet, type EditSheetWriter } from '../../src/server/tools/edit-sheet';
 import { runReadSheet } from '../../src/server/tools/read-sheet';
+import { renderSvgToPng } from '../../src/render/render';
 import { bundledSheetRenderAssets, runRenderSheet } from '../../src/server/tools/render-sheet';
 import { createSheetDocumentExporter } from '../../src/server/tools/sheet-export';
 import { blobOf } from '../../src/server/tools/sheet-read';
@@ -50,6 +51,16 @@ const cgroup = (name: string): number | null => {
   }
 };
 const mib = (n: number | null): number | null => (n === null ? null : Math.round((n / MIB) * 10) / 10);
+/** `anon`, `file` y `kernel` de `memory.stat` en MiB: qué parte de `memory.current` es memoria del proceso. */
+const memoryStat = (): Record<string, number | null> => {
+  try {
+    const text = readFileSync('/sys/fs/cgroup/memory.stat', 'utf8');
+    const of = (key: string) => mib(Number(new RegExp(`^${key} (\\d+)$`, 'm').exec(text)?.[1] ?? NaN));
+    return { anon: of('anon'), file: of('file'), kernel: of('kernel') };
+  } catch {
+    return {};
+  }
+};
 
 async function openLibrary() {
   return openNodeLibraryPort({ sqlitePath: join(dir, 'lib', 'library.sqlite'), dataDir: join(dir, 'lib') });
@@ -145,11 +156,48 @@ if (caso.startsWith('read')) {
   );
   phases.push(r.row);
 } else if (caso.startsWith('render')) {
+  // H-95d: el pintado se parte en dos fases en la frontera entre la lectura (hasta el SVG) y el
+  // pintado del PNG, envolviendo `render` del cableado. `GC=1` (con `--expose-gc`) recoge la
+  // basura en esa frontera, para ver cuánto de lo que deja la lectura es basura sin recoger.
   const assets = bundledSheetRenderAssets();
+  let frontier: Record<string, unknown> | null = null;
+  const render: typeof renderSvgToPng = async (input) => {
+    const readPeak = await new Promise<number>((resolve) => {
+      sampler.once('message', resolve);
+      sampler.postMessage('stop');
+    });
+    const atFrontier = cgroup('memory.current');
+    const statAtFrontier = memoryStat();
+    const gc = (globalThis as { gc?: () => void }).gc;
+    if (process.env.GC === '1' && gc) gc();
+    // `ESPERA_MS`: cuánto se espera en la frontera antes de pintar (lo que tarda en irse el hilo del motor).
+    const wait = Number(process.env.ESPERA_MS ?? 0);
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    frontier = {
+      lecturaPicoMiB: mib(readPeak),
+      fronteraMiB: mib(atFrontier),
+      statFrontera: statAtFrontier,
+      fronteraTrasGcMiB: process.env.GC === '1' && gc ? mib(cgroup('memory.current')) : null,
+      fronteraTrasEsperaMiB: wait > 0 ? mib(cgroup('memory.current')) : null,
+      statTrasEspera: wait > 0 ? memoryStat() : null,
+      rssFronteraMiB: mib(process.memoryUsage().rss),
+      heapFronteraMiB: mib(v8.getHeapStatistics().used_heap_size),
+      svgBytes: input.svg.byteLength,
+      anchoPedido: input.widthPx
+    };
+    sampler.postMessage('start');
+    const out = await renderSvgToPng(input);
+    frontier.png = { width: out.width, height: out.height, bytes: out.png.byteLength };
+    return out;
+  };
   const r = await phase('render', () =>
-    runRenderSheet(ctx, { id: meta.fileId, sheet: 'Datos', range: process.env.RANGO ?? 'A1:BH200', width: 1568 }, { documents: port.documentSource(), capacity, ...assets })
+    runRenderSheet(
+      ctx,
+      { id: meta.fileId, sheet: 'Datos', range: process.env.RANGO ?? 'A1:BH200', width: Number(process.env.ANCHO ?? 1568) },
+      { documents: port.documentSource(), capacity, ...assets, render }
+    )
   );
-  phases.push(r.row);
+  phases.push({ ...r.row, ...(frontier ?? {}) });
 } else {
   registerDocumentFormat('ods', createSheetDocumentFormat());
   const writer: EditSheetWriter = async (request) => {

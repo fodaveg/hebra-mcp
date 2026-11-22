@@ -46,7 +46,19 @@ const CASOS = {
   'pintar-medio': { fx: 'pintar', op: 'render', rango: 'A1:AD100' },
   'pintar-libro-corto-medio': { fx: 'pintar200', op: 'render', rango: 'A1:AD100' }
 };
+/**
+ * H-95d: barrido del pintado. `pintar@<fx>@<rango>[@<ancho>]` pinta `<rango>` del libro `<fx>` con
+ * ese ancho pedido (1.568 por defecto), sin tener que darlo de alta arriba.
+ */
+const casoDe = (name) => {
+  if (CASOS[name]) return CASOS[name];
+  const [kind, fx, rango, ancho] = name.split('@');
+  return kind === 'pintar' && fx && rango ? { fx, op: 'render', rango, ancho } : undefined;
+};
 const casos = (o.casos ?? 'foto,limite8,pintar,libro39,libro39-leer').split(',');
+// `--gc 1`: `--expose-gc` y una recogida en la frontera entre lectura y pintado (diagnóstico).
+const gc = o.gc === '1';
+// `--espera <ms>`: pausa en esa frontera, para ver si lo que deja la lectura se va solo (diagnóstico).
 
 const work = join(root, '.cache', 'sheets-peak');
 rmSync(work, { recursive: true, force: true });
@@ -71,10 +83,10 @@ const mounts = [
 ];
 
 for (const name of casos) {
-  const caso = CASOS[name];
+  const caso = casoDe(name);
   if (!caso) throw new Error(`caso desconocido «${name}»`);
   for (let rep = 1; rep <= repite; rep += 1) {
-    const volume = `hebra-sheets-peak-${name}-${rep}-${process.pid}`.toLowerCase();
+    const volume = `hebra-sheets-peak-${name.replace(/[^a-z0-9]+/gi, '-')}-${rep}-${process.pid}`.toLowerCase();
     try {
       docker(['volume', 'create', volume]);
       // Siembra sin límite de memoria: la caché de escritura no cuenta en el cgroup medido.
@@ -85,8 +97,11 @@ for (const name of casos) {
         console.log(JSON.stringify({ caso: name, rep, error: 'prep', stderr: prep.stderr.slice(0, 400) }));
         continue;
       }
-      const run = docker(['run', '--rm', `--memory=${memory}`, `--memory-swap=${memory}`, '--security-opt', 'label=disable', '--entrypoint', 'node', '-e', `RANGO=${caso.rango ?? 'A1:BH200'}`,
-        ...mounts, '-v', `${volume}:/work`, '-w', '/app', image, '--liftoff-only', '/app/dist/sheets-probe.mjs', 'run', caso.op === 'edit' ? name : caso.op, '/work']);
+      // `--user node`, como el `USER` de `deploy/Dockerfile`: así vale también la imagen base
+      // (`node:24-alpine` del mismo digest) en una máquina sin la imagen de producción de su arquitectura.
+      const run = docker(['run', '--rm', '--user', 'node', `--memory=${memory}`, `--memory-swap=${memory}`, '--security-opt', 'label=disable', '--entrypoint', 'node', '-e', `RANGO=${caso.rango ?? 'A1:BH200'}`,
+        '-e', `ANCHO=${caso.ancho ?? 1568}`, '-e', `GC=${gc ? 1 : 0}`, '-e', `ESPERA_MS=${o.espera ?? 0}`,
+        ...mounts, '-v', `${volume}:/work`, '-w', '/app', image, '--liftoff-only', ...(gc ? ['--expose-gc'] : []), '/app/dist/sheets-probe.mjs', 'run', caso.op === 'edit' ? name : caso.op, '/work']);
       const line = run.stdout.trim().split('\n').pop() ?? '';
       let row;
       try {
