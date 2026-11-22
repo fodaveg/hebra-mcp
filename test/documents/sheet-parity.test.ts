@@ -1174,8 +1174,49 @@ describe('cada SheetOp: la app al día por ediciones y el MCP con el libro enter
     }
     // El resto deja lo calculado igual: lo deshacen (`cell.unset`, `axis.restore`, `axis.show`,
     // `axis.runs`), no lo ve el motor (tamaños, estilo, inmovilizar, ocultar hoja, combinar) o no
-    // cambia ningún valor de las hojas que ya había (`sheet.add`, `sheet.move`). Ocultar filas no
-    // cambia `SUBTOTALES(109)` en ninguno de los dos lados: el motor no recibe lo oculto.
-    expect(cambian).toEqual(['cell.set', 'axis.insert', 'axis.delete', 'sheet.delete', 'sheet.rename', 'rule.put', 'rule.delete']);
+    // cambia ningún valor de las hojas que ya había (`sheet.add`, `sheet.move`). Ocultar filas
+    // (`axis.hide`, `axis.hideRun`) sí lo cambia desde H-SUBTOTAL-OCULTAS: `SUBTOTALES(109)` salta
+    // las filas ocultas en los dos lados.
+    expect(cambian).toEqual([
+      'cell.set',
+      'axis.insert',
+      'axis.delete',
+      'axis.hide',
+      'axis.hideRun',
+      'sheet.delete',
+      'sheet.rename',
+      'rule.put',
+      'rule.delete'
+    ]);
+  });
+
+  it('SUBTOTALES(109) salta las filas ocultas y SUMA no, igual en la app y en el MCP', async () => {
+    // `A1:A3` es 3, 1 y 4. `K1` es `SUMA(A1:A3)` y `N1` es `SUBTOTALES(109;A1:A3)`.
+    const totales = async (tipo: string, caso: Exclude<CasoDeOp, { excluida: string }>) => {
+      const { app, mcp } = await medir(tipo, caso);
+      const de = (lineas: string[]) => lineas.filter((l) => /^Hoja1!(K1|N1): /.test(l));
+      return { app: de(app), mcp: de(mcp) };
+    };
+    const conCaso = (tipo: SheetOpType) => {
+      const caso = CASOS_DE_OP[tipo];
+      if ('excluida' in caso) throw new Error(`${tipo} no tiene caso`);
+      return caso;
+    };
+    const esperado = (n1: number) => [`Hoja1!K1: num 8 [8]`, `Hoja1!N1: num ${n1} [${n1}]`];
+    const medidos = {
+      preparación: await totales('preparación', { lote: () => [] }),
+      // Fila 2 oculta: 3 + 4.
+      'axis.hide': await totales('axis.hide', conCaso('axis.hide')),
+      // Filas 1 y 2 ocultas: solo 4.
+      'axis.hideRun': await totales('axis.hideRun', conCaso('axis.hideRun')),
+      // Ocultar y volver a enseñar la fila 2: como al principio.
+      'axis.show': await totales('axis.show', conCaso('axis.show'))
+    };
+    expect(medidos).toEqual({
+      preparación: { app: esperado(8), mcp: esperado(8) },
+      'axis.hide': { app: esperado(7), mcp: esperado(7) },
+      'axis.hideRun': { app: esperado(4), mcp: esperado(4) },
+      'axis.show': { app: esperado(8), mcp: esperado(8) }
+    });
   });
 });
