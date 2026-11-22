@@ -19,6 +19,7 @@
  *   en una celda solo sale en campos de datos» con la ruta `$.hint`;
  * - no atar el cursor a la disposición (quitar la comprobación de `layoutTag`): cae «una fila
  *   insertada entre páginas».
+ * - dar siempre `hidden: false` en `summaryOf` (H-VENDOR-2): cae «el resumen marca hidden».
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -81,6 +82,26 @@ function content(sheets: { name: string; cols: number; rows: string[] }[]): stri
 /** Libro con el cebo en el nombre de una hoja y en una celda. */
 const baitOds = () =>
   buildOds(content([{ name: BAIT_SHEET, cols: 2, rows: [row(str(BAIT) + num(7)), row(num(1) + num(2))] }]));
+
+/**
+ * Libro con una hoja visible, una oculta por su estilo de tabla (como la guarda LibreOffice) y otra
+ * por el atributo en la propia `table:table` (algún otro escritor).
+ */
+const hiddenOds = () =>
+  buildOds(
+    content([
+      { name: 'Visible', cols: 1, rows: [row(num(1))] },
+      { name: 'Oculta', cols: 1, rows: [row(num(2))] },
+      { name: 'Suelta', cols: 1, rows: [row(num(3))] }
+    ])
+      .replace(
+        '<office:body>',
+        '<office:automatic-styles><style:style style:name="ta2" style:family="table">' +
+          '<style:table-properties table:display="false"/></style:style></office:automatic-styles><office:body>'
+      )
+      .replace('table:name="Oculta"', 'table:name="Oculta" table:style-name="ta2"')
+      .replace('table:name="Suelta"', 'table:name="Suelta" table:display="false"')
+  );
 
 /** Libro de `rows` filas de una columna con textos de `chars` caracteres. */
 const longTextOds = (rows: number, chars: number) =>
@@ -241,13 +262,35 @@ describe('hebra_read_sheet (H-78)', () => {
     expect(typeof out.layoutRevision).toBe('string');
     expect(out.range).toBeUndefined();
     expect(out.workbook.sheets).toEqual([
-      { sheetId: 's0', name: 'Datos', usedRange: 'A1:C5', formulaCount: 1, errorCount: 0, preserved: [] },
-      { sheetId: 's1', name: 'Resumen', usedRange: 'A1', formulaCount: 1, errorCount: 0, preserved: [] }
+      { sheetId: 's0', name: 'Datos', hidden: false, usedRange: 'A1:C5', formulaCount: 1, errorCount: 0, preserved: [] },
+      { sheetId: 's1', name: 'Resumen', hidden: false, usedRange: 'A1', formulaCount: 1, errorCount: 0, preserved: [] }
     ]);
     expect(out.workbook.calculated).toBe(true);
     // Ningún contenido de celda: ni el texto de C1 ni el de la combinada.
     expect(text).not.toContain('"x"');
     expect(text).not.toContain('unido');
+  });
+
+  it('el resumen marca hidden las hojas ocultas, por estilo o por atributo, y se leen igual', async () => {
+    const h = await harness();
+    const bytes = hiddenOds();
+    const hiddenOf = (out: Record<string, any>) =>
+      (out.workbook.sheets as { name: string; hidden: boolean }[]).map(({ name, hidden }) => ({ name, hidden }));
+    const expected = [
+      { name: 'Visible', hidden: false },
+      { name: 'Oculta', hidden: true },
+      { name: 'Suelta', hidden: true }
+    ];
+    // Un fichero que nunca se abrió como documento y uno con cabecera y una edición pendiente.
+    const loose = await addFile(h, h.folders.hojas, 'suelto.ods', bytes);
+    expect(hiddenOf(await read(h, { id: loose }))).toEqual(expected);
+    const opened = await addDocument(h, h.folders.hojas, 'libro.ods', bytes);
+    const before = await read(h, { id: opened });
+    const oculta = (before.workbook.sheets as { sheetId: string; name: string }[]).find((s) => s.name === 'Oculta')!;
+    await appendOps(h, opened, bytes, [{ type: 'cell.set', sheet: oculta.sheetId, row: 'b0', col: 'b1', value: 5, replaces: [] }]);
+    expect(hiddenOf(await read(h, { id: opened }))).toEqual(expected);
+    // Oculta no es privada: sus celdas se leen como las de cualquier otra hoja.
+    expect((await read(h, { id: opened, sheet: 'Oculta', range: 'A1:B1' })).range.rows).toEqual([[2, 5]]);
   });
 
   it('un rango da valores calculados y fórmulas en inglés, con la misma disposición', async () => {

@@ -34,6 +34,11 @@
  *
  * Imágenes: ningún comando de hojas coloca imágenes todavía, así que `assets` solo se valida (una
  * URL nunca pasa) y, si llega alguno, el lote es `batch_invalid`.
+ *
+ * Hojas ocultas: no se pueden crear. `addSheet` del núcleo no tiene campo para ocultarla y ninguna
+ * `SheetOp` cambia esa marca (en el modelo, `hidden` sale solo del fichero de base), así que un
+ * `hidden` en `addSheet` es `batch_invalid` por el esquema estricto. `writeNewOds` sí sabe escribir
+ * una hoja oculta: hace falta un comando del núcleo que la marque para que llegue aquí.
  */
 import { createHash } from 'node:crypto';
 import * as Y from 'yjs';

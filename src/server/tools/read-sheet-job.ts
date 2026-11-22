@@ -83,6 +83,11 @@ export interface ReadSheetJobInput {
 export interface SheetSummary {
   sheetId: string;
   name: string;
+  /**
+   * Oculta en el fichero (`table:display="false"`): sigue en el libro con sus celdas y sus
+   * fórmulas, y se lee igual, pero el editor no enseña su pestaña.
+   */
+  hidden: boolean;
   /** `A1:D20`, o `null` si la hoja está vacía. */
   usedRange: string | null;
   formulaCount: number;
@@ -282,6 +287,7 @@ function summaryOf(
     return {
       sheetId: sheet.id,
       name: sheet.name,
+      hidden: sheet.hidden === true,
       usedRange: used ? rectA1(used) : null,
       formulaCount,
       errorCount,
