@@ -71,7 +71,7 @@ runbook, sustituidos ahora por los reales.
 | Pieza | Dónde | Qué |
 |---|---|---|
 | Servicio | un directorio propio en el VPS de Lumbre (mismo servidor que `lumbre-app` y `lumbre-mcp`) | `deploy/compose.yml` y `deploy/.env` (secretos más `HEBRA_MCP_IMAGE`); la imagen sale del registro `git.dualhand.com/fodaveg/hebra-mcp`, sin `rsync` ni build en el servidor |
-| Contenedor | `hebra-mcp` | `node dist/cli.mjs serve-http`, escucha en 8787, usuario sin root |
+| Contenedor | `hebra-mcp` | `node --liftoff-only dist/cli.mjs serve-http` (la opción es la de los topes de hojas, H-95; ver el `CMD` del `Dockerfile`), escucha en 8787, usuario sin root |
 | Borde | `mcp-hebra-pro.caddy` en el `conf.d` del Caddy compartido (`/srv/edge` del VPS, el mismo borde que ya sirve Lumbre, Vega, fodaveg y las demos) | Caddy termina TLS y hace proxy, sin exponer `/healthz` |
 | Estado | volumen `hebra-mcp_data` en bind a `HEBRA_MCP_DATA_DEVICE`, en el volumen cifrado del servidor | Control OAuth y registro multiusuario en la raíz; biblioteca heredada de David en `legacy-root`; cuentas nuevas en directorios aislados con SQLite, blobs, privados, secretos, escritor, sync y espacios propios |
 

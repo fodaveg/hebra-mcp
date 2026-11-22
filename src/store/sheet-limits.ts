@@ -41,6 +41,12 @@
  *    La lectura más lenta dentro de los topes tardó 2,1 s, bajo el plazo de 10 s.
  * 3. Dos trabajos a la vez en los topes (4 y 4 MiB), con `--liftoff-only`: picos de 512, 501, 512,
  *    485 y 476 MiB y un OOM en seis corridas. No caben: la reserva tiene que dejarlos de uno en uno.
+ * 4. Con los topes ya cableados (H-95b, 22 nov 2026, la misma sonda y el mismo contenedor): un
+ *    `.ods` de 4 MiB con 3,9 MiB de `content.xml` da picos de 390,3, 391,8 y 390,4 MiB (página) y
+ *    391,7, 390,9 y 390,6 (resumen); el de 0,01 MiB, de 345 a 350. El de 4 MiB con 4 MiB de
+ *    `content.xml` de la tabla del punto 2 ya no se lee: con `styles.xml` y `settings.xml` pasa de los
+ *    4 MiB en total y da `document_too_complex` en 0,3 s, con el pico en 301 MiB. Sin
+ *    `--liftoff-only`, el de 3,9 MiB vuelve a morir por OOM (salida 137).
  *
  * No medido aquí: la edición (`hebra_edit_sheet` proyecta y exporta en el hilo principal), el
  * pintado (`hebra_render_sheet`), un servidor con otro número de núcleos y libros reales de
