@@ -21,10 +21,12 @@
  *   hilo del motor es otra entrada del empaquetado (`dist/sheet-engine-worker.mjs`,
  *   `../sheet-engine-worker.ts`): quien cree el motor pasa su URL como `workerUrl`.
  * - Lista de dibujo y su paso a SVG para el render común (H-76, H-77).
+ * - Para `hebra_render_sheet` (H-81): fuentes empaquetadas, datos de pintado de la rejilla
+ *   (`createEditorData`) y el texto de una fórmula (abajo, con su motivo).
  *
  * Fuera, a propósito: la rejilla, el controlador del editor y el resto de `sheets-ui/` (Svelte y
- * DOM), el hilo del motor para navegador (`engine.worker.ts`, `engine-client.ts`) y los dobles de
- * los tests (`contracts/doubles.ts`).
+ * DOM) salvo `editor-data.ts`, el hilo del motor para navegador (`engine.worker.ts`,
+ * `engine-client.ts`) y los dobles de los tests (`contracts/doubles.ts`).
  */
 export * from '../../vendor/hebra/src/lib/sheets/contracts/model';
 export * from '../../vendor/hebra/src/lib/sheets/contracts/ops';
@@ -54,3 +56,26 @@ export {
 } from '../../vendor/hebra/src/lib/sheets/engine/ironcalc-engine';
 export * from '../../vendor/hebra/src/lib/sheets/render/draw-list';
 export * from '../../vendor/hebra/src/lib/sheets/render/draw-to-svg';
+
+// Lo que añade `hebra_render_sheet` (H-81): el error del lector de `.ods`, las fuentes empaquetadas
+// (`loadFontSet`, B-LR11), el texto canónico de una fórmula para `showFormulas` y los datos con los
+// que la rejilla de la app pinta una hoja (`createEditorData`, H-51c): medidas, ocultas y estilo de
+// cada celda, del fichero y del `Y.Doc`. `editor-data.ts` vive en `sheets-ui/` pero no usa Svelte
+// ni el DOM (lo dice su cabecera y lo comprueba `check:bundle`); es la única pieza de esa carpeta
+// que entra, para que el PNG del MCP salga con los mismos datos que la rejilla.
+export { OdsReadError } from '../../vendor/hebra/src/lib/sheets/ods/read-workbook';
+export { readBookLocale } from '../../vendor/hebra/src/lib/sheets/ods/book-locale';
+export type { Axis } from '../../vendor/hebra/src/lib/sheets/grid/axes';
+export {
+  loadFontSet,
+  FontIntegrityError,
+  type FontSet
+} from '../../vendor/hebra/src/lib/documents/text/fonts';
+export { createFormulaLocale } from '../../vendor/hebra/src/lib/sheets/formula/locale';
+export type { FormulaScope } from '../../vendor/hebra/src/lib/sheets/formula/canon';
+export {
+  createEditorData,
+  type EditorData,
+  type EffectiveCellStyle
+} from '../../vendor/hebra/src/lib/sheets-ui/editor-data';
+export type { GridAxis } from '../../vendor/hebra/src/lib/sheets-ui/paint-grid';

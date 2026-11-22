@@ -35,7 +35,8 @@
  *    Desde H-173 carga también el núcleo de hojas (`dist/sheets/index.js`), comprueba que
  *    exporta una pieza de cada paquete de Hebra que lo forma (`SHEETS_CORE_EXPORTS`) y arranca
  *    el motor de fórmulas en su hilo empaquetado (`dist/sheet-engine-worker.mjs`), que tiene que
- *    calcular una fórmula. Las dependencias del núcleo (`@ironcalc/wasm`, `harfbuzzjs`,
+ *    calcular una fórmula. Desde H-81 pinta además, desde `dist/`, una lista de dibujo como SVG con
+ *    las fuentes de `dist/fonts/documents/` y ese SVG como PNG con `@napi-rs/canvas`. Las dependencias del núcleo (`@ironcalc/wasm`, `harfbuzzjs`,
  *    `linebreak`) las vigila R27 como las demás: pasar una a `devDependencies` da rojo aquí.
  *
  * `zod` (peer del SDK de MCP, L1) queda exento: `zod/v4/core/util.js` tiene
@@ -91,7 +92,9 @@ const SHEETS_CORE_EXPORTS = [
   'createSheetEngineProjection', // H-29
   'createNodeFormulaEngine', // H-09
   'layoutDrawList', // H-76
-  'drawToSvg' // H-77
+  'drawToSvg', // H-77
+  'createEditorData', // H-51c, para hebra_render_sheet (H-81)
+  'loadFontSet' // B-LR11, para hebra_render_sheet (H-81)
 ];
 /** Fuentes de los documentos, junto a su licencia (B-LR11): se maqueta siempre con ellas. */
 const FONTS_DIR = join(distDir, 'fonts', 'documents');
@@ -364,6 +367,38 @@ delete globalThis.navigator;
     }
   } finally {
     engine.dispose();
+  }
+  // H-81: la lista de dibujo y su SVG desde dist/, con las fuentes de dist/fonts/documents (no las
+  // del submódulo), y el SVG pintado como PNG por @napi-rs/canvas, sin DOM. El texto latino sale con
+  // sus contornos y los dos caracteres CJK, sin glifo en ninguna fuente empaquetada, como .notdef.
+  const { readFile } = require('node:fs/promises');
+  const { join } = require('node:path');
+  const fontsDir = ${JSON.stringify(FONTS_DIR)};
+  const fonts = await sheets.loadFontSet((file) => readFile(join(fontsDir, file)));
+  const ids = (n, p) => ({ length: () => n, idAt: (i) => p + i, indexOf: (id) => (id.startsWith(p) ? Number(id.slice(p.length)) : null) });
+  const axis = (n, size) => ({ count: n, visibleSize: () => size, offsetOf: (i) => i * size });
+  const sheet = {
+    id: 's0', name: 'Hoja 1', rows: ids(3, 'r'), cols: ids(2, 'c'), frozenRows: 0, frozenCols: 0, merges: [], rules: [],
+    cells: new Map([['r0:c0', 'Hebra'], ['r1:c0', 42], ['r2:c0', '漢字']])
+  };
+  const layout = await sheets.layoutDrawList({
+    sheet,
+    axes: { rows: axis(3, 24), cols: axis(2, 92) },
+    range: { from: { row: 0, col: 0 }, to: { row: 2, col: 1 } },
+    measurer: sheets.createFontTextMeasurer(fonts)
+  });
+  const drawn = await sheets.drawToSvg({ ops: layout.ops, width: layout.width, height: layout.height, fonts });
+  const glyphs = drawn.svg.split('<use ').length - 1;
+  if (glyphs !== 9 || drawn.missingGlyphs !== 2 || drawn.skipped.length !== 0) {
+    throw new Error('drawToSvg de dist/ no pintó lo esperado: ' + JSON.stringify({ glyphs, missing: drawn.missingGlyphs, skipped: drawn.skipped }));
+  }
+  const canvas = require('@napi-rs/canvas');
+  const image = await canvas.loadImage(Buffer.from(drawn.svg, 'utf8'));
+  const surface = canvas.createCanvas(layout.width, layout.height);
+  surface.getContext('2d').drawImage(image, 0, 0, layout.width, layout.height);
+  const png = await surface.encode('png');
+  if (png.readUInt32BE(0) !== 0x89504e47 || png.readUInt32BE(16) !== layout.width || png.readUInt32BE(20) !== layout.height) {
+    throw new Error('el SVG de dist/ no salió como PNG de ' + layout.width + 'x' + layout.height);
   }
 })().catch((error) => {
   process.stderr.write(String(error && error.stack ? error.stack : error));
