@@ -35,7 +35,7 @@
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { logToolError, logToolOk } from '../log/logger';
+import { logToolError, logToolOk, type ToolErrorCode } from '../log/logger';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { runListOrganizations, runListSpaces } from '../spaces/directory';
 import {
@@ -247,6 +247,50 @@ function createFileWrite(input: Record<string, unknown>): GatePolicy {
 }
 
 /**
+ * Los rechazos de un lote de hojas que solo hablan del documento que la llamada declaró (al
+ * editar) o del libro que se construye con la entrada (al crear): los campos (`issues`,
+ * `opIndex`, `target`…) son del lote y de ese documento, lo mismo que enseñaría su informe.
+ */
+const DOCUMENT_REFUSALS: ReadonlySet<string> = new Set<ToolErrorCode>([
+  'precondition_failed',
+  'generation_changed',
+  'batch_invalid',
+  'op_unsupported',
+  'document_invalid',
+  'document_too_complex',
+  'document_busy',
+  'too_large',
+  'op_invalid',
+  'file_too_large',
+  'file_unavailable',
+  'doc_head_invalid'
+]);
+
+/**
+ * Una escritura de documento (H-MCP-ERROR-LECTOR, 22 nov 2026): como `base`, pero un rechazo
+ * del lote (`DOCUMENT_REFUSALS`) sale tal cual si lo declarado se sigue viendo y la
+ * configuración es la misma, aunque la época haya cambiado. La fase 1 del lote
+ * (`runDocumentOps`) apunta el `operationId` en `hebra_mcp_operations` antes de calcular, así
+ * que la propia llamada cambia la época (`data_version` en un lector, `total_changes()` en el
+ * escritor), y lo mismo una ronda de sync durante el cálculo: con la regla de `WRITE`, todo
+ * rechazo del cálculo salía como `not_found`. El criterio es el del informe de una escritura
+ * que sí entra (`redactWhole`, solo lo declarado), y además sin cambio de configuración. Un
+ * documento que deja de verse sigue dando `not_found`; los demás errores, los de `base`.
+ */
+function documentWrite(base: GatePolicy): GatePolicy {
+  if (base.kind !== 'filter') return base;
+  return {
+    ...base,
+    staleError(error, verdict) {
+      if (DOCUMENT_REFUSALS.has(error.code) && verdict.declaredPassed && !verdict.configChanged) {
+        return { ok: false, error };
+      }
+      return base.staleError?.(error, verdict) ?? NOT_FOUND_OUTCOME();
+    }
+  };
+}
+
+/**
  * Crear o renombrar una carpeta: como `WRITE`, pero un error que la puerta no confirma (un
  * choque de nombres con una hermana que ya no se ve, o con la configuración cambiada) es
  * `folder_unavailable`, el error único de D9 para «ese nombre no se puede usar ahí»; si lo que
@@ -397,10 +441,11 @@ const GATE_POLICIES: Record<
   hebra_import_office: WRITE,
   // H-177 (D28): leer y pintar una hoja son lecturas (se repiten); crear un `.ods` es crear un
   // fichero (un nombre que la puerta no confirma, `file_name_unavailable`), y editar, una escritura.
+  // Las dos dejan salir el rechazo del lote con sus campos (`documentWrite`, H-MCP-ERROR-LECTOR).
   hebra_read_sheet: read(),
   hebra_render_sheet: read(),
-  hebra_create_sheet: (input) => createFileWrite(input),
-  hebra_edit_sheet: WRITE
+  hebra_create_sheet: (input) => documentWrite(createFileWrite(input)),
+  hebra_edit_sheet: documentWrite(WRITE)
 };
 
 /** Como `discardJdPlan`, para el plan de una simulación de `hebra_jd_move` (D19). */

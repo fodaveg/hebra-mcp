@@ -51,7 +51,9 @@
  * a un objeto (`no_match`, `ambiguous_heading`, `note_locked`, `operation_id_reused`,
  * `folder_name_taken`…), si la puerta no pasa entera (también por la configuración o la
  * época: con algo cambiado no se puede confirmar que ese objeto se siga viendo), pasa a
- * `not_found` (`folder_unavailable` en las carpetas).
+ * `not_found` (`folder_unavailable` en las carpetas). Salvo el rechazo de un lote de hojas, que
+ * habla solo del documento declarado y sale con lo declarado visible y la misma configuración
+ * aunque cambie la época (`documentWrite` de `register-tools.ts`, H-MCP-ERROR-LECTOR).
  *
  * Coste: dos lecturas de la huella de `config.json`, la época al empezar (tres sumas sobre
  * `notes`, `folders` y `files`) y una transacción de lectura con el árbol de carpetas, el
