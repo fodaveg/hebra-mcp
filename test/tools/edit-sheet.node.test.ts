@@ -116,8 +116,8 @@ beforeAll(async () => {
   });
   const sheets = createSheetDocumentFormat({ engineWorkerUrl: pathToFileURL(outfile) });
   registerDocumentFormat<SheetModel, SheetEditOp>('ods', {
-    async forDocument(source, fileId, signal) {
-      const handle = await sheets.forDocument(source, fileId, signal);
+    async forDocument(source, fileId, signal, sha256) {
+      const handle = await sheets.forDocument(source, fileId, signal, sha256);
       const between = hooks.betweenPhases;
       hooks.betweenPhases = null;
       const inner = handle.adapter;

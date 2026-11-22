@@ -495,12 +495,13 @@ export function createSheetDocumentFormat(
   const engineOf =
     options.engine ?? (() => createNodeFormulaEngine({ workerUrl: options.engineWorkerUrl ?? ENGINE_WORKER_URL }));
   return {
-    async forDocument(source: DocumentChannelSource, fileId: string, signal: AbortSignal) {
+    async forDocument(source: DocumentChannelSource, fileId: string, signal: AbortSignal, sha256: string | null) {
       let opened: OpenedSheet | DocumentError;
       try {
-        const row = await source.port.fileRead(fileId);
-        opened = row
-          ? await openSheetRead(source, { id: fileId, sha256: row.sha256.toLowerCase() }, signal, 'empty')
+        // El SHA lo da el servicio, juzgado con el filtro de ficheros del turno (D2: una herramienta
+        // no lee filas del almacén con `fileRead`); `null` si no se ve o no existe.
+        opened = sha256
+          ? await openSheetRead(source, { id: fileId, sha256: sha256.toLowerCase() }, signal, 'empty')
           : { code: 'not_found' };
       } catch (error) {
         opened = documentErrorOf(error);

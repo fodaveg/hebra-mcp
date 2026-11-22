@@ -44,7 +44,7 @@ import {
   type RunDocumentOpsOptions
 } from './document-ops';
 import { DOCUMENT_EDIT_TIMEOUT_MS } from './document-limits';
-import { guardDocumentWrite } from './document-privacy';
+import { guardDocumentRead, guardDocumentWrite } from './document-privacy';
 import { documentBytesForCopy, DocumentReadError } from './document-read';
 import type { DocumentError } from './document-types';
 import { documentTurnOf, undoDocumentOps, type DocumentUndoInput } from './document-undo';
@@ -108,7 +108,9 @@ export interface DocumentFormatPerDocument<Model = unknown, Op = unknown> {
   forDocument(
     source: DocumentChannelSource,
     fileId: string,
-    signal: AbortSignal
+    signal: AbortSignal,
+    /** SHA-256 del contenido actual, con el filtro de ficheros del turno; `null` si no se ve. */
+    sha256: string | null
   ): Promise<DocumentFormatHandle<Model, Op>>;
 }
 
@@ -295,7 +297,16 @@ async function handleFor(
     }
   }
   if (!('forDocument' in entry)) return entry;
-  return entry.forDocument(source, fileId, AbortSignal.timeout(DOCUMENT_EDIT_TIMEOUT_MS));
+  // El SHA del fichero, juzgado en un turno con el filtro de lectura: oculto, inexistente o en la
+  // papelera dan `null` (el formato responde `not_found`), y la fase 1 vuelve a juzgarlo.
+  const sha256 = await target.writeExclusive(async (store) => {
+    try {
+      return guardDocumentRead({ store, privacy: request.privacy }, fileId).sha256;
+    } catch {
+      return null;
+    }
+  });
+  return entry.forDocument(source, fileId, AbortSignal.timeout(DOCUMENT_EDIT_TIMEOUT_MS), sha256);
 }
 
 /**
