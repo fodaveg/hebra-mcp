@@ -32,6 +32,11 @@ Un fichero suelto no es un adjunto. Los adjuntos de una nota (`![[sha256:…]]`)
 
 Sacar de la papelera devuelve el fichero a su carpeta; si esa carpeta ya no existe, a la raíz.
 
+Un `.ods` (hoja de cálculo) o un `.odp` (presentación) también es un fichero suelto: se lista,
+se mueve, se renombra, se duplica y se tira con estas herramientas, pero `hebra_read_file` lo
+rechaza (`file_type_not_allowed`) y `hebra_replace_file_text` y `hebra_create_file` no lo tocan.
+Un `.ods` se lee, se crea y se edita con las herramientas de hojas ([hojas de cálculo](hojas-de-calculo.md)).
+
 ## Reemplazar el texto de un fichero
 
 Para cambiar un `.base` (YAML de Obsidian Bases), un `.md` suelto o un `.json`:

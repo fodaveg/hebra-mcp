@@ -9,6 +9,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { CAPABILITY_TOOLS } from '../src/server/capabilities';
+import { DOCUMENT_ERROR_CODES } from '../src/store/document-types';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_DIR = join(ROOT, 'skills', 'hebra');
@@ -86,6 +87,19 @@ describe('coherencia de la skill con el servidor', () => {
     expect(codes.length, 'el parser de ToolErrorCode no debe pasar vacío').toBeGreaterThanOrEqual(30);
     const undocumented = codes.filter((code) => !ALL_TEXT.includes(`\`${code}\``));
     expect(undocumented).toEqual([]);
+  });
+
+  it('cada código de DOCUMENT_ERROR_CODES (hojas y presentaciones) aparece entre acentos graves', () => {
+    // `ToolErrorCode` los trae por `DocumentErrorCode`, y `toolErrorCodes()` solo lee literales.
+    const undocumented = DOCUMENT_ERROR_CODES.filter((code) => !ALL_TEXT.includes(`\`${code}\``));
+    expect(undocumented).toEqual([]);
+  });
+
+  it('sin rayas largas, puntos centrados ni comillas latinas en la skill', () => {
+    const offenders = [...TEXTS]
+      .filter(([, text]) => /[\u2014\u2013\u00b7\u00ab\u00bb]/.test(text))
+      .map(([file]) => relative(SKILL_DIR, file));
+    expect(offenders).toEqual([]);
   });
 
   it('los recuentos de herramientas escritos a mano coinciden con CAPABILITY_TOOLS', () => {
