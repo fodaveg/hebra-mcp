@@ -19,7 +19,11 @@ import { parentPort, workerData } from 'node:worker_threads';
 type JobModule = { run(input: unknown): unknown | Promise<unknown> };
 
 /** Cargadores por tipo (`read`, `edit`): los registran sus paquetes con un `import()` literal. */
-const LOADERS: Record<string, (() => Promise<JobModule>) | undefined> = {};
+const LOADERS: Record<string, (() => Promise<JobModule>) | undefined> = {
+  // `hebra_read_sheet` (H-78). Solo sabe leer `.ods`: otro formato responde `op_unsupported`.
+  // Cuando las presentaciones lean por aquí, este cargador tendrá que elegir por `input.format`.
+  read: () => import('./server/tools/read-sheet-job')
+};
 
 /** Resultado de un trabajo; `code` es siempre uno de un conjunto cerrado de la capa de llamada. */
 export type DocumentJobReply = { ok: true; result: unknown } | { ok: false; code: string };
