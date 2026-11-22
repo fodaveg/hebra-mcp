@@ -4,10 +4,15 @@
  * otra celda: un lote que direcciona por A1 o por índice necesita una garantía de que la
  * dirección sigue apuntando a lo leído. Los elementos con id estable no la necesitan.
  *
- * La garantía es una de estas tres:
+ * La garantía es una de estas dos:
  * - `expect` en la operación (su dirección o id como clave).
  * - `expectedRevision` del lote.
- * - `expectedLayout` del lote (la `layoutRevision` leída; solo hojas).
+ *
+ * `expectedLayout` (la `layoutRevision` leída; solo hojas) es un control añadido y NO es una
+ * garantía: solo cambia con los ejes, así que no ve que otra persona escribió en el destino. Un
+ * lote con direcciones que solo trae `expectedLayout` es `batch_invalid`. Es la regla del contrato
+ * de hojas (`SheetBatch` del plan de hojas, sección 3.3, y `compileBatch` de H-30), la misma que
+ * aplica `hebra_edit_sheet`; `test/tools/edit-sheet.node.test.ts` compara las dos caso por caso.
  *
  * Sin ninguna, `batch_invalid` con la ruta de cada operación sin garantía. Los motivos son
  * fijos y nunca repiten contenido del documento.
@@ -31,7 +36,7 @@ export type AddressRuleInput<Op> = Pick<EditIn<Op>, 'expectedRevision' | 'expect
 };
 
 const REASON = 'direccion por posicion sin garantia';
-const EXPECTED = 'expect en la operacion, expectedRevision o expectedLayout';
+const EXPECTED = 'expect en la operacion o expectedRevision';
 
 function hasText(value: string | undefined): boolean {
   return typeof value === 'string' && value.length > 0;
@@ -48,8 +53,8 @@ export function assertAddressRule<Op>(
 ): void {
   const ops = input.ops;
   if (!ops) return;
-  // Una garantía del lote cubre todas las operaciones.
-  if (hasText(input.expectedRevision) || hasText(input.expectedLayout)) return;
+  // La garantía del lote cubre todas las operaciones; `expectedLayout` no lo es (ver la cabecera).
+  if (hasText(input.expectedRevision)) return;
   const issues: BatchIssue[] = [];
   let total = 0;
   ops.forEach((op, index) => {

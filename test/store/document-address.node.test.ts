@@ -1,7 +1,8 @@
 /**
- * B-N09 (R16): la regla de direcciones. Un lote con A1 o índices exige `expect`,
- * `expectedRevision` o `expectedLayout`; los ids estables no. R16 usa una hoja de juguete
- * que desplaza filas: sin garantía, A1 escribe en otra fila.
+ * B-N09 (R16): la regla de direcciones. Un lote con A1 o índices exige `expect` o
+ * `expectedRevision`, y `expectedLayout` se añade a eso sin sustituirlo (H-80b: la regla del
+ * contrato de hojas); los ids estables no. R16 usa una hoja de juguete que desplaza filas: sin
+ * garantía, A1 escribe en otra fila.
  */
 import { describe, expect, it } from 'vitest';
 import { assertAddressRule, DocumentAddressError } from '../../src/store/document-address';
@@ -37,12 +38,20 @@ describe('assertAddressRule', () => {
     ).not.toThrow();
   });
 
-  it('cada garantía basta: expect, expectedRevision o expectedLayout', () => {
+  it('cada garantía basta: expect o expectedRevision', () => {
     const ops: Op[] = [{ cell: 'A2', value: 'x', expect: { A2: '' } }];
     expect(() => assertAddressRule<Op>({ ops }, byA1)).not.toThrow();
+    expect(() => assertAddressRule<Op>({ ops, expectedLayout: 'l1' }, byA1)).not.toThrow();
     const bare: Op[] = [{ cell: 'A2', value: 'x' }];
     expect(() => assertAddressRule<Op>({ ops: bare, expectedRevision: 'r1' }, byA1)).not.toThrow();
-    expect(() => assertAddressRule<Op>({ ops: bare, expectedLayout: 'l1' }, byA1)).not.toThrow();
+  });
+
+  it('expectedLayout solo es un control añadido: sin expect ni expectedRevision, batch_invalid', () => {
+    // La regla del contrato de hojas (`SheetBatch`, `compileBatch`): `expectedLayout` no ve que
+    // otra persona escribió en el destino, solo que cambiaron los ejes.
+    const bare: Op[] = [{ cell: 'A2', value: 'x' }];
+    const err = failure(() => assertAddressRule<Op>({ ops: bare, expectedLayout: 'l1' }, byA1));
+    expect(err.error.issues.map((i) => i.path)).toEqual(['ops[0].expect']);
   });
 
   it('un expect vacío o una garantía vacía no cuentan', () => {

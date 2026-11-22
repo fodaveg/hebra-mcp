@@ -18,7 +18,8 @@
  * lote responde `op_unsupported` sin tocar nada. Los dan de alta los paquetes de integración de
  * cada editor (`P-110`, `H-177`), junto con sus herramientas. Un formato puede dar un adaptador
  * fijo o uno por documento (`forDocument`): el de hojas se crea con los bytes base de cada `.ods`
- * (`createSheetDocumentFormat`, H-80).
+ * (`createSheetDocumentFormat`, H-80), y lo que abre se suelta con su `close` al acabar la
+ * petición, haya calculado o no.
  */
 import type { DocFormat, DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import { checkpointPins } from '../../vendor/hebra/src/lib/documents/sync/checkpoint';
@@ -84,6 +85,16 @@ export interface DocumentFormatHandle<Model = unknown, Op = unknown> {
   compute(job: DocumentComputeJob, signal: AbortSignal): Promise<DocumentComputeResult>;
   /** Si una operación direcciona por A1 o índice (regla de `./document-address.ts`). */
   isAddressed?: RunDocumentOpsOptions<Op>['isAddressed'];
+  /**
+   * Un rechazo de un lote dicho con lo que el formato sabe de él: el lote de hojas viaja como una
+   * sola operación y la sesión solo puede decir `ops[0]`; el formato pone el comando que falló.
+   */
+  explainFailure?(error: DocumentError): DocumentError;
+  /**
+   * Suelta lo que abrió `forDocument`. El servicio la llama siempre al acabar la petición, también
+   * si no llegó a calcular (un deshacer, o un rechazo o un reintento de la fase 1).
+   */
+  close?(): Promise<void>;
 }
 
 /**
@@ -212,19 +223,25 @@ export async function runDocumentRequest(
   try {
     let result: DocumentOpsResult;
     const handle = entry ? await handleFor(target, request, entry) : null;
-    if (!handle) {
-      result = { ok: false, error: { code: 'op_unsupported' } };
-    } else if ('error' in handle) {
-      result = { ok: false, error: handle.error };
-    } else if (request.action === 'edit') {
-      result = await runDocumentOps(
-        { turn, compute: (job, signal) => handle.compute(job, signal), now: () => Date.now(), afterCommit },
-        request.input,
-        handle.adapter,
-        handle.isAddressed ? { isAddressed: handle.isAddressed } : {}
-      );
-    } else {
-      result = await undoDocumentOps({ turn, now: () => Date.now(), afterCommit }, request.input, handle.adapter);
+    try {
+      if (!handle) {
+        result = { ok: false, error: { code: 'op_unsupported' } };
+      } else if ('error' in handle) {
+        result = { ok: false, error: handle.error };
+      } else if (request.action === 'edit') {
+        result = await runDocumentOps(
+          { turn, compute: (job, signal) => handle.compute(job, signal), now: () => Date.now(), afterCommit },
+          request.input,
+          handle.adapter,
+          handle.isAddressed ? { isAddressed: handle.isAddressed } : {}
+        );
+        if (!result.ok && handle.explainFailure) result = { ok: false, error: handle.explainFailure(result.error) };
+      } else {
+        result = await undoDocumentOps({ turn, now: () => Date.now(), afterCommit }, request.input, handle.adapter);
+      }
+    } finally {
+      // Lo que abrió `forDocument` se suelta aquí siempre; un fallo al soltar no cambia la respuesta.
+      if (handle && !('error' in handle)) await handle.close?.().catch(() => undefined);
     }
     logDocumentEvent(resultEvent(request, result));
     return result;

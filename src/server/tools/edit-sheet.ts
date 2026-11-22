@@ -25,7 +25,9 @@
  *     y columna: si otra persona escribió en una de ellas entre la fase 2 y esta, el lote da
  *     `precondition_failed` sin escribir nada; si escribió en otra celda, entra sin copia de
  *     conflicto. Después aplica las operaciones compiladas con el adaptador real y, si el
- *     documento no lo tenía, el andamio del adaptador, todo en el mismo update.
+ *     documento no lo tenía, el andamio del adaptador, todo en el mismo update. Un rechazo dice
+ *     el comando del LLM que lo causó (`opIndex` y `target: "ops.<n>"`), no la operación de la
+ *     sesión, que siempre es la 0 (`explainFailure`).
  *
  * Decisión sobre un `.ods` sin cabecera (lo que H-78 dejó abierto). `hebra_read_sheet` lo lee con
  * un `Y.Doc` vacío y da la `revision` del estado vacío, que es siempre la misma; `layoutRevision`
@@ -43,7 +45,8 @@
  *
  * `expectedLayout` es un control añadido y no sustituye a `expect` ni a `expectedRevision`
  * (`compileBatch`): un comando por dirección sin ninguno de los dos es `batch_invalid` aunque
- * lleve `expectedLayout`.
+ * lleve `expectedLayout`. Es la misma regla de `assertAddressRule`
+ * (`../../store/document-address.ts`); un test las compara caso por caso.
  *
  * Imágenes: ningún comando de hojas coloca imágenes todavía, así que `assets` solo se valida (una
  * URL nunca pasa) y, si llega alguno, el lote es `batch_invalid`, como en `hebra_create_sheet`.
@@ -133,6 +136,8 @@ function isBatchOp(op: unknown): op is SheetBatchOp {
  * fichero no tienen versiones: siguen igual mientras nadie escriba en ellas.
  */
 interface CellGuard {
+  /** El comando del LLM que trajo el `expect` (su índice en `ops`). */
+  opIndex: number;
   sheet: string;
   rows: ReadonlySet<string> | null;
   cols: ReadonlySet<string> | null;
@@ -144,6 +149,17 @@ interface CompiledSheetBatch {
   ops: SheetOp[];
   createdIds: Record<string, string>;
   guards: CellGuard[];
+  /** El comando del LLM del que sale la operación compilada `index`, o `null` si no se sabe. */
+  commandOf(index: number): number | null;
+}
+
+/**
+ * Dónde falló el último intento del lote en el adaptador (el ensayo o la fase 3): el comando del
+ * LLM. La sesión solo ve UNA operación (`SheetBatchOp`), así que su `opIndex` siempre es 0; el
+ * formato lo cambia por este (`explainFailure`) antes de responder.
+ */
+interface BatchFailure {
+  command: number | null;
 }
 
 /** Separador de `multi-value` entre la clave de una celda y el `opId` de cada versión. */
@@ -225,20 +241,54 @@ function idsOf(axis: SheetModelSheet['rows'], from: number, to: number): Set<str
 /** Las guardas de cada `expect` del lote, leídas en el documento con que se compiló. */
 function guardsOf(commands: readonly SheetCommand[], model: SheetModel, doc: Y.Doc): CellGuard[] {
   const guards: CellGuard[] = [];
-  for (const command of commands) {
+  commands.forEach((command, opIndex) => {
     const expect = 'expect' in command ? command.expect : undefined;
-    if (!expect || !('sheet' in command)) continue;
+    if (!expect || !('sheet' in command)) return;
     // `compileBatch` ya rechazó lo que no casa (una hoja creada en el lote, un rango fuera).
     const sheet = model.sheets.find((s) => s.name === command.sheet);
-    if (!sheet) continue;
+    if (!sheet) return;
     for (const key of Object.keys(expect)) {
       const rect = rectOf(key, sheet);
       if (!rect) continue;
       const region = { sheet: sheet.id, rows: idsOf(sheet.rows, rect.r1, rect.r2), cols: idsOf(sheet.cols, rect.c1, rect.c2) };
-      guards.push({ ...region, seen: liveCells(doc, region) });
+      guards.push({ opIndex, ...region, seen: liveCells(doc, region) });
     }
-  }
+  });
   return guards;
+}
+
+/**
+ * El comando del que sale cada operación compilada, sin guardar un índice por operación (un lote
+ * puede dar 50.000): compilar un prefijo de un lote válido da las mismas operaciones, en el mismo
+ * orden, que el principio del lote entero. Se busca el prefijo más corto que ya llega a `index`,
+ * con unas pocas compilaciones y solo cuando algo falla. Se exporta para su test.
+ */
+export function commandLocator(model: SheetModel, batch: SheetBatchOp, expectedRevision: string | undefined): (index: number) => number | null {
+  const lengthOf = (count: number): number | null => {
+    const out = compileBatch(
+      model,
+      { ops: batch.commands.slice(0, count), ...(expectedRevision !== undefined ? { expectedRevision } : {}) },
+      { newId: seededIds(batch.seed) }
+    );
+    return 'error' in out ? null : out.ops.length;
+  };
+  return (index) => {
+    let low = 1;
+    let high = batch.commands.length;
+    try {
+      while (low < high) {
+        const middle = Math.floor((low + high) / 2);
+        const length = lengthOf(middle);
+        if (length === null) return null;
+        if (length > index) high = middle;
+        else low = middle + 1;
+      }
+    } catch {
+      // Nunca tapa el fallo que se está explicando: sin comando, se responde sin él.
+      return null;
+    }
+    return low - 1;
+  };
 }
 
 // --- El formato de hojas para el escritor ----------------------------------------------------------
@@ -281,12 +331,23 @@ function seededIds(seed: string): () => string {
   return () => createHash('sha256').update(`${SEED_PREFIX}\u0000${seed}\u0000${n++}`).digest('hex').slice(0, 32);
 }
 
-/** Un `DocOpError` del ensayo a su error recuperable. */
-function opFailure(error: DocOpError): DocumentError {
-  if (error.code === 'precondition_failed') return { code: 'precondition_failed', opIndex: 0, target: 'ops.0' };
+/** Un `DocOpError` del ensayo a su error recuperable, en el comando que falló si se sabe. */
+function opFailure(error: DocOpError, command: number | null): DocumentError {
+  const opIndex = command ?? 0;
+  if (error.code === 'precondition_failed') return { code: 'precondition_failed', opIndex, target: `ops.${opIndex}` };
   if (error.code === 'too_large') return { code: 'document_too_complex' };
   if (error.code === 'generation_changed') return { code: 'generation_changed' };
-  return batchInvalid(0, 'ops', error.message);
+  return batchInvalid(opIndex, command === null ? 'ops' : `ops.${opIndex}`, error.message);
+}
+
+/**
+ * Un rechazo de la fase 3 en el comando que lo causó. `runDocumentOps` responde con el índice de
+ * la operación de la sesión (`ops[0]`, el sobre del lote); las garantías del lote
+ * (`expectedRevision`, `expectedLayout`) y lo que no es de un comando se quedan como están.
+ */
+function explainBatchFailure(error: DocumentError, failure: BatchFailure): DocumentError {
+  if (error.code !== 'precondition_failed' || error.target !== 'ops[0]' || failure.command === null) return error;
+  return { code: 'precondition_failed', opIndex: failure.command, target: `ops.${failure.command}` };
 }
 
 /**
@@ -298,7 +359,8 @@ function opFailure(error: DocOpError): DocumentError {
 function batchAdapter(
   inner: SheetAdapter,
   baseBytes: Uint8Array,
-  compiled: WeakMap<object, CompiledSheetBatch>
+  compiled: WeakMap<object, CompiledSheetBatch>,
+  failure: BatchFailure
 ): DocFormatAdapter<SheetModel, SheetEditOp> & {
   captureUndo(doc: Y.Doc, ops: readonly SheetEditOp[], inverse: readonly SheetEditOp[]): unknown[];
   prepareUndo(doc: Y.Doc, steps: readonly unknown[]): SheetEditOp[];
@@ -312,14 +374,26 @@ function batchAdapter(
     applyOp(doc, op, ctx) {
       if (!isBatchOp(op)) return inner.applyOp(doc, op, ctx);
       const batch = compiled.get(op);
+      failure.command = null;
       if (!batch) throw new DocOpError('op_invalid', 'Lote sin calcular');
       // Cada `expect` otra vez, sobre el estado de ahora (la copia del ensayo).
       for (const guard of batch.guards) {
-        if (!sameCells(doc, guard)) throw new DocOpError('precondition_failed', 'Un destino cambió desde la lectura');
+        if (!sameCells(doc, guard)) {
+          failure.command = guard.opIndex;
+          throw new DocOpError('precondition_failed', 'Un destino cambió desde la lectura');
+        }
       }
       // El andamio, si nadie lo escribió todavía, en el mismo update que el lote (ver la cabecera).
       if (doc.getMap('sheetMeta').get('v') === undefined) inner.scaffold(baseBytes, doc);
-      const parts = batch.ops.map((sheetOp) => inner.applyOp(doc, sheetOp, ctx));
+      const parts: (readonly SheetOp[])[] = [];
+      batch.ops.forEach((sheetOp, index) => {
+        try {
+          parts.push(inner.applyOp(doc, sheetOp, ctx));
+        } catch (error) {
+          failure.command = batch.commandOf(index);
+          throw error;
+        }
+      });
       // En orden de deshacer: la última operación primero.
       return parts.reverse().flat();
     },
@@ -406,6 +480,10 @@ async function formulaReport(
  * petición, `forDocument` abre el documento con la lectura común y crea su adaptador; el cálculo y
  * la guarda de esa petición viven en ella. Nada de lo que lee sale antes de que la fase 1 haya
  * visto el documento: un fallo de lectura lo devuelve el cálculo.
+ *
+ * La lectura se suelta al terminar el cálculo y, en todo caso, con `close`, que el servicio llama
+ * al acabar la petición: un deshacer, o un lote que la fase 1 rechaza o repite, no llegan a
+ * calcular.
  */
 export function createSheetDocumentFormat(
   options: SheetDocumentFormatOptions = {}
@@ -432,17 +510,22 @@ export function createSheetDocumentFormat(
         return failed;
       }
       const read = opened;
+      let closing: Promise<void> | null = null;
+      const close = (): Promise<void> => (closing ??= read.close());
       const compiled = new WeakMap<object, CompiledSheetBatch>();
-      const adapter = batchAdapter(read.adapter, read.base, compiled);
+      const failure: BatchFailure = { command: null };
+      const adapter = batchAdapter(read.adapter, read.base, compiled, failure);
       const handle: DocumentFormatHandle<SheetModel, SheetEditOp> = {
         adapter,
         compute: async (job, jobSignal) => {
           try {
-            return await computeBatch(job, read, adapter, compiled, engineOf, jobSignal);
+            return await computeBatch(job, read, adapter, compiled, failure, engineOf, jobSignal);
           } finally {
-            await read.close();
+            await close();
           }
-        }
+        },
+        explainFailure: (error) => explainBatchFailure(error, failure),
+        close
       };
       return handle;
     }
@@ -455,6 +538,7 @@ async function computeBatch(
   read: OpenedSheet,
   adapter: DocFormatAdapter<SheetModel, SheetEditOp>,
   compiled: WeakMap<object, CompiledSheetBatch>,
+  failure: BatchFailure,
   engineOf: () => FormulaEngine,
   signal: AbortSignal
 ): Promise<DocumentComputeResult> {
@@ -479,7 +563,12 @@ async function computeBatch(
     }
     return { ok: false, error: batchInvalid(opIndex, out.opIndex === null ? 'ops' : `ops.${opIndex}`, out.reason) };
   }
-  compiled.set(envelope, { ops: out.ops, createdIds: out.createdIds, guards: guardsOf(envelope.commands, state.model, state.doc) });
+  compiled.set(envelope, {
+    ops: out.ops,
+    createdIds: out.createdIds,
+    guards: guardsOf(envelope.commands, state.model, state.doc),
+    commandOf: commandLocator(state.model, envelope, job.expectedRevision)
+  });
 
   // El ensayo, en una copia: lo mismo que hará la fase 3, sin escribir.
   const copy = new Y.Doc();
@@ -489,7 +578,7 @@ async function computeBatch(
       const ctxIds = seededIds(`${envelope.seed}\u0000ensayo`);
       copy.transact(() => adapter.applyOp(copy, envelope, { newId: ctxIds }), 'agent');
     } catch (error) {
-      if (error instanceof DocOpError) return { ok: false, error: opFailure(error) };
+      if (error instanceof DocOpError) return { ok: false, error: opFailure(error, failure.command) };
       throw error;
     }
     const after = await adapter.project(read.base, copy, signal);
