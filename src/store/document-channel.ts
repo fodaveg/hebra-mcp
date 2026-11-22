@@ -296,6 +296,17 @@ function documentPortOf(host: DocumentHost): DocumentPort {
   };
 }
 
+/**
+ * Los hashes que fijan en `doc_pins` los documentos distintos de `fileId`, sin cola: quien llama
+ * ya está en un turno (`otherPins` de la fuente, o `documentPinsOfOthers` del turno de escritura).
+ */
+export function otherDocumentPins(db: DatabaseSync, fileId: string): Set<string> {
+  const rows = db.prepare('SELECT DISTINCT sha256 FROM doc_pins WHERE file_id <> ?').all(fileId) as Array<{
+    sha256: string;
+  }>;
+  return new Set(rows.map((row) => row.sha256.toLowerCase()));
+}
+
 /** Crea la fuente del canal de un contexto. La llama `NodeLibraryPort.documentSource()`. */
 export function createDocumentSource(host: DocumentHost): DocumentChannelSource {
   const context = () => {
@@ -309,13 +320,7 @@ export function createDocumentSource(host: DocumentHost): DocumentChannelSource 
     sessions: new DocumentSessions(),
     externalMarks: () => host.read(() => syncDocExternalMarks(context())),
     clearExternalMark: (fileId) => host.write(() => syncDocClearExternal(context(), fileId)),
-    otherPins: (fileId) =>
-      host.read(() => {
-        const rows = host.db
-          .prepare('SELECT DISTINCT sha256 FROM doc_pins WHERE file_id <> ?')
-          .all(fileId) as Array<{ sha256: string }>;
-        return new Set(rows.map((row) => row.sha256.toLowerCase()));
-      }),
+    otherPins: (fileId) => host.read(() => otherDocumentPins(host.db, fileId)),
     cleanup: host.cleanup ?? null,
     wiring: null
   };

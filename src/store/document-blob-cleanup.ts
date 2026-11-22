@@ -22,10 +22,10 @@
  * siguiente. Como el diario se escribe antes de borrar, un corte entre el acuse y el borrado no
  * pierde candidatos; borrar un fichero que ya no está no es un error.
  *
- * Sin cablear (queda para quien monte la herramienta de edición, B-I01): llamar a
- * `checkpointThenClean` en lugar de `checkpointAfterBatch`, con `otherPins` real (la tabla
- * `doc_pins` de todos los documentos) y el `FsBlobStore` del contexto. No hace falta tocar
- * `node-port.ts`.
+ * Cableado en `./document-service.ts` (tras cada lote o deshacer que escribió), con el
+ * `FsBlobStore` del contexto. La cabecera y los pines de los demás documentos (`doc_pins`) se
+ * leen en el turno de la limpieza, por su conexión (`documentHead` y `documentPinsOfOthers` de
+ * `node-port.ts`), nunca por la cola (H-BLOQUEO-SYNC).
  */
 import { createHash } from 'node:crypto';
 import { mkdir, open, readFile, rename } from 'node:fs/promises';
@@ -190,10 +190,13 @@ function liveReferences(turn: WriteTurn, shas: readonly string[]): Set<string> {
   return used;
 }
 
-/** Lo que `checkpointThenClean` pide: lo del punto de control más lo de la limpieza. */
+/**
+ * Lo que `checkpointThenClean` pide: lo del punto de control más lo de la limpieza. La cabecera y
+ * los pines de los demás documentos no se piden: se leen en el turno de la limpieza.
+ */
 export interface CheckpointThenCleanDeps {
   checkpoint: CheckpointAfterBatchDeps;
-  cleanup: Omit<CleanupDeps, 'docRead' | 'isHeld'>;
+  cleanup: Omit<CleanupDeps, 'docRead' | 'isHeld' | 'otherPins'>;
 }
 
 /**
@@ -201,6 +204,12 @@ export interface CheckpointThenCleanDeps {
  * punto de control anota los hashes que fija el `/h`, para que la primera sustitución también se
  * detecte. La limpieza corre también con `not-due` o `failed`: así se reintenta lo que quedó a
  * medias. No lanza nunca.
+ *
+ * Dentro del turno, la cabecera y los pines de los demás documentos se leen por la conexión del
+ * propio turno (`documentHead` y `documentPinsOfOthers` del almacén), nunca por
+ * `source.port`/`source.otherPins`: esos entran en la cola del puerto, que este turno ya ocupa, y
+ * la pasada se esperaría a sí misma (la edición de hojas no volvía con un escritor vinculado al
+ * sync). Leerlos antes del turno tampoco vale: un pin podría entrar entre la lectura y el borrado.
  */
 export async function checkpointThenClean(
   deps: CheckpointThenCleanDeps,
@@ -208,16 +217,19 @@ export async function checkpointThenClean(
 ): Promise<{ outcome: CheckpointOutcome; cleanup: CleanupResult }> {
   const wiring = deps.checkpoint.source.wiring;
   const none: CleanupResult = { removed: 0, kept: 0 };
-  const read = (id: string) => deps.checkpoint.source.port.docRead(id);
-  const cleanupDeps: CleanupDeps | null = wiring
-    ? { ...deps.cleanup, docRead: read, isHeld: (id, sha) => wiring.retention.isHeld(id, sha) }
-    : null;
-  if (cleanupDeps) await seedPins(cleanupDeps, fileId);
+  const isHeld = wiring ? (id: string, sha: string) => wiring.retention.isHeld(id, sha) : null;
+  // Fuera de todo turno: por la cola, como cualquier lectura.
+  if (isHeld) await seedPins(deps.cleanup.journal, (id) => deps.checkpoint.source.port.docRead(id), fileId);
   const outcome = await checkpointAfterBatch(deps.checkpoint, fileId);
-  if (!cleanupDeps) return { outcome, cleanup: none };
+  if (!isHeld) return { outcome, cleanup: none };
   try {
     const cleanup = await deps.checkpoint.writeExclusive((store) =>
-      removeSupersededBlobs({ store, privacy: deps.checkpoint.privacy }, fileId, cleanupDeps)
+      removeSupersededBlobs({ store, privacy: deps.checkpoint.privacy }, fileId, {
+        ...deps.cleanup,
+        isHeld,
+        docRead: async (id) => ({ head: await store.documentHead(id) }),
+        otherPins: (id) => store.documentPinsOfOthers(id)
+      })
     );
     return { outcome, cleanup };
   } catch {
@@ -226,12 +238,16 @@ export async function checkpointThenClean(
 }
 
 /** Anota los hashes fijados si el diario no sabe aún de este documento. No lanza. */
-async function seedPins(deps: CleanupDeps, fileId: string): Promise<void> {
+async function seedPins(
+  journal: SupersededJournal,
+  docRead: CleanupDeps['docRead'],
+  fileId: string
+): Promise<void> {
   try {
-    const state = await deps.journal.load(fileId);
+    const state = await journal.load(fileId);
     if (state.pins.length > 0) return;
-    const { head } = await deps.docRead(fileId);
-    if (head) await deps.journal.save(fileId, { pins: cleanShas(defaultDocPins(head)), pending: state.pending });
+    const { head } = await docRead(fileId);
+    if (head) await journal.save(fileId, { pins: cleanShas(defaultDocPins(head)), pending: state.pending });
   } catch {
     // Sin diario no hay limpieza de esa sustitución; nada más se rompe.
   }

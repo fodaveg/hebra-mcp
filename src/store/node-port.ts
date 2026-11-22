@@ -130,7 +130,12 @@ import {
   type NoteStateRow
 } from './state-reads';
 import { createSyncStorePort, type SyncStorePort } from './sync-port';
-import { attachDocumentSource, createDocumentSource, type DocumentChannelSource } from './document-channel';
+import {
+  attachDocumentSource,
+  createDocumentSource,
+  otherDocumentPins,
+  type DocumentChannelSource
+} from './document-channel';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -1069,6 +1074,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
             adapter,
             signal
           ),
+        // B-N21: lo que lee la limpieza de blobs, en la conexión de ESTE turno. Por la cola
+        // (`documentSource().port`) se esperaría a sí misma; fuera del turno, un pin podría
+        // entrar entre la lectura y el borrado.
+        documentHead: async (fileId) => (await this.engine.docRead(fileId)).head,
+        documentPinsOfOthers: (fileId) => otherDocumentPins(this.db, fileId),
         // Con getters: la base de cada registro se abre cuando alguien lo toca, no en cada turno.
         get replacePlans() { return replacePlans(); },
         // En un escritor siempre está; `writeExclusive` ya rechaza en un lector.

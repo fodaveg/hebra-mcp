@@ -8,7 +8,7 @@
  * - Antes de una edición que escribe sobre un documento sin cabecera (nunca abierto en el
  *   editor), su cabecera, como al crearlo (`handleFor`, H-80).
  * - Tras un lote o un deshacer que escribieron: `checkpointThenClean`, con el exportador
- *   registrado, el diario en disco y `otherPins` leído de `doc_pins`. Nunca lanza: lo aplicado
+ *   registrado, el diario en disco y los pines de `doc_pins` leídos en su turno. Nunca lanza: lo aplicado
  *   no se rompe por un punto de control que falle. Después, la ronda de sync.
  * - `prepareDocumentCopy`: antes de duplicar un documento con cabecera, su punto de control al
  *   día (D17 y D28, protección 12). Sin él, la copia saldría con la última versión guardada.
@@ -168,11 +168,8 @@ async function checkpointAfterWrite(
     ({ outcome, cleanup } = await checkpointThenClean(
       {
         checkpoint,
-        cleanup: {
-          blobs: source.cleanup.blobs,
-          journal: new FsSupersededJournal(source.cleanup.root),
-          otherPins: (id) => source.otherPins(id)
-        }
+        // Los pines de los demás documentos los lee la limpieza en su turno, no por la cola.
+        cleanup: { blobs: source.cleanup.blobs, journal: new FsSupersededJournal(source.cleanup.root) }
       },
       fileId
     ));

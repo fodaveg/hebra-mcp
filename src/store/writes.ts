@@ -94,7 +94,7 @@ import { FILE_TEXT_REPLACE_MAX_BYTES } from './file-content';
 import type { FilePreviousStore } from './file-previous';
 import type { DocumentUndoStore } from './document-undo';
 import type { DocSessionLike } from './document-types';
-import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
+import type { DocFormatAdapter, DocHeadRecord } from '../../vendor/hebra/src/lib/documents/contract';
 import type { FolderNoteTitle } from './visible-sql';
 import type {
   BlobNoteRef,
@@ -235,6 +235,12 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
     adapter: DocFormatAdapter<Model, Op>,
     signal: AbortSignal
   ): Promise<DocSessionLike<Model, Op>>;
+  /** La cabecera `/h` de un documento leída en la conexión de ESTE turno, sin entrar en la
+   *  cola (B-N21, `./document-blob-cleanup.ts`): la limpieza lee y borra en el mismo turno. */
+  documentHead(fileId: string): Promise<DocHeadRecord | null>;
+  /** Los hashes que fijan en `doc_pins` los DEMÁS documentos de este contexto, leídos en la
+   *  conexión de este turno (B-N21): un pin que entre después espera a que el turno acabe. */
+  documentPinsOfOthers(fileId: string): ReadonlySet<string>;
   /** Planes de `hebra_replace_in_notes` (D14, `./replace-plans.ts`): solo los usa
    *  `./replace-batch.ts`. */
   replacePlans: ReplacePlanStore;
