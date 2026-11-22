@@ -144,7 +144,7 @@ const axisCommand = <T extends 'insertAxis' | 'deleteAxis' | 'hideAxis' | 'showA
     expect: expectSchema.optional()
   });
 
-const sheetCommand = <T extends 'addSheet' | 'deleteSheet' | 'renameSheet'>(type: T) =>
+const sheetCommand = <T extends 'deleteSheet' | 'renameSheet'>(type: T) =>
   z.strictObject({
     type: z.literal(type),
     sheet: sheetRefSchema,
@@ -204,7 +204,20 @@ export const SHEET_COMMAND_SCHEMAS = {
     unit: z.enum(['px', 'pt']).optional(),
     expect: expectSchema.optional()
   }),
-  addSheet: sheetCommand('addSheet'),
+  addSheet: z.strictObject({
+    type: z.literal('addSheet'),
+    sheet: sheetRefSchema,
+    name: z.string().min(1).max(SHEET_REF_MAX).optional(),
+    as: aliasSchema.optional(),
+    /** `true` crea la hoja ya oculta (H-OCULTAR-HOJA). */
+    hidden: z.boolean().optional()
+  }),
+  /** Oculta o muestra una hoja; nunca la última visible (lo decide `compileBatch`). */
+  setSheetHidden: z.strictObject({
+    type: z.literal('setSheetHidden'),
+    sheet: sheetRefSchema,
+    hidden: z.boolean()
+  }),
   deleteSheet: sheetCommand('deleteSheet'),
   renameSheet: sheetCommand('renameSheet'),
   moveSheet: z.strictObject({
@@ -238,6 +251,7 @@ export const sheetCommandSchema = z.discriminatedUnion('type', [
   SHEET_COMMAND_SCHEMAS.showAxis,
   SHEET_COMMAND_SCHEMAS.setAxisSize,
   SHEET_COMMAND_SCHEMAS.addSheet,
+  SHEET_COMMAND_SCHEMAS.setSheetHidden,
   SHEET_COMMAND_SCHEMAS.deleteSheet,
   SHEET_COMMAND_SCHEMAS.renameSheet,
   SHEET_COMMAND_SCHEMAS.moveSheet,
@@ -275,6 +289,7 @@ export const SHEET_OP_COVERAGE = {
   'sheet.delete': { command: 'deleteSheet' },
   'sheet.rename': { command: 'renameSheet' },
   'sheet.move': { command: 'moveSheet' },
+  'sheet.hide': { command: 'setSheetHidden' },
   'sheet.freeze': { command: 'freeze' },
   'range.merge': { command: 'merge' },
   'range.unmerge': { command: 'unmerge' },
@@ -473,7 +488,7 @@ export const SHEET_OPS_DESCRIPTION =
   '`setFormat` {sheet, range:"A1:B3", format:{bold,italic,underline,strike,wrap:"true"|"false", fill,color:"#rrggbb", halign, valign, numberFormatCode, fontFamily, fontSize, "border.top"…, link}}; ' +
   '`insertAxis`, `deleteAxis`, `hideAxis`, `showAxis` {sheet, axis:"row"|"col", at (desde 1), count}; ' +
   '`setAxisSize` {sheet, axis, at, count, size (px, o pt con unit:"pt"; null quita la medida), unit?}; ' +
-  '`addSheet` {sheet:nombre, as?}, `deleteSheet` {sheet}, `renameSheet` {sheet, name}, `moveSheet` {sheet, to (desde 0)}, `freeze` {sheet, rows, cols}; ' +
+  '`addSheet` {sheet:nombre, as?, hidden?:true crea la hoja oculta}, `setSheetHidden` {sheet, hidden:true|false} (nunca la última hoja visible), `deleteSheet` {sheet}, `renameSheet` {sheet, name}, `moveSheet` {sheet, to (desde 0)}, `freeze` {sheet, rows, cols}; ' +
   '`merge`, `unmerge` {sheet, range}; `putRule`, `deleteRule` {kind:"name"|"filter"|"validation"|"conditional"|"comment", id?, body?, as?}. ' +
   'Una hoja creada en el lote se cita como "$alias". Ninguna fórmula puede usar WEBSERVICE, IMAGE, RTD ni DDE.';
 

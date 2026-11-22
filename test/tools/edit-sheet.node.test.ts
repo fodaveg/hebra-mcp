@@ -444,6 +444,38 @@ describe('dryRun', () => {
   });
 });
 
+describe('hojas ocultas (H-OCULTAR-HOJA)', () => {
+  const sheetsOf = async (h: { port: NodeLibraryPort; fileId: string; bytes: Uint8Array }) => {
+    const opened = await openSheetRead(h.port.documentSource(), { id: h.fileId, sha256: sha(h.bytes) }, live, 'empty');
+    try {
+      return opened.read.model.sheets.map((sheet) => [sheet.name, sheet.hidden === true]);
+    } finally {
+      await opened.close();
+    }
+  };
+
+  it('oculta y muestra una hoja; hebra_read_sheet la ve hidden y el deshacer la devuelve', async () => {
+    const h = await world();
+    expect(await sheetsOf(h)).toEqual([['Datos', false], ['Resumen', false]]);
+    await h.edit({ operationId: 'op-1', ops: [{ type: 'setSheetHidden', sheet: 'Resumen', hidden: true }] });
+    expect(await sheetsOf(h)).toEqual([['Datos', false], ['Resumen', true]]);
+    await h.edit({ operationId: 'op-2', ops: [{ type: 'setSheetHidden', sheet: 'Resumen', hidden: false }] });
+    expect(await sheetsOf(h)).toEqual([['Datos', false], ['Resumen', false]]);
+    await h.edit({ operationId: 'op-3', ops: [{ type: 'setSheetHidden', sheet: 'Resumen', hidden: true }] });
+    await h.edit({ operationId: 'op-u', undoOperationId: 'op-3' });
+    expect(await sheetsOf(h)).toEqual([['Datos', false], ['Resumen', false]]);
+  });
+
+  it('ocultar la última hoja visible da batch_invalid sin escribir', async () => {
+    const h = await world();
+    await h.edit({ operationId: 'op-1', ops: [{ type: 'setSheetHidden', sheet: 'Resumen', hidden: true }] });
+    const before = await stored(h);
+    await expectCode(h.edit({ operationId: 'op-2', ops: [{ type: 'setSheetHidden', sheet: 'Datos', hidden: true }] }), 'batch_invalid');
+    expect(await stored(h)).toEqual(before);
+    expect(await sheetsOf(h)).toEqual([['Datos', false], ['Resumen', true]]);
+  });
+});
+
 describe('deshacer', () => {
   it('deshace el lote exacto, una sola vez, y el reintento devuelve lo mismo', async () => {
     const h = await world();

@@ -319,21 +319,19 @@ describe('hebra_create_sheet (H-79)', () => {
     await expectCode(runCreateSheet(ctx, { name: 'X.ods', operationId: '' }, writer), 'invalid_input');
   });
 
-  it('hojas ocultas: addSheet del núcleo no las admite, así que `hidden` es batch_invalid y no escribe', async () => {
+  it('hojas ocultas: addSheet con `hidden` crea la hoja oculta y sin él sale visible', async () => {
     const { port, publica } = await world();
-    const before = await snapshot(port);
     const writer = writerOf(port);
-    const error = await expectCode(
-      runCreateSheet(
-        await contextOf(port),
-        { name: 'Oculta.ods', folderId: publica, operationId: 'op-1', ops: [{ type: 'addSheet', sheet: 'Notas', hidden: true }] },
-        writer
-      ),
-      'batch_invalid'
+    const hidden = await runCreateSheet(
+      await contextOf(port),
+      { name: 'Oculta.ods', folderId: publica, operationId: 'op-1', ops: [{ type: 'addSheet', sheet: 'Notas', hidden: true }] },
+      writer
     );
-    expect(error.extra?.issues).toEqual([expect.objectContaining({ path: 'ops.0', reason: 'campo no admitido' })]);
-    expect(writer.calls).toBe(0);
-    expect(await snapshot(port)).toBe(before);
+    const base = await prepareSheetBase(await bytesOf(port, hidden.id));
+    expect(base.model.sheets.map((sheet) => [sheet.name, sheet.hidden === true])).toEqual([
+      [DEFAULT_SHEET_NAME, false],
+      ['Notas', true]
+    ]);
     // Sin el campo, la hoja nueva sale visible, como la de partida.
     const out = await runCreateSheet(
       await contextOf(port),
@@ -345,6 +343,21 @@ describe('hebra_create_sheet (H-79)', () => {
       [DEFAULT_SHEET_NAME, false],
       ['Notas', false]
     ]);
+  });
+
+  it('ocultar la única hoja visible al crear es batch_invalid y no escribe', async () => {
+    const { port, publica } = await world();
+    const before = await snapshot(port);
+    const writer = writerOf(port);
+    await expectCode(
+      runCreateSheet(
+        await contextOf(port),
+        { name: 'Sin.ods', folderId: publica, operationId: 'op-1', ops: [{ type: 'setSheetHidden', sheet: DEFAULT_SHEET_NAME, hidden: true }] },
+        writer
+      ),
+      'batch_invalid'
+    );
+    expect(await snapshot(port)).toBe(before);
   });
 
   it('lo que depende del libro lo decide compileBatch: una hoja que no existe o un alias desconocido', async () => {

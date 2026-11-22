@@ -32,7 +32,8 @@ const EXAMPLES: { [T in SheetCommand['type']]: SheetCommand & { type: T } } = {
   hideAxis: { type: 'hideAxis', sheet: 'Ventas', axis: 'col', at: 4, count: 2 },
   showAxis: { type: 'showAxis', sheet: 'Ventas', axis: 'row', at: 1, count: 1 },
   setAxisSize: { type: 'setAxisSize', sheet: 'Ventas', axis: 'col', at: 2, count: 3, size: 120, expect: { 'B:D': null } },
-  addSheet: { type: 'addSheet', sheet: 'Resumen', as: 'resumen' },
+  addSheet: { type: 'addSheet', sheet: 'Resumen', as: 'resumen', hidden: true },
+  setSheetHidden: { type: 'setSheetHidden', sheet: 'Resumen', hidden: false },
   deleteSheet: { type: 'deleteSheet', sheet: 'Viejo' },
   renameSheet: { type: 'renameSheet', sheet: '$resumen', name: 'Total' },
   moveSheet: { type: 'moveSheet', sheet: 'Total', to: 0 },
@@ -99,7 +100,11 @@ describe('forma de cada comando', () => {
     ['medida sin size', { type: 'setAxisSize', sheet: 'A', axis: 'row', at: 1, count: 1 }, 'ops.0.size'],
     ['unidad que no es px ni pt', { type: 'setAxisSize', sheet: 'A', axis: 'col', at: 1, count: 1, size: 2, unit: 'cm' }, 'ops.0.unit'],
     ['tipo de regla desconocido', { type: 'putRule', kind: 'macro', body: 'x' }, 'ops.0.kind'],
-    ['alias con espacios', { type: 'addSheet', sheet: 'A', as: 'mi hoja' }, 'ops.0.as']
+    ['alias con espacios', { type: 'addSheet', sheet: 'A', as: 'mi hoja' }, 'ops.0.as'],
+    ['hidden de addSheet que no es booleano', { type: 'addSheet', sheet: 'A', hidden: 'true' }, 'ops.0.hidden'],
+    ['setSheetHidden sin hidden', { type: 'setSheetHidden', sheet: 'A' }, 'ops.0.hidden'],
+    ['hidden de setSheetHidden que no es booleano', { type: 'setSheetHidden', sheet: 'A', hidden: 1 }, 'ops.0.hidden'],
+    ['setSheetHidden con un campo de más', { type: 'setSheetHidden', sheet: 'A', hidden: true, name: 'B' }, 'ops.0']
   ];
   it.each(bad)('%s es batch_invalid con la ruta del campo y sin el valor', (_label, op, path) => {
     const parsed = parseSheetCommands([op]);
