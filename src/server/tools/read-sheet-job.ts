@@ -20,6 +20,14 @@
  *    hilo, con la región y la zona del libro. Si el libro no tiene región admitida o el motor falla,
  *    esas celdas van a `null` con `calculated: false`: nunca un valor inventado.
  *
+ * Matrices que se derraman (H-SPILL): una fórmula como `=SEQUENCE(3)` en N1 rellena N2 y N3, que
+ * en el modelo no tienen nada. Sus valores solo los sabe el motor, como en la rejilla de la app
+ * (que pinta lo que da `controller.read`). Una celda sin contenido propio con valor en el motor es
+ * una celda derramada: sale con su valor, la página la marca en `spilled` y cuenta en el rango
+ * usado y en los errores del resumen. El contrato del motor no dice de qué ancla viene cada celda
+ * (eso lo sabe IronCalc por dentro, `getCellArrayStructure`), así que la marca no nombra la fórmula
+ * de origen: deducirla de los valores sería adivinar cuando dos matrices se tocan.
+ *
  * Todo lo que sale de una celda (valor, fórmula, comentario, nombre de hoja) es un dato del
  * documento y va solo en campos de datos. Un error sale como código cerrado (`DocumentError`), sin
  * texto del documento.
@@ -115,6 +123,11 @@ export interface PageRow {
   formulas?: Record<string, string>;
   comments?: Record<string, string>;
   formats?: { range: string; styleId: string }[];
+  /**
+   * Tramos de columnas (base 0, extremos incluidos) de la fila que rellena una matriz que se
+   * derrama: sin contenido propio, con el valor que calcula el motor. Solo con `values` y si hay.
+   */
+  spilled?: { from: number; to: number }[];
 }
 
 export interface SheetPage {
@@ -131,7 +144,10 @@ export interface SheetPage {
   rows: PageRow[];
   /** Propiedades de cada `styleId` usado en `formats`. */
   styles?: Record<string, Record<string, unknown>>;
-  /** `false` si alguna fórmula de la página no se pudo calcular (su valor va a `null`). */
+  /**
+   * `false` si el motor no pudo calcular lo que la página necesita: el valor de sus fórmulas y el
+   * de lo que derrama una matriz van a `null`.
+   */
   calculated: boolean;
 }
 
@@ -215,6 +231,39 @@ function usedRect(sheet: SheetModelSheet): Rect | null {
   return rect;
 }
 
+/** El menor rectángulo que contiene los dos (cualquiera puede faltar). */
+function unionRect(a: Rect | null, b: Rect | null): Rect | null {
+  if (!a || !b) return a ?? b;
+  return { r1: Math.min(a.r1, b.r1), c1: Math.min(a.c1, b.c1), r2: Math.max(a.r2, b.r2), c2: Math.max(a.c2, b.c2) };
+}
+
+/** La hoja entera para el motor: `read` recorre solo las celdas con valor, no el rango. */
+const WHOLE_SHEET: GridRange = { from: { row: 0, col: 0 }, to: { row: MAX_ROWS - 1, col: MAX_COLS - 1 } };
+
+/** Posiciones (`fila:columna`, base 0) con contenido propio en el modelo. */
+function ownPositions(sheet: SheetModelSheet): Set<string> {
+  const out = new Set<string>();
+  for (const [key, value] of sheet.cells) {
+    if (isEmpty(value)) continue;
+    const at = positionOf(sheet, key);
+    if (at) out.add(`${at.row}:${at.col}`);
+  }
+  return out;
+}
+
+/**
+ * ¿Hay alguna fórmula que pueda derramar hasta (`row`, `col`)? Una matriz se derrama hacia abajo
+ * y a la derecha de su ancla, así que solo cuentan las de arriba a la izquierda.
+ */
+function formulaUpLeftOf(sheet: SheetModelSheet, row: number, col: number): boolean {
+  for (const [key, value] of sheet.cells) {
+    if (!isFormula(value)) continue;
+    const at = positionOf(sheet, key);
+    if (at && at.row <= row && at.col <= col) return true;
+  }
+  return false;
+}
+
 /** Un comentario del panel (H-50): JSON con `row`, `col` y `text`. Otro cuerpo no es un comentario. */
 function commentOf(body: string): { row: string; col: string; text: string } | null {
   try {
@@ -255,10 +304,18 @@ async function loadEngine(
   }
 }
 
+/** Lo que el resumen de una hoja con fórmulas necesita del motor. */
+interface EngineSheetFacts {
+  /** Errores calculados: en celdas con fórmula y en celdas derramadas. */
+  errors: number;
+  /** Rectángulo de las celdas derramadas, o `null` si no hay. */
+  spilled: Rect | null;
+}
+
 function summaryOf(
   model: SheetModel,
   findings: readonly { cls: string; sheet?: string }[],
-  engineErrors: ReadonlyMap<string, number> | null
+  engineFacts: ReadonlyMap<string, EngineSheetFacts> | null
 ): WorkbookSummary {
   const names = new Set<string>();
   let calculated = true;
@@ -274,12 +331,17 @@ function summaryOf(
       const name = nameOf(rule.body);
       if (name) names.add(name);
     }
+    let spilled: Rect | null = null;
     if (formulaCount > 0) {
-      const counted = engineErrors?.get(sheet.id);
-      if (counted === undefined) calculated = false;
-      else errorCount += counted;
+      const facts = engineFacts?.get(sheet.id);
+      if (facts === undefined) calculated = false;
+      else {
+        errorCount += facts.errors;
+        spilled = facts.spilled;
+      }
     }
-    const used = usedRect(sheet);
+    // Lo que derrama una matriz también es parte del rango usado: la rejilla lo enseña.
+    const used = unionRect(usedRect(sheet), spilled);
     const preserved = new Set<string>();
     for (const finding of findings) {
       if (finding.sheet === undefined || finding.sheet === sheet.name) preserved.add(finding.cls);
@@ -297,13 +359,37 @@ function summaryOf(
   return { sheets, namedRanges: [...names].sort(), calculated };
 }
 
-/** Errores calculados de las fórmulas de cada hoja, o `null` sin motor. */
-async function formulaErrors(
+/**
+ * Celdas derramadas de una hoja: las que el motor rellena sin que el modelo tenga nada en ellas.
+ * `own` son las posiciones con contenido propio (`ownPositions`).
+ */
+async function spilledCells(
+  engine: FormulaEngineWithValues,
+  index: number,
+  own: ReadonlySet<string>
+): Promise<{ row: number; col: number }[]> {
+  const out: { row: number; col: number }[] = [];
+  for (const cell of await engine.read(index, WHOLE_SHEET)) {
+    if (cell.kind === 'empty' || own.has(`${cell.row}:${cell.col}`)) continue;
+    out.push({ row: cell.row, col: cell.col });
+  }
+  return out;
+}
+
+/** Rectángulo de unas posiciones, o `null` si no hay ninguna. */
+function rectOf(cells: readonly { row: number; col: number }[]): Rect | null {
+  let rect: Rect | null = null;
+  for (const { row, col } of cells) rect = unionRect(rect, { r1: row, c1: col, r2: row, c2: col });
+  return rect;
+}
+
+/** Errores calculados y celdas derramadas de cada hoja con fórmulas, o `null` sin motor. */
+async function engineSheetFacts(
   model: SheetModel,
   engine: FormulaEngineWithValues | null
-): Promise<Map<string, number> | null> {
+): Promise<Map<string, EngineSheetFacts> | null> {
   if (!engine) return null;
-  const out = new Map<string, number>();
+  const out = new Map<string, EngineSheetFacts>();
   try {
     for (const [index, sheet] of model.sheets.entries()) {
       const formulas = new Set<string>();
@@ -313,10 +399,18 @@ async function formulaErrors(
         if (at && at.row < MAX_ROWS && at.col < MAX_COLS) formulas.add(`${at.row}:${at.col}`);
       }
       if (formulas.size === 0) continue;
-      const used = usedRect(sheet)!;
-      const range: GridRange = { from: { row: used.r1, col: used.c1 }, to: { row: used.r2, col: used.c2 } };
-      const cells = await engine.read(index, range);
-      out.set(sheet.id, cells.filter((c) => c.kind === 'error' && formulas.has(`${c.row}:${c.col}`)).length);
+      const own = ownPositions(sheet);
+      const cells = await engine.read(index, WHOLE_SHEET);
+      let errors = 0;
+      const spilled: { row: number; col: number }[] = [];
+      for (const cell of cells) {
+        const at = `${cell.row}:${cell.col}`;
+        if (cell.kind === 'empty') continue;
+        const isSpilled = !own.has(at);
+        if (isSpilled) spilled.push(cell);
+        if (cell.kind === 'error' && (isSpilled || formulas.has(at))) errors += 1;
+      }
+      out.set(sheet.id, { errors, spilled: rectOf(spilled) });
     }
   } catch {
     return null;
@@ -368,7 +462,7 @@ async function pageOf(
   sheet: SheetModelSheet,
   rect: Rect,
   request: ReadSheetJobRequest,
-  options: ReadSheetJobOptions
+  engineOf: () => Promise<FormulaEngineWithValues | null>
 ): Promise<SheetPage> {
   const width = rect.c2 - rect.c1 + 1;
   const totalRows = rect.r2 - rect.r1 + 1;
@@ -387,12 +481,12 @@ async function pageOf(
     grid.set(`${at.row}:${at.col}`, { value, rowId: key.slice(0, colon), colId: key.slice(colon + 1) });
   }
 
-  // Valores de las fórmulas: solo si se piden y hay alguna en la página.
+  // Valores calculados: solo si se piden y hay alguna fórmula que llegue a la página, en ella o
+  // arriba a la izquierda (una matriz que se derrama desde fuera también la rellena).
   let calculated = true;
   let computed: Map<string, ReadCellValue> | null = null;
-  const hasFormulas = [...grid.values()].some((cell) => isFormula(cell.value));
-  if (include.has('values') && hasFormulas) {
-    const engine = await loadEngine(model, base.engineSettings, options);
+  if (include.has('values') && formulaUpLeftOf(sheet, last, rect.c2)) {
+    const engine = await engineOf();
     if (engine) {
       try {
         const range: GridRange = {
@@ -406,8 +500,6 @@ async function pageOf(
         }
       } catch {
         computed = null;
-      } finally {
-        engine.dispose();
       }
     }
     if (!computed) calculated = false;
@@ -484,6 +576,7 @@ async function pageOf(
     const rowFormulas: Record<string, string> = {};
     const rowComments: Record<string, string> = {};
     const rowFormats: { range: string; styleId: string }[] = [];
+    const rowSpilled: { from: number; to: number }[] = [];
     // Tramo de celdas seguidas de la fila con el mismo estilo.
     const open: { run: { from: number; to: number; styleId: string } | null } = { run: null };
     const closeRun = () => {
@@ -503,6 +596,12 @@ async function pageOf(
         if (include.has('formulas')) rowFormulas[cellA1(row, col)] = `=${formulaText(value.f, scope, formulas)}`;
       } else if (isStoredError(value)) {
         shown = { error: value.err };
+      } else if (isEmpty(value) && (computed?.get(at) ?? null) !== null) {
+        // Sin contenido propio y con valor en el motor: la rellena una matriz que se derrama.
+        shown = computed!.get(at)!;
+        const run = rowSpilled[rowSpilled.length - 1];
+        if (run && run.to === col - 1) run.to = col;
+        else rowSpilled.push({ from: col, to: col });
       } else {
         shown = value;
       }
@@ -523,6 +622,7 @@ async function pageOf(
     if (include.has('formulas')) out.formulas = rowFormulas;
     if (include.has('comments')) out.comments = rowComments;
     if (include.has('formats')) out.formats = rowFormats;
+    if (rowSpilled.length > 0) out.spilled = rowSpilled;
     rows.push(out);
   }
 
@@ -579,9 +679,9 @@ export async function runReadSheetJob(
       if (request.sheet === undefined && request.range === undefined) {
         const hasFormulas = model.sheets.some((s) => [...s.cells.values()].some(isFormula));
         const engine = hasFormulas ? await loadEngine(model, base.engineSettings, options) : null;
-        let errors: Map<string, number> | null;
+        let facts: Map<string, EngineSheetFacts> | null;
         try {
-          errors = await formulaErrors(model, engine);
+          facts = await engineSheetFacts(model, engine);
         } finally {
           engine?.dispose();
         }
@@ -591,21 +691,39 @@ export async function runReadSheetJob(
         } catch {
           findings = [];
         }
-        return { ok: true, revision, layoutRevision, workbook: summaryOf(model, findings, errors) };
+        return { ok: true, revision, layoutRevision, workbook: summaryOf(model, findings, facts) };
       }
 
       const sheet = findSheet(model, request.sheet);
       if (!sheet) return { ok: false, invalid: 'sheet' };
-      let rect: Rect | null;
-      if (request.range === undefined) rect = usedRect(sheet) ?? { r1: 0, c1: 0, r2: 0, c2: 0 };
-      else rect = parseA1Range(request.range);
-      if (!rect) return { ok: false, invalid: 'range' };
-      const rows = Math.min(MAX_ROWS, sheet.rows.length());
-      const cols = Math.min(MAX_COLS, sheet.cols.length());
-      if (rect.r2 >= Math.max(rows, 1) || rect.c2 >= Math.max(cols, 1)) return { ok: false, invalid: 'range' };
-      if (rect.c2 - rect.c1 + 1 > request.maxCells) return { ok: false, error: { code: 'document_too_complex' } };
-      const page = await pageOf(doc, base, opened.base, model, sheet, rect, request, options);
-      return { ok: true, revision, layoutRevision, page };
+      // Un solo motor por lectura, cargado la primera vez que haga falta.
+      const slot: { loading: Promise<FormulaEngineWithValues | null> | null } = { loading: null };
+      const engineOf = () => (slot.loading ??= loadEngine(model, base.engineSettings, options));
+      try {
+        let rect: Rect | null;
+        if (request.range === undefined) {
+          // El rango usado, con lo que derraman las matrices: es lo que enseña la rejilla.
+          let spilled: Rect | null = null;
+          if ([...sheet.cells.values()].some(isFormula)) {
+            const engine = await engineOf();
+            try {
+              if (engine) spilled = rectOf(await spilledCells(engine, model.sheets.indexOf(sheet), ownPositions(sheet)));
+            } catch {
+              spilled = null;
+            }
+          }
+          rect = unionRect(usedRect(sheet), spilled) ?? { r1: 0, c1: 0, r2: 0, c2: 0 };
+        } else rect = parseA1Range(request.range);
+        if (!rect) return { ok: false, invalid: 'range' };
+        const rows = Math.min(MAX_ROWS, sheet.rows.length());
+        const cols = Math.min(MAX_COLS, sheet.cols.length());
+        if (rect.r2 >= Math.max(rows, 1) || rect.c2 >= Math.max(cols, 1)) return { ok: false, invalid: 'range' };
+        if (rect.c2 - rect.c1 + 1 > request.maxCells) return { ok: false, error: { code: 'document_too_complex' } };
+        const page = await pageOf(doc, base, opened.base, model, sheet, rect, request, engineOf);
+        return { ok: true, revision, layoutRevision, page };
+      } finally {
+        (await slot.loading)?.dispose();
+      }
     }
   } finally {
     await opened.close();

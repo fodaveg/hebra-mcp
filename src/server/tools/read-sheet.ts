@@ -13,7 +13,9 @@
  *   usado, fórmulas, errores y lo que se conserva sin entender, y los nombres definidos).
  * - Con `sheet` o `range`: una página de filas del rango (o del rango usado de la hoja), con
  *   `truncated` y `nextCursor` si quedan más. La página tiene como mucho `maxCells` celdas y la
- *   respuesta entera no pasa de 30.000 caracteres: si no caben, la página lleva menos filas.
+ *   respuesta entera no pasa de 30.000 caracteres: si no caben, la página lleva menos filas. Con
+ *   `values`, `spilled` (solo si hay) da los rangos de celdas que rellena una matriz que se
+ *   derrama: no tienen contenido propio y su valor lo calcula una fórmula de otra celda.
  * - Siempre `revision` y `layoutRevision` (decisión 18): son las que `hebra_edit_sheet` acepta en
  *   `expectedRevision` y `expectedLayout`. El cursor se ata a la petición y a la disposición: si
  *   entre páginas alguien inserta o borra filas, la siguiente da `precondition_failed` con
@@ -322,6 +324,33 @@ function jobFailure(result: Extract<ReadSheetJobResult, { ok: false }>): ToolErr
   return new ToolError(error.code);
 }
 
+/**
+ * Las celdas derramadas de unas filas como rangos A1: los tramos de cada fila, y los que tienen
+ * las mismas columnas en filas seguidas, en un solo rectángulo (`N2:N3`, no `N2` y `N3`).
+ */
+function spilledRanges(rows: readonly PageRow[]): string[] {
+  type Block = { r1: number; r2: number; from: number; to: number };
+  const done: Block[] = [];
+  let open: Block[] = [];
+  for (const row of rows) {
+    const r = row.row - 1;
+    const next: Block[] = [];
+    for (const run of row.spilled ?? []) {
+      const above = open.find((b) => b.r2 === r - 1 && b.from === run.from && b.to === run.to);
+      if (above) {
+        above.r2 = r;
+        next.push(above);
+      } else next.push({ r1: r, r2: r, from: run.from, to: run.to });
+    }
+    done.push(...open.filter((b) => !next.includes(b)));
+    open = next;
+  }
+  done.push(...open);
+  return done
+    .sort((a, b) => a.r1 - b.r1 || a.from - b.from)
+    .map((b) => (b.r1 === b.r2 && b.from === b.to ? cellA1(b.r1, b.from) : `${cellA1(b.r1, b.from)}:${cellA1(b.r2, b.to)}`));
+}
+
 /** El `range` de la respuesta con las `count` primeras filas de la página. */
 function rangeOf(page: SheetPage, count: number, include: readonly ReadSheetInclude[]): Record<string, unknown> {
   const rows: PageRow[] = page.rows.slice(0, count);
@@ -332,7 +361,11 @@ function rangeOf(page: SheetPage, count: number, include: readonly ReadSheetIncl
   const address =
     first === last && page.width === 1 ? cellA1(first, page.col) : `${cellA1(first, page.col)}:${cellA1(last, lastCol)}`;
   const out: Record<string, unknown> = { sheet: page.sheet, sheetId: page.sheetId, address };
-  if (include.includes('values')) out.rows = rows.map((row) => row.values);
+  if (include.includes('values')) {
+    out.rows = rows.map((row) => row.values);
+    const spilled = spilledRanges(rows);
+    if (spilled.length > 0) out.spilled = spilled;
+  }
   if (include.includes('formulas')) out.formulas = Object.assign({}, ...rows.map((row) => row.formulas ?? {}));
   if (include.includes('comments')) out.comments = Object.assign({}, ...rows.map((row) => row.comments ?? {}));
   if (include.includes('formats')) {

@@ -20,6 +20,10 @@
  * - no atar el cursor a la disposición (quitar la comprobación de `layoutTag`): cae «una fila
  *   insertada entre páginas».
  * - dar siempre `hidden: false` en `summaryOf` (H-VENDOR-2): cae «el resumen marca hidden».
+ * - H-SPILL, cada una por separado, cae «una matriz que se derrama»: cargar el motor solo si la
+ *   página tiene una fórmula (la condición de antes) cae en el rango `D2:D4`; el rango usado del
+ *   resumen sin lo derramado, en `usedRange`; no contar los errores derramados, en `errorCount`;
+ *   la página sin rango sin lo derramado, en `address`.
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -39,8 +43,10 @@ import { runReadSheetJob, type ReadSheetJobInput, type ReadSheetJobResult } from
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { DocumentJobError } from '../../src/store/document-jobs';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
+import { scopeOf } from '../../src/server/tools/sheet-read';
 import type { SheetOp } from '../../src/sheets';
-import { createSheetAdapter, prepareSheetBase } from '../../src/sheets';
+import { createFormulaLocale, createSheetAdapter, prepareSheetBase } from '../../src/sheets';
+import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts/locale';
 import { buildOds, ctxOf } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
 import { newDocumentHead } from '../../vendor/hebra/src/lib/documents/sync/lifecycle';
 
@@ -209,6 +215,21 @@ async function appendOps(h: Harness, id: string, bytes: Uint8Array, ops: SheetOp
   for (const op of ops) adapter.applyOp(doc, op, ctxOf(`t${++opSeed}`));
   await source.docAppend(id, GENERATION, Y.encodeStateAsUpdateV2(doc, before));
   doc.destroy();
+}
+
+/**
+ * Dos matrices que se derraman en `Datos` de `buildOds()`: `=SEQUENCE(7)` en D1 (D1:D7) y
+ * `=1/SEQUENCE(2,1,1,-1)` en C2, que da 1 en C2 y `#DIV/0!` en C3.
+ */
+async function spillOps(bytes: Uint8Array): Promise<SheetOp[]> {
+  const model = (await prepareSheetBase(bytes)).model;
+  const sheet = model.sheets[0];
+  const formula = (text: string, row: number, col: number): SheetOp => {
+    const f = createFormulaLocale().toCanon(text, scopeOf(model, sheet.id), { row, col }, 'en');
+    if (isFormulaParseError(f)) throw new Error(f.error);
+    return { type: 'cell.set', sheet: sheet.id, row: sheet.rows.idAt(row), col: sheet.cols.idAt(col), value: { f }, replaces: [] };
+  };
+  return [formula('=SEQUENCE(7)', 0, 3), formula('=1/SEQUENCE(2,1,1,-1)', 1, 2)];
 }
 
 /** El trabajo en este proceso, con la entrada clonada como por `postMessage`. */
@@ -452,6 +473,49 @@ describe('hebra_read_sheet (H-78)', () => {
     expect(out.range.formats).toEqual([{ range: 'A1:B1', styleId: 'st1' }]);
     expect(out.range.styles).toEqual({ st1: { bold: true } });
     expect(out.range.rows).toBeUndefined();
+  });
+
+  it('una matriz que se derrama: sus celdas salen con valor, marcadas en spilled, y cuentan en el resumen (H-SPILL)', async () => {
+    const h = await harness();
+    const bytes = buildOds();
+    const id = await addDocument(h, h.folders.hojas, 'libro.ods', bytes);
+    await appendOps(h, id, bytes, await spillOps(bytes));
+    // D1 derrama hasta D7, más abajo que nada del fichero; C2 derrama un error en C3.
+    const summary = await read(h, { id });
+    expect(summary.workbook.sheets[0]).toMatchObject({ name: 'Datos', usedRange: 'A1:D7', formulaCount: 3, errorCount: 1 });
+    expect(summary.workbook.calculated).toBe(true);
+
+    // Un rango con solo celdas derramadas: la fórmula está fuera, arriba.
+    const only = await read(h, { id, sheet: 'Datos', range: 'D2:D4' });
+    expect(only.range).toEqual({ sheet: 'Datos', sheetId: 's0', address: 'D2:D4', rows: [[2], [3], [4]], spilled: ['D2:D4'] });
+
+    // Con fórmulas: solo las anclas la tienen; el error derramado sale como error.
+    const mixed = await read(h, { id, sheet: 'Datos', range: 'B2:D3', include: ['values', 'formulas'] });
+    expect(mixed.range).toEqual({
+      sheet: 'Datos',
+      sheetId: 's0',
+      address: 'B2:D3',
+      rows: [
+        [null, 1, 2],
+        [null, { error: '#DIV/0!' }, 3]
+      ],
+      spilled: ['D2', 'C3:D3'],
+      formulas: { C2: '=1/SEQUENCE(2,1,1,-1)' }
+    });
+
+    // Sin rango, la página llega hasta lo derramado.
+    const whole = await read(h, { id, sheet: 'Datos', include: ['values'] });
+    expect(whole.range.address).toBe('A1:D7');
+    expect(whole.range.rows[6]).toEqual([null, null, null, 7]);
+
+    // Sin derrames en la página, no hay `spilled`; sin `values`, tampoco.
+    expect((await read(h, { id, sheet: 'Datos', range: 'A1:B2' })).range).not.toHaveProperty('spilled');
+    expect((await read(h, { id, sheet: 'Datos', range: 'D2:D4', include: ['formulas'] })).range).toEqual({
+      sheet: 'Datos',
+      sheetId: 's0',
+      address: 'D2:D4',
+      formulas: {}
+    });
   });
 
   it('rechaza la entrada sin eco y sin tocar el almacén', async () => {

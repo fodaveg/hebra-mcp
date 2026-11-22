@@ -13,6 +13,8 @@
  *   por el fichero de la papelera;
  * - `fitRenderWidth` devolviendo el ancho pedido: cae «el rango máximo» (2,46 Mpx);
  * - sin `ticket.done()` en la fase de lectura: cae «suelta todo lo que aparta».
+ * - sin `withSpilledValues` (la hoja del modelo tal cual a la lista de dibujo): cae «pinta las
+ *   celdas que rellena una matriz que se derrama» (H-SPILL).
  */
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -41,7 +43,9 @@ import {
   type RenderSheetInput,
   type RenderSheetWiring
 } from '../../src/server/tools/render-sheet';
-import type { FormulaEngineWithValues } from '../../src/sheets';
+import { scopeOf } from '../../src/server/tools/sheet-read';
+import { createFormulaLocale, type FormulaEngineWithValues } from '../../src/sheets';
+import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts/locale';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import type { SheetOp } from '../../vendor/hebra/src/lib/sheets/contracts/ops';
@@ -308,6 +312,23 @@ describe('hebra_render_sheet', () => {
     await render(h, { id: edited, sheet: 'Datos', range: 'A1:C5' });
     const [before, after] = h.svgs;
     expect(glyphsIn(after!) - glyphsIn(before!)).toBe(3 + 3);
+  });
+
+  it('pinta las celdas que rellena una matriz que se derrama, como la rejilla (H-SPILL)', async () => {
+    const h = await harness();
+    const bytes = buildOds();
+    const model = (await prepareSheetBase(bytes)).model;
+    const f = createFormulaLocale().toCanon('=SEQUENCE(3)', scopeOf(model, 's0'), { row: 0, col: 3 }, 'en');
+    if (isFormulaParseError(f)) throw new Error(f.error);
+    const plain = await addDocument(h, 'antes.ods', bytes);
+    const spill = await addDocument(h, 'matriz.ods', bytes, [
+      { type: 'cell.set', sheet: 's0', row: 'b0', col: 'b3', value: { f }, replaces: [] }
+    ]);
+    await render(h, { id: plain, sheet: 'Datos', range: 'A1:D5' });
+    await render(h, { id: spill, sheet: 'Datos', range: 'A1:D5' });
+    // D1 enseña su «1» y D2 y D3, que no tienen nada en el modelo, el «2» y el «3».
+    const [before, after] = h.svgs.map(glyphsIn);
+    expect(after! - before!).toBe(3);
   });
 
   it('sin motor las fórmulas salen vacías, y con showFormulas sale su texto', async () => {

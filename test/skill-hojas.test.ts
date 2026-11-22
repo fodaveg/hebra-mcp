@@ -164,7 +164,7 @@ describe('referencia de hojas de cálculo de la skill (H-180)', () => {
     const mentioned = (name: string) => TEXT.includes(`\`${name}\``);
     expect([...SHEET_TOOL_NAMES].filter((name) => !mentioned(name))).toEqual([]);
     expect(SHEET_COMMAND_TYPES.filter((name) => !mentioned(name))).toEqual([]);
-    for (const word of ['expect', 'expectedRevision', 'expectedLayout', 'layoutRevision', 'nextCursor', 'dryRun', 'undoOperationId', 'untrustedContent']) {
+    for (const word of ['expect', 'expectedRevision', 'expectedLayout', 'layoutRevision', 'nextCursor', 'dryRun', 'undoOperationId', 'untrustedContent', 'spilled']) {
       expect(mentioned(word), word).toBe(true);
     }
     // La regla de garantías con la advertencia sobre `expectedLayout`.

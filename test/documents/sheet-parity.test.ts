@@ -418,18 +418,11 @@ const FILA_DERRAME = (i: number) => i * 4;
 /** Una diferencia medida entre app y MCP, con lo que da cada lado (texto de `describir`) y por qué. */
 type Diferencia = { app: string; mcp: string; motivo: string };
 /**
- * Por etiqueta de caso o por `celda@caso`. Solo hay una, y es un fallo del MCP pendiente de
- * arreglo, no una diferencia aceptada: cuando se arregle, el test falla y hay que borrarla.
+ * Por etiqueta de caso o por `celda@caso`. No queda ninguna: las cuatro celdas derramadas
+ * (`N2`, `N3`, `N6` y `N7`) que el MCP leía como vacías las arregló H-SPILL. Una nueva va aquí
+ * con lo medido en cada lado y su motivo.
  */
-const DERRAME_SIN_VALOR =
-  'hebra_read_sheet (pageOf de read-sheet-job.ts) solo pone el valor calculado en las celdas que son fórmula en el modelo; ' +
-  'las celdas derramadas no tienen valor propio y salen null, aunque el motor las calcula y la rejilla las enseña';
-const DIFERENCIAS: Record<string, Diferencia> = {
-  'N2@SECUENCIA': { app: 'num 2', mcp: 'vacía', motivo: DERRAME_SIN_VALOR },
-  'N3@SECUENCIA': { app: 'num 3', mcp: 'vacía', motivo: DERRAME_SIN_VALOR },
-  'N6@ORDENAR': { app: 'num 3', mcp: 'vacía', motivo: DERRAME_SIN_VALOR },
-  'N7@ORDENAR': { app: 'num 4', mcp: 'vacía', motivo: DERRAME_SIN_VALOR }
-};
+const DIFERENCIAS: Record<string, Diferencia> = {};
 
 // --- Valores comparables ------------------------------------------------------------------------
 

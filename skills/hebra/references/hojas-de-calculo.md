@@ -59,17 +59,22 @@ pintada con `hebra_render_sheet`.
   `formulaCount`, `errorCount` y `preserved`, lo que el editor conserva sin entender), los
   `namedRanges` y `calculated`. Sin celdas, sin páginas. Una hoja oculta se lee igual que las demás.
 - **Con `sheet` o `range`**: una página de filas enteras. Sin `sheet`, la primera hoja. Trae
-  `range: {sheet, sheetId, address, rows, formulas?, comments?, formats?, styles?}`.
+  `range: {sheet, sheetId, address, rows, spilled?, formulas?, comments?, formats?, styles?}`.
   - `address` es el rango de la página (por ejemplo `A2:D41`); `rows` es una lista de filas, cada
     una con sus valores de izquierda a derecha, y la primera fila de la lista es la primera de
     `address`.
   - Un valor es `null` (vacía), `true`, `false`, un número, un texto, o `{error: "#DIV/0!"}`.
     En una celda con fórmula, el valor es el que calcula el motor.
+  - `spilled` (solo con `values` y si la página tiene alguna) son los rangos de celdas que
+    rellena una fórmula de matriz que se derrama: `=SEQUENCE(3)` en N1 da `["N2:N3"]`. Su valor
+    está en `rows`, pero no tienen contenido propio ni fórmula: la fórmula es la de la celda de
+    arriba o de la izquierda donde empieza la matriz. Para cambiarlas, cambia esa fórmula; no
+    escribas encima. El rango usado y los errores del resumen también las cuentan.
   - `formulas` va por dirección (`{"B4": "=SUM(B2:B3)"}`), en inglés y con coma, y solo trae las
     celdas con fórmula. `comments`, igual. `formats` son tramos `{range, styleId}` y `styles` dice
     qué significa cada `styleId`.
   - `calculated: false` sale si el motor no pudo calcular alguna fórmula de la página: sus valores
-    van a `null`; no los des por vacíos.
+    (y los de lo que derraman) van a `null`; no los des por vacíos.
 - **Páginas**: cada página lleva `maxCells` celdas como mucho, siempre filas enteras (con 4
   columnas y 500 celdas, 125 filas). Una respuesta no pasa de 30000 caracteres: si no caben, la
   página trae menos filas. `truncated: true` y `nextCursor` dicen que hay más; `nextCursor: null`

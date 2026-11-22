@@ -70,8 +70,10 @@ import {
   type FontSet,
   type FormulaEngineWithValues,
   type GridAxis,
+  type CellValue,
   type GridRange,
-  type SheetModel
+  type SheetModel,
+  type SheetModelSheet
 } from '../../sheets';
 import { documentReserveBytes } from '../../store/document-jobs';
 import {
@@ -321,6 +323,31 @@ async function formulaValues(
   }
 }
 
+/**
+ * La hoja con el valor de las celdas que rellena una matriz que se derrama (H-SPILL). La lista de
+ * dibujo solo pinta las celdas con contenido en el modelo y pide al motor el valor de las que
+ * tienen fórmula; una celda derramada (`=SEQUENCE(3)` en N1 rellena N2 y N3) no tiene nada en el
+ * modelo. La rejilla de la app la pinta porque pinta lo que da el motor: aquí se le pone a la hoja
+ * que se dibuja, solo para dibujar, el valor calculado como si fuera suyo. La hoja del modelo no
+ * se toca.
+ */
+function withSpilledValues(sheet: SheetModelSheet, values: ReadonlyMap<string, ComputedValue>): SheetModelSheet {
+  let cells: Map<string, CellValue> | null = null;
+  for (const [at, value] of values) {
+    if (value === null || value === undefined) continue;
+    const colon = at.indexOf(':');
+    const row = Number(at.slice(0, colon));
+    const col = Number(at.slice(colon + 1));
+    if (row >= sheet.rows.length() || col >= sheet.cols.length()) continue;
+    const key = `${sheet.rows.idAt(row)}:${sheet.cols.idAt(col)}`;
+    const own = sheet.cells.get(key);
+    if (own !== undefined && own !== null && own !== '') continue;
+    cells ??= new Map(sheet.cells);
+    cells.set(key, value);
+  }
+  return cells ? { ...sheet, cells } : sheet;
+}
+
 /** Lo que sale de la fase de lectura: el SVG y lo que lleva la respuesta. */
 type ReadPhase = {
   svg: Uint8Array;
@@ -361,6 +388,7 @@ async function readPhase(
 
     let computed: ((row: number, col: number) => ComputedValue | undefined) | undefined;
     let formulas: ReadPhase['formulas'];
+    let sheetToDraw: SheetModelSheet = sheet;
     if (input.showFormulas) {
       const locale = createFormulaLocale();
       const scope = scopeOf(model, sheet.id);
@@ -373,12 +401,13 @@ async function readPhase(
       const values = await formulaValues(model, sheetIndex, range, base, wiring.engine, signal);
       computed = values ? (row, col) => values.get(`${row}:${col}`) : undefined;
       formulas = values ? 'calculated' : 'not_calculated';
+      if (values) sheetToDraw = withSpilledValues(sheet, values);
     }
     signal.throwIfAborted();
 
     const fonts = await wiring.fonts();
     const layout = await layoutDrawList({
-      sheet,
+      sheet: sheetToDraw,
       axes: { rows: asDrawAxis(view.rowsAxis()), cols: asDrawAxis(view.colsAxis()) },
       range,
       styleAt: view.styleAt,
