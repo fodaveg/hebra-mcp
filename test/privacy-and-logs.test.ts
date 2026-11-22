@@ -46,7 +46,12 @@ const TOOL_NAMES = [
   'hebra_note_authors',
   'hebra_replace_in_notes',
   'hebra_read_file',
-  'hebra_replace_file_text'
+  'hebra_replace_file_text',
+  // Hojas de cálculo (D28, H-177).
+  'hebra_read_sheet',
+  'hebra_create_sheet',
+  'hebra_edit_sheet',
+  'hebra_render_sheet'
 ] as const;
 
 /** Argumentos válidos de las herramientas de papelera y versiones (30 sep 2026). */
@@ -88,7 +93,17 @@ const TRASH_AND_VERSION_ARGS: Partial<Record<(typeof TOOL_NAMES)[number], Record
     expectedSha256: 'a'.repeat(64),
     text: 'lo que sea',
     operationId: 'op'
-  }
+  },
+  // Hojas de cálculo (D28, H-177): argumentos que pasan el esquema, para que el código salga de
+  // la privacidad y no de la validación.
+  hebra_read_sheet: { id: 'lo-que-sea' },
+  hebra_create_sheet: { name: 'lo que sea.ods', operationId: 'op' },
+  hebra_edit_sheet: {
+    id: 'lo-que-sea',
+    ops: [{ type: 'setCells', sheet: 'Hoja 1', start: 'A1', rows: [[1]], expect: { A1: null } }],
+    operationId: 'op'
+  },
+  hebra_render_sheet: { id: 'lo-que-sea', sheet: 'Hoja 1', range: 'A1:B2' }
 };
 
 async function connectedClient(ctx: ServerContext): Promise<{ client: Client; server: McpServer }> {
@@ -233,8 +248,8 @@ describe('privacy_config_unresolved (carpeta configurada que no existe)', () => 
                   ? { id: 'lo-que-sea', text: 'lo que sea' }
                   : (TRASH_AND_VERSION_ARGS[name] ?? {});
       const result = (await client.callTool({ name, arguments: arguments_ })) as CallToolResult;
-      expect(result.isError).toBe(true);
-      expect(JSON.parse(textOf(result))).toEqual({ error: 'privacy_config_unresolved' });
+      expect(result.isError, name).toBe(true);
+      expect(JSON.parse(textOf(result)), name).toEqual({ error: 'privacy_config_unresolved' });
     }
   });
 });
