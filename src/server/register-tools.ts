@@ -142,29 +142,9 @@ import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
 import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
 import type { SpaceVersionsDeps } from './tools/space-versions';
-
-/** `annotations` MCP: ninguna herramienta toca el mundo exterior, y solo
- *  `hebra_replace_file_text` (D15) es destructiva. */
-const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
-const WRITE_IDEMPOTENT = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: true,
-  openWorldHint: false
-} as const;
-/** Escritura destructiva pero repetible: `hebra_replace_file_text` (D15). */
-const WRITE_DESTRUCTIVE_IDEMPOTENT = {
-  readOnlyHint: false,
-  destructiveHint: true,
-  idempotentHint: true,
-  openWorldHint: false
-} as const;
-const WRITE_NON_IDEMPOTENT = {
-  readOnlyHint: false,
-  destructiveHint: false,
-  idempotentHint: false,
-  openWorldHint: false
-} as const;
+// `annotations` MCP: ninguna herramienta toca el mundo exterior, y solo las que sobrescriben un
+// fichero son destructivas. Viven en `./tool-annotations.ts`, que comparte la tabla de documentos.
+import { READ_ONLY, WRITE_DESTRUCTIVE_IDEMPOTENT, WRITE_IDEMPOTENT, WRITE_NON_IDEMPOTENT } from './tool-annotations';
 
 /** Entrada de `hebra_import_office` (C-25, plan de importación común 3.6). Lo que depende de
  *  varios campos a la vez (uno de `dataBase64` o `fileId`, `operationId` salvo con `preview`) lo
