@@ -16,8 +16,10 @@
  * `createRequest` (rojo "nace con su cabecera"), quitar la búsqueda de funciones de red en los
  * cuerpos de regla (rojo "WEBSERVICE en una regla"), quitar la comprobación de carpeta de la
  * herramienta (rojo "no llega al escritor") y quitar el `clientID` fijo del `Y.Doc` de trabajo
- * (rojo "mismos bytes").
+ * (rojo "mismos bytes"). H-TOPES-MCP: quitar la lectura con `SHEET_ODS_READ_LIMITS` tras exportar
+ * en `buildSheetFile` (rojo "no se lee con los topes de hojas": salen los bytes).
  */
+import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,6 +42,7 @@ import { openDocumentRead } from '../../src/store/document-read';
 import { runDocumentRequest } from '../../src/store/document-service';
 import { DOCUMENT_OPS_VERSION } from '../../src/store/document-types';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
+import { SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
 import type { SyncStorePort } from '../../src/store/sync-port';
 import { IDENTITY } from '../sync/devices';
 
@@ -386,5 +389,18 @@ describe('hebra_create_sheet (H-79)', () => {
     const signal = new AbortController().signal;
     expect(await buildSheetFile([wide, wide], signal, { maxCompiledOps: 12 })).not.toHaveProperty('code');
     expect(await buildSheetFile([wide, wide, wide], signal, { maxCompiledOps: 12 })).toEqual({ code: 'document_too_complex' });
+  });
+
+  it('un libro que no se lee con los topes de hojas es document_too_complex antes de crearlo (H-TOPES-MCP)', async () => {
+    // 140 textos de 32.000 caracteres hexadecimales al azar: unos 4,3 MiB de `content.xml`, más que
+    // `SHEET_ODS_READ_LIMITS.maxTotalBytes`, con una razón de compresión de 2. Sin la comprobación,
+    // `buildSheetFile` daba los bytes y `freshRevisions` fallaba con el fichero ya escrito.
+    const text = () => randomBytes(16_000).toString('hex');
+    const rows = Array.from({ length: 20 }, () => Array.from({ length: 7 }, text));
+    expect(rows.flat().join('').length).toBeGreaterThan(SHEET_ODS_READ_LIMITS.maxTotalBytes);
+    const signal = new AbortController().signal;
+    expect(await buildSheetFile([{ type: 'setCells', sheet: DEFAULT_SHEET_NAME, start: 'A1', rows }], signal)).toEqual({
+      code: 'document_too_complex'
+    });
   });
 });

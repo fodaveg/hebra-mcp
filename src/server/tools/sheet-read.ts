@@ -19,8 +19,7 @@
 import * as Y from 'yjs';
 import type { FormulaScope } from '../../../vendor/hebra/src/lib/sheets/formula/canon';
 import { newDocumentHead } from '../../../vendor/hebra/src/lib/documents/sync/lifecycle';
-import { readSafeZip } from '../../../vendor/hebra/src/lib/portability/zip-read';
-import { zipLimits } from '../../../vendor/hebra/src/lib/sheets/ods/read-workbook';
+import { ExportOdsError } from '../../../vendor/hebra/src/lib/sheets/ods/export';
 import {
   createSheetAdapter,
   OdsReadError,
@@ -94,31 +93,30 @@ export async function blobOf(source: DocumentReadSource, sha256: string): Promis
   return local ?? (await source.readBlob?.(sha256).catch(() => null)) ?? null;
 }
 
-/** Las partes del paquete que lee `readOdsWorkbook` (su `select`). */
-const WORKBOOK_PARTS = new Set(['content.xml', 'mimetype', 'settings.xml', 'styles.xml']);
+/** Lo que dice `readSafeZip` al pasar un tope: mismo criterio que `zipError` de `read-workbook.ts`. */
+const ZIP_LIMIT_MESSAGE = /l[ií]mite|relaci[oó]n de compresi|demasiadas entradas/i;
 
 /**
- * Las partes XML del libro con los topes de hojas del MCP (`SHEET_ODS_READ_LIMITS`, H-95b): 4 MiB
- * descomprimidos en total. `prepareSheetBase` de Hebra lee con los topes de S-F (256 MiB) y no los
- * acepta por parámetro, así que se miran aquí antes, con las mismas partes, y el descompresor corta
- * al pasar del tope sin inflar el resto. Un tope pasado es `document_too_complex`; un ZIP roto se
- * deja para el lector, que dice `document_invalid`.
+ * Si `error` es un tope de lectura de `SHEET_ODS_READ_LIMITS` pasado (H-TOPES-MCP), que quien
+ * llama responde como `document_too_complex`. Hebra lo dice de tres formas según el camino:
+ * `OdsReadError` con `too_large` (el lector del libro, `prepareSheetBase`), `ExportOdsError` con
+ * `unreadable` y el texto del tope (guardar, `exportOds`) y el `Error` sin tipo de `readSafeZip`
+ * (las imágenes y `content.xml` de `createEditorData`, el paquete de `openSheetController`).
  */
-export async function assertSheetReadLimits(base: Uint8Array): Promise<void> {
-  try {
-    await readSafeZip(base, zipLimits(SHEET_ODS_READ_LIMITS), { select: (path) => WORKBOOK_PARTS.has(path) });
-  } catch (error) {
-    // Mismo criterio que `zipError` de `read-workbook.ts`: los de tope se distinguen por el texto.
-    const message = error instanceof Error ? error.message : '';
-    if (/l[ií]mite|relaci[oó]n de compresi|demasiadas entradas/i.test(message)) throw new ToolError('document_too_complex');
-  }
+export function isSheetLimitError(error: unknown): boolean {
+  if (error instanceof OdsReadError) return error.code === 'too_large';
+  if (error instanceof ExportOdsError) return error.code === 'unreadable' && ZIP_LIMIT_MESSAGE.test(error.message);
+  // Solo el `Error` de `readSafeZip`, no una subclase con un texto que lo parezca.
+  return error instanceof Error && error.constructor === Error && ZIP_LIMIT_MESSAGE.test(error.message);
 }
 
 /**
- * Abre el `.ods` `file` para leerlo. Errores con código cerrado (`ToolError`): cabecera de otro
- * formato, `document_invalid`; faltan los bytes, `file_unavailable`; más de
- * `SHEET_DOCUMENT_MAX_BYTES` (4 MiB), `file_too_large`; un `.ods` ilegible, `document_invalid`, o
- * `document_too_complex` si pasa un tope de lectura (`assertSheetReadLimits` o el del lector).
+ * Abre el `.ods` `file` para leerlo, con los topes de hojas del MCP (`SHEET_ODS_READ_LIMITS`,
+ * H-95b): el libro, el adaptador y su guardado los reciben por parámetro (H-TOPES-MCP), siempre el
+ * mismo objeto, porque la caché de `prepareSheetBase` va por su identidad. Errores con código
+ * cerrado (`ToolError`): cabecera de otro formato, `document_invalid`; faltan los bytes,
+ * `file_unavailable`; más de `SHEET_DOCUMENT_MAX_BYTES` (4 MiB), `file_too_large`; un `.ods`
+ * ilegible, `document_invalid`, o `document_too_complex` si pasa un tope de lectura.
  */
 export async function openSheetRead(
   source: DocumentReadSource,
@@ -136,19 +134,16 @@ export async function openSheetRead(
     throw new ToolError('file_too_large', { byteLength: base.byteLength, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
   }
   signal.throwIfAborted();
-  await assertSheetReadLimits(base);
-  signal.throwIfAborted();
 
   let sheetBase: SheetBase;
   try {
-    sheetBase = await prepareSheetBase(base);
+    sheetBase = await prepareSheetBase(base, SHEET_ODS_READ_LIMITS);
   } catch (error) {
-    if (error instanceof OdsReadError) {
-      throw new ToolError(error.code === 'too_large' ? 'document_too_complex' : 'document_invalid');
-    }
+    if (isSheetLimitError(error)) throw new ToolError('document_too_complex');
+    if (error instanceof OdsReadError) throw new ToolError('document_invalid');
     throw error;
   }
-  const adapter = createSheetAdapter(sheetBase);
+  const adapter = createSheetAdapter(sheetBase, { limits: SHEET_ODS_READ_LIMITS });
 
   let state = stored;
   if (!stored.head) {

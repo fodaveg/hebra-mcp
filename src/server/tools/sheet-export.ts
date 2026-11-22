@@ -22,6 +22,7 @@
 import * as Y from 'yjs';
 import { createNodeFormulaEngine, createSheetAdapter, prepareSheetBase, type FormulaEngine } from '../../sheets';
 import { setDocumentExporter, type DocumentExporter } from '../../store/document-channel';
+import { SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 
 const ENGINE_WORKER_URL = new URL('./sheet-engine-worker.mjs', import.meta.url);
 
@@ -43,7 +44,12 @@ export function createSheetDocumentExporter(options: SheetDocumentExporterOption
     try {
       for (const update of [...read.segments, ...read.pending]) Y.applyUpdateV2(doc, update);
       if (recent !== '') Y.applyUpdateV2(doc, new Uint8Array(Buffer.from(recent, 'base64')));
-      const adapter = createSheetAdapter(await prepareSheetBase(base), { engine });
+      // Los topes de hojas del MCP, el mismo objeto que la lectura común (H-TOPES-MCP): un `.ods`
+      // que los pasa no se exporta: el exportador lanza, como con cualquier otro fallo de lectura.
+      const adapter = createSheetAdapter(await prepareSheetBase(base, SHEET_ODS_READ_LIMITS), {
+        engine,
+        limits: SHEET_ODS_READ_LIMITS
+      });
       const bytes = await adapter.exportFile(base, doc, new AbortController().signal);
       return { bytes, referencedBlobs: adapter.referencedBlobs(doc) };
     } finally {

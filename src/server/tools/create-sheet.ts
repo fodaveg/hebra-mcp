@@ -24,7 +24,8 @@
  *    (`parseSheetCommands`: forma, topes y sin funciones de red). Un fallo es `batch_invalid`.
  * 2. La carpeta de destino, visible con el filtro de esta llamada; si no, `not_found`.
  * 3. El libro, fuera de todo turno, con plazo (`DOCUMENT_EDIT_TIMEOUT_MS`) y un tope de
- *    operaciones compiladas: pasarse es `document_too_complex`.
+ *    operaciones compiladas: pasarse es `document_too_complex`, igual que un libro que no se lee
+ *    con los topes de hojas del MCP (`SHEET_ODS_READ_LIMITS`).
  * 4. El escritor (`createDocumentFile`, B-N20, desde `runDocumentRequest`) lo vuelve a comprobar
  *    todo en su turno: carpeta privada u oculta, `not_found`; espacio de solo lectura,
  *    `client_outdated`; homónimo visible, `file_exists`.
@@ -63,9 +64,11 @@ import { openDocumentRead, type DocumentReadSource } from '../../store/document-
 import type { DocumentCreated } from '../../store/document-service';
 import type { BatchIssue, DocumentError, WriteOut } from '../../store/document-types';
 import { nameExtension, validFileName } from '../../store/file-content';
+import { SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { requireValidOperationId } from './guards';
+import { isSheetLimitError } from './sheet-read';
 import { parseSheetAssets, parseSheetCommands, sheetAssetsField, sheetOpsField } from './sheet-op-schemas';
 import { mapWriteError } from './write-errors';
 
@@ -240,7 +243,9 @@ export async function buildSheetFile(
   // que necesita `writeStyle` para dar formato: el libro vacío sale tal cual.
   const blank = writeNewOds(blankBook());
   if (commands.length === 0) return { bytes: blank, createdIds: {} };
-  const adapter: SheetAdapter = createSheetAdapter(await prepareSheetBase(blank));
+  const adapter: SheetAdapter = createSheetAdapter(await prepareSheetBase(blank, SHEET_ODS_READ_LIMITS), {
+    limits: SHEET_ODS_READ_LIMITS
+  });
   const doc = new Y.Doc();
   // Sin azar: el `clientID` entra en las versiones de cada celda.
   doc.clientID = 1;
@@ -280,7 +285,17 @@ export async function buildSheetFile(
       if (STRUCTURAL.has(command.type) || nextReads) model = await adapter.project(blank, doc, signal);
     }
     signal.throwIfAborted();
-    return { bytes: await adapter.exportFile(blank, doc, signal), createdIds };
+    const bytes = await adapter.exportFile(blank, doc, signal);
+    // El libro creado se tiene que poder leer con los mismos topes (H-TOPES-MCP): uno que los pasa
+    // es `document_too_complex` antes de crear nada, y no un fallo de `freshRevisions` con el
+    // fichero ya escrito. La lectura queda en la caché de `prepareSheetBase` para esos bytes.
+    try {
+      await prepareSheetBase(bytes, SHEET_ODS_READ_LIMITS);
+    } catch (error) {
+      if (isSheetLimitError(error)) return { code: 'document_too_complex' };
+      throw error;
+    }
+    return { bytes, createdIds };
   } finally {
     doc.destroy();
   }
@@ -326,7 +341,9 @@ async function freshRevisions(
       blobRead: async () => bytes
     }
   } as unknown as DocumentReadSource;
-  const adapter = createSheetAdapter(await prepareSheetBase(bytes));
+  const adapter = createSheetAdapter(await prepareSheetBase(bytes, SHEET_ODS_READ_LIMITS), {
+    limits: SHEET_ODS_READ_LIMITS
+  });
   const read = await openDocumentRead(source, fileId, adapter, signal);
   try {
     return { revision: read.revision, layoutRevision: read.layoutRevision };

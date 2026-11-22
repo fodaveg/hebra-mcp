@@ -623,7 +623,8 @@ async function until(done: () => boolean): Promise<void> {
  * - sin `reserveBytes` en el contexto del trabajo: cae «el trabajo aparta la reserva de hojas»;
  * - sin `sheetJobSlot` en `runJob`: cae «dos lecturas a la vez van de una en una» (`overlap` 2);
  * - `tooLarge` y las comprobaciones con `DOCUMENT_MAX_BYTES` (25 MiB): cae «más de 4 MiB»;
- * - sin `assertSheetReadLimits` en `openSheetRead`: cae «más de 4 MiB de XML» (la lectura sale);
+ * - `prepareSheetBase` sin `SHEET_ODS_READ_LIMITS` en `openSheetRead` (H-TOPES-MCP, que sustituye a
+ *   la comprobación previa `assertSheetReadLimits`): cae «más de 4 MiB de XML» (la lectura sale);
  * - el inventario con `DEFAULT_ZIP_LIMITS`: cae «el inventario lee con los topes de hojas».
  */
 describe('hebra_read_sheet: topes de hojas (H-95b)', () => {

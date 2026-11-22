@@ -18,6 +18,8 @@
  * - H-95b: `admitRead` con la compuerta directa (sin `admitSheetJob`): cae «con la cola de hojas
  *   ocupada»; el tope de tamaño con `DOCUMENT_MAX_BYTES`: cae «más de 4 MiB»;
  *   `renderSheetReadReserveBytes` con `documentReserveBytes`: cae «pinta un rango como PNG».
+ * - H-TOPES-MCP: `createEditorData` sin `limits`: cae «una imagen que pasa del tope» (pinta, sale
+ *   `null`); con `limits` y sin `isSheetLimitError`: cae igual, con el `Error` de `readSafeZip`.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -53,7 +55,7 @@ import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { sheetJobSlot } from '../../src/store/sheet-jobs';
-import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES } from '../../src/store/sheet-limits';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
 import type { SheetOp } from '../../vendor/hebra/src/lib/sheets/contracts/ops';
 import { IronCalcEngine } from '../../vendor/hebra/src/lib/sheets/engine/ironcalc-engine';
 import { createSheetAdapter, prepareSheetBase } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter';
@@ -242,6 +244,38 @@ function pngSize(png: Uint8Array): { width: number; height: number } {
 
 /** Glifos pintados en el SVG: cada uno es un `<use>` de su contorno. */
 const glyphsIn = (svg: string): number => svg.split('<use ').length - 1;
+
+const MIB = 1024 * 1024;
+
+/** Espacios de nombres de un `content.xml` con una imagen flotante. */
+const IMAGE_NS =
+  'xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" ' +
+  'xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" ' +
+  'xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" ' +
+  'xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0" ' +
+  'xmlns:svg="urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0" ' +
+  'xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.3"';
+
+/**
+ * Un `.ods` con la hoja `Datos` (un número en A1) y una imagen flotante que cita
+ * `Pictures/foto.png`, guardada con `level` (0, sin comprimir, por defecto).
+ */
+function bookWithImage(image: Uint8Array, level: 0 | 9 = 0): Uint8Array {
+  const content =
+    `<?xml version="1.0" encoding="UTF-8"?>\n<office:document-content ${IMAGE_NS}><office:body><office:spreadsheet>` +
+    '<table:table table:name="Datos"><table:shapes>' +
+    '<draw:frame draw:name="Foto" svg:x="1cm" svg:y="1cm" svg:width="2cm" svg:height="1cm">' +
+    '<draw:image xlink:href="Pictures/foto.png" xlink:type="simple"/></draw:frame>' +
+    '</table:shapes><table:table-column/><table:table-row>' +
+    '<table:table-cell office:value-type="float" office:value="7"><text:p>7</text:p></table:table-cell>' +
+    '</table:table-row></table:table></office:spreadsheet></office:body></office:document-content>';
+  const entries: Zippable = {};
+  for (const [path, data] of Object.entries(unzipSync(buildOds(content)))) {
+    entries[path] = [data, { level: path === 'mimetype' ? 0 : 9 }];
+  }
+  entries['Pictures/foto.png'] = [image, { level }];
+  return zipSync(entries);
+}
 
 const setCell = (row: string, col: string, value: number | string): SheetOp => ({
   type: 'cell.set',
@@ -452,6 +486,23 @@ describe('hebra_render_sheet', () => {
     expect((error as ToolError).code).toBe('file_too_large');
     expect((error as ToolError).extra).toEqual({ byteLength: bytes.length, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
     expect(h.gate.asked).toEqual([]);
+  });
+
+  it('una imagen que pasa del tope de hojas da document_too_complex y suelta lo que aparta (H-TOPES-MCP)', async () => {
+    const h = await harness();
+    // La misma hoja con la imagen pequeña se pinta: lo que corta es el tamaño de la imagen.
+    const small = await addFile(h, h.folders.hojas, 'logo.ods', bookWithImage(new Uint8Array(64 * 1024).fill(7)));
+    expect((await render(h, { id: small, sheet: 'Datos', range: 'A1:C5' })).meta.sheet).toBe('Datos');
+    // 5 MiB de texto hexadecimal: deflate lo deja en la mitad, así que el `.ods` no llega a los
+    // 4 MiB y la razón queda lejos de 200; solo lo para `maxEntryBytes` (4 MiB) en las imágenes.
+    // Sin topes, `createEditorData` la leía con los de la app (128 MiB por entrada) y pintaba.
+    const image = new TextEncoder().encode(randomBytes(5 * MIB / 2).toString('hex'));
+    expect(image.length).toBeGreaterThan(SHEET_ODS_READ_LIMITS.maxEntryBytes);
+    const bytes = bookWithImage(image, 9);
+    expect(bytes.length).toBeLessThan(SHEET_DOCUMENT_MAX_BYTES);
+    const big = await addFile(h, h.folders.hojas, 'foto.ods', bytes);
+    expect(await refusal(h, { id: big, sheet: 'Datos', range: 'A1:C5' })).toBe('document_too_complex');
+    expect(h.gate.pending).toBe(0);
   });
 
   it('sin hueco en la compuerta: document_busy, sin motor ni pintado', async () => {

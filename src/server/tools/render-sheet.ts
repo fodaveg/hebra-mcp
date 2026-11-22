@@ -34,8 +34,8 @@
  *
  * Errores, todos con código cerrado y sin texto del documento: `invalid_input`, `not_found`,
  * `file_too_large`, `file_unavailable` (faltan los bytes), `document_invalid` (no es un `.ods`
- * legible, o la cabecera es de otro formato), `document_too_complex` (rango, plazo, SVG o
- * superficie) y `document_busy` (sin hueco en la compuerta o en la cola del render).
+ * legible, o la cabecera es de otro formato), `document_too_complex` (rango, plazo, SVG,
+ * superficie o un tope de lectura de `SHEET_ODS_READ_LIMITS`, también en las imágenes) y `document_busy` (sin hueco en la compuerta o en la cola del render).
  *
  * Puntos de unión (los cablea H-177): `RenderSheetWiring` lleva la fuente de documentos del
  * contexto (`NodeLibraryPort.documentSource()`), la compuerta de la cuenta y, en producción,
@@ -89,11 +89,11 @@ import {
 import { visibleDocumentOf } from '../../store/document-privacy';
 import type { DocumentReadSource } from '../../store/document-read';
 import { admitSheetJob } from '../../store/sheet-jobs';
-import { SHEET_DOCUMENT_MAX_BYTES, sheetJobReserveBytes } from '../../store/sheet-limits';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_READ_LIMITS, sheetJobReserveBytes } from '../../store/sheet-limits';
 import { documentOk } from '../document-response';
 import { usageOf, type ToolContext } from '../context';
 import { ToolContent, ToolError } from '../errors';
-import { isFormula, openSheetRead, scopeOf, sheetOf } from './sheet-read';
+import { isFormula, isSheetLimitError, openSheetRead, scopeOf, sheetOf } from './sheet-read';
 
 /** Superficie máxima del PNG: 2 Mpx, unos 7,63 MiB de lienzo RGBA (estudio de fidelidad, R3). */
 export const RENDER_SHEET_MAX_PIXELS = 2_000_000;
@@ -310,7 +310,8 @@ async function formulaValues(
   engine: () => FormulaEngineWithValues,
   signal: AbortSignal
 ): Promise<Map<string, ComputedValue> | null> {
-  const settings = await readBookSettings(base);
+  // Un `styles.xml` que pasa los topes cuenta como libro sin lengua: fórmulas sin calcular.
+  const settings = await readBookSettings(base, SHEET_ODS_READ_LIMITS);
   if (!settings) return null;
   const book = engineBookOf(snapshotEngine(model, settings));
   const motor = engine();
@@ -386,7 +387,14 @@ async function readPhase(
     if (range.from.row >= sheet.rows.length() || range.from.col >= sheet.cols.length()) {
       throw new ToolError('invalid_input');
     }
-    data = await createEditorData({ doc: read.doc, base });
+    // Con los topes de hojas del MCP (H-TOPES-MCP): también las imágenes, que sin ellos se leían
+    // con `DEFAULT_ZIP_LIMITS` (hasta 512 MiB descomprimidos). Pasarlos es `document_too_complex`.
+    try {
+      data = await createEditorData({ doc: read.doc, base, limits: SHEET_ODS_READ_LIMITS });
+    } catch (error) {
+      if (isSheetLimitError(error)) throw new ToolError('document_too_complex');
+      throw error;
+    }
     signal.throwIfAborted();
     const view = data.forSheet(sheet.id);
     const sheetIndex = model.sheets.indexOf(sheet);
@@ -418,7 +426,7 @@ async function readPhase(
       styleAt: view.styleAt,
       computed,
       // La etiqueta de idioma del libro, como la rejilla (`bookLocale` de `OdsEditorHost`).
-      locale: (await readBookLocale(base)) ?? undefined,
+      locale: (await readBookLocale(base, SHEET_ODS_READ_LIMITS)) ?? undefined,
       measurer: createFontTextMeasurer(fonts),
       maxCells: RENDER_SHEET_MAX_ROWS * RENDER_SHEET_MAX_COLUMNS
     });
