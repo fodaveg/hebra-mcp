@@ -45,6 +45,7 @@ import {
 } from './forward';
 import { buildWriteContext, type WriteContext } from './write-context';
 import { registerSheetDocumentFormat } from './tools/edit-sheet';
+import { registerSheetDocumentExporter } from './tools/sheet-export';
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -196,6 +197,9 @@ export function localWriteContext(
   const office = options.office ?? {};
   // H-177: los lotes de hojas que atiende este escritor, también los que le reenvía un lector.
   registerSheetDocumentFormat();
+  // Y su exportador: sin él, el punto de control tras un lote no escribe el `.ods` y duplicar
+  // un documento con cabecera da `file_unavailable` (H-BLOQUEO-SYNC).
+  registerSheetDocumentExporter();
   const context = buildWriteContext({
     importOffice: (input) =>
       instance.importOfficeLocal(

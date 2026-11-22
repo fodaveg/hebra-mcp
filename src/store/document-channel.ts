@@ -142,9 +142,13 @@ export class DocumentSessions {
   }
 }
 
-/** Exporta el estado actual de un documento como fichero (lo aporta el registro de formatos). */
+/**
+ * Exporta el estado actual de un documento como fichero (lo aporta el registro de formatos).
+ * `blobRead` da los bytes del fichero base (`head.baseSha256`); `null` si este dispositivo no los
+ * tiene y no se pudieron bajar.
+ */
 export type DocumentExporter = (
-  context: { libraryId: string; store: DocStorePort },
+  context: { libraryId: string; store: DocStorePort; blobRead(sha256: string): Promise<Uint8Array | null> },
   fileId: string,
   head: DocHeadRecord
 ) => Promise<ExportedDocument>;
@@ -460,7 +464,11 @@ export interface DocumentWireHooks {
 export function wireDocuments(source: DocumentChannelSource, hooks: DocumentWireHooks): DocumentSyncWiring {
   const wiring = createDocumentSyncWiring({ libraryId: source.libraryId }, source.port, {
     exportDocument: (fileId, head) =>
-      exporter({ libraryId: source.libraryId, store: wiring.store }, fileId, head),
+      exporter(
+        { libraryId: source.libraryId, store: wiring.store, blobRead: (sha256) => hooks.readBlob(sha256) },
+        fileId,
+        head
+      ),
     requestRound: () => hooks.requestRound(),
     readBlob: (sha256) => hooks.readBlob(sha256),
     externalMarks: () => source.externalMarks(),

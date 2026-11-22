@@ -56,6 +56,7 @@ import {
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
 import {
+  prepareDocumentCopy,
   runDocumentRequest,
   type DocumentAfterCommit,
   type DocumentOpsOutcome,
@@ -812,8 +813,22 @@ export class LibraryInstance implements NoteWriteTarget {
 
   /** Crea, renombra, mueve o duplica un fichero suelto (D17, `../store/file-verbs.ts`). Al
    *  duplicar, si este escritor no tiene aún los bytes del origen, los baja antes con su
-   *  motor de sync. Pide la ronda de después sin esperarla. */
-  looseFileWriteLocal(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>> {
+   *  motor de sync. Pide la ronda de después sin esperarla.
+   *
+   *  Duplicar un documento con cabecera (`.ods`, `.odp`): antes, su punto de control al día
+   *  (`prepareDocumentCopy`, D17 y D28 protección 12), para que la copia lleve la última
+   *  edición y no la última versión guardada. Sin poder exportar, `file_unavailable`. */
+  async looseFileWriteLocal(input: LooseFileWriteInput): Promise<LocalWrite<LooseFileSaved>> {
+    if (input.action === 'duplicateFile') {
+      await prepareDocumentCopy(
+        {
+          port: { documentSource: () => this.current.documentSource() },
+          writeExclusive: (operation) => this.writeExclusive(operation)
+        },
+        input.id,
+        input.privacy
+      );
+    }
     const runner = this.runner;
     return writeLooseFile(
       this,

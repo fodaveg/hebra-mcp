@@ -182,7 +182,11 @@ export async function checkpointAfterBatch(
             })
         },
         exportDocument: async (id, head) => {
-          const exported = await exportDocument({ libraryId: source.libraryId, store: wiring.store }, id, head);
+          const exported = await exportDocument(
+            { libraryId: source.libraryId, store: wiring.store, blobRead: (sha256) => source.port.blobRead(sha256) },
+            id,
+            head
+          );
           const after = await source.port.docRead(id);
           if (fingerprint(after) !== reference) throw new StaleExport('stale');
           return exported;

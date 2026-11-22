@@ -18,10 +18,10 @@
  * `documentBytesForCopy` filtra siempre: antes de pedir el punto de control el documento tiene
  * que verse, y después de pedirlo, sus bytes no pueden ser los de algo oculto (regla (b) de D10).
  *
- * Punto de unión pendiente: `ensureCheckpoint` exporta con el exportador de formatos que se
- * registra con `setDocumentExporter` (`./document-channel`). Mientras nadie lo registre, duplicar
- * falla con `DocumentExportUnavailableError` y no escribe nada. Cuando exista, no hay que tocar
- * este fichero.
+ * `ensureCheckpoint` exporta con el exportador de formatos que se registra con
+ * `setDocumentExporter` (`./document-channel`); el de `.ods` lo registra el escritor en
+ * `localWriteContext` (`../server/tools/sheet-export.ts`). Sin exportador, duplicar falla con
+ * `DocumentExportUnavailableError` y no escribe nada.
  */
 import * as Y from 'yjs';
 import type { DocFormatAdapter, DocHeadRecord, DocStoreAtomicPort } from '../../vendor/hebra/src/lib/documents/contract';

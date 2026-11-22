@@ -12,6 +12,8 @@
  */
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import * as Y from 'yjs';
+import { createSheetAdapter, prepareSheetBase } from '../../src/sheets';
 import { writerSocketHandlers } from '../../src/server/forward';
 import { localWriteContext } from '../../src/server/serve';
 import { buildSheetFile } from '../../src/server/tools/create-sheet';
@@ -94,6 +96,30 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T | 'colgado'
   }
 }
 
+/** El valor de `B1` de la primera hoja de unos bytes `.ods`, leído como un fichero nuevo. */
+async function b1Of(bytes: Uint8Array): Promise<unknown> {
+  const adapter = createSheetAdapter(await prepareSheetBase(bytes));
+  const doc = new Y.Doc();
+  try {
+    adapter.scaffold(bytes, doc);
+    const model = await adapter.project(bytes, doc, new AbortController().signal);
+    const sheet = model.sheets[0]!;
+    return sheet.cells.get(`${sheet.rows.idAt(0)}:${sheet.cols.idAt(1)}`);
+  } finally {
+    doc.destroy();
+  }
+}
+
+/** Los bytes que tiene hoy `files.sha256` de `id`, y el hash. */
+async function fileBytes(writer: LibraryInstance, id: string): Promise<{ sha256: string; bytes: Uint8Array }> {
+  const port = writer.port.documentSource().port;
+  const row = await port.fileRead(id);
+  if (!row) throw new Error('sin fila');
+  const bytes = await port.blobRead(row.sha256);
+  if (!bytes) throw new Error('sin bytes');
+  return { sha256: row.sha256, bytes };
+}
+
 describe('hojas con el escritor vinculado al sync (H-BLOQUEO-SYNC)', () => {
   it('editar una hoja vuelve en el plazo: la limpieza de blobs no se espera a sí misma', async () => {
     const { write } = await linkedWriter();
@@ -101,5 +127,40 @@ describe('hojas con el escritor vinculado al sync (H-BLOQUEO-SYNC)', () => {
     const edited = await within(editCell(write, id, 42, 43), EDIT_DEADLINE_MS);
     expect(edited).not.toBe('colgado');
     expect(edited).toMatchObject({ ok: true, out: { id, outcome: 'saved' } });
+  });
+
+  it('tras un lote, el punto de control deja en files un .ods que se relee con el cambio', async () => {
+    const { writer, write } = await linkedWriter();
+    const id = await createBook(write);
+    const before = await fileBytes(writer, id);
+    expect(await b1Of(before.bytes)).toBe(42);
+
+    expect(await editCell(write, id, 42, 43)).toMatchObject({ ok: true });
+    const after = await fileBytes(writer, id);
+    expect(after.sha256).not.toBe(before.sha256);
+    const { head } = await writer.port.documentSource().port.docRead(id);
+    expect(head?.checkpointSha256).toBe(after.sha256);
+    expect(await b1Of(after.bytes)).toBe(43);
+  });
+
+  it('duplicar un documento con cabecera da una copia con la última edición', async () => {
+    const { writer, write } = await linkedWriter();
+    const id = await createBook(write);
+    expect(await editCell(write, id, 42, 43)).toMatchObject({ ok: true });
+    // El segundo lote cae dentro de los 30 minutos: no hay punto de control automático y
+    // `files.sha256` se queda en 43. Duplicar tiene que pedir el suyo.
+    expect(await editCell(write, id, 43, 44)).toMatchObject({ ok: true });
+    expect(await b1Of((await fileBytes(writer, id)).bytes)).toBe(43);
+
+    const copy = await write.looseFileWrite!({
+      action: 'duplicateFile',
+      id,
+      name: 'Copia.ods',
+      operationId: randomUUID(),
+      privacy: OPEN
+    });
+    expect(copy).toMatchObject({ name: 'Copia.ods' });
+    expect(await b1Of((await fileBytes(writer, copy.id)).bytes)).toBe(44);
+    expect(await b1Of((await fileBytes(writer, id)).bytes)).toBe(44);
   });
 });
