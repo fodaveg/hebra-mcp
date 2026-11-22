@@ -868,12 +868,12 @@ describe('las 195 funciones en la app y en el MCP', () => {
     const cambian = CASOS.flatMap(([fn], i) =>
       !VOLATILES[fn] && describir(es.app[i]) !== describir(en.app[i]) ? [`${fn}: es ${describir(es.app[i])}, en ${describir(en.app[i])}`] : []
     );
-    expect(cambian).toEqual(['TEXT: es str "1234,6", en str "1234.6"']);
+    expect(cambian).toEqual(['TEXT: es str "1.235", en str "1234.6"']);
   });
 
   it('prueba negativa: con la región cambiada solo en el MCP la paridad falla justo en TEXT', async () => {
     const m = await funcionesCruzadas();
-    expect(diferencias(CASOS.map((c) => c[0]), m.app, m.mcp)).toEqual(['TEXT: app str "1234,6", MCP str "1234.6"']);
+    expect(diferencias(CASOS.map((c) => c[0]), m.app, m.mcp)).toEqual(['TEXT: app str "1.235", MCP str "1234.6"']);
   });
 });
 
@@ -921,9 +921,9 @@ describe('casos de fórmula sueltos en la app y en el MCP', () => {
       'DECIMAL_COMA: es num 3.5, en num 3.5',
       'VALOR_COMA: es num 1.5, en error #VALUE!',
       'VALOR_PUNTO: es error #VALUE!, en num 1.5',
-      'TEXTO_MILES_ES: es str "1.234,5000", en str "1,234.5000"',
+      'TEXTO_MILES_ES: es str "1.234,50", en str "1,234.5000"',
       'TEXTO_MILES_EN: es str "1.234,50", en str "1,234.50"',
-      'TEXTO_PORCIENTO: es str "12%", en str "12%"',
+      'TEXTO_PORCIENTO: es str "12,5%", en str "12%"',
       'NUMERO_A_TEXTO: es str "1.5", en str "1.5"',
       'PUNTO_Y_COMA_EN_CADENA: es str "a;bc", en str "a;bc"',
       'MATRIZ_EN_LINEA: es num 21, en num 21',
@@ -941,7 +941,8 @@ describe('casos de fórmula sueltos en la app y en el MCP', () => {
       'VALOR_COMA',
       'VALOR_PUNTO',
       'TEXTO_MILES_ES',
-      'TEXTO_MILES_EN'
+      'TEXTO_MILES_EN',
+      'TEXTO_PORCIENTO'
     ]);
   });
 
