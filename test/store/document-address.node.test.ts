@@ -1,8 +1,8 @@
 /**
- * B-N09 (R16): la regla de direcciones. Un lote con A1 o índices exige `expect` o
- * `expectedRevision`, y `expectedLayout` se añade a eso sin sustituirlo (H-80b: la regla del
- * contrato de hojas); los ids estables no. R16 usa una hoja de juguete que desplaza filas: sin
- * garantía, A1 escribe en otra fila.
+ * B-N09 (R16): la regla de direcciones. Un lote con A1 o índices exige `expectedRevision`, o
+ * `expect` en cada operación con `expectedLayout` (H-80b-BASE, plan-base-documentos 2.3.4); los
+ * ids estables no. R16 usa una hoja de juguete que desplaza filas: sin garantía, A1 escribe en
+ * otra fila.
  */
 import { describe, expect, it } from 'vitest';
 import { assertAddressRule, DocumentAddressError } from '../../src/store/document-address';
@@ -38,25 +38,40 @@ describe('assertAddressRule', () => {
     ).not.toThrow();
   });
 
-  it('cada garantía basta: expect o expectedRevision', () => {
+  it('cada garantía basta: expectedRevision, o expect con expectedLayout', () => {
     const ops: Op[] = [{ cell: 'A2', value: 'x', expect: { A2: '' } }];
-    expect(() => assertAddressRule<Op>({ ops }, byA1)).not.toThrow();
     expect(() => assertAddressRule<Op>({ ops, expectedLayout: 'l1' }, byA1)).not.toThrow();
     const bare: Op[] = [{ cell: 'A2', value: 'x' }];
     expect(() => assertAddressRule<Op>({ ops: bare, expectedRevision: 'r1' }, byA1)).not.toThrow();
   });
 
-  it('expectedLayout solo es un control añadido: sin expect ni expectedRevision, batch_invalid', () => {
-    // La regla del contrato de hojas (`SheetBatch`, `compileBatch`): `expectedLayout` no ve que
-    // otra persona escribió en el destino, solo que cambiaron los ejes.
+  it('expect sin expectedLayout ni expectedRevision es batch_invalid con la ruta expectedLayout', () => {
+    // plan-base-documentos 2.3.4: con una fila insertada y el destino vacío, el expect null sigue
+    // casando; solo expectedLayout nota que el eje cambió.
+    const ops: Op[] = [{ cell: 'A2', value: 'x', expect: { A2: '' } }, { id: 'r1', value: 'y' }];
+    const err = failure(() => assertAddressRule<Op>({ ops }, byA1));
+    expect(err.error.issues).toEqual([
+      { opIndex: 0, path: 'expectedLayout', reason: 'expect sin expectedLayout', expected: expect.any(String) }
+    ]);
+  });
+
+  it('expectedLayout sola, sin expect ni expectedRevision, es batch_invalid', () => {
+    // `expectedLayout` no ve que otra persona escribió en el destino, solo que cambiaron los ejes.
     const bare: Op[] = [{ cell: 'A2', value: 'x' }];
     const err = failure(() => assertAddressRule<Op>({ ops: bare, expectedLayout: 'l1' }, byA1));
     expect(err.error.issues.map((i) => i.path)).toEqual(['ops[0].expect']);
   });
 
+  it('un lote solo con ids estables no pide expectedLayout', () => {
+    expect(() => assertAddressRule<Op>({ ops: [{ id: 'r1', value: 'x' }] }, byA1)).not.toThrow();
+  });
+
   it('un expect vacío o una garantía vacía no cuentan', () => {
     const ops: Op[] = [{ cell: 'A2', value: 'x', expect: {} }];
     failure(() => assertAddressRule<Op>({ ops, expectedRevision: '', expectedLayout: '' }, byA1));
+    const full: Op[] = [{ cell: 'A2', value: 'x', expect: { A2: '' } }];
+    const err = failure(() => assertAddressRule<Op>({ ops: full, expectedLayout: '' }, byA1));
+    expect(err.error.issues.map((i) => i.path)).toEqual(['expectedLayout']);
   });
 
   it('deshacer no direcciona nada', () => {
@@ -108,5 +123,10 @@ describe('R16: A1 escribe en otra fila', () => {
     expect(s.rows[2]).toBe('nuevo');
     expect(s.rows).not.toContain('dos');
     failure(() => assertAddressRule<Op>({ ops: [{ cell: 'A3', value: 'nuevo' }] }, byA1));
+    // Con expect del destino vacío tampoco basta: casaría en la fila desplazada.
+    const err = failure(() =>
+      assertAddressRule<Op>({ ops: [{ cell: 'A3', value: 'nuevo', expect: { A3: '' } }] }, byA1)
+    );
+    expect(err.error.issues.map((i) => i.path)).toEqual(['expectedLayout']);
   });
 });

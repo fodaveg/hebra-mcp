@@ -4,18 +4,20 @@
  * otra celda: un lote que direcciona por A1 o por índice necesita una garantía de que la
  * dirección sigue apuntando a lo leído. Los elementos con id estable no la necesitan.
  *
- * La garantía es una de estas dos:
- * - `expect` en la operación (su dirección o id como clave).
+ * La garantía es una de estas dos (plan-base-documentos 2.3.4):
  * - `expectedRevision` del lote.
+ * - `expect` en CADA operación con direcciones (su dirección o id como clave) Y `expectedLayout`
+ *   del lote (la `layoutRevision` leída).
  *
- * `expectedLayout` (la `layoutRevision` leída; solo hojas) es un control añadido y NO es una
- * garantía: solo cambia con los ejes, así que no ve que otra persona escribió en el destino. Un
- * lote con direcciones que solo trae `expectedLayout` es `batch_invalid`. Es la regla del contrato
- * de hojas (`SheetBatch` del plan de hojas, sección 3.3, y `compileBatch` de H-30), la misma que
- * aplica `hebra_edit_sheet`; `test/tools/edit-sheet.node.test.ts` compara las dos caso por caso.
+ * `expect` solo no basta: si alguien inserta una fila y la celda desplazada también está vacía,
+ * `expect: null` se cumple y el lote escribe en otra fila; `expectedLayout` cambia con los ejes y
+ * lo nota. `expectedLayout` solo tampoco basta: no ve que otra persona escribió en el destino. Es la
+ * regla de `compileBatch` (H-30), la misma que aplica `hebra_edit_sheet`;
+ * `test/tools/edit-sheet.node.test.ts` compara las dos caso por caso.
  *
- * Sin ninguna, `batch_invalid` con la ruta de cada operación sin garantía. Los motivos son
- * fijos y nunca repiten contenido del documento.
+ * Sin `expectedRevision`, `batch_invalid` con la ruta de cada operación sin `expect` y, si todas lo
+ * llevan pero falta `expectedLayout`, una sola incidencia con la ruta `expectedLayout`. Los
+ * motivos son fijos y nunca repiten contenido del documento.
  */
 import { BATCH_INVALID_ISSUES_MAX } from './document-limits';
 import type { BatchIssue, DocumentError, EditIn } from './document-types';
@@ -37,6 +39,8 @@ export type AddressRuleInput<Op> = Pick<EditIn<Op>, 'expectedRevision' | 'expect
 
 const REASON = 'direccion por posicion sin garantia';
 const EXPECTED = 'expect en la operacion o expectedRevision';
+const LAYOUT_REASON = 'expect sin expectedLayout';
+const LAYOUT_EXPECTED = 'expectedLayout con la layoutRevision leida, o expectedRevision';
 
 function hasText(value: string | undefined): boolean {
   return typeof value === 'string' && value.length > 0;
@@ -53,12 +57,14 @@ export function assertAddressRule<Op>(
 ): void {
   const ops = input.ops;
   if (!ops) return;
-  // La garantía del lote cubre todas las operaciones; `expectedLayout` no lo es (ver la cabecera).
+  // La revisión del lote cubre todas las operaciones; si no, `expect` y `expectedLayout` (ver la cabecera).
   if (hasText(input.expectedRevision)) return;
   const issues: BatchIssue[] = [];
   let total = 0;
+  let addressed = false;
   ops.forEach((op, index) => {
     if (!isAddressed(op, index)) return;
+    addressed = true;
     const expect = (op as { expect?: Record<string, unknown> }).expect;
     if (expect && Object.keys(expect).length > 0) return;
     total += 1;
@@ -67,4 +73,7 @@ export function assertAddressRule<Op>(
     }
   });
   if (total > 0) throw new DocumentAddressError(issues);
+  if (addressed && !hasText(input.expectedLayout)) {
+    throw new DocumentAddressError([{ opIndex: 0, path: 'expectedLayout', reason: LAYOUT_REASON, expected: LAYOUT_EXPECTED }]);
+  }
 }

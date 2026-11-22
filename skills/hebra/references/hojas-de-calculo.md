@@ -36,9 +36,9 @@ pintada con `hebra_render_sheet`.
    errores, nombres definidos), sin celdas.
 3. `hebra_read_sheet` con `sheet` y `range`, pidiendo solo lo que necesitas en `include`. Guarda
    `revision` y `layoutRevision`.
-4. `hebra_edit_sheet` con el lote. Cada comando que usa direcciones lleva `expect` con lo que
-   leíste en ese destino, o el lote lleva `expectedRevision` (siguiente apartado). Si dudas,
-   primero con `dryRun: true`.
+4. `hebra_edit_sheet` con el lote. O el lote lleva `expectedRevision`, o cada comando que usa
+   direcciones lleva `expect` con lo que leíste en ese destino Y el lote lleva `expectedLayout`
+   con la `layoutRevision` leída (siguiente apartado). Si dudas, primero con `dryRun: true`.
 5. Si responde `precondition_failed`, alguien cambió el destino: vuelve al paso 3 y rehaz el lote
    sobre lo leído. Nunca lo reintentes igual.
 6. Con la respuesta no hace falta releer: trae `revision`, `layoutRevision`, el recuento de
@@ -100,18 +100,23 @@ Una dirección como `B3` apunta a lo que haya en ese sitio cuando el lote entra,
 Si otra persona inserta una fila, `B3` es ya otra celda. Por eso un lote que usa direcciones tiene
 que probar que lo leído sigue valiendo, con una de estas dos garantías:
 
-- **`expect` en el comando**, con lo que leíste en sus destinos. Garantía fina: solo falla si
-  cambió ESE destino.
 - **`expectedRevision` en el lote**, la `revision` leída. Cubre todos los comandos, pero falla si
   cambió cualquier cosa del documento.
+- **`expect` en CADA comando con direcciones y además `expectedLayout` en el lote.** `expect` lleva
+  lo que leíste en sus destinos y solo falla si cambió ESE destino; `expectedLayout` es la
+  `layoutRevision` leída y falla si alguien insertó o borró filas, columnas u hojas.
 
-Un lote con comandos con direcciones y ninguna de las dos es `batch_invalid`, sin escribir nada
-(motivo: `direccion por posicion sin garantia`). El `expect` vacío (`{}`) no cuenta.
+En una frase: sin `expectedRevision`, cada comando con direcciones lleva su `expect` y el lote
+lleva la `layoutRevision` leída como `expectedLayout`.
 
-**`expectedLayout` solo NO basta.** Es un control añadido, nunca la garantía: se pasa ADEMÁS de
-`expect` o de `expectedRevision`. Sirve para lo que un `expect` no ve: una fila o columna insertada
-por otra persona que desplaza el destino aunque las dos celdas estén vacías. Si caducó,
-`precondition_failed` con `target: "expectedLayout"` y no se escribe nada.
+`expect` solo no basta: si otra persona inserta una fila y el destino desplazado también está
+vacío, un `expect` con `null` sigue casando y el lote escribiría en otra fila. Por eso un lote con
+`expect` y sin `expectedLayout` ni `expectedRevision` es `batch_invalid` con `path: "expectedLayout"`.
+
+**`expectedLayout` solo NO basta.** No ve que otra persona escribió en el destino: sin `expect` en
+cada comando ni `expectedRevision`, `batch_invalid` (motivo: `direccion por posicion sin
+garantia`). El `expect` vacío (`{}`) no cuenta. Si la `expectedLayout` caducó,
+`precondition_failed` con `target: "expectedLayout"` y no se escribe nada: relee y rehaz el lote.
 
 Comandos con direcciones (necesitan garantía): `setCells`, `setFormat`, `insertAxis`, `deleteAxis`,
 `hideAxis`, `showAxis`, `setAxisSize`, `merge` y `unmerge`. Los demás (`addSheet`,
@@ -267,8 +272,9 @@ Leer el resumen y después la tabla, con fórmulas:
 { "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10", "sheet": "Hoja 1", "range": "A1:B4", "include": ["values", "formulas"] }
 ```
 
-Cambiar una celda leída. El `expect` lleva lo que había (`350`); si otra persona la cambió, el
-lote falla sin escribir:
+Cambiar una celda leída. El `expect` lleva lo que había (`350`) y `expectedLayout` la
+`layoutRevision` de la lectura; si otra persona cambió la celda o movió filas, el lote falla sin
+escribir:
 
 ```json hebra_edit_sheet
 {
@@ -276,12 +282,13 @@ lote falla sin escribir:
   "ops": [
     { "type": "setCells", "sheet": "Hoja 1", "start": "B3", "rows": [[400]], "expect": { "B3": 350 } }
   ],
+  "expectedLayout": "layout-leida",
   "operationId": "0b6e9c2a-51d4-4c7f-8e13-a94f2d7c3b02"
 }
 ```
 
 Añadir una fila y reescribir el total. `A5:B5` estaba vacío; el total se espera con su fórmula, no con
-su valor. `expectedLayout` va además de los `expect`, nunca solo:
+su valor. `expectedLayout` va con los `expect`, nunca solo:
 
 ```json hebra_edit_sheet
 {
@@ -310,7 +317,7 @@ después en esa hoja va en OTRO lote, con una lectura nueva:
 ```
 
 Ocultar una hoja, mostrar otra y dar alto a la fila 1 en puntos. Los dos primeros comandos no
-necesitan garantía; el tercero lleva su `expect`:
+necesitan garantía; el tercero lleva su `expect` y el lote, `expectedLayout`:
 
 ```json hebra_edit_sheet
 {
@@ -320,6 +327,7 @@ necesitan garantía; el tercero lleva su `expect`:
     { "type": "setSheetHidden", "sheet": "Calculos", "hidden": false },
     { "type": "setAxisSize", "sheet": "Hoja 1", "axis": "row", "at": 1, "count": 1, "size": 24, "unit": "pt", "expect": { "A1": "Concepto" } }
   ],
+  "expectedLayout": "layout-leida",
   "operationId": "e84b1d63-7c0a-4a95-8f2e-31d6b9c0a705"
 }
 ```
@@ -362,6 +370,19 @@ Lo que NO entra. Escribir por dirección sin `expect` ni `expectedRevision` es `
 }
 ```
 
+Y `expect` sin `expectedLayout` (ni `expectedRevision`) tampoco entra: es `batch_invalid` con
+`path: "expectedLayout"`. Añade la `layoutRevision` leída:
+
+```json hebra_edit_sheet batch_invalid
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "setCells", "sheet": "Hoja 1", "start": "A5", "rows": [["Transporte"]], "expect": { "A5": null } }
+  ],
+  "operationId": "4c8e2a17-6f3b-4d90-a5e1-92b7d0c4e810"
+}
+```
+
 Un `expect` que ya no casa (aquí la celda ya no vale `999`) es `precondition_failed` en ese comando:
 
 ```json hebra_edit_sheet precondition_failed
@@ -370,6 +391,7 @@ Un `expect` que ya no casa (aquí la celda ya no vale `999`) es `precondition_fa
   "ops": [
     { "type": "setCells", "sheet": "Hoja 1", "start": "B3", "rows": [[400]], "expect": { "B3": 999 } }
   ],
+  "expectedLayout": "layout-leida",
   "operationId": "6a0c3e57-b8d1-4f29-9e74-c5d2a1b8f909"
 }
 ```

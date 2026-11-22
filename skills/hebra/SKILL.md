@@ -179,9 +179,10 @@ Un documento (hoy, una hoja `.ods`) no se edita con sustituciones de texto sino 
 comandos por dirección, de 1 a 200, que **entra entero o no entra**.
 
 1. **Lee antes**: la lectura da `revision` y, en una hoja, `layoutRevision`.
-2. **Una dirección (`B3`, una fila, una columna) necesita una garantía**: `expect` en el comando,
-   con lo que leíste en ese destino (`null` si estaba vacío), o `expectedRevision` en el lote. Sin
-   ninguna, `batch_invalid`. `expectedLayout` solo no es una garantía: se añade a las otras.
+2. **Una dirección (`B3`, una fila, una columna) necesita una garantía**: `expectedRevision` en el
+   lote, o bien `expect` en cada comando con direcciones (lo que leíste en ese destino, `null` si
+   estaba vacío) Y `expectedLayout` en el lote con la `layoutRevision` leída. Sin ninguna,
+   `batch_invalid`. Ni `expect` solo ni `expectedLayout` solo bastan.
 3. **`precondition_failed`**: alguien cambió el destino. Relee, rehaz el lote sobre lo leído y usa
    un `operationId` nuevo; nunca reintentes el mismo lote ni quites la garantía para que pase.
 4. **`operationId`**: un UUID nuevo por lote. Si se pierde la respuesta, reintenta con el MISMO:

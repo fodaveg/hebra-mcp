@@ -156,8 +156,25 @@ describe('referencia de hojas de cálculo de la skill (H-180)', () => {
     const example = EDIT.find((item) => item.reason === 'batch_invalid') as Example;
     const out = compileBatch(model, batchOf(example, model));
     expect('error' in out ? out.reason : '').toContain('necesita "expect" o "expectedRevision"');
-    // Con `expectedLayout` y nada más: sigue sin valer (es un control añadido, no una garantía).
+    // Con `expectedLayout` y nada más: sigue sin valer (no ve que otra persona escribió en el destino).
     expect('expectedLayout' in example.input).toBe(true);
+  });
+
+  it('el ejemplo con expect y sin expectedLayout lo rechaza la regla por expectedLayout (H-80b-BASE)', async () => {
+    const model = await bookOf(CREATE[0] as Example);
+    const example = EDIT.find(
+      (item) =>
+        item.reason === 'batch_invalid' &&
+        !('expectedLayout' in item.input) &&
+        !('expectedRevision' in item.input) &&
+        (item.input.ops as Array<{ expect?: unknown }>).every((op) => op.expect !== undefined)
+    ) as Example;
+    expect(example).toBeDefined();
+    const out = compileBatch(model, batchOf(example, model));
+    expect('error' in out ? out : null).toMatchObject({ error: 'batch_invalid', opIndex: null });
+    expect('error' in out ? out.reason : '').toContain('expectedLayout');
+    // Con la `layoutRevision` leída, el mismo lote entra.
+    expect('error' in compileBatch(model, { ...batchOf(example, model), expectedLayout: model.layoutRevision })).toBe(false);
   });
 
   it('nombra cada herramienta, cada comando del contrato y cada campo de la regla', () => {
@@ -167,8 +184,9 @@ describe('referencia de hojas de cálculo de la skill (H-180)', () => {
     for (const word of ['expect', 'expectedRevision', 'expectedLayout', 'layoutRevision', 'nextCursor', 'dryRun', 'undoOperationId', 'untrustedContent', 'spilled']) {
       expect(mentioned(word), word).toBe(true);
     }
-    // La regla de garantías con la advertencia sobre `expectedLayout`.
+    // La regla de garantías con las dos advertencias: ni `expectedLayout` solo ni `expect` solo.
     expect(TEXT).toContain('`expectedLayout` solo NO basta');
+    expect(TEXT).toContain('`expect` solo no basta');
   });
 
   it('los topes escritos coinciden con los del código', () => {

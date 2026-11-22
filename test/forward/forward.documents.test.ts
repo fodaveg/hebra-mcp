@@ -172,6 +172,7 @@ describe('hojas desde un lector: crear y editar van por el socket (H-177)', () =
     const edited = await call(client, 'hebra_edit_sheet', {
       id: created.id,
       ops: [{ type: 'setCells', sheet: 'Hoja 1', start: 'B1', rows: [[43]], expect: { B1: 42 } }],
+      expectedLayout: created.layoutRevision,
       operationId: randomUUID()
     });
     expect(edited.isError, JSON.stringify(edited.value)).toBe(false);

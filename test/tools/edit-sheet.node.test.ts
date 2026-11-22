@@ -33,6 +33,10 @@
  *   fuera de tope» (el lote llega al escritor y lo rechaza `compileBatch`, no el esquema).
  * - H-TOPES-MCP: `SHEET_ODS_READ_LIMITS` en el adaptador de `openSheetRead`: cae «se edita y se
  *   guarda» (`ExportOdsError` al guardar: el paquete entero pasa de 4 MiB).
+ * - H-80b-BASE: no exigir `expectedLayout` a un lote con `expect` en `assertAddressRule`: cae «la
+ *   regla de direcciones es la misma»; con `vendor/hebra` en el SHA anterior (la regla vieja de
+ *   `compileBatch`) caen además «una expectedLayout caducada no aplica nada» (el lote sin
+ *   `expectedLayout` entra) y dos de `skill-hojas.test.ts`.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -267,17 +271,19 @@ async function world(options: { folder?: 'Hojas' | 'Diario'; shared?: boolean; b
   /**
    * Otra persona escribe un lote entre la fase 2 y la 3 de `edit`: por el escritor, con los mismos
    * comandos ya validados, pero sin la cola de hojas de la herramienta, que tiene el hueco de la
-   * edición en curso (una herramienta dentro de otra se esperaría a sí misma).
+   * edición en curso (una herramienta dentro de otra se esperaría a sí misma). Lee justo antes de
+   * escribir y manda su `expectedLayout`, como pide la regla de direcciones a un lote con `expect`.
    */
   const other = async (input: { operationId: string; ops: unknown[] }) => {
     const parsed = parseSheetCommands(input.ops, undefined);
     if (!parsed.ok) throw new Error(parsed.error.code);
     const batch: SheetBatchOp = { type: 'sheet.batch', seed: input.operationId, commands: parsed.ops };
+    const { layoutRevision: expectedLayout } = await readState({ port, fileId, bytes });
     const result = await writer({
       format: 'ods',
       privacy: config,
       action: 'edit',
-      input: { id: fileId, operationId: input.operationId, ops: [batch] }
+      input: { id: fileId, operationId: input.operationId, ops: [batch], expectedLayout }
     });
     if (!result.ok) throw new Error(result.error.code);
   };
@@ -354,7 +360,10 @@ describe('hebra_edit_sheet (H-80)', () => {
   it('un expect viejo da precondition_failed y no escribe nada', async () => {
     const h = await world();
     const before = await readState(h);
-    await expectCode(h.edit({ operationId: 'op-1', ops: [set('A1', [[5]], { A1: 'otro' })] }), 'precondition_failed');
+    await expectCode(
+      h.edit({ operationId: 'op-1', expectedLayout: before.layoutRevision, ops: [set('A1', [[5]], { A1: 'otro' })] }),
+      'precondition_failed'
+    );
     expect((await stored(h)).updates).toBe(0);
     expect((await readState(h)).cells.A1).toBe(before.cells.A1);
   });
@@ -387,8 +396,13 @@ describe('hebra_edit_sheet (H-80)', () => {
 
   it('el lote es atómico: un comando que no casa en la fase 2 deja sin escribir los de antes', async () => {
     const h = await world();
+    const before = await readState(h);
     const error = await expectCode(
-      h.edit({ operationId: 'op-1', ops: [set('C2', [['nuevo']], { C2: null }), set('A1', [[5]], { A1: 999 })] }),
+      h.edit({
+        operationId: 'op-1',
+        expectedLayout: before.layoutRevision,
+        ops: [set('C2', [['nuevo']], { C2: null }), set('A1', [[5]], { A1: 999 })]
+      }),
       'precondition_failed'
     );
     expect(error.extra).toMatchObject({ opIndex: 1, target: 'ops.1' });
@@ -485,7 +499,7 @@ describe('carpeta privada y espacio de solo lectura', () => {
     hooks.betweenPhases = async () => {
       await h.port.writeExclusive(async (store) => store.fileMove(h.fileId, h.diario));
     };
-    await expectCode(h.edit({ operationId: 'op-2', ops: [set('A1', [[10]], { A1: 1 })] }), 'not_found');
+    await expectCode(h.edit({ operationId: 'op-2', expectedLayout: before.layoutRevision, ops: [set('A1', [[10]], { A1: 1 })] }), 'not_found');
     expect((await stored(h)).updates).toBe(written.updates);
     expect((await readState(h)).cells.A1).toBe(1);
   });
@@ -510,7 +524,10 @@ describe('carpeta privada y espacio de solo lectura', () => {
     hooks.betweenPhases = async () => {
       await h.port.syncStorePort().syncApplyPage(readOnlyPage());
     };
-    await expectCode(h.edit({ operationId: 'op-2', ops: [set('A1', [[10]], { A1: 1 })] }), 'client_outdated');
+    await expectCode(
+      h.edit({ operationId: 'op-2', expectedLayout: before.layoutRevision, ops: [set('A1', [[10]], { A1: 1 })] }),
+      'client_outdated'
+    );
     expect((await stored(h)).updates).toBe(written.updates);
     expect((await readState(h)).cells.A1).toBe(1);
   });
@@ -536,7 +553,7 @@ describe('dryRun', () => {
     const before = await readState(h);
     const real = await h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [set('A1', [[10]])] });
     const written = await stored(h);
-    const out = await h.edit({ operationId: 'op-2', dryRun: true, ops: [set('A1', [[99]], { A1: 10 })] });
+    const out = await h.edit({ operationId: 'op-2', dryRun: true, expectedLayout: before.layoutRevision, ops: [set('A1', [[99]], { A1: 10 })] });
     expect(out).toMatchObject({ outcome: 'validated', revision: real.revision, changed: { cells: 1 } });
     expect((await stored(h)).updates).toBe(written.updates);
     expect((await readState(h)).cells.A1).toBe(10);
@@ -544,8 +561,14 @@ describe('dryRun', () => {
 
   it('dryRun también rechaza lo que no casa, sin escribir', async () => {
     const h = await world();
+    const before = await readState(h);
     const error = await expectCode(
-      h.edit({ operationId: 'op-1', dryRun: true, ops: [set('C2', [['x']], { C2: null }), set('A1', [[5]], { A1: 999 })] }),
+      h.edit({
+        operationId: 'op-1',
+        dryRun: true,
+        expectedLayout: before.layoutRevision,
+        ops: [set('C2', [['x']], { C2: null }), set('A1', [[5]], { A1: 999 })]
+      }),
       'precondition_failed'
     );
     expect(error.extra).toMatchObject({ opIndex: 1 });
@@ -621,7 +644,7 @@ describe('deshacer', () => {
     const h = await world();
     const before = await readState(h);
     await h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [set('A1', [[10]])] });
-    await h.edit({ operationId: 'op-2', ops: [set('A1', [[30]], { A1: 10 })] });
+    await h.edit({ operationId: 'op-2', expectedLayout: before.layoutRevision, ops: [set('A1', [[30]], { A1: 10 })] });
     const written = await stored(h);
     await expectCode(h.edit({ operationId: 'op-u', undoOperationId: 'op-1' }), 'precondition_failed');
     expect((await stored(h)).updates).toBe(written.updates);
@@ -717,11 +740,16 @@ describe('medidas de filas y columnas (setAxisSize)', () => {
 describe('persona a la vez entre la fase 2 y la 3', () => {
   it('en la misma celda da precondition_failed sin escribir, con el comando que falló', async () => {
     const h = await world();
+    const before = await readState(h);
     hooks.betweenPhases = async () => {
       await h.other({ operationId: 'otra-persona', ops: [set('A1', [[50]], { A1: 1 })] });
     };
     const error = await expectCode(
-      h.edit({ operationId: 'op-1', ops: [set('C2', [['nuevo']], { C2: null }), set('A1', [[100]], { A1: 1 })] }),
+      h.edit({
+        operationId: 'op-1',
+        expectedLayout: before.layoutRevision,
+        ops: [set('C2', [['nuevo']], { C2: null }), set('A1', [[100]], { A1: 1 })]
+      }),
       'precondition_failed'
     );
     // El comando del LLM que falló, no la operación de la sesión (siempre la 0).
@@ -738,7 +766,7 @@ describe('persona a la vez entre la fase 2 y la 3', () => {
       // 4 operaciones del primer comando, ninguna del segundo (`freeze` no direcciona celdas y da
       // una), 1 del tercero.
       const batch = { type: 'sheet.batch' as const, seed: 'op-1', commands: [set('A1', [[1, 2], [3, 4]]), { type: 'freeze', sheet: 'Datos', rows: 1, cols: 0 } as SheetCommand, set('D1', [[5]])] };
-      const commandOf = commandLocator(opened.read.model, batch, opened.read.revision);
+      const commandOf = commandLocator(opened.read.model, batch, { expectedRevision: opened.read.revision });
       expect([0, 1, 2, 3, 4, 5].map(commandOf)).toEqual([0, 0, 0, 0, 1, 2]);
     } finally {
       await opened.close();
@@ -748,10 +776,11 @@ describe('persona a la vez entre la fase 2 y la 3', () => {
   it('en otra celda entra sin copia de conflicto y no pierde la otra escritura', async () => {
     const h = await world();
     const filesBefore = (await h.port.filesIndex()).files.length;
+    const before = await readState(h);
     hooks.betweenPhases = async () => {
       await h.other({ operationId: 'otra-persona', ops: [set('A3', [[70]], { A3: 3 })] });
     };
-    const out = await h.edit({ operationId: 'op-1', ops: [set('A1', [[100]], { A1: 1 })] });
+    const out = await h.edit({ operationId: 'op-1', expectedLayout: before.layoutRevision, ops: [set('A1', [[100]], { A1: 1 })] });
     expect(out.outcome).toBe('saved');
     expect((await readState(h)).cells).toMatchObject({ A1: 100, A3: 70 });
     expect((await h.port.filesIndex()).files.length).toBe(filesBefore);
@@ -770,6 +799,10 @@ describe('expectedLayout', () => {
       'precondition_failed'
     );
     expect(error.extra).toMatchObject({ target: 'expectedLayout' });
+    // El mismo lote sin expectedLayout: el `expect` vacío casaría en la fila desplazada, así que la
+    // regla de direcciones lo rechaza (plan-base-documentos 2.3.4).
+    const bare = await expectCode(h.edit({ operationId: 'op-2', ops: [set('A4', [['total']], { A4: null })] }), 'batch_invalid');
+    expect(bare.extra).toMatchObject({ issues: [{ opIndex: 0, path: 'expectedLayout' }] });
     expect((await stored(h)).updates).toBe(written.updates);
     expect((await readState(h)).cells).toMatchObject({ A4: null, A5: null });
   });
@@ -800,6 +833,7 @@ describe('un corte entre el append y la respuesta', () => {
     // `expect` vuelve a casar, así que solo el registro de la operación evita una segunda fila.
     const input = {
       operationId: 'op-1',
+      expectedLayout: before.layoutRevision,
       ops: [{ type: 'insertAxis', sheet: 'Datos', axis: 'row', at: 10, count: 1, expect: { A10: null } } as SheetCommand]
     };
     hooks.cut = true;
@@ -837,19 +871,20 @@ describe('errores de fórmula con el motor real', () => {
 
   it('un lote sin fórmulas no arranca el motor', async () => {
     const h = await world();
-    const out = await h.edit({ operationId: 'op-1', ops: [set('A1', [[5]], { A1: 1 })] });
+    const before = await readState(h);
+    const out = await h.edit({ operationId: 'op-1', expectedLayout: before.layoutRevision, ops: [set('A1', [[5]], { A1: 1 })] });
     expect(out).toMatchObject({ recalculated: { cells: 0, ms: 0 }, formulaErrors: [] });
   });
 });
 
 describe('la regla de direcciones es la misma en hebra_edit_sheet y en assertAddressRule', () => {
-  it('caso por caso: expect, expectedRevision, expect con expectedLayout, solo expectedLayout y nada', async () => {
+  it('caso por caso: expect solo, expectedRevision, expect con expectedLayout, solo expectedLayout y nada', async () => {
     const h = await world();
     const before = await readState(h);
     const bare = set('A1', [[5]]);
     const guarded = set('A1', [[5]], { A1: 1 });
     const cases: Array<{ name: string; command: SheetCommand; guards: { expectedRevision?: string; expectedLayout?: string }; ok: boolean }> = [
-      { name: 'expect', command: guarded, guards: {}, ok: true },
+      { name: 'expect solo', command: guarded, guards: {}, ok: false },
       { name: 'expectedRevision', command: bare, guards: { expectedRevision: before.revision }, ok: true },
       { name: 'expect y expectedLayout', command: guarded, guards: { expectedLayout: before.layoutRevision }, ok: true },
       { name: 'solo expectedLayout', command: bare, guards: { expectedLayout: before.layoutRevision }, ok: false },

@@ -13,7 +13,7 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
-import { createSheetAdapter, prepareSheetBase } from '../../src/sheets';
+import { createSheetAdapter, layoutRevision, prepareSheetBase } from '../../src/sheets';
 import { writerSocketHandlers } from '../../src/server/forward';
 import { localWriteContext } from '../../src/server/serve';
 import { buildSheetFile } from '../../src/server/tools/create-sheet';
@@ -44,8 +44,11 @@ async function linkedWriter(): Promise<{ writer: LibraryInstance; write: WriteCo
   return { writer, write: localWriteContext(writer) };
 }
 
-/** Crea `C.ods` con `Total | 42` en A1:B1 y devuelve su id. */
-async function createBook(write: WriteContext): Promise<string> {
+/**
+ * Crea `C.ods` con `Total | 42` en A1:B1 y devuelve su id y su `layoutRevision` (la de sus ejes,
+ * que escribir celdas no mueve): la `expectedLayout` de los lotes con `expect`.
+ */
+async function createBook(write: WriteContext): Promise<{ id: string; layout: string }> {
   const built = await buildSheetFile(
     [{ type: 'setCells', sheet: 'Hoja 1', start: 'A1', rows: [['Total', 42]] }],
     AbortSignal.timeout(10_000)
@@ -62,19 +65,21 @@ async function createBook(write: WriteContext): Promise<string> {
     bytes: built.bytes
   });
   expect(created).toMatchObject({ ok: true, created: { outcome: 'saved' } });
-  return (created as { created: { id: string } }).created.id;
+  const layout = layoutRevision((await prepareSheetBase(built.bytes)).model);
+  return { id: (created as { created: { id: string } }).created.id, layout };
 }
 
-/** Un lote de hojas sobre `id`: `B1 = value`, con la guarda de lo que había. */
-function editCell(write: WriteContext, id: string, previous: number, value: number) {
+/** Un lote de hojas sobre `id`: `B1 = value`, con la guarda de lo que había y la disposición leída. */
+function editCell(write: WriteContext, book: { id: string; layout: string }, previous: number, value: number) {
   return write.documentOps!({
     opsVersion: DOCUMENT_OPS_VERSION,
     format: 'ods',
     privacy: OPEN,
     action: 'edit',
     input: {
-      id,
+      id: book.id,
       operationId: randomUUID(),
+      expectedLayout: book.layout,
       ops: [
         {
           type: 'sheet.batch',
@@ -123,19 +128,21 @@ async function fileBytes(writer: LibraryInstance, id: string): Promise<{ sha256:
 describe('hojas con el escritor vinculado al sync (H-BLOQUEO-SYNC)', () => {
   it('editar una hoja vuelve en el plazo: la limpieza de blobs no se espera a sí misma', async () => {
     const { write } = await linkedWriter();
-    const id = await createBook(write);
-    const edited = await within(editCell(write, id, 42, 43), EDIT_DEADLINE_MS);
+    const book = await createBook(write);
+    const { id } = book;
+    const edited = await within(editCell(write, book, 42, 43), EDIT_DEADLINE_MS);
     expect(edited).not.toBe('colgado');
     expect(edited).toMatchObject({ ok: true, out: { id, outcome: 'saved' } });
   });
 
   it('tras un lote, el punto de control deja en files un .ods que se relee con el cambio', async () => {
     const { writer, write } = await linkedWriter();
-    const id = await createBook(write);
+    const book = await createBook(write);
+    const { id } = book;
     const before = await fileBytes(writer, id);
     expect(await b1Of(before.bytes)).toBe(42);
 
-    expect(await editCell(write, id, 42, 43)).toMatchObject({ ok: true });
+    expect(await editCell(write, book, 42, 43)).toMatchObject({ ok: true });
     const after = await fileBytes(writer, id);
     expect(after.sha256).not.toBe(before.sha256);
     const { head } = await writer.port.documentSource().port.docRead(id);
@@ -145,11 +152,12 @@ describe('hojas con el escritor vinculado al sync (H-BLOQUEO-SYNC)', () => {
 
   it('duplicar un documento con cabecera da una copia con la última edición', async () => {
     const { writer, write } = await linkedWriter();
-    const id = await createBook(write);
-    expect(await editCell(write, id, 42, 43)).toMatchObject({ ok: true });
+    const book = await createBook(write);
+    const { id } = book;
+    expect(await editCell(write, book, 42, 43)).toMatchObject({ ok: true });
     // El segundo lote cae dentro de los 30 minutos: no hay punto de control automático y
     // `files.sha256` se queda en 43. Duplicar tiene que pedir el suyo.
-    expect(await editCell(write, id, 43, 44)).toMatchObject({ ok: true });
+    expect(await editCell(write, book, 43, 44)).toMatchObject({ ok: true });
     expect(await b1Of((await fileBytes(writer, id)).bytes)).toBe(43);
 
     const copy = await write.looseFileWrite!({
