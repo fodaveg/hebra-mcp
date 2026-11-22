@@ -277,6 +277,7 @@ deshacer un lote, crear o mover algo o cambiar un fichero.
 - [espacios y organizaciones](references/espacios-y-organizaciones.md): espacio, organizaciones, autores, `merged` o `revoked: true`.
 - [ficheros sueltos](references/ficheros-sueltos.md): un `.base`, un PDF suelto u otro fichero que no es nota ni adjunto.
 - [sustituir en varias notas](references/sustituir-en-varias-notas.md): el mismo cambio en muchas notas.
+- [hojas de cálculo](references/hojas-de-calculo.md): leer, crear, editar o pintar un `.ods`.
 - [Johnny.Decimal](references/johnny-decimal.md): crear un ID, archivar en un ID o auditar el JDex.
 - [el comando y los ficheros de trabajo](references/ficheros-de-trabajo.md): instalar o lanzar `hebra-mcp` (`pair`, `checkout`, `apply`, `undo`, `status`, `diff`); qué vía usar.
 - [convenciones de notas](references/convenciones-de-notas.md): un relevo, un changelog, una nota de decisiones o un informe pedido.
