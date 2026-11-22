@@ -1,5 +1,5 @@
 /**
- * Registro de las 46 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
+ * Registro de las 51 herramientas del servidor (SPEC.md §5, §10): lectura, escritura,
  * organización, papelera, versiones, adjuntos, desde D9 (3 oct 2026), crear y renombrar
  * carpetas y añadir adjuntos, y desde D10 (9 oct 2026), listar los ficheros sueltos,
  * mandarlos a la papelera y sacarlos, desde D11 (9 oct 2026), el esquema de una nota
@@ -8,8 +8,10 @@
  * (`hebra_replace_in_notes`: simular, aplicar, deshacer), desde D15 (10 oct 2026), leer
  * un fichero suelto y reemplazar el texto de uno, desde D17 (12 oct 2026), crear,
  * renombrar, mover y duplicar ficheros sueltos, y desde D18 (19 oct 2026), crear un ID nuevo
- * del JDex y auditar el sistema Johnny.Decimal, y desde D19 (19 oct 2026), mover a un ID del
- * JDex (la única vía para mover carpetas). Todas pasan por `runTool`:
+ * del JDex y auditar el sistema Johnny.Decimal, desde D19 (19 oct 2026), mover a un ID del
+ * JDex (la única vía para mover carpetas), desde C-36 (21 nov 2026), importar un Office, y
+ * desde D28 (H-177, 22 nov 2026), leer, crear, editar y pintar hojas de cálculo `.ods`, que se
+ * dan de alta desde su tabla (`./tools/document-tool-table.ts`). Todas pasan por `runTool`:
  * - `privacy_config_unresolved` primero (§6.3, R5): ninguna corre con una carpeta
  *   configurada que no existe.
  * - La puerta final de privacidad (`./privacy-gate.ts`, tarea d64e187e): toda respuesta y
@@ -28,7 +30,8 @@
  * Ninguna purga ni vacía la papelera, borra carpetas ni las mueve fuera de `hebra_jd_move`, ni cambia ni borra
  * adjuntos, ni purga un fichero suelto (de uno se lee el contenido y, si es de texto, se
  * reemplaza entero con la base comprobada, D15; y se crea, renombra, mueve o duplica,
- * D17). Cada una lleva sus `annotations` MCP.
+ * D17; una hoja `.ods` se edita por su propia herramienta, D28). Cada una lleva sus
+ * `annotations` MCP.
  */
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';

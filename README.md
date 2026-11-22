@@ -14,7 +14,7 @@ vincula como un dispositivo más de la biblioteca. En el conector remoto, el ser
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 21 de noviembre de 2026: el servidor MCP tiene 47 herramientas
+Estado a 22 de noviembre de 2026: el servidor MCP tiene 51 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -82,6 +82,10 @@ Estado a 21 de noviembre de 2026: el servidor MCP tiene 47 herramientas
   o `keep-only`), conserva el original; `preview` solo analiza. Pide `operationId` salvo con
   `preview`. Todavía no hay ningún convertidor registrado: una importación guarda solo el
   original. Límites y errores: `SPEC.md` (D27) y la skill (`herramientas.md`).
+- Hojas de cálculo (D28, 22 nov 2026): `hebra_read_sheet` lee un `.ods` (el resumen del libro
+  o una página de celdas, con `revision` y `layoutRevision`), `hebra_create_sheet` crea uno con
+  un lote de comandos A1, `hebra_edit_sheet` aplica un lote que entra entero o no entra (o
+  deshace uno) y `hebra_render_sheet` pinta un rango como PNG. Contrato en `SPEC.md` (D28).
 - Versiones anteriores: `hebra_list_versions`, `hebra_read_version` y
   `hebra_restore_version` (paginadas: limit 1-200, def. 50).
 - Adjuntos: `hebra_list_attachments` (paginados: limit 1-200; sin limit, todos) y `hebra_read_attachment`

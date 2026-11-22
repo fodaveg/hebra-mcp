@@ -63,6 +63,11 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_jd_move',
   // Importar un Office (C-36, 21 nov 2026).
   'hebra_import_office',
+  // Hojas de cálculo (D28 y H-177, 22 nov 2026).
+  'hebra_read_sheet',
+  'hebra_create_sheet',
+  'hebra_edit_sheet',
+  'hebra_render_sheet',
   // Autores de una nota (D23, 5 nov 2026).
   'hebra_note_authors',
   // Ocultar del listado general y quitar la marca de conflicto (D23, 5 nov 2026).

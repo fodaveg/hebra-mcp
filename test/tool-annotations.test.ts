@@ -1,6 +1,7 @@
 /**
- * `annotations` MCP de las 46 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
- * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026; D23 del 5 nov 2026): cada una
+ * `annotations` MCP de las 51 herramientas (C3 del audit; D9 del 3 oct 2026; D10 del 9 oct
+ * 2026; D13, D14 y D15 del 10 oct 2026; D17 del 12 oct 2026; D18 y D19 del 19 oct 2026; D23 del 5 nov 2026;
+ * C-36 del 21 nov 2026; D28 y H-177 del 22 nov 2026): cada una
  * contra una tabla escrita aquí, para que un cambio de contrato sea una decisión y no un
  * descuido.
  */
@@ -94,6 +95,12 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // C-36: importar un Office se reintenta con su `operationId` sin duplicar; con `convert-only`
   // el original va a la papelera (reversible), así que no destruye.
   hebra_import_office: WRITE_IDEMPOTENT,
+  // D28 y H-177: leer y pintar una hoja no escriben; crear se reintenta con su `operationId`
+  // sin otro fichero; editar sobrescribe celdas (destructiva) y se reintenta igual.
+  hebra_read_sheet: READ,
+  hebra_render_sheet: READ,
+  hebra_create_sheet: WRITE_IDEMPOTENT,
+  hebra_edit_sheet: WRITE_DESTRUCTIVE_IDEMPOTENT,
   hebra_create_note: WRITE_NEW,
   hebra_append_to_note: WRITE_NEW
 };

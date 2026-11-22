@@ -334,6 +334,44 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       { name: 'hebra_import_office', arguments: { fileId: id, mode: 'convert-only', operationId: `bait-office-src-${id}` } },
       { name: 'hebra_import_office', arguments: { fileId: id, preview: true } }
     ]),
+    // Hojas de cálculo (D28, H-177): leer, pintar o editar un fichero oculto (en la carpeta
+    // privada, enlazado por una nota privada, en la papelera de la privada o una lápida) es
+    // `not_found` antes de leer un byte, con el cebo como hoja y en una celda; crear en la carpeta
+    // privada (por ruta y por id) con el cebo en el nombre y en una celda, también. Ni el cebo ni
+    // los ids llegan a la salida ni al log.
+    ...[
+      library.files.privateFolder,
+      library.files.referencedByHash,
+      library.files.referencedByName,
+      library.files.referencedByLockedNote,
+      library.files.trashedPrivateFolder,
+      library.files.tombstone
+    ].flatMap((id): BaitCall[] => [
+      { name: 'hebra_read_sheet', arguments: { id } },
+      { name: 'hebra_read_sheet', arguments: { id, sheet: BAIT_FOLDER, range: 'A1:B2', include: ['formulas', 'comments'] } },
+      { name: 'hebra_render_sheet', arguments: { id, sheet: BAIT_TAG, range: 'A1:B2' } },
+      {
+        name: 'hebra_edit_sheet',
+        arguments: {
+          id,
+          ops: [{ type: 'setCells', sheet: BAIT_FOLDER, start: 'A1', rows: [[BAIT_TAG]], expect: { A1: null } }],
+          operationId: `bait-sheet-edit-${id}`
+        }
+      }
+    ]),
+    {
+      name: 'hebra_create_sheet',
+      arguments: {
+        folder: 'Diario/2026',
+        name: `${BAIT_FOLDER}.ods`,
+        ops: [{ type: 'setCells', sheet: 'Hoja 1', start: 'A1', rows: [[BAIT_TAG]] }],
+        operationId: 'bait-sheet-create-1'
+      }
+    },
+    {
+      name: 'hebra_create_sheet',
+      arguments: { folderId: library.folders.diario, name: `${BAIT_TAG}.ods`, operationId: 'bait-sheet-create-2' }
+    },
     // Carpetas y adjuntos (D9, 3 oct 2026): el cebo como nombre de una carpeta dentro de
     // la privada (`not_found`), una ruta privada (`folder_unavailable`), renombrar la
     // privada (`not_found`) o hacia una ruta privada (`folder_unavailable`); un adjunto en
