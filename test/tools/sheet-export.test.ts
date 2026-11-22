@@ -11,8 +11,11 @@
  *
  * Prueba negativa hecha al escribirlo: sin aplicar `recent` en el exportador del MCP, cae «los
  * mismos bytes que el núcleo» en el caso con `recent` (el `.ods` no lleva esa edición).
+ * H-TOPES-MCP: con `SHEET_ODS_READ_LIMITS` en el adaptador del exportador, cae «exporta un .ods
+ * que se lee aunque descomprimido entero pase de los topes de lectura» (`ExportOdsError`).
  */
 import { createHash } from 'node:crypto';
+import { unzipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import type { DocHeadRecord, DocStorePort } from '../../vendor/hebra/src/lib/documents/contract';
@@ -20,6 +23,8 @@ import { newDocumentHead } from '../../vendor/hebra/src/lib/documents/sync/lifec
 import { buildOds } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
 import { createSheetAdapter, prepareSheetBase, type SheetOp } from '../../src/sheets';
 import { createSheetDocumentExporter } from '../../src/server/tools/sheet-export';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
+import { PHOTO_ODS_MEDIA_BYTES, photoOds } from '../fixtures/photo-ods';
 
 const sha = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 const FILE = 'hoja-1';
@@ -37,9 +42,12 @@ async function coreExporter(): Promise<CoreExporter> {
   return ((await import(/* @vite-ignore */ path)) as { createOdsExporter: CoreExporter }).createOdsExporter;
 }
 
-/** Un documento con el andamio y `A1 = value` en un segmento; con `recent`, un `A1 = 'reciente'` más. */
-async function state(options: { recent: boolean }) {
-  const base = buildOds();
+/**
+ * Un documento con el andamio y `A1 = 7` en un segmento; con `recent`, un `A1 = 'reciente'` más.
+ * El fichero base es el del fixture del adaptador, u otro con `base`.
+ */
+async function state(options: { recent: boolean; base?: Uint8Array }) {
+  const base = options.base ?? buildOds();
   const adapter = createSheetAdapter(await prepareSheetBase(base));
   const doc = new Y.Doc();
   adapter.scaffold(base, doc);
@@ -90,6 +98,24 @@ describe('exportador de .ods del escritor (H-BLOQUEO-SYNC)', () => {
       expect(await a1Of(mine.bytes)).toBe(recent ? 'reciente' : 7);
     });
   }
+
+  it('exporta un .ods que se lee aunque descomprimido entero pase de los topes de lectura (H-TOPES-MCP)', async () => {
+    const base = photoOds();
+    expect(base.length).toBeLessThan(SHEET_DOCUMENT_MAX_BYTES);
+    expect(PHOTO_ODS_MEDIA_BYTES).toBeGreaterThan(SHEET_ODS_READ_LIMITS.maxTotalBytes);
+    const s = await state({ recent: false, base });
+    const out = await createSheetDocumentExporter()(
+      { libraryId: 'personal', store: s.store as DocStorePort, blobRead: s.blobRead },
+      FILE,
+      s.head
+    );
+    expect(await a1Of(out.bytes)).toBe(7);
+    // La foto y el SVG siguen en el paquete, byte a byte.
+    const before = unzipSync(base);
+    const after = unzipSync(out.bytes);
+    expect(sha(after['Pictures/foto.png']!)).toBe(sha(before['Pictures/foto.png']!));
+    expect(sha(after['Pictures/b.svg']!)).toBe(sha(before['Pictures/b.svg']!));
+  });
 
   it('sin el fichero base lanza, sin devolver bytes', async () => {
     const s = await state({ recent: false });

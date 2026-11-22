@@ -64,7 +64,7 @@ import { openDocumentRead, type DocumentReadSource } from '../../store/document-
 import type { DocumentCreated } from '../../store/document-service';
 import type { BatchIssue, DocumentError, WriteOut } from '../../store/document-types';
 import { nameExtension, validFileName } from '../../store/file-content';
-import { SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
+import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { requireValidOperationId } from './guards';
@@ -243,8 +243,9 @@ export async function buildSheetFile(
   // que necesita `writeStyle` para dar formato: el libro vacío sale tal cual.
   const blank = writeNewOds(blankBook());
   if (commands.length === 0) return { bytes: blank, createdIds: {} };
+  // El libro con los topes de lectura y el guardado con los del inventario (`sheet-limits.ts`).
   const adapter: SheetAdapter = createSheetAdapter(await prepareSheetBase(blank, SHEET_ODS_READ_LIMITS), {
-    limits: SHEET_ODS_READ_LIMITS
+    limits: SHEET_ODS_INVENTORY_LIMITS
   });
   const doc = new Y.Doc();
   // Sin azar: el `clientID` entra en las versiones de cada celda.
@@ -342,7 +343,7 @@ async function freshRevisions(
     }
   } as unknown as DocumentReadSource;
   const adapter = createSheetAdapter(await prepareSheetBase(bytes, SHEET_ODS_READ_LIMITS), {
-    limits: SHEET_ODS_READ_LIMITS
+    limits: SHEET_ODS_INVENTORY_LIMITS
   });
   const read = await openDocumentRead(source, fileId, adapter, signal);
   try {

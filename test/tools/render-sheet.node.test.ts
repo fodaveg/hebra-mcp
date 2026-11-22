@@ -20,6 +20,9 @@
  *   `renderSheetReadReserveBytes` con `documentReserveBytes`: cae «pinta un rango como PNG».
  * - H-TOPES-MCP: `createEditorData` sin `limits`: cae «una imagen que pasa del tope» (pinta, sale
  *   `null`); con `limits` y sin `isSheetLimitError`: cae igual, con el `Error` de `readSafeZip`.
+ * - H-TOPES-MCP, tests aislados: con un plazo de 300 ms forzado en «el rango máximo», si `cleanUp`
+ *   no espera las llamadas en marcha, «id oculto» pasa de 80 ms a 4.583 ms (espera el hueco de la
+ *   cola que dejó el que venció, al borde de los 5 s); esperándolas, se queda en 80 ms.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
@@ -69,17 +72,57 @@ const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
 
 const sha = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
-beforeAll(() => {
+/**
+ * Plazo del calentamiento de `beforeAll`. Lo que cuesta en frío, medido en este Mac el 22 nov 2026
+ * con una carga media de 9 en 15 núcleos (sonda de una vez, no versionada): el primer PNG 167 y
+ * 195 ms (el segundo, 32 y 40: el hilo del render carga `@napi-rs/canvas` la primera vez), las
+ * fuentes 70 y 77 ms (`loadDocumentFonts` las guarda), el primer libro en IronCalc 50 y 53 ms (el
+ * segundo, 2: el wasm se compila al primer uso, no en `initSync`) y los primeros datos de pintado
+ * 19 y 21 ms (el tercero, 3). Unos 0,3 s que pagaba el primer test del fichero. Con 60 s caben
+ * más de cien veces: si vence, el fallo es del calentamiento, con su nombre, y no de un test.
+ */
+const WARM_UP_TIMEOUT_MS = 60_000;
+
+beforeAll(async () => {
   const wasm = createRequire(import.meta.url).resolve('@ironcalc/wasm/wasm_bg.wasm');
   initSync({ module: readFileSync(wasm) });
-});
+  // Un pintado entero, con las piezas reales, para que el coste en frío no lo pague ningún test.
+  const h = await harness();
+  const id = await addDocument(h, 'calentar.ods', buildOds());
+  await render(h, { id, sheet: 'Datos', range: 'A1:C5' });
+  await cleanUp();
+}, WARM_UP_TIMEOUT_MS);
 
 const ports: NodeLibraryPort[] = [];
 const directories: string[] = [];
-afterEach(async () => {
+
+/**
+ * Las llamadas a `runRenderSheet` de este fichero que siguen en marcha. Un test que vence su plazo
+ * no para la suya, que sigue con el hueco de la cola de hojas (uno por proceso) y el de la cola del
+ * render: el test siguiente esperaría ese hueco y vencería también, sin ser el lento. `afterEach`
+ * las espera antes de cerrar nada, así que un test lento cae solo y con su nombre.
+ */
+const inflight = new Set<Promise<unknown>>();
+
+/** `runRenderSheet`, apuntada en `inflight` hasta que acaba. */
+function runTracked(...args: Parameters<typeof runRenderSheet>): ReturnType<typeof runRenderSheet> {
+  const call = runRenderSheet(...args);
+  inflight.add(call);
+  call.then(
+    () => inflight.delete(call),
+    () => inflight.delete(call)
+  );
+  return call;
+}
+
+/** Espera las llamadas en marcha y cierra bibliotecas y carpetas temporales. */
+async function cleanUp(): Promise<void> {
+  await Promise.allSettled([...inflight]);
   for (const port of ports.splice(0)) await port.closeWhenIdle();
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
-});
+}
+
+afterEach(cleanUp);
 
 /** El motor de la app en este mismo proceso, con la interfaz del de `dist/` (que va en un hilo). */
 function inProcessEngine(log: { loads: number; disposed: number }): FormulaEngineWithValues {
@@ -216,7 +259,7 @@ async function addDocument(h: Harness, name: string, bytes: Uint8Array, ops: She
 type Rendered = { meta: Record<string, unknown>; png: Uint8Array };
 
 async function render(h: Harness, input: RenderSheetInput, extra?: Partial<RenderSheetWiring>): Promise<Rendered> {
-  const out = await runRenderSheet(h.ctx, input, h.wiring(extra));
+  const out = await runTracked(h.ctx, input, h.wiring(extra));
   expect(out).toBeInstanceOf(ToolContent);
   const [text, image] = out.result.content;
   expect(text?.type).toBe('text');
@@ -229,7 +272,7 @@ async function render(h: Harness, input: RenderSheetInput, extra?: Partial<Rende
 /** El código del `ToolError` con que rechaza la llamada, o `null` si no rechaza. */
 async function refusal(h: Harness, input: RenderSheetInput, extra?: Partial<RenderSheetWiring>): Promise<string | null> {
   try {
-    await runRenderSheet(h.ctx, input, h.wiring(extra));
+    await runTracked(h.ctx, input, h.wiring(extra));
     return null;
   } catch (error) {
     if (error instanceof ToolError) return error.code;
@@ -412,6 +455,16 @@ describe('hebra_render_sheet', () => {
     expect(meta.range).toBe('A20:A209');
   });
 
+  /**
+   * El único test de trabajo pesado del fichero, y no por frío: pinta el rango máximo (60 x 200
+   * celdas con texto y números) en un PNG de 2 Mpx. Medido el 22 nov 2026 en este Mac con una carga
+   * media de 9 en 15 núcleos, ya caliente: entre 1,4 y 1,5 s en total, de los que el PNG de un SVG
+   * de 4,1 MB se lleva de 0,84 a 1,1 s, la lista de dibujo de 0,19 a 0,33, el SVG 0,2, el motor de
+   * 0,12 a 0,22 y el libro 0,13. Los 5 s por defecto son poco más de tres veces eso, y con la
+   * máquina llena (carga de 46) vencieron. El plazo es una guarda contra un cuelgue, no una medida:
+   * 30 s, unas veinte veces lo medido. Cuánto tarda es cosa de una pasada de rendimiento aparte.
+   */
+  const MAX_RANGE_TIMEOUT_MS = 30_000;
   it('el rango máximo sale como PNG de 2 Mpx como mucho aunque se pida el ancho máximo', async () => {
     const h = await harness();
     const id = await addDocument(h, 'grande.ods', buildOds(bigContent(250, 70)));
@@ -421,7 +474,7 @@ describe('hebra_render_sheet', () => {
     expect(Math.max(width, height)).toBeLessThanOrEqual(1568);
     expect(meta).toMatchObject({ width, height, range: 'A1:BH200' });
     expect(h.gate.pending).toBe(0);
-  });
+  }, MAX_RANGE_TIMEOUT_MS);
 
   it('id oculto da not_found, igual que uno inexistente, uno de la papelera o el de una nota', async () => {
     const h = await harness();
@@ -481,7 +534,7 @@ describe('hebra_render_sheet', () => {
     entries['Pictures/relleno.png'] = [randomBytes(SHEET_DOCUMENT_MAX_BYTES), { level: 0 }];
     const bytes = zipSync(entries);
     const id = await addFile(h, h.folders.hojas, 'grande.ods', bytes);
-    const error = await runRenderSheet(h.ctx, { id, sheet: 'Datos', range: 'A1' }, h.wiring()).catch((caught: unknown) => caught);
+    const error = await runTracked(h.ctx, { id, sheet: 'Datos', range: 'A1' }, h.wiring()).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ToolError);
     expect((error as ToolError).code).toBe('file_too_large');
     expect((error as ToolError).extra).toEqual({ byteLength: bytes.length, maxBytes: SHEET_DOCUMENT_MAX_BYTES });

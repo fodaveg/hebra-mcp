@@ -31,6 +31,8 @@
  * - un error de uno en la búsqueda de `commandLocator`: cae su test.
  * - quitar el tope `max(MAX_AXIS_PX)` del esquema de `setAxisSize` (H-VENDOR-2): cae «una medida
  *   fuera de tope» (el lote llega al escritor y lo rechaza `compileBatch`, no el esquema).
+ * - H-TOPES-MCP: `SHEET_ODS_READ_LIMITS` en el adaptador de `openSheetRead`: cae «se edita y se
+ *   guarda» (`ExportOdsError` al guardar: el paquete entero pasa de 4 MiB).
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -63,10 +65,11 @@ import { registerDocumentFormat, runDocumentRequest } from '../../src/store/docu
 import { DOCUMENT_OPS_VERSION } from '../../src/store/document-types';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { sheetJobSlot } from '../../src/store/sheet-jobs';
-import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES } from '../../src/store/sheet-limits';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
 import type { SyncStorePort } from '../../src/store/sync-port';
 import { buildOds } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
 import { IDENTITY } from '../sync/devices';
+import { PHOTO_ODS_MEDIA_BYTES, photoOds } from '../fixtures/photo-ods';
 
 /** Lecturas de hojas abiertas y cerradas en todo el proceso del test. */
 const reads = vi.hoisted(() => ({ opened: 0, closed: 0 }));
@@ -434,6 +437,29 @@ describe('topes de hojas (H-95b)', () => {
     expect(error.extra).toEqual({ byteLength: bytes.length, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
     expect(h.calls()).toBe(0);
     expect(h.gate.asked).toEqual([]);
+  });
+
+  it('un .ods que se lee aunque descomprimido entero pase de los topes de lectura se edita y se guarda (H-TOPES-MCP)', async () => {
+    const bytes = photoOds();
+    expect(bytes.length).toBeLessThan(SHEET_DOCUMENT_MAX_BYTES);
+    expect(PHOTO_ODS_MEDIA_BYTES).toBeGreaterThan(SHEET_ODS_READ_LIMITS.maxTotalBytes);
+    const h = await world({ bytes });
+    const before = await readState(h);
+    await expect(h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [set('A1', [[42]])] })).resolves.toMatchObject({
+      outcome: 'saved'
+    });
+    // El guardado con el adaptador de la edición: el de la lectura común, que `forDocument` envuelve
+    // y cuyo `exportFile` llama con los mismos bytes base.
+    const opened = await openSheetRead(h.port.documentSource(), { id: h.fileId, sha256: sha(bytes) }, live, 'empty');
+    let out: Uint8Array;
+    try {
+      out = await opened.adapter.exportFile(opened.base, opened.read.doc, live);
+    } finally {
+      await opened.close();
+    }
+    const after = unzipSync(out);
+    expect(new TextDecoder().decode(after['content.xml'])).toContain('office:value="42"');
+    expect(sha(after['Pictures/foto.png']!)).toBe(sha(unzipSync(bytes)['Pictures/foto.png']!));
   });
 });
 

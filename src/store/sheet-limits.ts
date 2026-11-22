@@ -53,6 +53,19 @@
  * usuarios. La edición y la fase de lectura del pintado abren el mismo libro con la misma lectura
  * común (`openSheetRead`) y el mismo motor, así que apartan la misma reserva que la lectura.
  *
+ * Por parámetro a Hebra (H-TOPES-MCP): el libro (`prepareSheetBase`), los datos del pintado
+ * (`createEditorData`, también las imágenes) y la lengua del libro (`readBookSettings`,
+ * `readBookLocale`) leen con `SHEET_ODS_READ_LIMITS`, siempre el mismo objeto, porque la caché de
+ * `prepareSheetBase` va por su identidad. El adaptador (`createSheetAdapter`, en `sheet-read.ts`,
+ * `sheet-export.ts` y `create-sheet.ts`) recibe `SHEET_ODS_INVENTORY_LIMITS`: su guardado
+ * (`exportOds`) descomprime TODAS las entradas del paquete, imágenes incluidas, y con los de
+ * lectura un `.ods` bajo `SHEET_DOCUMENT_MAX_BYTES` que se lee no se podría guardar (medido: uno de
+ * 4.071.603 bytes con una imagen de 3,3 MiB y un SVG de 1 MiB se lee y no se exporta). Hebra pide
+ * en `SheetAdapterOptions.limits` los mismos topes que en `prepareSheetBase` porque `baseFor`
+ * relee con ellos los bytes base que no son los del adaptador; el MCP siempre exporta con los
+ * bytes con que creó el adaptador, nunca pasa por esa relectura, así que la diferencia no cambia
+ * lo que se lee.
+ *
  * Dónde se aplican (H-95b): `../server/tools/sheet-read.ts` (el tope de tamaño y los de lectura,
  * para las tres herramientas), `../server/tools/read-sheet-job.ts` (estilos e inventario),
  * `./sheet-jobs.ts` (un trabajo a la vez y la reserva, para leer, pintar y editar),
@@ -100,7 +113,9 @@ export const SHEET_ODS_READ_LIMITS: Readonly<OdsReadLimits> = Object.freeze({
  * del documento: 8 MiB. Un `.ods` legítimo cabe; una bomba se corta ahí, y el resumen sale sin
  * inventario, como cualquier fallo de ese lector. Es menos de lo que se midió, que leía el
  * inventario con
- * `DEFAULT_ZIP_LIMITS` sobre un `.ods` cuyo relleno es una imagen sin comprimir.
+ * `DEFAULT_ZIP_LIMITS` sobre un `.ods` cuyo relleno es una imagen sin comprimir. Son también los
+ * del guardado del adaptador (`exportOds`), que descomprime el paquete entero por lo mismo
+ * (H-TOPES-MCP, ver la cabecera).
  */
 export const SHEET_ODS_INVENTORY_LIMITS: Readonly<OdsReadLimits> = Object.freeze({
   ...SHEET_ODS_READ_LIMITS,

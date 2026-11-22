@@ -33,7 +33,7 @@ import {
 } from '../../sheets';
 import type { DocumentPort } from '../../store/document-channel';
 import { openDocumentRead, type DocumentRead, type DocumentReadSource } from '../../store/document-read';
-import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 import { ToolError } from '../errors';
 
 /** Cómo se lee un `.ods` sin cabecera (ver la cabecera del fichero). */
@@ -111,9 +111,10 @@ export function isSheetLimitError(error: unknown): boolean {
 }
 
 /**
- * Abre el `.ods` `file` para leerlo, con los topes de hojas del MCP (`SHEET_ODS_READ_LIMITS`,
- * H-95b): el libro, el adaptador y su guardado los reciben por parámetro (H-TOPES-MCP), siempre el
- * mismo objeto, porque la caché de `prepareSheetBase` va por su identidad. Errores con código
+ * Abre el `.ods` `file` para leerlo, con los topes de hojas del MCP (H-95b) por parámetro
+ * (H-TOPES-MCP): el libro con `SHEET_ODS_READ_LIMITS`, siempre el mismo objeto, porque la caché de
+ * `prepareSheetBase` va por su identidad; el adaptador, que guarda descomprimiendo también las
+ * imágenes, con `SHEET_ODS_INVENTORY_LIMITS` (el motivo, en `sheet-limits.ts`). Errores con código
  * cerrado (`ToolError`): cabecera de otro formato, `document_invalid`; faltan los bytes,
  * `file_unavailable`; más de `SHEET_DOCUMENT_MAX_BYTES` (4 MiB), `file_too_large`; un `.ods`
  * ilegible, `document_invalid`, o `document_too_complex` si pasa un tope de lectura.
@@ -143,7 +144,7 @@ export async function openSheetRead(
     if (error instanceof OdsReadError) throw new ToolError('document_invalid');
     throw error;
   }
-  const adapter = createSheetAdapter(sheetBase, { limits: SHEET_ODS_READ_LIMITS });
+  const adapter = createSheetAdapter(sheetBase, { limits: SHEET_ODS_INVENTORY_LIMITS });
 
   let state = stored;
   if (!stored.head) {
