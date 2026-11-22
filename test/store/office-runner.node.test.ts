@@ -388,7 +388,18 @@ describe('hilo de conversión', () => {
     expect(JSON.stringify(reply)).not.toContain('contenido');
   });
 
-  it('un formato sin convertidor registrado (tabla vacía) es internal', async () => {
-    expect(await handleOfficeJob(job('analyze'))).toMatchObject({ ok: false, code: 'internal' });
+  it('un formato sin convertidor registrado (hoy .docx, C-40) es internal', async () => {
+    const docx: OfficeJobData = {
+      kind: 'analyze',
+      input: { ...input(), fileName: 'a.docx', format: 'docx', budgetMs: 1000 }
+    };
+    expect(await handleOfficeJob(docx)).toMatchObject({ ok: false, code: 'internal' });
+  });
+
+  it('.xlsx va al convertidor real de la tabla (C-48): unos bytes que no son un zip dan corrupt', async () => {
+    expect(await handleOfficeJob(job('analyze'))).toEqual({
+      ok: true,
+      result: expect.objectContaining({ format: 'xlsx', convertible: false, reason: 'corrupt' })
+    });
   });
 });

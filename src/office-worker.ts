@@ -8,8 +8,8 @@
  *   documento); cualquier otro fallo responde `internal` sin su texto.
  *
  * Es un punto de entrada propio del empaquetado (`dist/office-worker.mjs`, C-38). El
- * convertidor se carga por el registro de Hebra (`converter-table`), que hoy está vacío: cada
- * formato lo da de alta su paquete. El convertidor es quien pasa `OFFICE_ZIP_LIMITS` y un
+ * convertidor se carga por el registro de Hebra (`converter-table`): cada formato lo da de alta su
+ * paquete, y hoy solo está el de `.xlsx` (C-48). El convertidor es quien pasa `OFFICE_ZIP_LIMITS` y un
  * `select` con solo las partes XML a `readSafeZip` (las imágenes se leen aparte, para que no
  * entren en el tope de 12 MiB de XML expandido).
  */

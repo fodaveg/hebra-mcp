@@ -36,7 +36,6 @@
  * URL nunca pasa) y, si llega alguno, el lote es `batch_invalid`.
  */
 import { createHash } from 'node:crypto';
-import { unzipSync } from 'fflate';
 import * as Y from 'yjs';
 import { z } from 'zod';
 import { ROOT_FOLDER_ID } from '../../hebra';
@@ -54,7 +53,6 @@ import {
   type SheetOp
 } from '../../sheets';
 import { DocOpError } from '../../../vendor/hebra/src/lib/documents/contract';
-import { writeOdfZip } from '../../../vendor/hebra/src/lib/documents/odf/zip-write';
 import { newDocumentHead } from '../../../vendor/hebra/src/lib/documents/sync/lifecycle';
 import { DOCUMENT_EDIT_TIMEOUT_MS } from '../../store/document-limits';
 import { openDocumentRead, type DocumentReadSource } from '../../store/document-read';
@@ -192,43 +190,6 @@ function blankBook(): SheetModel {
   return { ...model, layoutRevision: layoutRevision(model) };
 }
 
-/** Prefijos que `exportOds` necesita en la raíz de `content.xml` para escribir estilos. */
-const STYLE_NAMESPACES: readonly [string, string][] = [
-  ['style', 'urn:oasis:names:tc:opendocument:xmlns:style:1.0'],
-  ['fo', 'urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0'],
-  ['number', 'urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0']
-];
-
-/**
- * El `.ods` vacío de partida. `writeNewOds` no declara `style`, `fo` ni `number` en la raíz de
- * `content.xml` (`vendor/hebra/src/lib/sheets/ods/write-new.ts:623`), y `writeStyle` rechaza
- * entonces cualquier formato (`style-write.ts:384`). El convertidor XLSX los añade igual
- * (`withNamespaces`, `xlsx/converter.ts:387`); aquí se hace lo mismo hasta que `writeNewOds` los
- * declare, y entonces esta función se reduce a `writeNewOds(blankBook())`.
- */
-function blankBase(): Uint8Array {
-  const files = unzipSync(writeNewOds(blankBook()));
-  const decoder = new TextDecoder();
-  const content = decoder.decode(files['content.xml']);
-  const root = '<office:document-content';
-  const at = content.indexOf(root) + root.length;
-  const extra = STYLE_NAMESPACES.filter(([prefix]) => !content.includes(` xmlns:${prefix}=`))
-    .map(([prefix, uri]) => ` xmlns:${prefix}="${uri}"`)
-    .join('');
-  const encoder = new TextEncoder();
-  const { mimetype, ...rest } = files;
-  return writeOdfZip(
-    [],
-    [
-      { path: 'mimetype', bytes: mimetype! },
-      ...Object.entries(rest).map(([path, bytes]) => ({
-        path,
-        bytes: path === 'content.xml' ? encoder.encode(content.slice(0, at) + extra + content.slice(at)) : bytes
-      }))
-    ]
-  );
-}
-
 /** Id determinista: el mismo lote da los mismos ids y, por tanto, los mismos bytes. */
 function seededId(...parts: Array<string | number>): string {
   return createHash('sha256').update(`hebra.create-sheet/v1\u0000${parts.join('\u0000')}`).digest('hex').slice(0, 32);
@@ -271,7 +232,9 @@ export async function buildSheetFile(
   options: { maxCompiledOps?: number } = {}
 ): Promise<BuiltSheet | DocumentError> {
   const maxCompiledOps = options.maxCompiledOps ?? CREATE_SHEET_COMPILED_OPS_MAX;
-  const blank = blankBase();
+  // `writeNewOds` ya declara en `content.xml` los prefijos de estilos (`style`, `fo`, `number`)
+  // que necesita `writeStyle` para dar formato: el libro vacío sale tal cual.
+  const blank = writeNewOds(blankBook());
   if (commands.length === 0) return { bytes: blank, createdIds: {} };
   const adapter: SheetAdapter = createSheetAdapter(await prepareSheetBase(blank));
   const doc = new Y.Doc();
