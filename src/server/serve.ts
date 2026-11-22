@@ -44,6 +44,7 @@ import {
   type ForwardOptions
 } from './forward';
 import { buildWriteContext, type WriteContext } from './write-context';
+import { registerSheetDocumentFormat } from './tools/edit-sheet';
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
@@ -193,6 +194,8 @@ export function localWriteContext(
   options: { denyJdex?: boolean; office?: OfficeWiring } = {}
 ): WriteContext {
   const office = options.office ?? {};
+  // H-177: los lotes de hojas que atiende este escritor, también los que le reenvía un lector.
+  registerSheetDocumentFormat();
   const context = buildWriteContext({
     importOffice: (input) =>
       instance.importOfficeLocal(

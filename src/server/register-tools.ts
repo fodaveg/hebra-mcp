@@ -142,6 +142,7 @@ import { runSearch } from './tools/search';
 import { runStatus } from './tools/status';
 import { runListVersions, runReadVersion, runRestoreVersion } from './tools/versions';
 import type { SpaceVersionsDeps } from './tools/space-versions';
+import { DOCUMENT_TOOLS, registerDocumentTools } from './tools/document-tool-table';
 // `annotations` MCP: ninguna herramienta toca el mundo exterior, y solo las que sobrescriben un
 // fichero son destructivas. Viven en `./tool-annotations.ts`, que comparte la tabla de documentos.
 import { READ_ONLY, WRITE_DESTRUCTIVE_IDEMPOTENT, WRITE_IDEMPOTENT, WRITE_NON_IDEMPOTENT } from './tool-annotations';
@@ -390,7 +391,13 @@ const GATE_POLICIES: Record<
       ? WRITE
       : { ...read(), discard: (outcome) => discardJdMovePlan(server, outcome) },
   // C-36: importar un Office es una escritura (con `preview` no escribe, pero nombra lo mismo).
-  hebra_import_office: WRITE
+  hebra_import_office: WRITE,
+  // H-177 (D28): leer y pintar una hoja son lecturas (se repiten); crear un `.ods` es crear un
+  // fichero (un nombre que la puerta no confirma, `file_name_unavailable`), y editar, una escritura.
+  hebra_read_sheet: read(),
+  hebra_render_sheet: read(),
+  hebra_create_sheet: (input) => createFileWrite(input),
+  hebra_edit_sheet: WRITE
 };
 
 /** Como `discardJdPlan`, para el plan de una simulación de `hebra_jd_move` (D19). */
@@ -1213,5 +1220,20 @@ export function registerTools(
     gated('hebra_import_office', (toolCtx, input) => runImportOffice(toolCtx, input as ImportOfficeInput), {
       privacyLoad: 'lazy'
     })
+  );
+
+  // H-177 (22 nov 2026): las cuatro herramientas de hojas, desde su tabla
+  // (`./tools/document-tool-table.ts`), que se comprueba entera antes de registrar ninguna.
+  registerDocumentTools(DOCUMENT_TOOLS, (entry) =>
+    server.registerTool(
+      entry.name,
+      {
+        title: entry.title,
+        description: entry.description,
+        inputSchema: scoped(entry.inputShape),
+        annotations: entry.annotations
+      },
+      gated(entry.name, entry.run, { privacyLoad: 'lazy' })
+    )
   );
 }

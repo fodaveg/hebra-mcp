@@ -74,7 +74,11 @@ import {
 import type { DocumentChannelSource } from '../../store/document-channel';
 import { DOCUMENT_MAX_BYTES } from '../../store/document-limits';
 import type { DocumentComputeJob, DocumentComputeResult, DocumentOpsInput, DocumentOpsResult } from '../../store/document-ops';
-import type { DocumentFormatHandle, DocumentFormatPerDocument } from '../../store/document-service';
+import {
+  registerDocumentFormat,
+  type DocumentFormatHandle,
+  type DocumentFormatPerDocument
+} from '../../store/document-service';
 import type { BatchIssue, DocumentError, EditSheetOut, FormulaError, WriteOut } from '../../store/document-types';
 import type { DocumentUndoInput } from '../../store/document-undo';
 import { usageOf, type ToolContext } from '../context';
@@ -530,6 +534,20 @@ export function createSheetDocumentFormat(
       return handle;
     }
   };
+}
+
+let sheetFormatRegistered = false;
+
+/**
+ * Da de alta el formato de hojas en el escritor (H-177): `registerDocumentFormat('ods',
+ * createSheetDocumentFormat())`, una sola vez por proceso. Lo llama `localWriteContext` de
+ * `../serve.ts`, que es donde se cablea `documentOps` del escritor: así un escritor atiende los
+ * lotes que le reenvía un lector aunque no tenga ninguna sesión MCP abierta.
+ */
+export function registerSheetDocumentFormat(): void {
+  if (sheetFormatRegistered) return;
+  sheetFormatRegistered = true;
+  registerDocumentFormat('ods', createSheetDocumentFormat());
 }
 
 /** Fase 2: comprobar, compilar, ensayar y preparar el informe (ver la cabecera). */
