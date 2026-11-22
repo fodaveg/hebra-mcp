@@ -56,6 +56,12 @@ import {
 } from '../store/body-writes';
 import { busyOtherInstance } from '../store/errors';
 import {
+  runDocumentRequest,
+  type DocumentAfterCommit,
+  type DocumentOpsOutcome,
+  type DocumentOpsRequest
+} from '../store/document-service';
+import {
   fetchFileBytes,
   replaceFileText,
   type FetchFileInput,
@@ -785,6 +791,21 @@ export class LibraryInstance implements NoteWriteTarget {
       input,
       { converter, download: runner ? (sha256) => runner.readBlob(sha256) : null },
       () => this.afterWrite()
+    );
+  }
+
+  /** Hojas y presentaciones (H-177, `../store/document-service.ts`): crear, editar con un lote o
+   *  deshacer, sobre el almacén vigente de esta instancia y en su turno. Si escribió, anota la
+   *  subida pendiente y pide la ronda sin esperarla; `afterCommit` es la espera de quien llama.
+   *  Rechaza con `busy_other_instance` en un lector (lo reenvía `src/server/forward.ts`). */
+  documentOpsLocal(request: DocumentOpsRequest, afterCommit: DocumentAfterCommit): Promise<DocumentOpsOutcome> {
+    return runDocumentRequest(
+      {
+        port: { documentSource: () => this.current.documentSource() },
+        writeExclusive: (operation) => this.writeExclusive(operation)
+      },
+      request,
+      { onWritten: () => this.afterWrite(), afterCommit }
     );
   }
 

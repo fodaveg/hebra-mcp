@@ -18,7 +18,7 @@ import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/librar
 import { registerLinkedDevice } from '../sync/linked';
 import { PrivacyConfigSource } from '../privacy/config-source';
 import { StoreError } from '../store/errors';
-import { localWriteContext, type OfficeWiring } from '../server/serve';
+import { documentCapacityOf, localWriteContext, type OfficeWiring } from '../server/serve';
 import {
   buildRoutedWriteContext,
   RoutedStatusSource,
@@ -614,6 +614,8 @@ export class AgentSpaceManager implements SpaceRouter {
       // La segunda validación fresca de cada invocación (`runTool`, al aceptar).
       authorize,
       status: new RoutedStatusSource(instance, true),
+      // H-177: la lectura y el pintado de hojas apartan memoria donde la conversión de ofimática.
+      documentCapacity: documentCapacityOf(this.office),
       // Dentro de una invocación ya validada por `resolve`: sin red, solo lo ya sabido.
       // Si esta instancia es lectora, el escritor vuelve a consultar el catálogo.
       write: buildRoutedWriteContext(

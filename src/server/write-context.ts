@@ -48,6 +48,11 @@ import type {
 } from '../store/file-writes';
 import type { LooseFileSaved, LooseFileWriteInput } from '../store/file-verbs';
 import type { OfficeImportInput, OfficeImportSaved } from '../store/office-writes';
+import type {
+  DocumentOpsOutcome,
+  DocumentOpsRequest,
+  DocumentServiceHooks
+} from '../store/document-service';
 import type { NoteStateInput, NoteStateSaved } from '../store/note-state';
 import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
 import type { JdMoveApplyReport, JdMoveRequest, JdMoveResult, JdMoveUndoReport } from '../store/jd-move';
@@ -103,6 +108,11 @@ export interface WriteContextSources {
   /** `hebra_import_office` en local (C-26, `importOfficeLocal` de `../store/office-writes.ts`),
    *  sin esperar ronda. Opcional: sin él, la herramienta responde `invalid_input`. */
   importOffice?(input: OfficeImportInput): Promise<LocalWrite<OfficeImportSaved>>;
+  /** Hojas y presentaciones en local (H-177, `runDocumentRequest` de
+   *  `../store/document-service.ts` sobre la instancia): crear, editar o deshacer. `hooks.afterCommit`
+   *  es la ronda de después, que pone `buildWriteContext`. Opcional: sin él, las herramientas de
+   *  escritura de documentos responden `invalid_input`. */
+  documentOps?(request: DocumentOpsRequest, hooks: Pick<DocumentServiceHooks, 'afterCommit'>): Promise<DocumentOpsOutcome>;
   /** Para saber si lo escrito ya subió (`dirty`). */
   noteRead(id: string): Promise<NoteRow | null>;
   /** Lo mismo para una carpeta (`HebraLibraryPort.folderDirty`), para un blob
@@ -285,6 +295,10 @@ export interface WriteContext {
    *  devuelve el estado de sync (con `preview`, ninguno). En un lector, todo ocurre en el
    *  escritor (`./forward.ts`, op `importOffice`). Opcional. */
   importOffice?(input: OfficeImportInput): Promise<OfficeImportOutcome>;
+  /** Hojas y presentaciones (H-177, op `documentOps`): crear un `.ods` u `.odp`, editarlo con un
+   *  lote en tres fases o deshacer uno. Si escribió, espera la ronda y el resultado lleva el estado
+   *  de sync. En un lector, todo ocurre en el escritor (`./forward.ts`). Opcional. */
+  documentOps?(request: DocumentOpsRequest): Promise<DocumentOpsOutcome>;
   onConflictCopy(listener: (copy: SyncConflictCopy) => void): () => void;
   /** Anota en el registro de idempotencia la copia de conflicto que produjo la ronda de
    *  después de una escritura con `operationId` (`appendAndAwaitRound`). Nunca rechaza. */
@@ -690,7 +704,37 @@ export function buildWriteContext(
 
   const importOffice = sources.importOffice?.bind(sources);
 
+  /**
+   * Hojas y presentaciones (H-177): la ronda de después la pide el servicio solo si escribió
+   * (`afterCommit`). Una edición dice `pending` tras una ronda correcta, porque no hay fila que
+   * mirar: lo que sube es el estado Yjs del documento. Una creación sí la tiene: con la ronda
+   * correcta, `uploaded` si la fila del fichero ya no está sucia y su blob ya subió.
+   */
+  async function documentWrite(
+    run: NonNullable<WriteContextSources['documentOps']>,
+    request: DocumentOpsRequest
+  ): Promise<DocumentOpsOutcome> {
+    let wait: RoundWait | null = null;
+    const outcome = await run(request, {
+      afterCommit: async () => {
+        wait = await awaitRound(roundTimeoutMs);
+        return syncFieldsOf(wait, null);
+      }
+    });
+    const settled = wait as RoundWait | null;
+    if (settled === null || !outcome.ok || !('created' in outcome)) return outcome;
+    const { created } = outcome;
+    const sync = syncFieldsOf(settled, await replacedFileDirtyOf(created.sha256)(created.id));
+    const { syncError: _previous, ...rest } = created;
+    return { ok: true, created: { ...rest, ...sync } };
+  }
+
+  const documentOps = sources.documentOps?.bind(sources);
+
   return {
+    ...(documentOps
+      ? { documentOps: (request: DocumentOpsRequest) => documentWrite(documentOps, request) }
+      : {}),
     ...(importOffice
       ? { importOffice: (input: OfficeImportInput) => importOfficeWrite(importOffice, input) }
       : {}),

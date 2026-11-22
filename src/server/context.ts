@@ -1,4 +1,4 @@
-import type { AdmissionTicket } from '../accounts/capacity';
+import type { AdmissionTicket, CapacityGate } from '../accounts/capacity';
 import type { SpaceHistoryTransport } from '../hebra';
 import type { Clock } from '../accounts/lifecycle';
 import type { HebraLibraryPort } from '../store/types';
@@ -106,6 +106,13 @@ export interface ServerContext {
   /** Biblioteca personal (§8, §12.10): resuelve al terminar la primera ronda, o a los 10 s de
    *  abrir, y nunca rechaza. Los espacios no lo llevan: su apertura ya espera esa ronda. */
   firstRound?: () => Promise<void>;
+  /**
+   * Hojas y presentaciones (H-177): la compuerta de memoria y la cuenta en cuyo turno esperan la
+   * lectura y el pintado de un documento, que corren en el proceso de la llamada. Es la misma de la
+   * conversión de ofimática (`serve-http`: la de `AccountContexts`). Sin ella (tests), la del
+   * proceso.
+   */
+  documentCapacity?: { gate: Pick<CapacityGate, 'admit'>; key: string };
 }
 
 /** Todo lo que una herramienta necesita PARA ESTA llamada: el almacén, un filtro de

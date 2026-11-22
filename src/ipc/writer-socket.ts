@@ -97,6 +97,15 @@
  *   lector al escritor: caben 5 MiB; más es `file_too_large`. Con `sourceFileId` (C-37b) no
  *   hay `dataBase64`: el escritor lee el fichero de su disco, hasta 25 MiB. Op propia: un escritor
  *   anterior la rechaza en `parseEnvelope` y el lector lo traduce a `writer_outdated`.
+ * - `documentOps` `{opsVersion, format, action, privacy, …}` (H-177, 22 nov 2026) →
+ *   `DocumentOpsOutcome` (`src/store/document-service.ts`), con la ronda ya esperada: crear un
+ *   `.ods` u `.odp` (`create` `{operationId, folderId, name, dataBase64}`), editarlo con un lote
+ *   (`edit` `{input: {id, operationId, ops, expectedRevision?, expectedLayout?, dryRun?}}`) o
+ *   deshacer un lote (`undo` `{input: {id, operationId, undoOperationId}}`). Las tres fases del
+ *   lote corren en el escritor, con la privacidad del lector. Los bytes de una creación van en
+ *   base64 del lector al escritor (caben 5 MiB; más, `file_too_large`). Un `opsVersion` distinto
+ *   de `DOCUMENT_OPS_VERSION` es `invalid_request` sin escribir, como un escritor que no conoce la
+ *   op: el lector lo traduce a `writer_outdated`.
  * - Ficheros de trabajo (SPEC.md §13, 10 oct 2026), la vía LOCAL de `hebra-mcp apply` y
  *   `undo` cuando otro proceso es el escritor. Ninguna herramienta MCP las usa:
  *   - `replaceBody` `{id, body, baseBodySha256, onConflict, privacy}` →
@@ -184,6 +193,9 @@ import { FILE_TEXT_REPLACE_MAX_BYTES } from '../store/file-content';
 import type { FetchFileInput, ReplaceFileTextInput } from '../store/file-writes';
 import type { LooseFileWriteInput } from '../store/file-verbs';
 import type { OfficeImportInput } from '../store/office-writes';
+import type { DocumentOpsOutcome, DocumentOpsRequest } from '../store/document-service';
+import { DOCUMENT_OPS_VERSION } from '../store/document-types';
+import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES } from '../store/document-limits';
 import type { OfficeFormat, OfficeImportMode } from '../../vendor/hebra/src/lib/office-import/types';
 import type { NoteStateInput } from '../store/note-state';
 import {
@@ -264,6 +276,7 @@ export type WriterSocketOp =
   | 'looseFileWrite'
   | 'renameFileRelinking'
   | 'importOffice'
+  | 'documentOps'
   | 'noteState'
   | 'jdNewId'
   | 'jdMove'
@@ -278,6 +291,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'looseFileWrite',
   'renameFileRelinking',
   'importOffice',
+  'documentOps',
   'noteState',
   'jdNewId',
   'jdMove',
@@ -361,6 +375,10 @@ export interface WriterSocketHandlers {
    *  Opcional: un escritor sin él responde `invalid_request` (el lector lo traduce a
    *  `writer_outdated`). */
   importOffice?(input: OfficeImportInput): Promise<OfficeImportOutcome>;
+  /** Hojas y presentaciones (H-177): crear, editar con un lote o deshacer, en el escritor y con
+   *  la ronda ya esperada. Opcional: un escritor sin él responde `invalid_request` (el lector lo
+   *  traduce a `writer_outdated`). */
+  documentOps?(request: DocumentOpsRequest): Promise<DocumentOpsOutcome>;
   /** Cambios de estado de una nota de D23, con la ronda ya esperada. Opcional: un escritor
    *  sin él responde `invalid_request`. */
   noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
@@ -693,6 +711,78 @@ function officeImportInputOf(params: Record<string, unknown>): OfficeImportInput
     ...(sourceFileId !== undefined ? { sourceFileId } : {}),
     ...(validOperationId !== undefined ? { operationId: validOperationId } : {}),
     privacy
+  };
+}
+
+const DOCUMENT_FORMATS: readonly string[] = ['ods', 'odp'];
+
+/** Las operaciones de un lote tal como las espera `runDocumentRequest`: las valida el formato. */
+type DocumentOpsInputOps = Extract<DocumentOpsRequest, { action: 'edit' }>['input']['ops'];
+
+/** Una revisión o una disposición leídas: texto acotado, opcional. */
+function optionalRevisionOf(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'string' || value.length === 0 || value.length > REVISION_MAX_LENGTH) {
+    throw new InvalidRequest();
+  }
+  return value;
+}
+
+/**
+ * `documentOps` (H-177). Solo la forma y los topes: la privacidad, el `operationId`, el tipo del
+ * fichero y cada operación los vuelve a comprobar el escritor en sus turnos
+ * (`runDocumentRequest`), y los comandos de un lote de hojas, `writerSocketHandlers` con el mismo
+ * esquema que la herramienta. Otra `opsVersion` es `invalid_request`: un lote cuyo significado
+ * cambió no se aplica nunca a medias.
+ */
+function documentOpsRequestOf(params: Record<string, unknown>): DocumentOpsRequest {
+  const { opsVersion, format, action } = params;
+  if (opsVersion !== DOCUMENT_OPS_VERSION) throw new InvalidRequest();
+  if (typeof format !== 'string' || !DOCUMENT_FORMATS.includes(format)) throw new InvalidRequest();
+  const privacy = privacyOf(params.privacy);
+  const docFormat = format as DocumentOpsRequest['format'];
+  if (action === 'create') {
+    const { folderId, name, dataBase64 } = params;
+    if (!isId(folderId) || !isName(name) || name.length === 0 || typeof dataBase64 !== 'string') {
+      throw new InvalidRequest();
+    }
+    const operationId = operationIdOf(params.operationId);
+    const decoded = decodeAttachmentBase64(dataBase64);
+    if (!decoded.ok) {
+      if (decoded.code === 'attachment_too_large') throw writeRejected('file_too_large');
+      throw new InvalidRequest();
+    }
+    return { opsVersion, format: docFormat, privacy, action, operationId, folderId, name, bytes: decoded.bytes };
+  }
+  if (!isPlainObject(params.input)) throw new InvalidRequest();
+  const input = params.input;
+  if (!isId(input.id)) throw new InvalidRequest();
+  const operationId = operationIdOf(input.operationId);
+  if (action === 'undo') {
+    const undoOperationId = operationIdOf(input.undoOperationId);
+    return { opsVersion, format: docFormat, privacy, action, input: { id: input.id, operationId, undoOperationId } };
+  }
+  if (action !== 'edit') throw new InvalidRequest();
+  const { ops, dryRun } = input;
+  if (!Array.isArray(ops) || ops.length === 0 || ops.length > EDIT_OPS_MAX) throw new InvalidRequest();
+  // El lote ya pasó el tope en el lector; aquí se vuelve a medir con el margen de su envoltorio.
+  if (JSON.stringify(ops).length > EDIT_OPS_MAX_BYTES * 2) throw new InvalidRequest();
+  if (dryRun !== undefined && typeof dryRun !== 'boolean') throw new InvalidRequest();
+  const expectedRevision = optionalRevisionOf(input.expectedRevision);
+  const expectedLayout = optionalRevisionOf(input.expectedLayout);
+  return {
+    opsVersion,
+    format: docFormat,
+    privacy,
+    action,
+    input: {
+      id: input.id,
+      operationId,
+      ops: ops as DocumentOpsInputOps,
+      ...(expectedRevision !== undefined ? { expectedRevision } : {}),
+      ...(expectedLayout !== undefined ? { expectedLayout } : {}),
+      ...(dryRun === true ? { dryRun: true } : {})
+    }
   };
 }
 
@@ -1302,6 +1392,12 @@ export class WriterSocketServer {
           const input = officeImportInputOf(envelope.params);
           if (!handlers.importOffice) throw new InvalidRequest();
           result = await handlers.importOffice(input);
+          break;
+        }
+        case 'documentOps': {
+          const input = documentOpsRequestOf(envelope.params);
+          if (!handlers.documentOps) throw new InvalidRequest();
+          result = await handlers.documentOps(input);
           break;
         }
         case 'noteState': {

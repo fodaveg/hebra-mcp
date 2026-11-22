@@ -153,6 +153,15 @@ function processOfficeCapacity(): OfficeCapacity {
 }
 
 /**
+ * Dónde aparta la memoria una lectura o un pintado de un documento que corre en el proceso de la
+ * llamada (`hebra_read_sheet`, `hebra_render_sheet`, H-177): la misma compuerta y cuenta que la
+ * conversión de ofimática de este contexto, o la del proceso si no hay (stdio, tests).
+ */
+export function documentCapacityOf(office?: OfficeWiring): OfficeCapacity {
+  return office?.capacity ?? processOfficeCapacity();
+}
+
+/**
  * El convertidor de `importOfficeLocal` sobre el hilo de C-27: cada análisis o conversión
  * reserva `OFFICE_CONVERSION_RESERVE_BYTES` más el tamaño del fichero en la compuerta y la
  * suelta al terminar. Un fallo llega como `ConversionError` (la clase real de Hebra, la misma
@@ -190,6 +199,7 @@ export function localWriteContext(
         input,
         officeConversionRunner(office.capacity ?? processOfficeCapacity(), office.run)
       ),
+    documentOps: (request, hooks) => instance.documentOpsLocal(request, hooks.afterCommit),
     createNote: (input) => instance.createNote(input),
     appendToNote: (input) => instance.appendToNote(input),
     editNote: (input) => instance.editNoteLocal(input),
@@ -378,6 +388,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
       status: new LibraryInstanceStatusSource(instance, linked !== null),
       authorize,
       firstRound: () => firstRound,
+      documentCapacity: documentCapacityOf(options.office),
       write: localWriteContext(instance, authorize, { office: options.office })
     };
     return { ctx, instance, linked: linked !== null, close };
@@ -403,6 +414,7 @@ export async function openServeContext(options: OpenServeOptions): Promise<Serve
     privacyConfigSource: privacySource,
     status: new RoutedStatusSource(instance, linked !== null, options.forward),
     firstRound: () => firstRound,
+    documentCapacity: documentCapacityOf(options.office),
     write
   };
   return { ctx, instance, linked: linked !== null, close };

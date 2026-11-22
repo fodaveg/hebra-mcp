@@ -102,6 +102,15 @@ import {
   OFFICE_QUEUE_WAIT_MS
 } from '../store/office-runner';
 import type { OfficeImportInput } from '../store/office-writes';
+import type { DocumentOpsOutcome, DocumentOpsRequest } from '../store/document-service';
+import { DOCUMENT_ERROR_CODES, type DocumentError, type WriteOut } from '../store/document-types';
+import {
+  BATCH_INVALID_ISSUES_MAX,
+  DOCUMENT_EDIT_TIMEOUT_MS,
+  DOCUMENT_QUEUE_WAIT_MS,
+  EDIT_OPS_MAX
+} from '../store/document-limits';
+import { parseSheetCommands } from './tools/sheet-op-schemas';
 import type { NoteStateInput } from '../store/note-state';
 import type { JdNewIdRequest } from '../store/jd-new-id';
 import type { JdMoveItem, JdMoveRequest } from '../store/jd-move';
@@ -158,6 +167,8 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // C-37: la cola del hilo, la conversión con su corte duro, los `blobPut` y la ronda.
   importOffice:
     OFFICE_QUEUE_WAIT_MS + OFFICE_CONVERT_BUDGET_MS + OFFICE_HARD_CUT_GRACE_MS + AWAIT_ROUND_TIMEOUT_MS + 30_000,
+  // H-177: la cola y el cálculo de un lote, los dos turnos, el punto de control y la ronda.
+  documentOps: DOCUMENT_QUEUE_WAIT_MS + DOCUMENT_EDIT_TIMEOUT_MS + AWAIT_ROUND_TIMEOUT_MS + 60_000,
   noteState: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
   jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
@@ -396,6 +407,123 @@ function asOfficeOutcome(value: unknown): OfficeImportOutcome {
     ...(record.replayed === true ? { replayed: true as const } : {}),
     ...(outcome === 'preview' ? {} : syncFieldsFrom(record))
   };
+}
+
+/** Estados de sync de una escritura de documento: los de siempre y, con `dryRun`, `not_applicable`. */
+const DOCUMENT_SYNC_STATES: ReadonlySet<string> = new Set([...SYNC_STATES, 'not_applicable']);
+
+function documentSyncOf(record: Record<string, unknown>): { sync: string; syncError?: string } {
+  if (typeof record.sync !== 'string' || !DOCUMENT_SYNC_STATES.has(record.sync)) throw new Error('writer_protocol');
+  return typeof record.syncError === 'string' ? { sync: record.sync, syncError: record.syncError } : { sync: record.sync };
+}
+
+/** Los `createdIds` del escritor: un `as` por comando como mucho. */
+function asCreatedIds(value: unknown): Record<string, string> {
+  const entries = Object.entries(asRecordValue(value));
+  if (entries.length > EDIT_OPS_MAX || !entries.every(([, id]) => typeof id === 'string')) {
+    throw new Error('writer_protocol');
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
+}
+
+/** El error recuperable de un documento, reconstruido con solo los campos de su código. */
+function asDocumentError(value: unknown): DocumentError {
+  const record = asRecordValue(value);
+  const code = oneOfValues(record.code, DOCUMENT_ERROR_CODES);
+  switch (code) {
+    case 'precondition_failed':
+      return { code, opIndex: asCount(record.opIndex), target: asString(record.target) };
+    case 'batch_invalid': {
+      const issues = asArray(record.issues);
+      if (issues.length > BATCH_INVALID_ISSUES_MAX) throw new Error('writer_protocol');
+      return {
+        code,
+        issues: issues.map((entry) => {
+          const issue = asRecordValue(entry);
+          return {
+            opIndex: asCount(issue.opIndex),
+            path: asString(issue.path),
+            reason: asString(issue.reason),
+            ...(issue.expected !== undefined ? { expected: asString(issue.expected) } : {})
+          };
+        })
+      };
+    }
+    case 'op_unsupported':
+      return record.opIndex === undefined ? { code } : { code, opIndex: asCount(record.opIndex) };
+    case 'document_busy':
+      return { code, retryAfterSeconds: asCount(record.retryAfterSeconds) };
+    case 'file_too_large':
+      return { code, byteLength: asCount(record.byteLength), maxBytes: asCount(record.maxBytes) };
+    case 'file_exists':
+      return { code, id: asString(record.id) };
+    default:
+      // Los demás no llevan campos: lo que traigan de más no pasa.
+      return { code } as DocumentError;
+  }
+}
+
+/** La salida común de una escritura de documento, campo a campo. Con `id`, tiene que ser ese. */
+function asWriteOut(value: unknown, id: string): WriteOut {
+  const record = asRecordValue(value);
+  if (record.id !== id) throw new Error('writer_protocol');
+  return {
+    id,
+    outcome: oneOfValues(record.outcome, ['saved', 'already', 'validated'] as const),
+    revision: asString(record.revision),
+    ...(record.layoutRevision !== undefined ? { layoutRevision: asString(record.layoutRevision) } : {}),
+    ...(record.previousRevision !== undefined ? { previousRevision: asString(record.previousRevision) } : {}),
+    ...(record.createdIds !== undefined ? { createdIds: asCreatedIds(record.createdIds) } : {}),
+    ...(record.undoUntil !== undefined ? { undoUntil: asString(record.undoUntil) } : {}),
+    ...(typeof record.undoAvailable === 'boolean' ? { undoAvailable: record.undoAvailable } : {}),
+    ...(record.replayed === true ? { replayed: true as const } : {}),
+    ...documentSyncOf(record)
+  };
+}
+
+/**
+ * Valida el `DocumentOpsOutcome` que devuelve el escritor (H-177). El informe de un lote
+ * (`report`) es propio de cada formato y viaja como objeto: lo lee la herramienta que lo pidió.
+ */
+function asDocumentOpsOutcome(value: unknown, request: DocumentOpsRequest): DocumentOpsOutcome {
+  const record = asRecordValue(value);
+  if (record.ok === false) return { ok: false, error: asDocumentError(record.error) };
+  if (record.ok !== true) throw new Error('writer_protocol');
+  if (request.action === 'create') {
+    const created = asRecordValue(record.created);
+    if (typeof created.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(created.sha256)) throw new Error('writer_protocol');
+    return {
+      ok: true,
+      created: {
+        id: asString(created.id),
+        sha256: created.sha256,
+        outcome: oneOfValues(created.outcome, ['saved', 'already'] as const),
+        ...(created.replayed === true ? { replayed: true as const } : {}),
+        ...documentSyncOf(created)
+      }
+    };
+  }
+  const out = asWriteOut(record.out, request.input.id);
+  if (record.report !== undefined && !isRecord(record.report)) throw new Error('writer_protocol');
+  return { ok: true, out, ...(record.report !== undefined ? { report: record.report } : {}) };
+}
+
+/** Lo que viaja por `writer.sock` en `documentOps`: los bytes de una creación, en base64. */
+function documentOpsParams(request: DocumentOpsRequest): Record<string, unknown> {
+  const { opsVersion, format, privacy } = request;
+  if (request.action === 'create') {
+    return {
+      opsVersion,
+      format,
+      privacy,
+      action: 'create',
+      operationId: request.operationId,
+      folderId: request.folderId,
+      name: request.name,
+      dataBase64: Buffer.from(request.bytes).toString('base64')
+    };
+  }
+  return { opsVersion, format, privacy, action: request.action, input: request.input };
 }
 
 /** Los ids de las notas que arregló un renombrado (D23), acotados: para la puerta final de ESTE
@@ -1201,6 +1329,31 @@ export function buildRoutedWriteContext(
           }
         }
       : {}),
+    // Hojas y presentaciones (H-177): crear, editar o deshacer ocurre entero en el escritor, con
+    // la privacidad de ESTE lector; aquí no se escribe nada. Los bytes de una creación viajan en
+    // base64 y caben 5 MiB (más, `file_too_large` sin tocar el socket). Si la conexión se corta
+    // tras enviarla, no se repite: el agente reintenta con el mismo `operationId`. Un escritor que
+    // no conoce la op o tiene otra `opsVersion` la rechaza sin escribir: `writer_outdated`.
+    ...(local.documentOps
+      ? {
+          documentOps: (request: DocumentOpsRequest) => {
+            if (instance.role !== 'this' && request.action === 'create' && request.bytes.length > ATTACHMENT_MAX_BYTES) {
+              return Promise.reject(writeRejected('file_too_large'));
+            }
+            return routed(
+              'documentOps',
+              documentOpsParams(request),
+              (value) => asDocumentOpsOutcome(value, request),
+              () => local.documentOps!(request)
+            ).catch((error: unknown) => {
+              if (error instanceof WriterRemoteError && error.code === 'invalid_request') {
+                throw new ToolError('writer_outdated');
+              }
+              throw error;
+            });
+          }
+        }
+      : {}),
     // Cambios de estado de una nota (D23): op propia, para fallar cerrado igual. Un escritor
     // anterior ignoraría `expectedRevision` y movería la nota sin guarda.
     ...(local.noteState
@@ -1258,6 +1411,28 @@ function hasWorkdirWrites(instance: object): instance is WorkdirWriterInstance {
   return typeof candidate.replaceBodyLocal === 'function' && typeof candidate.trashConflictCopiesLocal === 'function';
 }
 
+/**
+ * Un `documentOps` que llega por el socket. Un lote de hojas es UNA operación `sheet.batch` con
+ * los comandos del LLM (`SheetBatchOp` de `./tools/edit-sheet.ts`): sus comandos pasan otra vez
+ * por `parseSheetCommands`, y uno que no pase es `batch_invalid` sin llegar al almacén.
+ */
+async function documentOpsChecked(
+  run: NonNullable<WriteContext['documentOps']>,
+  request: DocumentOpsRequest
+): Promise<DocumentOpsOutcome> {
+  if (request.format !== 'ods' || request.action !== 'edit') return run(request);
+  const [batch, ...rest] = request.input.ops as unknown[];
+  const envelope = isRecord(batch) ? batch : null;
+  if (rest.length > 0 || !envelope || envelope.type !== 'sheet.batch' || typeof envelope.seed !== 'string') {
+    return { ok: false, error: { code: 'batch_invalid', issues: [{ opIndex: 0, path: 'ops', reason: 'lote de hojas mal formado' }] } };
+  }
+  const parsed = parseSheetCommands(envelope.commands);
+  if (!parsed.ok) return { ok: false, error: parsed.error };
+  const batchOp: unknown = { type: 'sheet.batch', seed: envelope.seed, commands: parsed.ops };
+  const ops = [batchOp] as typeof request.input.ops;
+  return run({ ...request, input: { ...request.input, ops } });
+}
+
 /** Lo que hace el escritor con lo que le reenvían (`LibraryInstance.open({ writerSocket })`). */
 export function writerSocketHandlers(
   local: WriteContext,
@@ -1291,6 +1466,12 @@ export function writerSocketHandlers(
     // C-37: importar un Office, con la privacidad del lector y la ronda aquí.
     ...(local.importOffice
       ? { importOffice: (input: OfficeImportInput) => local.importOffice!(input) }
+      : {}),
+    // H-177: hojas y presentaciones, con la privacidad del lector y la ronda aquí. Los comandos
+    // de un lote de hojas se vuelven a validar con el esquema de la herramienta: el escritor no
+    // se fía de lo que le llega.
+    ...(local.documentOps
+      ? { documentOps: (request: DocumentOpsRequest) => documentOpsChecked(local.documentOps!, request) }
       : {}),
     // D23: cambios de estado de una nota, con la privacidad del lector y la ronda aquí.
     ...(local.noteState ? { noteState: (input: NoteStateInput) => local.noteState!(input) } : {}),
