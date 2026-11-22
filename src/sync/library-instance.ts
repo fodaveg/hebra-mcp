@@ -96,6 +96,7 @@ import {
 } from '../store/replace-batch';
 import type { PrivacyConfig } from '../privacy/config';
 import { openNodeLibraryPort, type NodeLibraryPort, type SpaceStoreAccess } from '../store/node-port';
+import type { DocumentChannelSource } from '../store/document-channel';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -261,7 +262,7 @@ export class LibraryInstance implements NoteWriteTarget {
   /** `hebra_replace_in_notes` (D14): simular, aplicar y deshacer, en este escritor. */
   private readonly replaceBatch: ReplaceBatch;
   /** Vista estable para la capa de herramientas. */
-  readonly port: HebraLibraryPort;
+  readonly port: InstancePort;
 
   private constructor(
     private readonly options: OpenLibraryInstanceOptions,
@@ -927,8 +928,11 @@ export class LibraryInstance implements NoteWriteTarget {
   }
 }
 
+/** El puerto estable de una instancia: `HebraLibraryPort` y el canal de documentos (H-177). */
+export type InstancePort = HebraLibraryPort & { documentSource(): DocumentChannelSource };
+
 /** `HebraLibraryPort` que delega en el puerto vigente en cada llamada. */
-function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
+function stablePort(current: () => NodeLibraryPort): InstancePort {
   return {
     libraryOpen: (): Promise<LibraryOpenInfo> => current().libraryOpen(),
     libraryId: (): Promise<string> => current().libraryId(),
@@ -1010,6 +1014,10 @@ function stablePort(current: () => NodeLibraryPort): HebraLibraryPort {
       privacy: PrivacyConfig,
       session: GrepBodiesSession | null
     ): Promise<GrepBodiesResult> => current().grepBodies(rowids, privacy, session),
+    // H-177: el canal de documentos del puerto vigente. Lo buscan las herramientas de hojas
+    // (`hebra_read_sheet`, `hebra_edit_sheet`, `hebra_render_sheet`): sin él, en un `serve`
+    // la lectura respondía `file_unavailable` aunque los bytes estuvieran en el disco.
+    documentSource: (): DocumentChannelSource => current().documentSource(),
     close: (): void => current().close()
   };
 }

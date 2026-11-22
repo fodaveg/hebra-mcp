@@ -160,12 +160,23 @@ export const DOCUMENT_TOOLS: readonly DocumentToolEntry[] = [
     annotations: READ_ONLY,
     run: (toolCtx, input, server) =>
       runRenderSheet(toolCtx, input as unknown as RenderSheetInput, {
-        documents: (toolCtx.port as NodeLibraryPort).documentSource(),
+        documents: documentSourceOf(toolCtx),
         capacity: capacityOf(server),
         ...bundledSheetRenderAssets()
       })
   }
 ];
+
+/**
+ * La fuente de documentos del puerto de la llamada (`NodeLibraryPort.documentSource()`, también
+ * por el puerto estable de `LibraryInstance`). Un puerto sin ella no tiene de dónde leer un
+ * documento: `file_unavailable`, como `hebra_read_sheet`, sin decir nada de la biblioteca.
+ */
+function documentSourceOf(ctx: ToolContext): ReturnType<NodeLibraryPort['documentSource']> {
+  const port = ctx.port as Partial<Pick<NodeLibraryPort, 'documentSource'>>;
+  if (typeof port.documentSource !== 'function') throw new ToolError('file_unavailable');
+  return port.documentSource();
+}
 
 /**
  * Comprueba la tabla antes de registrar nada (R28 del plan de hojas): cada entrada con su
