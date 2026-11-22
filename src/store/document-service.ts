@@ -3,7 +3,8 @@
  * (`.ods`, `.odp`) con la instancia. Aquí no hay reglas nuevas, solo el cableado:
  *
  * - `runDocumentRequest`: un lote (`runDocumentOps`), un deshacer (`undoDocumentOps`) o una
- *   creación (`createDocumentFile`), con el turno real (`documentTurnOf`).
+ *   creación (`createDocumentFile`), con el turno real (`documentTurnOf`). Lo creado sale ya con
+ *   su cabecera `/h` (`ensureCreatedHead`, H-79), lista para editarse desde el MCP.
  * - Tras un lote o un deshacer que escribieron: `checkpointThenClean`, con el exportador
  *   registrado, el diario en disco y `otherPins` leído de `doc_pins`. Nunca lanza: lo aplicado
  *   no se rompe por un punto de control que falle. Después, la ronda de sync.
@@ -16,6 +17,9 @@
  * cada editor (`P-110`, `H-177`), junto con sus herramientas.
  */
 import type { DocFormat, DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
+import { checkpointPins } from '../../vendor/hebra/src/lib/documents/sync/checkpoint';
+import { initialGeneration } from '../../vendor/hebra/src/lib/documents/sync/generation-flow';
+import { newDocumentHead } from '../../vendor/hebra/src/lib/documents/sync/lifecycle';
 import { documentLogCode, logDocumentEvent, type DocumentLogEntry } from '../log/logger';
 import type { PrivacyConfig } from '../privacy/config';
 import {
@@ -213,7 +217,29 @@ export async function runDocumentRequest(
   }
 }
 
-/** Crear un documento: en un turno, con su `operationId`, y la ronda si escribió. */
+/**
+ * La cabecera `/h` del documento recién creado, como hace la app al abrir un `.ods` que no la
+ * tiene (`ensureHead` del cableado, H-ABRIR-ODS): base = los bytes creados, generación inicial
+ * derivada del fichero y de sus bytes, y `docSetHeadIfAbsent`, que no pisa una cabecera ni un
+ * estado que ya estén. Con cableado de sync va por `wiring.ensureHead`, que además avisa al
+ * canal para que el `/h` suba; sin él (biblioteca sin vincular), directo al puerto. Fuera del
+ * turno: las dos vías entran por la cola del almacén. Sin ella, la primera edición desde el MCP
+ * daría `doc_head_invalid` hasta que la app abriera el documento.
+ */
+async function ensureCreatedHead(
+  target: DocumentServiceTarget,
+  format: DocFormat,
+  fileId: string,
+  sha256: string
+): Promise<boolean> {
+  const source = target.port.documentSource();
+  if (source.wiring) return (await source.wiring.ensureHead(fileId)) !== null;
+  const head = newDocumentHead(format, await initialGeneration(fileId, sha256), sha256);
+  const result = await source.port.docSetHeadIfAbsent(fileId, head, checkpointPins(head, []));
+  return result.head !== null;
+}
+
+/** Crear un documento: en un turno, con su `operationId`, su cabecera y la ronda si escribió. */
 async function createRequest(
   target: DocumentServiceTarget,
   request: Extract<DocumentOpsRequest, { action: 'create' }>,
@@ -224,6 +250,11 @@ async function createRequest(
     const made = await target.writeExclusive((store) =>
       createDocumentFile({ store, privacy }, { format, folderId, name, bytes, operationId })
     );
+    // También en un reintento: un corte entre el fichero y su cabecera se cura repitiendo.
+    if (!(await ensureCreatedHead(target, format, made.fileId, made.sha256))) {
+      logDocumentEvent({ event: 'document.write', action: 'create', format, outcome: 'error', code: 'doc_head_invalid' });
+      return { ok: false, error: { code: 'doc_head_invalid' } };
+    }
     logDocumentEvent({
       event: 'document.write',
       action: 'create',
