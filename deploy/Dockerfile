@@ -59,4 +59,12 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=10s \
 
 # Subcomando confirmado por SPEC.md §12.1/§12.8: `serve-http`. Sin flags de
 # Node peligrosos (sin `--inspect`, sin `--experimental-*`).
-CMD ["node", "dist/cli.mjs", "serve-http"]
+#
+# `--liftoff-only` (H-95, `SHEET_ENGINE_NODE_FLAGS` de `src/store/sheet-limits.ts`):
+# sin él, cada hilo del motor de hojas compila el wasm de IronCalc con TurboFan y
+# ningún libro con fórmulas cabe en los 512 MiB del contenedor (medido el 22 nov
+# 2026: OOM en todas las corridas con fórmulas). Es una opción de V8 y vale para
+# todo el proceso, hilos incluidos, solo si va en esta línea: con `NODE_OPTIONS` o
+# `v8.setFlagsFromString` no sirve, y el `execArgv` de un `Worker` la rechaza
+# (`ERR_WORKER_INVALID_EXEC_ARGV`). Lo comprueba `test/deploy/deploy-config.test.ts`.
+CMD ["node", "--liftoff-only", "dist/cli.mjs", "serve-http"]

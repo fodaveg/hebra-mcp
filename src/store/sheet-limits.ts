@@ -42,10 +42,16 @@
  * 3. Dos trabajos a la vez en los topes (4 y 4 MiB), con `--liftoff-only`: picos de 512, 501, 512,
  *    485 y 476 MiB y un OOM en seis corridas. No caben: la reserva tiene que dejarlos de uno en uno.
  *
- * No medido aquí: la edición (`hebra_edit_sheet` proyecta y exporta en el hilo principal, sin
- * reserva en la compuerta), el pintado (`hebra_render_sheet`, que tiene su propia reserva), un
- * servidor con otro número de núcleos y libros reales de usuarios. Este fichero no lo importa aún
- * ningún camino: cablearlo es de quien posee esos ficheros.
+ * No medido aquí: la edición (`hebra_edit_sheet` proyecta y exporta en el hilo principal), el
+ * pintado (`hebra_render_sheet`), un servidor con otro número de núcleos y libros reales de
+ * usuarios. La edición y la fase de lectura del pintado abren el mismo libro con la misma lectura
+ * común (`openSheetRead`) y el mismo motor, así que apartan la misma reserva que la lectura.
+ *
+ * Dónde se aplican (H-95b): `../server/tools/sheet-read.ts` (el tope de tamaño y los de lectura,
+ * para las tres herramientas), `../server/tools/read-sheet-job.ts` (estilos e inventario),
+ * `./sheet-jobs.ts` (un trabajo a la vez y la reserva, para leer, pintar y editar),
+ * `../server/tools/{read,edit,render}-sheet.ts` (`file_too_large`) y `deploy/Dockerfile`
+ * (`--liftoff-only` en la línea de `node`, que comprueba `test/deploy/deploy-config.test.ts`).
  */
 import type { OdsReadLimits } from '../../vendor/hebra/src/lib/sheets/contracts/limits';
 
@@ -78,6 +84,21 @@ export const SHEET_ODS_READ_LIMITS: Readonly<OdsReadLimits> = Object.freeze({
   maxEntryBytes: 4 * MIB,
   maxRatio: 200,
   maxEntries: 10_000
+});
+
+/**
+ * Topes del inventario del resumen (`inventoryOds`, lo que se conserva sin entender): ese lector
+ * descomprime TODAS las entradas del paquete, no solo las partes XML, porque busca macros, firmas
+ * y objetos por su ruta. Lo que no es XML (imágenes, miniatura) va casi siempre guardado sin
+ * comprimir y ocupa como mucho lo que el `.ods`, así que el total es el de las partes XML más el
+ * del documento: 8 MiB. Un `.ods` legítimo cabe; una bomba se corta ahí, y el resumen sale sin
+ * inventario, como cualquier fallo de ese lector. Es menos de lo que se midió, que leía el
+ * inventario con
+ * `DEFAULT_ZIP_LIMITS` sobre un `.ods` cuyo relleno es una imagen sin comprimir.
+ */
+export const SHEET_ODS_INVENTORY_LIMITS: Readonly<OdsReadLimits> = Object.freeze({
+  ...SHEET_ODS_READ_LIMITS,
+  maxTotalBytes: SHEET_ODS_READ_LIMITS.maxTotalBytes + SHEET_DOCUMENT_MAX_BYTES
 });
 
 /**

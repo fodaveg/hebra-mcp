@@ -9,7 +9,9 @@
  * Dos lados:
  * - La herramienta (`runEditSheet`), en el proceso que atiende la llamada: la entrada
  *   (`parseSheetCommands`: forma, topes y sin funciones de red), la privacidad con el filtro de la
- *   llamada y el escritor. No calcula nada del libro.
+ *   llamada, el tope de tamaño de hojas (4 MiB, `file_too_large`) y el escritor, con un hueco de la
+ *   cola de hojas y la reserva de un trabajo de hojas en la compuerta (`admitSheetJob`, H-95b)
+ *   mientras dura. No calcula nada del libro.
  * - El formato (`createSheetDocumentFormat`), en el escritor, dentro de las tres fases de
  *   `runDocumentOps` (`../../store/document-ops.ts`). El lote viaja como UNA operación
  *   (`SheetBatchOp`) con los comandos del LLM: así valen los topes del lote (200 comandos y
@@ -72,7 +74,10 @@ import {
   type SheetOp
 } from '../../sheets';
 import type { DocumentChannelSource } from '../../store/document-channel';
-import { DOCUMENT_MAX_BYTES } from '../../store/document-limits';
+import { DocumentJobError } from '../../store/document-jobs';
+import { DOCUMENT_QUEUE_WAIT_MS } from '../../store/document-limits';
+import { admitSheetJob, type SheetJobCapacity } from '../../store/sheet-jobs';
+import { SHEET_DOCUMENT_MAX_BYTES } from '../../store/sheet-limits';
 import type { DocumentComputeJob, DocumentComputeResult, DocumentOpsInput, DocumentOpsResult } from '../../store/document-ops';
 import {
   registerDocumentFormat,
@@ -317,7 +322,7 @@ function documentErrorOf(error: unknown): DocumentError {
   if (error instanceof ToolError) {
     const known = ['document_invalid', 'document_too_complex', 'file_unavailable', 'file_too_large', 'not_found'];
     if (error.code === 'file_too_large') {
-      return { code: 'file_too_large', byteLength: Number(error.extra?.byteLength ?? 0), maxBytes: DOCUMENT_MAX_BYTES };
+      return { code: 'file_too_large', byteLength: Number(error.extra?.byteLength ?? 0), maxBytes: SHEET_DOCUMENT_MAX_BYTES };
     }
     if (known.includes(error.code)) return { code: error.code } as DocumentError;
   }
@@ -692,9 +697,11 @@ function documentRefusal(error: DocumentError): ToolError {
 /**
  * El documento visible con el filtro de esta llamada, como en `hebra_read_sheet`: oculto,
  * inexistente, en la papelera o el id de una nota dan el mismo `not_found`, y unos bytes de punto
- * de control que enlaza algo oculto también. El escritor lo vuelve a comprobar en sus turnos.
+ * de control que enlaza algo oculto también. Más de `SHEET_DOCUMENT_MAX_BYTES` (4 MiB, H-95),
+ * `file_too_large`. El escritor lo vuelve a comprobar en sus turnos (`openSheetRead`, con los bytes
+ * que de verdad abre). Devuelve el tamaño conocido del fichero, o `null`.
  */
-async function requireVisibleSheet(ctx: ToolContext, id: string): Promise<void> {
+async function requireVisibleSheet(ctx: ToolContext, id: string): Promise<number | null> {
   const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
   const content = filter.contentOf(id);
   if (!content || content.file.trashedAt !== null) throw new ToolError('not_found');
@@ -702,19 +709,50 @@ async function requireVisibleSheet(ctx: ToolContext, id: string): Promise<void> 
   used.file(id, filter.sealOf(id));
   used.folder(content.file.folderId, ctx.privacy.folderPath(content.file.folderId));
   const byteLength = content.file.byteLength;
-  if (byteLength !== null && byteLength > DOCUMENT_MAX_BYTES) {
-    throw new ToolError('file_too_large', { byteLength, maxBytes: DOCUMENT_MAX_BYTES });
+  if (byteLength !== null && byteLength > SHEET_DOCUMENT_MAX_BYTES) {
+    throw new ToolError('file_too_large', { byteLength, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
   }
   const port = ctx.port as Partial<{ documentSource(): DocumentChannelSource }>;
-  if (typeof port.documentSource !== 'function') return;
+  if (typeof port.documentSource !== 'function') return byteLength;
   const { head } = await port.documentSource().port.docRead(id);
   if (head && head.format !== 'ods') throw new ToolError('file_type_not_allowed');
   const sha256 = (head ? (head.checkpointSha256 ?? head.baseSha256) : content.sha256).toLowerCase();
   if (sha256 !== content.sha256 && filter.hidesContent(sha256)) throw new ToolError('not_found');
+  return byteLength;
+}
+
+/**
+ * Lo que H-177 cablea al registrar la herramienta: la compuerta de memoria de la cuenta, la misma
+ * de `hebra_read_sheet` y `hebra_render_sheet` (`ServerContext.documentCapacity`, o la del proceso
+ * por stdio).
+ */
+export interface EditSheetDeps {
+  capacity: SheetJobCapacity;
+}
+
+/**
+ * Un hueco de la cola de hojas y la reserva de un trabajo de hojas (`admitSheetJob`, H-95b)
+ * mientras el escritor proyecta, ensaya, calcula y exporta el libro. Sin hueco a tiempo,
+ * `document_busy`.
+ */
+async function admitEdit(deps: EditSheetDeps, byteLength: number | null): Promise<{ done(): void }> {
+  try {
+    return await admitSheetJob(deps.capacity, byteLength ?? SHEET_DOCUMENT_MAX_BYTES);
+  } catch (error) {
+    if (error instanceof DocumentJobError && error.code === 'document_busy') {
+      throw new ToolError('document_busy', { retryAfterSeconds: Math.max(1, Math.ceil(DOCUMENT_QUEUE_WAIT_MS / 1000)) });
+    }
+    throw error;
+  }
 }
 
 /** `hebra_edit_sheet`: ver la cabecera. */
-export async function runEditSheet(ctx: ToolContext, input: EditSheetInput, writer: EditSheetWriter): Promise<EditSheetOutput> {
+export async function runEditSheet(
+  ctx: ToolContext,
+  input: EditSheetInput,
+  writer: EditSheetWriter,
+  deps: EditSheetDeps
+): Promise<EditSheetOutput> {
   // 1. Solo la entrada, sin tocar el almacén.
   const id = optionalText(input?.id, 'id');
   if (id === undefined) throw invalid('id');
@@ -752,14 +790,20 @@ export async function runEditSheet(ctx: ToolContext, input: EditSheetInput, writ
   }
 
   // 2. Privacidad con el filtro de esta llamada.
-  await requireVisibleSheet(ctx, id);
+  const byteLength = await requireVisibleSheet(ctx, id);
 
-  // 3. El escritor lo vuelve a comprobar todo en sus turnos.
+  // 3. El escritor lo vuelve a comprobar todo en sus turnos. Abre el libro entero en su hilo
+  // principal (proyección, motor y exportación), y en local, como en el contenedor HTTP, es este
+  // mismo proceso: va con la reserva de hojas. Con el escritor en otro proceso (un lector por
+  // `writer.sock`), la reserva y la cola son las de este, no las del escritor.
   let result: DocumentOpsResult;
+  const ticket = await admitEdit(deps, byteLength);
   try {
     result = await writer(request);
   } catch (error) {
     throw mapWriteError(error);
+  } finally {
+    ticket.done();
   }
   if (!result.ok) throw documentRefusal(result.error);
   const report = result.report as SheetEditReport | undefined;

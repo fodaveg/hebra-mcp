@@ -33,8 +33,10 @@
  * almacén es la cabecera, los segmentos y los pendientes del `Y.Doc` y los bytes base. Si este
  * dispositivo no tiene los bytes del fichero, los baja el escritor (`fetchFile`, con el filtro de
  * quien pide dentro del turno). El cálculo (proyectar, motor de fórmulas, página) va en el hilo de
- * documentos (`./read-sheet-job.ts`, cargador `read` de `../../document-worker.ts`), con su
- * reserva en la compuerta de memoria y el plazo de lectura de 10 s.
+ * documentos (`./read-sheet-job.ts`, cargador `read` de `../../document-worker.ts`), con el plazo
+ * de lectura de 10 s y los topes de hojas medidos en H-95 (`../../store/sheet-limits.ts`): un
+ * `.ods` de más de 4 MiB es `file_too_large`, el trabajo espera hueco en la cola de hojas (uno a la
+ * vez en el proceso) y aparta en la compuerta de memoria `sheetJobReserveBytes`.
  */
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
@@ -42,13 +44,10 @@ import { logDocumentEvent, documentLogCode } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';
 import { DocumentJobError, runDocumentJob, type DocumentJobContext } from '../../store/document-jobs';
 import { odfMimetypeOf } from '../../store/document-create';
-import {
-  DOCUMENT_MAX_BYTES,
-  DOCUMENT_RESPONSE_MAX_CHARS,
-  READ_SHEET_DEFAULT_CELLS,
-  READ_SHEET_MAX_CELLS
-} from '../../store/document-limits';
+import { DOCUMENT_RESPONSE_MAX_CHARS, READ_SHEET_DEFAULT_CELLS, READ_SHEET_MAX_CELLS } from '../../store/document-limits';
 import type { DocumentReadSource } from '../../store/document-read';
+import { sheetJobSlot } from '../../store/sheet-jobs';
+import { SHEET_DOCUMENT_MAX_BYTES, sheetJobReserveBytes } from '../../store/sheet-limits';
 import type { CapacityGate } from '../../accounts/capacity';
 import { afterGate, usageOf, type ToolContext } from '../context';
 import { documentOk } from '../document-response';
@@ -138,15 +137,15 @@ export interface ReadSheetCapacity {
  * Lo que H-177 cablea al registrar la herramienta. `capacity` es la compuerta de la cuenta, como
  * la de la conversión de ofimática (`officeCapacity` de `../../accounts/contexts.ts`, o
  * `processCapacityGate()` de `../serve.ts` por stdio). `runJob` y `source` solo los cambian los
- * tests: por defecto, el hilo de documentos y la fuente de documentos del puerto.
+ * tests: por defecto, el hilo de documentos (`runDocumentJob('read', …)`) y la fuente de
+ * documentos del puerto. `runJob` recibe el mismo contexto que el hilo, con la reserva de hojas.
  */
 export type ReadSheetDeps = {
   /** La fuente de documentos del contexto. Por defecto, `ctx.port.documentSource()`. */
   source?: DocumentReadSource;
-} & (
-  | { capacity: ReadSheetCapacity; runJob?: undefined }
-  | { runJob(input: ReadSheetJobInput, documentBytes: number): Promise<unknown>; capacity?: ReadSheetCapacity }
-);
+  capacity: ReadSheetCapacity;
+  runJob?(input: ReadSheetJobInput, context: DocumentJobContext): Promise<unknown>;
+};
 
 type ValidRequest = {
   sheet?: string;
@@ -208,7 +207,7 @@ function sourceOf(ctx: ToolContext, deps: ReadSheetDeps): DocumentReadSource | n
 }
 
 function tooLarge(byteLength: number): ToolError {
-  return new ToolError('file_too_large', { byteLength, maxBytes: DOCUMENT_MAX_BYTES });
+  return new ToolError('file_too_large', { byteLength, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
 }
 
 async function localBlob(source: DocumentReadSource, sha256: string): Promise<Uint8Array | null> {
@@ -251,7 +250,7 @@ async function readStored(ctx: ToolContext, deps: ReadSheetDeps, id: string, req
   used.file(id, filter.sealOf(id));
   used.folder(content.file.folderId, ctx.privacy.folderPath(content.file.folderId));
   const knownLength = content.file.byteLength;
-  if (knownLength !== null && knownLength > DOCUMENT_MAX_BYTES) throw tooLarge(knownLength);
+  if (knownLength !== null && knownLength > SHEET_DOCUMENT_MAX_BYTES) throw tooLarge(knownLength);
 
   const source = sourceOf(ctx, deps);
   if (!source) throw new ToolError('file_unavailable');
@@ -270,7 +269,7 @@ async function readStored(ctx: ToolContext, deps: ReadSheetDeps, id: string, req
     bytes = await localBlob(source, sha256);
   }
   if (!bytes) throw new ToolError('file_unavailable');
-  if (bytes.length > DOCUMENT_MAX_BYTES) throw tooLarge(bytes.length);
+  if (bytes.length > SHEET_DOCUMENT_MAX_BYTES) throw tooLarge(bytes.length);
   if (odfMimetypeOf(bytes) !== ODS_MIME) throw new ToolError('file_type_not_allowed');
 
   return {
@@ -295,14 +294,25 @@ async function readStored(ctx: ToolContext, deps: ReadSheetDeps, id: string, req
   };
 }
 
-/** Corre el cálculo en el hilo. Los fallos de la cola o del hilo, a su código recuperable. */
+/**
+ * Corre el cálculo en el hilo, con un hueco de la cola de hojas (uno a la vez en el proceso,
+ * `SHEET_JOBS_MAX`) y la reserva de hojas en la compuerta (`sheetJobReserveBytes`, H-95b). Los
+ * fallos de la cola o del hilo, a su código recuperable.
+ */
 async function runJob(deps: ReadSheetDeps, job: ReadSheetJobInput, documentBytes: number): Promise<ReadSheetJobResult> {
   let reply: unknown;
   try {
-    if (deps.runJob) reply = await deps.runJob(job, documentBytes);
-    else {
-      const context: DocumentJobContext = { gate: deps.capacity.gate, key: deps.capacity.key, documentBytes };
-      reply = await runDocumentJob('read', job, context);
+    const release = await sheetJobSlot();
+    try {
+      const context: DocumentJobContext = {
+        gate: deps.capacity.gate,
+        key: deps.capacity.key,
+        documentBytes,
+        reserveBytes: sheetJobReserveBytes(documentBytes)
+      };
+      reply = await (deps.runJob ? deps.runJob(job, context) : runDocumentJob('read', job, context));
+    } finally {
+      release();
     }
   } catch (error) {
     if (error instanceof DocumentJobError && error.code === 'document_busy') {

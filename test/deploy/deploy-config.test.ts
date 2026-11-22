@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { SHEET_ENGINE_NODE_FLAGS } from '../../src/store/sheet-limits';
 
 // Configuración del despliegue: compose.yml, Dockerfile, .dockerignore y las
 // constantes de deploy/publicar.sh. El comportamiento del despliegue por
@@ -86,5 +87,29 @@ describe('imagen: solo lo necesario y sin secretos', () => {
   it('el Dockerfile solo copia lo que el .dockerignore deja pasar', () => {
     const copies = [...read('deploy/Dockerfile').matchAll(/^COPY (.+)$/gm)].map((m) => m[1]);
     expect(copies).toEqual(['package.json package-lock.json ./', 'dist/ ./dist/']);
+  });
+});
+
+describe('arranque de node: las opciones sin las que no valen los topes de hojas (H-95b)', () => {
+  // Rotura vista: con `CMD ["node", "dist/cli.mjs", "serve-http"]` (sin la opción) el primer
+  // test cae; con un `command:` en compose.yml, el segundo.
+  it('el CMD del Dockerfile lanza node con SHEET_ENGINE_NODE_FLAGS antes del script', () => {
+    const cmds = [...read('deploy/Dockerfile').matchAll(/^CMD (.+)$/gm)].map((m) => m[1]);
+    expect(cmds).toHaveLength(1);
+    // Forma exec (JSON): sin shell de por medio que pudiera perder o reordenar las opciones.
+    const argv = JSON.parse(cmds[0]) as string[];
+    expect(argv[0]).toBe('node');
+    const script = argv.indexOf('dist/cli.mjs');
+    expect(script).toBeGreaterThan(0);
+    expect(argv.slice(1, script)).toEqual(expect.arrayContaining([...SHEET_ENGINE_NODE_FLAGS]));
+    expect(argv.slice(script)).toEqual(['dist/cli.mjs', 'serve-http']);
+    // Un ENTRYPOINT cambiaría quién recibe el CMD.
+    expect(read('deploy/Dockerfile')).not.toMatch(/^ENTRYPOINT /m);
+  });
+
+  it('compose.yml no sustituye esa línea ni mueve las opciones a NODE_OPTIONS', () => {
+    const compose = read('deploy/compose.yml');
+    expect(compose).not.toMatch(/^\s+(command|entrypoint):/m);
+    expect(compose).not.toContain('NODE_OPTIONS');
   });
 });

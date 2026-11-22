@@ -34,10 +34,11 @@
  */
 import type * as Y from 'yjs';
 import type { DocHeadRecord } from '../../../vendor/hebra/src/lib/documents/contract';
-import { DEFAULT_ZIP_LIMITS, readSafeZip } from '../../../vendor/hebra/src/lib/portability/zip-read';
+import { readSafeZip } from '../../../vendor/hebra/src/lib/portability/zip-read';
 import { columnIndex, columnLetters, MAX_COLS, MAX_ROWS } from '../../../vendor/hebra/src/lib/sheets/formula/canon';
 import { inventoryOds } from '../../../vendor/hebra/src/lib/sheets/ods/inventory';
 import { readOdsStylesFromBytes, type OdsStyleBook, type ResolvedCellStyle } from '../../../vendor/hebra/src/lib/sheets/ods/read-styles';
+import { zipLimits } from '../../../vendor/hebra/src/lib/sheets/ods/read-workbook';
 import { CELL_STYLES_MAP, readCellStyle } from '../../../vendor/hebra/src/lib/sheets/ops/apply-cell';
 import {
   createFormulaLocale,
@@ -53,6 +54,7 @@ import {
   type SheetModelSheet
 } from '../../sheets';
 import type { DocumentError } from '../../store/document-types';
+import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 import { ToolError } from '../errors';
 import type { ReadSheetInclude } from './read-sheet';
 import { isFormula, openSheetRead, pinnedSource, scopeOf, sheetOf, type OpenedSheet } from './sheet-read';
@@ -530,7 +532,7 @@ async function pageOf(
   const patched = new Set<string>();
   if (include.has('formats')) {
     try {
-      styleBook = await readOdsStylesFromBytes(sheetBytes);
+      styleBook = await readOdsStylesFromBytes(sheetBytes, { limits: SHEET_ODS_READ_LIMITS });
       defaultStyle = styleBook.resolveNamed(null);
     } catch {
       styleBook = null;
@@ -687,7 +689,9 @@ export async function runReadSheetJob(
         }
         let findings: { cls: string; sheet?: string }[] = [];
         try {
-          findings = inventoryOds(await readSafeZip(input.base, DEFAULT_ZIP_LIMITS)).findings;
+          // Todas las entradas, con los topes de hojas: con `DEFAULT_ZIP_LIMITS` un `.ods` de 4 MiB
+          // podía inflarse hasta 512 MiB aquí (H-95b).
+          findings = inventoryOds(await readSafeZip(input.base, zipLimits(SHEET_ODS_INVENTORY_LIMITS))).findings;
         } catch {
           findings = [];
         }

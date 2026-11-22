@@ -32,12 +32,13 @@
  * - quitar el tope `max(MAX_AXIS_PX)` del esquema de `setAxisSize` (H-VENDOR-2): cae «una medida
  *   fuera de tope» (el lote llega al escritor y lo rechaza `compileBatch`, no el esquema).
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
+import { unzipSync, zipSync, type Zippable } from 'fflate';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import type { PrivacyConfig } from '../../src/privacy/config';
@@ -50,8 +51,10 @@ import {
   runEditSheet,
   type EditSheetInput,
   type EditSheetWriter,
+  type SheetBatchOp,
   type SheetEditOp
 } from '../../src/server/tools/edit-sheet';
+import { parseSheetCommands } from '../../src/server/tools/sheet-op-schemas';
 import { openSheetRead } from '../../src/server/tools/sheet-read';
 import { createEditorData, type SheetCommand, type SheetModel, type SheetModelSheet } from '../../src/sheets';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
@@ -59,6 +62,8 @@ import { assertAddressRule, DocumentAddressError } from '../../src/store/documen
 import { registerDocumentFormat, runDocumentRequest } from '../../src/store/document-service';
 import { DOCUMENT_OPS_VERSION } from '../../src/store/document-types';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
+import { sheetJobSlot } from '../../src/store/sheet-jobs';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES } from '../../src/store/sheet-limits';
 import type { SyncStorePort } from '../../src/store/sync-port';
 import { buildOds } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
 import { IDENTITY } from '../sync/devices';
@@ -214,10 +219,10 @@ function readOnlyPage(): Parameters<SyncStorePort['syncApplyPage']>[0] {
  * Una biblioteca con un `.ods` subido, sin cabecera de documento (nunca abierto en el editor), en
  * `Hojas` o en la carpeta privada `Diario`; o en un espacio compartido (`shared`).
  */
-async function world(options: { folder?: 'Hojas' | 'Diario'; shared?: boolean } = {}) {
+async function world(options: { folder?: 'Hojas' | 'Diario'; shared?: boolean; bytes?: Uint8Array } = {}) {
   const port = await open(options.shared === true);
   const config = options.shared === true ? SPACE : CONFIG;
-  const bytes = buildOds();
+  const bytes = options.bytes ?? buildOds();
   const { fileId, diario } = await port.writeExclusive(async (store) => {
     const hojas = (await store.folderCreate('root', 'Hojas')).id;
     const diarioId = (await store.folderCreate('root', 'Diario')).id;
@@ -237,8 +242,43 @@ async function world(options: { folder?: 'Hojas' | 'Diario'; shared?: boolean } 
     if ('created' in outcome) throw new Error('documentOps devolvió una creación');
     return outcome;
   };
-  const edit = (input: Omit<EditSheetInput, 'id'>, context: ToolContext = ctx) => runEditSheet(context, { id: fileId, ...input }, writer);
-  return { port, ctx, writer, edit, fileId, diario, bytes, calls: () => calls };
+  // La compuerta apunta cada reserva y cuántas siguen sin soltar, y si el escritor corrió con ella.
+  const gate = { asked: [] as number[], pending: 0, pendingInWriter: [] as number[] };
+  const capacity = {
+    key: 'cuenta',
+    gate: {
+      admit: async (_signal?: AbortSignal, bytes?: number) => {
+        gate.asked.push(bytes ?? 0);
+        gate.pending += 1;
+        let released = false;
+        return { done: () => { if (!released) { released = true; gate.pending -= 1; } } };
+      }
+    }
+  };
+  const watched: EditSheetWriter = (request) => {
+    gate.pendingInWriter.push(gate.pending);
+    return writer(request);
+  };
+  const edit = (input: Omit<EditSheetInput, 'id'>, context: ToolContext = ctx) =>
+    runEditSheet(context, { id: fileId, ...input }, watched, { capacity });
+  /**
+   * Otra persona escribe un lote entre la fase 2 y la 3 de `edit`: por el escritor, con los mismos
+   * comandos ya validados, pero sin la cola de hojas de la herramienta, que tiene el hueco de la
+   * edición en curso (una herramienta dentro de otra se esperaría a sí misma).
+   */
+  const other = async (input: { operationId: string; ops: unknown[] }) => {
+    const parsed = parseSheetCommands(input.ops, undefined);
+    if (!parsed.ok) throw new Error(parsed.error.code);
+    const batch: SheetBatchOp = { type: 'sheet.batch', seed: input.operationId, commands: parsed.ops };
+    const result = await writer({
+      format: 'ods',
+      privacy: config,
+      action: 'edit',
+      input: { id: fileId, operationId: input.operationId, ops: [batch] }
+    });
+    if (!result.ok) throw new Error(result.error.code);
+  };
+  return { port, ctx, writer, edit, other, fileId, diario, bytes, gate, calls: () => calls };
 }
 
 /** El contexto de una llamada, con el filtro de privados de `filterConfig` (por defecto el real). */
@@ -351,6 +391,49 @@ describe('hebra_edit_sheet (H-80)', () => {
     expect(error.extra).toMatchObject({ opIndex: 1, target: 'ops.1' });
     expect(await stored(h)).toMatchObject({ updates: 0 });
     expect((await readState(h)).cells.C2).toBeNull();
+  });
+});
+
+/**
+ * Topes de hojas (H-95b). Pruebas negativas hechas a mano al escribirlo (se rompe, el test cae, se
+ * restaura): sin `admitEdit` en `runEditSheet`, caen los dos primeros (nada apartado, y el escritor
+ * corre con la cola de hojas ocupada); con `DOCUMENT_MAX_BYTES` (25 MiB) en `requireVisibleSheet`,
+ * cae el tercero (el lote llega al escritor).
+ */
+describe('topes de hojas (H-95b)', () => {
+  it('editar y deshacer apartan la reserva de hojas mientras corre el escritor, y la sueltan', async () => {
+    const h = await world();
+    const before = await readState(h);
+    await h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [set('A1', [[3]])] });
+    await h.edit({ operationId: 'op-2', undoOperationId: 'op-1' });
+    expect(h.gate.asked).toEqual([SHEET_JOB_RESERVE_BYTES, SHEET_JOB_RESERVE_BYTES]);
+    expect(h.gate.pendingInWriter).toEqual([1, 1]);
+    expect(h.gate.pending).toBe(0);
+  });
+
+  it('con la cola de hojas ocupada el lote espera: no llega al escritor hasta que se suelta', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const release = await sheetJobSlot();
+    const pending = h.edit({ operationId: 'op-1', expectedRevision: before.revision, ops: [set('A1', [[4]])] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.calls()).toBe(0);
+    expect(h.gate.asked).toEqual([]);
+    release();
+    await expect(pending).resolves.toMatchObject({ outcome: 'saved' });
+    expect(h.calls()).toBe(1);
+  });
+
+  it('un .ods de más de 4 MiB da file_too_large con el tope de hojas, sin llegar al escritor', async () => {
+    const entries: Zippable = {};
+    for (const [path, data] of Object.entries(unzipSync(buildOds()))) entries[path] = [data, { level: path === 'mimetype' ? 0 : 9 }];
+    entries['Pictures/relleno.png'] = [randomBytes(SHEET_DOCUMENT_MAX_BYTES), { level: 0 }];
+    const bytes = zipSync(entries);
+    const h = await world({ bytes });
+    const error = await expectCode(h.edit({ operationId: 'op-1', ops: [set('A1', [[1]], { A1: null })] }), 'file_too_large');
+    expect(error.extra).toEqual({ byteLength: bytes.length, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
+    expect(h.calls()).toBe(0);
+    expect(h.gate.asked).toEqual([]);
   });
 });
 
@@ -609,7 +692,7 @@ describe('persona a la vez entre la fase 2 y la 3', () => {
   it('en la misma celda da precondition_failed sin escribir, con el comando que falló', async () => {
     const h = await world();
     hooks.betweenPhases = async () => {
-      await h.edit({ operationId: 'otra-persona', ops: [set('A1', [[50]], { A1: 1 })] });
+      await h.other({ operationId: 'otra-persona', ops: [set('A1', [[50]], { A1: 1 })] });
     };
     const error = await expectCode(
       h.edit({ operationId: 'op-1', ops: [set('C2', [['nuevo']], { C2: null }), set('A1', [[100]], { A1: 1 })] }),
@@ -640,7 +723,7 @@ describe('persona a la vez entre la fase 2 y la 3', () => {
     const h = await world();
     const filesBefore = (await h.port.filesIndex()).files.length;
     hooks.betweenPhases = async () => {
-      await h.edit({ operationId: 'otra-persona', ops: [set('A3', [[70]], { A3: 3 })] });
+      await h.other({ operationId: 'otra-persona', ops: [set('A3', [[70]], { A3: 3 })] });
     };
     const out = await h.edit({ operationId: 'op-1', ops: [set('A1', [[100]], { A1: 1 })] });
     expect(out.outcome).toBe('saved');
@@ -669,7 +752,7 @@ describe('expectedLayout', () => {
     const h = await world();
     const before = await readState(h);
     hooks.betweenPhases = async () => {
-      await h.edit({ operationId: 'otra-persona', ops: [{ type: 'insertAxis', sheet: 'Datos', axis: 'row', at: 4, count: 1, expect: { A4: null } }] });
+      await h.other({ operationId: 'otra-persona', ops: [{ type: 'insertAxis', sheet: 'Datos', axis: 'row', at: 4, count: 1, expect: { A4: null } }] });
     };
     const error = await expectCode(
       h.edit({ operationId: 'op-1', expectedLayout: before.layoutRevision, ops: [set('A4', [['total']], { A4: null })] }),

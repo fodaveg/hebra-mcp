@@ -77,6 +77,11 @@ export interface DocumentJobContext {
   key: string;
   /** Tamaño del documento en bytes; fija la reserva (`documentReserveBytes`). */
   documentBytes?: number;
+  /**
+   * Lo que aparta en la compuerta, si el tipo de documento tiene su propia cifra medida (las
+   * hojas: `sheetJobReserveBytes` de `./sheet-limits.ts`, H-95b). Sin él, `documentReserveBytes`.
+   */
+  reserveBytes?: number;
   /** Cancela el trabajo: sale de la cola o mata el hilo. Rechaza con `signal.reason`. */
   signal?: AbortSignal;
   /** Cambia el plazo por tipo (pruebas). */
@@ -90,8 +95,11 @@ export interface DocumentJobRunnerOptions {
   createWorker?: DocumentWorkerFactory;
 }
 
-/** Semáforo de huecos con espera acotada y salida por aborto; los huecos van por orden de llegada. */
-class SlotQueue {
+/**
+ * Semáforo de huecos con espera acotada y salida por aborto; los huecos van por orden de llegada.
+ * Lo usa también la cola de los trabajos de hojas (`./sheet-jobs.ts`).
+ */
+export class SlotQueue {
   private inUse = 0;
   private readonly waiters: Array<() => void> = [];
 
@@ -163,7 +171,8 @@ export function createDocumentJobRunner(options: DocumentJobRunnerOptions = {}) 
     }
     let ticket: AdmissionTicket;
     try {
-      ticket = await context.gate.admit(queue.signal, documentReserveBytes(context.documentBytes ?? 0), context.key);
+      const bytes = context.reserveBytes ?? documentReserveBytes(context.documentBytes ?? 0);
+      ticket = await context.gate.admit(queue.signal, bytes, context.key);
     } catch (error) {
       detach();
       slots.release();

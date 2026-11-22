@@ -18,6 +18,7 @@ import {
   SHEET_JOBS_MAX,
   SHEET_MCP_BASE_BYTES,
   SHEET_MEMORY_BUDGET_BYTES,
+  SHEET_ODS_INVENTORY_LIMITS,
   SHEET_ODS_READ_LIMITS,
   SHEET_RETAINED_VERSIONS,
   sheetJobReserveBytes
@@ -154,6 +155,21 @@ describe('topes de hojas del MCP (H-95)', () => {
     }
     // S-F se queda 32 veces por encima de lo que cabe: 128 MiB por entrada frente a 4.
     expect(ODS_READ_LIMITS.maxEntryBytes / SHEET_ODS_READ_LIMITS.maxEntryBytes).toBe(32);
+  });
+
+  it('el inventario (todas las entradas) cabe en el XML más el documento, y tampoco pasa de S-F ni de C-02', () => {
+    expect(SHEET_ODS_INVENTORY_LIMITS).toEqual({
+      ...SHEET_ODS_READ_LIMITS,
+      maxTotalBytes: SHEET_ODS_READ_LIMITS.maxTotalBytes + SHEET_DOCUMENT_MAX_BYTES
+    });
+    expect(SHEET_ODS_INVENTORY_LIMITS.maxTotalBytes).toBe(8 * MIB);
+    const zip = zipLimits(SHEET_ODS_INVENTORY_LIMITS);
+    for (const key of Object.keys(DEFAULT_ZIP_LIMITS) as (keyof typeof DEFAULT_ZIP_LIMITS)[]) {
+      expect(zip[key]).toBeLessThanOrEqual(DEFAULT_ZIP_LIMITS[key]);
+    }
+    for (const key of Object.keys(ODS_READ_LIMITS) as (keyof typeof ODS_READ_LIMITS)[]) {
+      expect(SHEET_ODS_INVENTORY_LIMITS[key]).toBeLessThanOrEqual(ODS_READ_LIMITS[key]);
+    }
   });
 
   it('disco por documento con B-N21: las versiones retenidas de Hebra, la base y el punto actual', () => {

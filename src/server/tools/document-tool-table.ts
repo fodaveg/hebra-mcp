@@ -6,6 +6,7 @@
  * que la corre ya cableada:
  * - Lectura y render apartan memoria en la compuerta de la cuenta (`ServerContext.documentCapacity`,
  *   o la del proceso por stdio) y corren en el proceso de la llamada: no piden turno de escritura.
+ *   Editar aparta en la misma compuerta mientras espera al escritor (H-95b).
  * - Crear y editar van al escritor por la op `documentOps` (`WriteContext.documentOps`): en local,
  *   `runDocumentRequest`; en un lector, `writer.sock`, que no escribe nada aquí. La versión del
  *   significado de un lote viaja siempre (`DOCUMENT_OPS_VERSION`): un escritor con otra responde
@@ -150,7 +151,8 @@ export const DOCUMENT_TOOLS: readonly DocumentToolEntry[] = [
     description: EDIT_SHEET_DESCRIPTION,
     inputShape: editSheetInputShape,
     annotations: WRITE_DESTRUCTIVE_IDEMPOTENT,
-    run: (toolCtx, input) => runEditSheet(toolCtx, input as unknown as EditSheetInput, editSheetWriter(toolCtx))
+    run: (toolCtx, input, server) =>
+      runEditSheet(toolCtx, input as unknown as EditSheetInput, editSheetWriter(toolCtx), { capacity: capacityOf(server) })
   },
   {
     name: 'hebra_render_sheet',

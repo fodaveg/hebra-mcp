@@ -15,8 +15,11 @@
  * - sin `ticket.done()` en la fase de lectura: cae «suelta todo lo que aparta».
  * - sin `withSpilledValues` (la hoja del modelo tal cual a la lista de dibujo): cae «pinta las
  *   celdas que rellena una matriz que se derrama» (H-SPILL).
+ * - H-95b: `admitRead` con la compuerta directa (sin `admitSheetJob`): cae «con la cola de hojas
+ *   ocupada»; el tope de tamaño con `DOCUMENT_MAX_BYTES`: cae «más de 4 MiB»;
+ *   `renderSheetReadReserveBytes` con `documentReserveBytes`: cae «pinta un rango como PNG».
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -24,6 +27,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { initSync, Model } from '@ironcalc/wasm';
+import { unzipSync, zipSync, type Zippable } from 'fflate';
 import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import * as Y from 'yjs';
 import { ContextUnavailableError, type AdmissionTicket } from '../../src/accounts/capacity';
@@ -48,6 +52,8 @@ import { createFormulaLocale, type FormulaEngineWithValues } from '../../src/she
 import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts/locale';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
+import { sheetJobSlot } from '../../src/store/sheet-jobs';
+import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES } from '../../src/store/sheet-limits';
 import type { SheetOp } from '../../vendor/hebra/src/lib/sheets/contracts/ops';
 import { IronCalcEngine } from '../../vendor/hebra/src/lib/sheets/engine/ironcalc-engine';
 import { createSheetAdapter, prepareSheetBase } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter';
@@ -295,9 +301,10 @@ describe('hebra_render_sheet', () => {
     expect(meta.width).toBe(960);
     expect(meta).not.toHaveProperty('missingGlyphs');
 
-    // Dos reservas: la de leer el documento y la del pintado. Las dos se sueltan.
+    // Dos reservas: la de leer el libro (la de hojas, H-95b) y la del pintado. Las dos se sueltan.
     expect(h.gate.asked).toHaveLength(2);
     expect(h.gate.asked[0]).toBe(renderSheetReadReserveBytes(buildOds().byteLength));
+    expect(h.gate.asked[0]).toBe(SHEET_JOB_RESERVE_BYTES);
     expect(h.gate.asked[1]).toBe(renderReserveBytes(0, meta.width as number, meta.height as number));
     expect(h.gate.pending).toBe(0);
     expect(h.engineLog).toEqual({ loads: 1, disposed: 1 });
@@ -417,6 +424,34 @@ describe('hebra_render_sheet', () => {
     const text = await addFile(h, h.folders.hojas, 'nota.ods', new TextEncoder().encode('no soy un zip'));
     expect(await refusal(h, { id: text, sheet: 'Datos', range: 'A1' })).toBe('document_invalid');
     expect(h.gate.pending).toBe(0);
+  });
+
+  it('con la cola de hojas ocupada la lectura espera su hueco: ni reserva ni motor hasta soltarlo (H-95b)', async () => {
+    const h = await harness();
+    const id = await addDocument(h, 'cuentas.ods', buildOds());
+    const release = await sheetJobSlot();
+    const pending = render(h, { id, sheet: 'Datos', range: 'A1:C5' });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.gate.asked).toEqual([]);
+    expect(h.engineLog.loads).toBe(0);
+    release();
+    await pending;
+    expect(h.gate.asked[0]).toBe(SHEET_JOB_RESERVE_BYTES);
+    expect(h.gate.pending).toBe(0);
+  });
+
+  it('un .ods de más de 4 MiB da file_too_large con el tope de hojas, sin reservar (H-95b)', async () => {
+    const h = await harness();
+    const entries: Zippable = {};
+    for (const [path, data] of Object.entries(unzipSync(buildOds()))) entries[path] = [data, { level: path === 'mimetype' ? 0 : 9 }];
+    entries['Pictures/relleno.png'] = [randomBytes(SHEET_DOCUMENT_MAX_BYTES), { level: 0 }];
+    const bytes = zipSync(entries);
+    const id = await addFile(h, h.folders.hojas, 'grande.ods', bytes);
+    const error = await runRenderSheet(h.ctx, { id, sheet: 'Datos', range: 'A1' }, h.wiring()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ToolError);
+    expect((error as ToolError).code).toBe('file_too_large');
+    expect((error as ToolError).extra).toEqual({ byteLength: bytes.length, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
+    expect(h.gate.asked).toEqual([]);
   });
 
   it('sin hueco en la compuerta: document_busy, sin motor ni pintado', async () => {

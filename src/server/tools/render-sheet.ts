@@ -18,8 +18,9 @@
  *     llamada. Oculto, inexistente, lápida, papelera o id de nota dan el mismo `not_found`, antes
  *     de leer un solo byte. La puerta final (`../privacy-gate.ts`) lo vuelve a juzgar con el sello
  *     de la fila (`usageOf`), igual que `hebra_read_file`.
- *  3. Fase de lectura, con su reserva en el `CapacityGate` de la cuenta (`documentReserveBytes`,
- *     la de leer un documento) y el plazo de `DOCUMENT_READ_TIMEOUT_MS`: el estado de ahora
+ *  3. Fase de lectura, con un hueco de la cola de hojas (uno a la vez en el proceso) y su reserva
+ *     en el `CapacityGate` de la cuenta (`sheetJobReserveBytes`, la medida de leer un libro en
+ *     H-95; `admitSheetJob`) y el plazo de `DOCUMENT_READ_TIMEOUT_MS`: el estado de ahora
  *     (`openDocumentRead`, que no escribe ni crea punto de control), los datos de pintado de la
  *     rejilla (`createEditorData`), los valores de las fórmulas (el motor de la app, en su hilo) y
  *     la lista de dibujo con su SVG (`layoutDrawList`, `drawToSvg`). Al acabar se cierra todo y se
@@ -49,7 +50,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { ContextUnavailableError, type AdmissionTicket, type CapacityGate } from '../../accounts/capacity';
+import type { CapacityGate } from '../../accounts/capacity';
 import { FileFilter } from '../../privacy/file-filter';
 import { RenderError, RENDER_SVG_MAX_BYTES, renderSvgToPng, type RenderSvgResult } from '../../render/render';
 import {
@@ -75,9 +76,8 @@ import {
   type SheetModel,
   type SheetModelSheet
 } from '../../sheets';
-import { documentReserveBytes } from '../../store/document-jobs';
+import { DocumentJobError } from '../../store/document-jobs';
 import {
-  DOCUMENT_MAX_BYTES,
   DOCUMENT_QUEUE_WAIT_MS,
   DOCUMENT_READ_TIMEOUT_MS,
   RENDER_SHEET_MAX_COLUMNS,
@@ -88,6 +88,8 @@ import {
 } from '../../store/document-limits';
 import { visibleDocumentOf } from '../../store/document-privacy';
 import type { DocumentReadSource } from '../../store/document-read';
+import { admitSheetJob } from '../../store/sheet-jobs';
+import { SHEET_DOCUMENT_MAX_BYTES, sheetJobReserveBytes } from '../../store/sheet-limits';
 import { documentOk } from '../document-response';
 import { usageOf, type ToolContext } from '../context';
 import { ToolContent, ToolError } from '../errors';
@@ -273,9 +275,12 @@ export function bundledSheetRenderAssets(): Pick<RenderSheetWiring, 'fonts' | 'e
 
 // ---------- lectura ----------
 
-/** Cuánto aparta la fase de lectura en la compuerta: lo de leer un documento de ese tamaño. */
+/**
+ * Cuánto aparta la fase de lectura en la compuerta: lo de leer un libro de hojas
+ * (`sheetJobReserveBytes`), que abre el mismo libro con la misma lectura y el mismo motor.
+ */
 export function renderSheetReadReserveBytes(documentBytes: number): number {
-  return documentReserveBytes(documentBytes);
+  return sheetJobReserveBytes(documentBytes);
 }
 
 /**
@@ -440,12 +445,15 @@ async function readPhase(
   }
 }
 
-/** Aparta la reserva de la fase de lectura. Sin hueco a tiempo, `document_busy`. */
-async function admitRead(wiring: RenderSheetWiring, bytes: number, signal: AbortSignal): Promise<AdmissionTicket> {
+/**
+ * Un hueco de la cola de hojas y la reserva de la fase de lectura (`admitSheetJob`). Sin hueco a
+ * tiempo, `document_busy`.
+ */
+async function admitRead(wiring: RenderSheetWiring, bytes: number, signal: AbortSignal): Promise<{ done(): void }> {
   try {
-    return await wiring.capacity.gate.admit(signal, renderSheetReadReserveBytes(bytes), wiring.capacity.key);
+    return await admitSheetJob(wiring.capacity, bytes, signal);
   } catch (error) {
-    if (error instanceof ContextUnavailableError) {
+    if (error instanceof DocumentJobError && error.code === 'document_busy') {
       throw new ToolError('document_busy', { retryAfterSeconds: Math.max(1, Math.ceil(DOCUMENT_QUEUE_WAIT_MS / 1000)) });
     }
     throw error;
@@ -488,8 +496,8 @@ export async function runRenderSheet(
   used.file(input.id, filter.sealOf(input.id));
   used.folder(content.file.folderId, ctx.privacy.folderPath(content.file.folderId));
   const knownLength = content.file.byteLength;
-  if (knownLength !== null && knownLength > DOCUMENT_MAX_BYTES) {
-    throw new ToolError('file_too_large', { byteLength: knownLength, maxBytes: DOCUMENT_MAX_BYTES });
+  if (knownLength !== null && knownLength > SHEET_DOCUMENT_MAX_BYTES) {
+    throw new ToolError('file_too_large', { byteLength: knownLength, maxBytes: SHEET_DOCUMENT_MAX_BYTES });
   }
 
   // Fase de lectura, con su plazo y su reserva.
@@ -501,7 +509,7 @@ export async function runRenderSheet(
   let read: ReadPhase;
   try {
     outer.throwIfAborted();
-    const ticket = await admitRead(wiring, knownLength ?? DOCUMENT_MAX_BYTES, deadline.signal);
+    const ticket = await admitRead(wiring, knownLength ?? SHEET_DOCUMENT_MAX_BYTES, deadline.signal);
     try {
       read = await readPhase(
         { id: doc.id, name: doc.name, sha256: doc.sha256, byteLength: knownLength },

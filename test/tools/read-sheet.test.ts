@@ -25,13 +25,13 @@
  *   resumen sin lo derramado, en `usedRange`; no contar los errores derramados, en `errorCount`;
  *   la página sin rango sin lo derramado, en `address`.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
-import { zipSync } from 'fflate';
+import { unzipSync, zipSync, type Zippable } from 'fflate';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as Y from 'yjs';
 import { handleDocumentJob } from '../../src/document-worker';
@@ -41,7 +41,14 @@ import { toErrorResult, ToolError, type ToolContent } from '../../src/server/err
 import { runReadSheet, type ReadSheetDeps, type ReadSheetInput } from '../../src/server/tools/read-sheet';
 import { runReadSheetJob, type ReadSheetJobInput, type ReadSheetJobResult } from '../../src/server/tools/read-sheet-job';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
-import { DocumentJobError } from '../../src/store/document-jobs';
+import { DocumentJobError, type DocumentJobContext } from '../../src/store/document-jobs';
+import {
+  SHEET_DOCUMENT_MAX_BYTES,
+  SHEET_JOB_RESERVE_BYTES,
+  SHEET_JOBS_MAX,
+  SHEET_ODS_INVENTORY_LIMITS,
+  SHEET_ODS_READ_LIMITS
+} from '../../src/store/sheet-limits';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { scopeOf } from '../../src/server/tools/sheet-read';
 import type { SheetOp } from '../../src/sheets';
@@ -232,8 +239,12 @@ async function spillOps(bytes: Uint8Array): Promise<SheetOp[]> {
   return [formula('=SEQUENCE(7)', 0, 3), formula('=1/SEQUENCE(2,1,1,-1)', 1, 2)];
 }
 
+/** Compuerta que deja entrar siempre: la reserva la mira cada test con su propio `runJob`. */
+const openCapacity: ReadSheetDeps['capacity'] = { gate: { admit: async () => ({ done() {} }) }, key: 'cuenta' };
+
 /** El trabajo en este proceso, con la entrada clonada como por `postMessage`. */
 const inProcess: ReadSheetDeps = {
+  capacity: openCapacity,
   runJob: (input) => runReadSheetJob(structuredClone(input), { engineWorkerUrl })
 };
 
@@ -559,9 +570,9 @@ describe('hebra_read_sheet (H-78)', () => {
   it('la cola llena da document_busy y un hilo caído document_too_complex, sin texto del hilo', async () => {
     const h = await harness();
     const id = await addDocument(h, h.folders.hojas, 'libro.ods', buildOds());
-    const busy = await failure(h, { id }, { runJob: () => Promise.reject(new DocumentJobError('document_busy')) });
+    const busy = await failure(h, { id }, { capacity: openCapacity, runJob: () => Promise.reject(new DocumentJobError('document_busy')) });
     expect(JSON.parse((busy.content[0] as { text: string }).text)).toEqual({ error: 'document_busy', retryAfterSeconds: 5 });
-    const crashed = await failure(h, { id }, { runJob: () => Promise.reject(new Error(BAIT)) });
+    const crashed = await failure(h, { id }, { capacity: openCapacity, runJob: () => Promise.reject(new Error(BAIT)) });
     expect((crashed.content[0] as { text: string }).text).toBe('{"error":"document_too_complex"}');
   });
 
@@ -584,5 +595,129 @@ describe('hebra_read_sheet (H-78)', () => {
     // Otro formato no se lee con el trabajo de hojas.
     const other = await handleDocumentJob('read', { ...input, format: 'odp' });
     expect(other).toEqual({ ok: true, result: { ok: false, error: { code: 'op_unsupported' } } });
+  });
+});
+
+// --- Topes de hojas (H-95b) -----------------------------------------------------------------
+
+const MIB = 1024 * 1024;
+
+/** El `.ods` con más entradas: `[bytes, nivel de deflate]` (0 = guardada sin comprimir). */
+function withEntries(ods: Uint8Array, extra: Record<string, [Uint8Array, 0 | 9]>): Uint8Array {
+  const out: Zippable = {};
+  for (const [path, bytes] of Object.entries(unzipSync(ods))) out[path] = [bytes, { level: path === 'mimetype' ? 0 : 9 }];
+  for (const [path, [bytes, level]] of Object.entries(extra)) out[path] = [bytes, { level }];
+  return zipSync(out);
+}
+
+/** Texto que deflate apenas comprime (hexadecimal al azar): razón de unas 2 veces. */
+const hexText = (bytes: number) => new TextEncoder().encode(randomBytes(bytes / 2).toString('hex'));
+
+/** Espera de verdad hasta que `done()` sea cierto (un trabajo en cola no avisa). */
+async function until(done: () => boolean): Promise<void> {
+  for (let turn = 0; turn < 400 && !done(); turn += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+/**
+ * Pruebas negativas hechas a mano al escribirlo (se rompe, el test cae, se restaura):
+ * - sin `reserveBytes` en el contexto del trabajo: cae «el trabajo aparta la reserva de hojas»;
+ * - sin `sheetJobSlot` en `runJob`: cae «dos lecturas a la vez van de una en una» (`overlap` 2);
+ * - `tooLarge` y las comprobaciones con `DOCUMENT_MAX_BYTES` (25 MiB): cae «más de 4 MiB»;
+ * - sin `assertSheetReadLimits` en `openSheetRead`: cae «más de 4 MiB de XML» (la lectura sale);
+ * - el inventario con `DEFAULT_ZIP_LIMITS`: cae «el inventario lee con los topes de hojas».
+ */
+describe('hebra_read_sheet: topes de hojas (H-95b)', () => {
+  it('el trabajo aparta la reserva de hojas en la compuerta de la cuenta', async () => {
+    const h = await harness();
+    const bytes = buildOds();
+    const id = await addDocument(h, h.folders.hojas, 'libro.ods', bytes);
+    const seen: DocumentJobContext[] = [];
+    await read(h, { id }, { capacity: openCapacity, runJob: (input, context) => (seen.push(context), inProcess.runJob!(input, context)) });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ gate: openCapacity.gate, key: 'cuenta', documentBytes: bytes.length });
+    expect(seen[0].reserveBytes).toBe(SHEET_JOB_RESERVE_BYTES);
+  });
+
+  it('dos lecturas a la vez van de una en una (SHEET_JOBS_MAX)', async () => {
+    expect(SHEET_JOBS_MAX).toBe(1);
+    const h = await harness();
+    const id = await addDocument(h, h.folders.hojas, 'libro.ods', buildOds());
+    const waiting: Array<() => void> = [];
+    let running = 0;
+    let overlap = 0;
+    const deps: ReadSheetDeps = {
+      capacity: openCapacity,
+      runJob: async (input, context) => {
+        running += 1;
+        overlap = Math.max(overlap, running);
+        await new Promise<void>((resolve) => waiting.push(resolve));
+        running -= 1;
+        return inProcess.runJob!(input, context);
+      }
+    };
+    const both = Promise.all([read(h, { id }, deps), read(h, { id }, deps)]);
+    await until(() => waiting.length >= 1);
+    // Tiempo de sobra para que la segunda entrara si no hubiera cola.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(waiting).toHaveLength(1);
+    waiting[0]();
+    await until(() => waiting.length >= 2);
+    waiting[1]();
+    await both;
+    expect(overlap).toBe(1);
+  });
+
+  it('un .ods de más de 4 MiB da file_too_large con el tope de hojas, sin abrir el trabajo', async () => {
+    const h = await harness();
+    const bytes = withEntries(buildOds(), { 'Pictures/relleno.png': [randomBytes(SHEET_DOCUMENT_MAX_BYTES), 0] });
+    expect(bytes.length).toBeGreaterThan(SHEET_DOCUMENT_MAX_BYTES);
+    expect(bytes.length).toBeLessThan(25 * MIB);
+    const id = await addFile(h, h.folders.hojas, 'grande.ods', bytes);
+    let jobs = 0;
+    const result = await failure(h, { id }, { capacity: openCapacity, runJob: async () => (jobs += 1, null) });
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({
+      error: 'file_too_large',
+      byteLength: bytes.length,
+      maxBytes: SHEET_DOCUMENT_MAX_BYTES
+    });
+    expect(jobs).toBe(0);
+  });
+
+  it('un libro con más de 4 MiB de XML descomprimido da document_too_complex', async () => {
+    const h = await harness();
+    // Números al azar: el XML pasa de 4 MiB pero deflate lo deja muy por debajo de la razón de 200 y
+    // el `.ods` bajo los 4 MiB, así que solo lo para el total de `SHEET_ODS_READ_LIMITS`.
+    const rows: string[] = [];
+    let size = 0;
+    while (size <= SHEET_ODS_READ_LIMITS.maxTotalBytes + 256 * 1024) {
+      const cells = Array.from({ length: 10 }, () => num(randomBytes(4).readUInt32BE(0))).join('');
+      rows.push(row(cells));
+      size += cells.length + 30;
+    }
+    const bytes = buildOds(content([{ name: 'Datos', cols: 10, rows }]));
+    expect(bytes.length).toBeLessThan(SHEET_DOCUMENT_MAX_BYTES);
+    // Sin cabecera: así no se lee el libro al prepararlo, solo en la herramienta.
+    const id = await addFile(h, h.folders.hojas, 'mucho-xml.ods', bytes);
+    const result = await failure(h, { id });
+    expect(JSON.parse((result.content[0] as { text: string }).text)).toEqual({ error: 'document_too_complex' });
+  });
+
+  it('el inventario lee con los topes de hojas: una entrada de más de 4 MiB lo deja vacío', async () => {
+    const h = await harness();
+    const macro = (bytes: Uint8Array) => withEntries(buildOds(), { 'Basic/Standard/Module1.xml': [bytes, 9] });
+    // Con una imagen que llena casi todo el `.ods`, el inventario sigue viendo la macro: el total es
+    // el XML más el documento (`SHEET_ODS_INVENTORY_LIMITS`).
+    const small = withEntries(macro(new TextEncoder().encode('<script/>')), {
+      'Pictures/foto.png': [randomBytes(SHEET_DOCUMENT_MAX_BYTES - 64 * 1024), 0]
+    });
+    expect(small.length).toBeLessThanOrEqual(SHEET_DOCUMENT_MAX_BYTES);
+    const seen = await read(h, { id: await addDocument(h, h.folders.hojas, 'macro.ods', small) });
+    expect(seen.workbook.sheets[0].preserved).toContain('macros');
+    // Una entrada de 5 MiB descomprimidos pasa del tope por entrada (con `DEFAULT_ZIP_LIMITS`, 128 MiB).
+    const big = macro(hexText(5 * MIB));
+    expect(big.length).toBeLessThan(SHEET_DOCUMENT_MAX_BYTES);
+    expect(SHEET_ODS_INVENTORY_LIMITS.maxEntryBytes).toBeLessThan(5 * MIB);
+    const cut = await read(h, { id: await addDocument(h, h.folders.hojas, 'macro-grande.ods', big) });
+    expect(cut.workbook.sheets[0].preserved).toEqual([]);
   });
 });

@@ -109,6 +109,17 @@ describe('reserva en la compuerta', () => {
     expect(documentReserveBytes(DOCUMENT_MAX_BYTES)).toBe(114 * MIB);
   });
 
+  it('con reserveBytes aparta esa cifra en vez de la del tamaño (las hojas, H-95b)', async () => {
+    const { gate, runner } = harness();
+    const seen: number[] = [];
+    const result = runner.run('read', {}, { gate, key: 'a', documentBytes: 25 * MIB, reserveBytes: 168 * MIB });
+    await settled();
+    seen.push(gate.reservedBytes);
+    expect(await result).toBe('hecho');
+    expect(seen).toEqual([168 * MIB]);
+    expect(gate.reservedBytes).toBe(0);
+  });
+
   it('aparta la reserva mientras corre el hilo y la suelta al terminar bien', async () => {
     const { gate, runner } = harness();
     const seen: number[] = [];
