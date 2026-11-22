@@ -45,6 +45,7 @@ import type { DocumentOpsRequest } from '../../src/store/document-service';
 import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES } from '../../src/store/document-limits';
 import { DOCUMENT_OPS_VERSION } from '../../src/store/document-types';
 import { LibraryInstance } from '../../src/sync/library-instance';
+import { IDENTITY, InMemoryLibraryRelay, VAULT_KEY } from '../sync/devices';
 import { call, connect, instances, livePid, OPEN, servers, tempDataDir, useForwardHarness } from './forward-harness';
 
 /** Los trabajos de lectura que pidió la herramienta, con su compuerta y su cuenta. */
@@ -90,26 +91,34 @@ function recording(handlers: WriterSocketHandlers, seen: string[]): WriterSocket
 }
 
 /**
- * Escritor y lector sobre la misma carpeta; el lector con su cliente MCP y su `documentOps`
- * espiado. Sin sync: con el cableado de documentos de un escritor vinculado, la limpieza de blobs
- * de después de un lote (`checkpointThenClean`) se queda esperando su propio turno y la edición no
- * vuelve nunca (hallazgo de H-177b, fuera de este paquete).
+ * Escritor y lector sobre la misma carpeta, vinculados al relé en memoria como `pair()`; el lector
+ * con su cliente MCP y su `documentOps` espiado. Con sync, el escritor monta el cableado de
+ * documentos: tras cada lote hay punto de control y limpieza de blobs (`checkpointThenClean`),
+ * que antes de H-BLOQUEO-SYNC se esperaba a sí misma y dejaba la edición sin volver.
  */
 async function documentPair() {
   const dataDir = tempDataDir();
   const socketOps: string[] = [];
+  const sync = {
+    transport: new InMemoryLibraryRelay(),
+    blobTransport: null,
+    identity: IDENTITY,
+    vaultKey: VAULT_KEY,
+    intervalMs: null
+  };
   const writer = await LibraryInstance.open({
     dataDir,
-    sync: null,
+    sync,
     checkIntervalMs: null,
     lock: { releaseOnExit: false },
     writerSocket: (opened) => recording(writerSocketHandlers(localWriteContext(opened), opened), socketOps)
   });
   instances.push(writer);
   await writer.whenReady(5_000);
+  expect(writer.syncRunner).not.toBeNull();
   const reader = await LibraryInstance.open({
     dataDir,
-    sync: null,
+    sync,
     checkIntervalMs: null,
     lock: { releaseOnExit: false, pid: livePid() }
   });
