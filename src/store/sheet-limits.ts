@@ -75,6 +75,44 @@
  *    en el hilo de pintado, sumado a lo que deja la lectura sin devolver. No se cambia el tope a ojo:
  *    queda para una pasada que barra rango y píxeles (H-95d).
  *
+ * 6. Pintado (H-95d, 22 nov 2026). La sonda de H-95c parte el pintado en la frontera entre la
+ *    lectura (hasta el SVG) y el PNG (`render` del cableado envuelto) y lee `memory.stat`. Corrió en
+ *    el Fedora, x86_64 (la cola del Mac estaba llena), con `node:24-alpine` del digest de
+ *    `deploy/Dockerfile` (Node 24.21.0, x86_64), `--user node`, `--liftoff-only` y 220 MiB de lastre.
+ *    Antes de la llamada, 251 a 253 MiB. Libro `pintar` (3,9 MiB de XML, 64 columnas), a 512 MiB:
+ *
+ *      rango         cols x filas  SVG       frontera  pico pintado         sube sobre la frontera
+ *      A1:T40        20 x 40       0,30 MB   299-301   349,7 349,3 348,8    49 a 50
+ *      A1:T50        20 x 50       0,37 MB   298-302   362,4 363,6 361,7    60 a 63
+ *      A1:AD50       30 x 50       0,55 MB   302       374,8                73
+ *      A1:AN50       40 x 50       0,74 MB   303-304   390,0 388,2 388,9    85 a 87   <- el tope
+ *      A1:AN50, 960 px             0,74 MB   303       387,2 386,3 388,4    83 a 85
+ *      A1:AN50, libro corto        0,74 MB   304-311   398,9 392,6 392,3    87 a 88
+ *      A1:T100       20 x 100      0,75 MB   303       390,3                87
+ *      A1:AD80       30 x 80       0,89 MB   304       408,3                104
+ *      A1:BH50       60 x 50       1,10 MB   305       429,2                124
+ *      A1:AD100      30 x 100      1,12 MB   305       436,3                131
+ *      A1:BH200      60 x 200      4,6 MB    -         OOM (H-95c; con 1 GiB, de 758 a 871)
+ *
+ *    Lo que pesa es el SVG, no el PNG: cada glifo es un `<use>` (`drawToSvg`) y el SVG DOM de Skia
+ *    en el hilo de pintado crece con ellos (unos 115 MiB por MB de SVG). `A1:AD100` a 1516 x 1318 px
+ *    y a 640 x 557 px suben lo mismo salvo 6 MiB (con 1 GiB, 487 y 481), así que
+ *    `RENDER_SHEET_MAX_PIXELS` se queda en 2 Mpx. Tope nuevo: 40 columnas por 50 filas
+ *    (`RENDER_SHEET_MAX_COLUMNS`, `RENDER_SHEET_MAX_ROWS`), el mayor medido con margen: pico máximo
+ *    398,9 sobre 409,6. `A1:AD80` (2.400 celdas) se queda a 1 MiB del presupuesto.
+ *    La reserva del pintado pasa a lo medido (`SHEET_RENDER_RESERVE_BYTES`, 88,1 MiB redondeado a
+ *    96), en vez de los 128 MiB del montón del hilo más los píxeles de `renderReserveBytes`.
+ *    Lo que la lectura no devuelve: en la frontera `memory.current` está 47 a 59 MiB por encima de
+ *    antes de la llamada. Con 1 GiB: todo `anon` (`file` 0,1 MiB), el montón de JS vivo de 15 a
+ *    18 MiB, una recogida forzada (`--expose-gc`) solo baja 4 a 14 y esperar 1,5 s no baja nada. No
+ *    es basura de JS sin recoger ni caché de ficheros: es memoria nativa que no vuelve al sistema, y
+ *    crece con el rango (con 1 GiB, 335 con `A1:H10` y 386 con `A1:BH200`). Sospechosos sin
+ *    separar: el hilo del motor (`dispose` lo termina sin esperar) y el wasm de HarfBuzz, que no
+ *    encoge. No se recorta aquí: desde el MCP no se suelta sin sacar la lectura a un hilo propio, y
+ *    el tope ya la cuenta (la frontera entra en el pico medido). Con 1 GiB de límite
+ *    todo sale más alto (frontera de 345 a 409 y lectura de 405 a 429): Node dimensiona su montón por
+ *    el límite del cgroup, y por eso las cifras de los topes son siempre a 512 MiB.
+ *
  * No medido aquí: la edición con el escritor en otro proceso (cola del lector), un servidor con otro
  * número de núcleos, el pintado con imágenes en la hoja y libros reales de usuarios. La lectura
  * del pintado abre el mismo libro con la misma lectura común (`openSheetRead`) y el mismo motor, así
@@ -166,6 +204,16 @@ export function sheetJobReserveBytes(documentBytes: number): number {
   }
   return SHEET_JOB_RESERVE_BYTES;
 }
+
+/**
+ * Lo que aparta en la compuerta el pintado del PNG de `hebra_render_sheet` (su segunda fase, tras
+ * soltar la reserva de la lectura): lo que sube `memory.current` sobre la frontera entre las dos
+ * fases con el rango máximo (`RENDER_SHEET_MAX_COLUMNS` por `RENDER_SHEET_MAX_ROWS`) y el libro del
+ * tope, medido en H-95d (punto 6 de la cabecera), redondeado a 8 MiB. Sustituye para las hojas al
+ * cálculo por píxeles de `renderReserveBytes`, que no mide lo que pesa: el PNG casi no cuenta y el
+ * SVG con sus glifos sí.
+ */
+export const SHEET_RENDER_RESERVE_BYTES = 96 * MIB;
 
 /** Cuántos trabajos de hojas caben a la vez con la base medida: uno. */
 export const SHEET_JOBS_MAX = Math.floor((SHEET_MEMORY_BUDGET_BYTES - SHEET_MCP_BASE_BYTES) / SHEET_JOB_RESERVE_BYTES);

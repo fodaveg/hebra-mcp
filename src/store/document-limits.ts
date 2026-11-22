@@ -55,6 +55,10 @@ export const RENDER_WIDTH_MIN_PX = 320;
 export const RENDER_WIDTH_MAX_PX = 1568;
 export const RENDER_WIDTH_DEFAULT_PX = 960;
 export const RENDER_SLIDES_MAX = 4;
-/** Rango máximo de `hebra_render_sheet`. */
-export const RENDER_SHEET_MAX_COLUMNS = 60;
-export const RENDER_SHEET_MAX_ROWS = 200;
+/**
+ * Rango máximo de `hebra_render_sheet`: 40 columnas por 50 filas, medido en H-95d (punto 6 de la
+ * cabecera de `./sheet-limits.ts`). Con el libro del tope, ese rango deja el pico del pintado por
+ * debajo del presupuesto de 409,6 MiB; el de antes (60 por 200) mataba el contenedor.
+ */
+export const RENDER_SHEET_MAX_COLUMNS = 40;
+export const RENDER_SHEET_MAX_ROWS = 50;

@@ -25,9 +25,11 @@
  *     rejilla (`createEditorData`), los valores de las fórmulas (el motor de la app, en su hilo) y
  *     la lista de dibujo con su SVG (`layoutDrawList`, `drawToSvg`). Al acabar se cierra todo y se
  *     suelta la reserva: lo único que sigue vivo es el SVG.
- *  4. Pintado: `renderSvgToPng` (B-LR20), que aparta su propia reserva en la misma compuerta, con
- *     su hilo, su plazo y su cola de uno. El ancho se reduce si hace falta para que el PNG no pase
- *     de `RENDER_SHEET_MAX_PIXELS` (2 Mpx, la superficie que fijó el estudio de fidelidad).
+ *  4. Pintado: `renderSvgToPng` (B-LR20), con su hilo, su plazo y su cola de uno. Aparta en la
+ *     misma compuerta lo medido para pintar el rango máximo con el libro del tope
+ *     (`renderSheetPaintReserveBytes`, H-95d), no su cálculo por píxeles. El ancho se reduce si
+ *     hace falta para que el PNG no pase de `RENDER_SHEET_MAX_PIXELS` (2 Mpx, la superficie que
+ *     fijó el estudio de fidelidad).
  *
  * Un `.ods` sin cabecera de documento (nunca abierto en el editor) se pinta desde sus bytes, con el
  * andamio del adaptador (`scaffold`) como único estado: es lo que vería quien lo abriera ahora.
@@ -89,13 +91,22 @@ import {
 import { visibleDocumentOf } from '../../store/document-privacy';
 import type { DocumentReadSource } from '../../store/document-read';
 import { admitSheetJob } from '../../store/sheet-jobs';
-import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_READ_LIMITS, sheetJobReserveBytes } from '../../store/sheet-limits';
+import {
+  SHEET_DOCUMENT_MAX_BYTES,
+  SHEET_ODS_READ_LIMITS,
+  SHEET_RENDER_RESERVE_BYTES,
+  sheetJobReserveBytes
+} from '../../store/sheet-limits';
 import { documentOk } from '../document-response';
 import { usageOf, type ToolContext } from '../context';
 import { ToolContent, ToolError } from '../errors';
 import { isFormula, isSheetLimitError, openSheetRead, scopeOf, sheetOf } from './sheet-read';
 
-/** Superficie máxima del PNG: 2 Mpx, unos 7,63 MiB de lienzo RGBA (estudio de fidelidad, R3). */
+/**
+ * Superficie máxima del PNG: 2 Mpx, unos 7,63 MiB de lienzo RGBA (estudio de fidelidad, R3). Se
+ * queda en H-95d porque el barrido mostró que no es lo que pesa: el mismo rango a 2,0 y a 0,36 Mpx
+ * sube lo mismo salvo 6 MiB (punto 6 de la cabecera de `../../store/sheet-limits.ts`).
+ */
 export const RENDER_SHEET_MAX_PIXELS = 2_000_000;
 
 /** Largo máximo de `range` y de `sheet` en la entrada. */
@@ -281,6 +292,14 @@ export function bundledSheetRenderAssets(): Pick<RenderSheetWiring, 'fonts' | 'e
  */
 export function renderSheetReadReserveBytes(documentBytes: number): number {
   return sheetJobReserveBytes(documentBytes);
+}
+
+/**
+ * Cuánto aparta el pintado del PNG en la compuerta: lo medido con el rango máximo y el libro del
+ * tope (`SHEET_RENDER_RESERVE_BYTES`, H-95d), no el cálculo por píxeles de `renderReserveBytes`.
+ */
+export function renderSheetPaintReserveBytes(): number {
+  return SHEET_RENDER_RESERVE_BYTES;
 }
 
 /**
@@ -547,7 +566,8 @@ export async function runRenderSheet(
       widthPx: fitRenderWidth(width, read.canvas),
       signal: outer,
       gate: wiring.capacity.gate,
-      key: wiring.capacity.key
+      key: wiring.capacity.key,
+      reserveBytes: renderSheetPaintReserveBytes()
     });
   } catch (error) {
     if (error instanceof RenderError) throw renderFailure(error);

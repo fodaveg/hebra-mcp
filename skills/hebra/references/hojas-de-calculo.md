@@ -380,7 +380,7 @@ Para ver cómo queda un rango (formato, anchos, combinadas), no para leer datos:
 con `hebra_read_sheet`.
 
 - `sheet` (nombre o `sheetId`) y `range` son obligatorios. `range` admite `A1`, `A1:D20`, `A:C`
-  y `1:5`. Hasta 60 columnas por 200 filas, contando las filas y columnas inmovilizadas que se
+  y `1:5`. Hasta 40 columnas por 50 filas, contando las filas y columnas inmovilizadas que se
   pintan delante; más, `document_too_complex`.
 - `width`: de 320 a 1568 px (960 por defecto). La imagen no pasa de 2 millones de píxeles: se
   reduce el ancho si hace falta.
@@ -410,7 +410,7 @@ con `hebra_read_sheet`.
 | Filas o columnas de un `insertAxis`, `deleteAxis`, `hideAxis` o `showAxis` | 10000 |
 | `size` de `setAxisSize` | hasta 10000 px (7500 pt) |
 | Nombre de hoja | 31 caracteres |
-| Rango de `hebra_render_sheet` | 60 columnas por 200 filas |
+| Rango de `hebra_render_sheet` | 40 columnas por 50 filas |
 | Ancho de la imagen | 320 a 1568 px |
 | Operaciones compiladas de una creación | 200000 |
 | `batch_invalid` | hasta 20 fallos a la vez |

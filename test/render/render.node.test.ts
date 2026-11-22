@@ -269,6 +269,16 @@ describe('renderSvgToPng: reserva en la compuerta (B-LR21)', () => {
     expect(renderReserveBytes(16 * 1024 * 1024, 1568, 882)).toBeGreaterThan(renderReserveBytes(0, 1568, 882));
   });
 
+  it('con reserveBytes aparta esa medida en vez del cálculo por píxeles (H-95d)', async () => {
+    const gate = fakeGate();
+    await renderSvgToPng(
+      { svg: enc(frame('')), images: [], widthPx: 960, signal: never, ...held(gate), reserveBytes: 96 * 1024 * 1024 },
+      { jobSource: okJob }
+    );
+    expect(gate.asked).toEqual([96 * 1024 * 1024]);
+    expect(gate.pending).toBe(0);
+  });
+
   it('suelta la reserva por plazo, por aborto y cuando el hilo falla', async () => {
     const gate = fakeGate();
     await expect(

@@ -20,9 +20,11 @@ import {
   SHEET_MEMORY_BUDGET_BYTES,
   SHEET_ODS_INVENTORY_LIMITS,
   SHEET_ODS_READ_LIMITS,
+  SHEET_RENDER_RESERVE_BYTES,
   SHEET_RETAINED_VERSIONS,
   sheetJobReserveBytes
 } from '../../src/store/sheet-limits';
+import { RENDER_SHEET_MAX_COLUMNS, RENDER_SHEET_MAX_ROWS } from '../../src/store/document-limits';
 import { VERSIONS_MAX } from '../../vendor/hebra/src/lib/documents/sync/checkpoint';
 import { DEFAULT_ZIP_LIMITS } from '../../vendor/hebra/src/lib/portability/zip-read';
 import { ODS_READ_LIMITS } from '../../vendor/hebra/src/lib/sheets/contracts/limits';
@@ -124,6 +126,31 @@ describe('topes de hojas del MCP (H-95)', () => {
     expect(SHEET_MCP_BASE_BYTES + 2 * SHEET_JOB_RESERVE_BYTES).toBeGreaterThan(SHEET_MEMORY_BUDGET_BYTES);
     expect(SHEET_JOBS_MAX).toBe(1);
     for (const peak of TWO_JOBS_PEAKS) expect(peak).toBeGreaterThan(budgetMib);
+  });
+
+  it('pintado (H-95d): el rango del tope cabe en el presupuesto y lo que sube cabe en su reserva; los mayores, no', () => {
+    // Barrido de la cabecera (punto 6), libro del tope a 512 MiB: columnas, filas, frontera entre
+    // lectura y pintado y pico del pintado, en MiB, por corrida.
+    const PAINT: Array<{ cols: number; rows: number; runs: Array<[number, number]> }> = [
+      { cols: 20, rows: 40, runs: [[299.3, 349.7], [300.5, 349.3], [299.2, 348.8]] },
+      { cols: 20, rows: 50, runs: [[302.2, 362.4], [300.3, 363.6], [298.4, 361.7]] },
+      { cols: 40, rows: 50, runs: [[302.9, 390], [303.2, 388.2], [303.5, 388.9], [310.9, 398.9], [305.5, 392.6], [304.2, 392.3]] },
+      { cols: 30, rows: 100, runs: [[305, 436.3]] },
+      { cols: 60, rows: 50, runs: [[304.9, 429.2]] }
+    ];
+    const fits = (row: { cols: number; rows: number }) => row.cols <= RENDER_SHEET_MAX_COLUMNS && row.rows <= RENDER_SHEET_MAX_ROWS;
+    expect(PAINT.filter(fits).map((row) => [row.cols, row.rows])).toEqual([[20, 40], [20, 50], [40, 50]]);
+    for (const row of PAINT.filter(fits)) {
+      for (const [frontier, peak] of row.runs) {
+        expect(peak).toBeLessThanOrEqual(budgetMib);
+        expect((peak - frontier) * MIB).toBeLessThanOrEqual(SHEET_RENDER_RESERVE_BYTES);
+      }
+    }
+    for (const row of PAINT.filter((row) => !fits(row))) {
+      expect(Math.max(...row.runs.map(([, peak]) => peak))).toBeGreaterThan(budgetMib);
+    }
+    // La reserva es lo que sube con el rango del tope, redondeado a 8 MiB, no un margen a ojo.
+    expect(SHEET_RENDER_RESERVE_BYTES - 88.1 * MIB).toBeLessThan(8 * MIB);
   });
 
   it('la reserva es la del tope y no hay reserva por encima de él', () => {

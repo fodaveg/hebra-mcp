@@ -42,11 +42,13 @@ import { renderReserveBytes, renderSvgToPng } from '../../src/render/render';
 import type { ToolContext } from '../../src/server/context';
 import { ToolContent, ToolError } from '../../src/server/errors';
 import {
+  fitRenderWidth,
   formatRenderRange,
   loadDocumentFonts,
   parseRenderRange,
   RENDER_SHEET_MAX_PIXELS,
   renderRangeTooLarge,
+  renderSheetPaintReserveBytes,
   renderSheetReadReserveBytes,
   runRenderSheet,
   type RenderSheetInput,
@@ -58,7 +60,12 @@ import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts
 import { UnlinkedStatusSource } from '../../src/status/status-source';
 import { openNodeLibraryPort, type NodeLibraryPort } from '../../src/store/node-port';
 import { sheetJobSlot } from '../../src/store/sheet-jobs';
-import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
+import {
+  SHEET_DOCUMENT_MAX_BYTES,
+  SHEET_JOB_RESERVE_BYTES,
+  SHEET_ODS_READ_LIMITS,
+  SHEET_RENDER_RESERVE_BYTES
+} from '../../src/store/sheet-limits';
 import type { SheetOp } from '../../vendor/hebra/src/lib/sheets/contracts/ops';
 import { IronCalcEngine } from '../../vendor/hebra/src/lib/sheets/engine/ironcalc-engine';
 import { createSheetAdapter, prepareSheetBase } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter';
@@ -343,16 +350,18 @@ describe('rango de render', () => {
     expect(formatRenderRange(parseRenderRange('AB7')!)).toBe('AB7');
   });
 
-  it('el tope es de 60 columnas por 200 filas, con las inmovilizadas que se pintan delante', () => {
-    expect(renderRangeTooLarge(parseRenderRange('A1:BH200')!)).toBe(false);
-    expect(renderRangeTooLarge(parseRenderRange('A1:BI200')!)).toBe(true);
-    expect(renderRangeTooLarge(parseRenderRange('A1:BH201')!)).toBe(true);
+  it('el tope es de 40 columnas por 50 filas (H-95d), con las inmovilizadas que se pintan delante', () => {
+    expect(renderRangeTooLarge(parseRenderRange('A1:AN50')!)).toBe(false);
+    expect(renderRangeTooLarge(parseRenderRange('A1:AO50')!)).toBe(true);
+    expect(renderRangeTooLarge(parseRenderRange('A1:AN51')!)).toBe(true);
+    // El de antes (60 por 200) mataba el contenedor: ya no cabe.
+    expect(renderRangeTooLarge(parseRenderRange('A1:BH200')!)).toBe(true);
     expect(renderRangeTooLarge(parseRenderRange('A:A')!)).toBe(true);
     // Diez filas inmovilizadas y el rango empieza después: se pintan delante y cuentan.
-    expect(renderRangeTooLarge(parseRenderRange('A20:A209')!, { rows: 10, cols: 0 })).toBe(false);
-    expect(renderRangeTooLarge(parseRenderRange('A20:A210')!, { rows: 10, cols: 0 })).toBe(true);
+    expect(renderRangeTooLarge(parseRenderRange('A20:A59')!, { rows: 10, cols: 0 })).toBe(false);
+    expect(renderRangeTooLarge(parseRenderRange('A20:A60')!, { rows: 10, cols: 0 })).toBe(true);
     // Si el rango las incluye, se pintan como parte de él y no cuentan dos veces.
-    expect(renderRangeTooLarge(parseRenderRange('A1:A200')!, { rows: 10, cols: 0 })).toBe(false);
+    expect(renderRangeTooLarge(parseRenderRange('A1:A50')!, { rows: 10, cols: 0 })).toBe(false);
   });
 });
 
@@ -378,11 +387,14 @@ describe('hebra_render_sheet', () => {
     expect(meta.width).toBe(960);
     expect(meta).not.toHaveProperty('missingGlyphs');
 
-    // Dos reservas: la de leer el libro (la de hojas, H-95b) y la del pintado. Las dos se sueltan.
+    // Dos reservas: la de leer el libro (la de hojas, H-95b) y la del pintado, la medida en H-95d y
+    // no el cálculo por píxeles del render común. Las dos se sueltan.
     expect(h.gate.asked).toHaveLength(2);
     expect(h.gate.asked[0]).toBe(renderSheetReadReserveBytes(buildOds().byteLength));
     expect(h.gate.asked[0]).toBe(SHEET_JOB_RESERVE_BYTES);
-    expect(h.gate.asked[1]).toBe(renderReserveBytes(0, meta.width as number, meta.height as number));
+    expect(h.gate.asked[1]).toBe(renderSheetPaintReserveBytes());
+    expect(h.gate.asked[1]).toBe(SHEET_RENDER_RESERVE_BYTES);
+    expect(h.gate.asked[1]).not.toBe(renderReserveBytes(0, meta.width as number, meta.height as number));
     expect(h.gate.pending).toBe(0);
     expect(h.engineLog).toEqual({ loads: 1, disposed: 1 });
   });
@@ -436,7 +448,7 @@ describe('hebra_render_sheet', () => {
   it('rango excesivo da document_too_complex sin leer el documento', async () => {
     const h = await harness();
     const id = await addDocument(h, 'grande.ods', buildOds(bigContent(250, 70)));
-    for (const range of ['A1:BI1', 'A1:A201', 'A:A', '1:1']) {
+    for (const range of ['A1:AO1', 'A1:A51', 'A1:BH200', 'A:A', '1:1']) {
       expect(await refusal(h, { id, sheet: 'Datos', range }), range).toBe('document_too_complex');
     }
     // Ni una reserva: se rechaza antes de abrir nada.
@@ -449,15 +461,16 @@ describe('hebra_render_sheet', () => {
     const id = await addDocument(h, 'panel.ods', buildOds(bigContent(250, 4)), [
       { type: 'sheet.freeze', sheet: 's0', rows: 10, cols: 0 }
     ]);
-    expect(await refusal(h, { id, sheet: 'Datos', range: 'A20:A210' })).toBe('document_too_complex');
+    expect(await refusal(h, { id, sheet: 'Datos', range: 'A20:A60' })).toBe('document_too_complex');
     expect(h.gate.pending).toBe(0);
-    const { meta } = await render(h, { id, sheet: 'Datos', range: 'A20:A209' });
-    expect(meta.range).toBe('A20:A209');
+    const { meta } = await render(h, { id, sheet: 'Datos', range: 'A20:A59' });
+    expect(meta.range).toBe('A20:A59');
   });
 
   /**
-   * El único test de trabajo pesado del fichero, y no por frío: pinta el rango máximo (60 x 200
-   * celdas con texto y números) en un PNG de 2 Mpx. Medido el 22 nov 2026 en este Mac con una carga
+   * El único test de trabajo pesado del fichero, y no por frío: pinta el rango máximo (40 x 50
+   * celdas con texto y números desde H-95d; las cifras de abajo son del de antes, 60 x 200, que pesaba
+   * más) en un PNG de 2 Mpx como mucho. Medido el 22 nov 2026 en este Mac con una carga
    * media de 9 en 15 núcleos, ya caliente: entre 1,4 y 1,5 s en total, de los que el PNG de un SVG
    * de 4,1 MB se lleva de 0,84 a 1,1 s, la lista de dibujo de 0,19 a 0,33, el SVG 0,2, el motor de
    * 0,12 a 0,22 y el libro 0,13. Los 5 s por defecto son poco más de tres veces eso, y con la
@@ -468,12 +481,20 @@ describe('hebra_render_sheet', () => {
   it('el rango máximo sale como PNG de 2 Mpx como mucho aunque se pida el ancho máximo', async () => {
     const h = await harness();
     const id = await addDocument(h, 'grande.ods', buildOds(bigContent(250, 70)));
-    const { meta, png } = await render(h, { id, sheet: 'Datos', range: 'A1:BH200', width: 1568 });
+    const { meta, png } = await render(h, { id, sheet: 'Datos', range: 'A1:AN50', width: 1568 });
     const { width, height } = pngSize(png);
     expect(width * height).toBeLessThanOrEqual(RENDER_SHEET_MAX_PIXELS);
     expect(Math.max(width, height)).toBeLessThanOrEqual(1568);
-    expect(meta).toMatchObject({ width, height, range: 'A1:BH200' });
+    expect(meta).toMatchObject({ width, height, range: 'A1:AN50' });
+    expect(h.gate.asked[1]).toBe(SHEET_RENDER_RESERVE_BYTES);
     expect(h.gate.pending).toBe(0);
+    // Una columna o una fila más que el tope: el error de rango, sin abrir nada (H-95d).
+    for (const range of ['A1:AO50', 'A1:AN51']) {
+      expect(await refusal(h, { id, sheet: 'Datos', range, width: 1568 }), range).toBe('document_too_complex');
+    }
+    expect(h.gate.asked).toHaveLength(2);
+    // El rango máximo ya no es cuadrado: la superficie se comprueba con un lienzo que sí lo es.
+    expect(fitRenderWidth(1568, { width: 1568, height: 1568 })).toBe(Math.floor(Math.sqrt(RENDER_SHEET_MAX_PIXELS)));
   }, MAX_RANGE_TIMEOUT_MS);
 
   it('id oculto da not_found, igual que uno inexistente, uno de la papelera o el de una nota', async () => {

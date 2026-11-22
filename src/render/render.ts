@@ -60,6 +60,12 @@ export type RenderSvgInput = {
   gate: Pick<CapacityGate, 'admit'>;
   /** La cuenta que pide, para el turno rotatorio de la compuerta. */
   key: string;
+  /**
+   * Lo que aparta el render en la compuerta cuando quien llama tiene una medida propia de su SVG
+   * (`hebra_render_sheet`, H-95d: lo que pesa pintar no lo marcan los píxeles sino el número de
+   * nodos del SVG). Sin ella, el cálculo de `renderReserveBytes`.
+   */
+  reserveBytes?: number;
 };
 
 export type RenderSvgResult = {
@@ -354,7 +360,7 @@ export async function renderSvgToPng(input: RenderSvgInput, options: RenderOptio
     // plazo o aborto). La compuerta tiene su propia espera: agotarla es lo mismo que no tener turno.
     let ticket: AdmissionTicket;
     try {
-      ticket = await input.gate.admit(signal, renderReserveBytes(decodedPixels, width, height), input.key);
+      ticket = await input.gate.admit(signal, input.reserveBytes ?? renderReserveBytes(decodedPixels, width, height), input.key);
     } catch (error) {
       throw error instanceof ContextUnavailableError ? new RenderError('document_busy') : error;
     }
