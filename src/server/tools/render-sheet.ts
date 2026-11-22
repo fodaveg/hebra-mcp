@@ -49,7 +49,6 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import * as Y from 'yjs';
 import { ContextUnavailableError, type AdmissionTicket, type CapacityGate } from '../../accounts/capacity';
 import { FileFilter } from '../../privacy/file-filter';
 import { RenderError, RENDER_SVG_MAX_BYTES, renderSvgToPng, type RenderSvgResult } from '../../render/render';
@@ -58,28 +57,21 @@ import {
   createFontTextMeasurer,
   createFormulaLocale,
   createNodeFormulaEngine,
-  createSheetAdapter,
   drawToSvg,
   engineBookOf,
   formulaText,
   layoutDrawList,
   loadFontSet,
-  OdsReadError,
-  prepareSheetBase,
   readBookLocale,
   readBookSettings,
   snapshotEngine,
   type Axis,
-  type CanonFormula,
-  type CellValue,
   type ComputedValue,
   type FontSet,
   type FormulaEngineWithValues,
-  type FormulaScope,
   type GridAxis,
   type GridRange,
-  type SheetModel,
-  type SheetModelSheet
+  type SheetModel
 } from '../../sheets';
 import { documentReserveBytes } from '../../store/document-jobs';
 import {
@@ -93,12 +85,11 @@ import {
   RENDER_WIDTH_MIN_PX
 } from '../../store/document-limits';
 import { visibleDocumentOf } from '../../store/document-privacy';
-import { openDocumentRead, type DocumentReadSource } from '../../store/document-read';
-import type { DocumentPort } from '../../store/document-channel';
-import { newDocumentHead } from '../../../vendor/hebra/src/lib/documents/sync/lifecycle';
+import type { DocumentReadSource } from '../../store/document-read';
 import { documentOk } from '../document-response';
 import { usageOf, type ToolContext } from '../context';
 import { ToolContent, ToolError } from '../errors';
+import { isFormula, openSheetRead, scopeOf, sheetOf } from './sheet-read';
 
 /** Superficie máxima del PNG: 2 Mpx, unos 7,63 MiB de lienzo RGBA (estudio de fidelidad, R3). */
 export const RENDER_SHEET_MAX_PIXELS = 2_000_000;
@@ -285,26 +276,6 @@ export function renderSheetReadReserveBytes(documentBytes: number): number {
   return documentReserveBytes(documentBytes);
 }
 
-function sheetOf(model: SheetModel, wanted: string): SheetModelSheet | null {
-  const exact = model.sheets.find((s) => s.name === wanted);
-  if (exact) return exact;
-  const lower = wanted.toLowerCase();
-  return model.sheets.find((s) => s.name.toLowerCase() === lower) ?? model.sheets.find((s) => s.id === wanted) ?? null;
-}
-
-/** El ámbito de una fórmula para escribir su texto, con los nombres visibles de las hojas. */
-function scopeOf(model: SheetModel, sheet: string): FormulaScope {
-  return {
-    sheet,
-    axes: (id) => {
-      const s = model.sheets.find((x) => x.id === id);
-      return s ? { rows: s.rows, cols: s.cols } : null;
-    },
-    sheetIdByName: (name) => model.sheets.find((x) => x.name.toLowerCase() === name.toLowerCase())?.id ?? null,
-    sheetNameById: (id) => model.sheets.find((x) => x.id === id)?.name ?? null
-  };
-}
-
 /**
  * `layoutDrawList` pide el `Axis` de H-33, una clase con campos privados, y solo usa `count`,
  * `offsetOf` y `visibleSize`, que el eje de la rejilla (`GridAxis`, sin memoria por fila) tiene
@@ -315,9 +286,6 @@ function asDrawAxis(axis: GridAxis): Axis {
   const view = { count: axis.count, offsetOf: axis.offsetOf, visibleSize: axis.visibleSize };
   return view as unknown as Axis;
 }
-
-const isFormula = (value: CellValue | undefined): value is { f: CanonFormula } =>
-  typeof value === 'object' && value !== null && 'f' in value;
 
 /** Columnas que se leen del motor a cada lado del rango: las que puede recorrer un desborde. */
 const SPILL_COLUMNS = 256;
@@ -366,25 +334,6 @@ type ReadPhase = {
   formulas: 'calculated' | 'shown' | 'not_calculated';
 };
 
-/** Una `DocumentReadSource` que sirve unos bytes y un estado ya leídos, sin volver al almacén. */
-function pinnedSource(
-  stored: Awaited<ReturnType<DocumentPort['docRead']>>,
-  sha256: string,
-  bytes: Uint8Array
-): DocumentReadSource {
-  const port = {
-    docRead: async () => stored,
-    blobRead: async (wanted: string) => (wanted === sha256 ? bytes : null)
-  };
-  // `openDocumentRead` solo llama a `docRead` y `blobRead` (los demás métodos son de escritura).
-  return { port: port as unknown as DocumentPort };
-}
-
-async function blobOf(source: DocumentReadSource, sha256: string): Promise<Uint8Array | null> {
-  const local = await source.port.blobRead(sha256).catch(() => null);
-  return local ?? (await source.readBlob?.(sha256).catch(() => null)) ?? null;
-}
-
 async function readPhase(
   file: { id: string; name: string; sha256: string; byteLength: number | null },
   input: RenderSheetInput,
@@ -392,41 +341,8 @@ async function readPhase(
   wiring: RenderSheetWiring,
   signal: AbortSignal
 ): Promise<ReadPhase> {
-  const source = wiring.documents;
-  const stored = await source.port.docRead(file.id);
-  const head = stored.head ?? newDocumentHead('ods', 'file', file.sha256);
-  if (head.format !== 'ods') throw new ToolError('document_invalid');
-  const baseSha = head.checkpointSha256 ?? head.baseSha256;
-  const base = await blobOf(source, baseSha);
-  if (!base) throw new ToolError('file_unavailable');
-  if (base.byteLength > DOCUMENT_MAX_BYTES) {
-    throw new ToolError('file_too_large', { byteLength: base.byteLength, maxBytes: DOCUMENT_MAX_BYTES });
-  }
-  signal.throwIfAborted();
-
-  let sheetBase;
-  try {
-    sheetBase = await prepareSheetBase(base);
-  } catch (error) {
-    if (error instanceof OdsReadError) {
-      throw new ToolError(error.code === 'too_large' ? 'document_too_complex' : 'document_invalid');
-    }
-    throw error;
-  }
-  const adapter = createSheetAdapter(sheetBase);
-
   // Sin cabecera, el estado es el andamio del fichero: lo que escribe quien lo abre por primera vez.
-  let state = stored;
-  if (!stored.head) {
-    const scaffold = new Y.Doc();
-    try {
-      adapter.scaffold(base, scaffold);
-      state = { head, segments: [Y.encodeStateAsUpdateV2(scaffold)], pending: [], pendingSeqs: [] };
-    } finally {
-      scaffold.destroy();
-    }
-  }
-  const read = await openDocumentRead(pinnedSource(state, baseSha, base), file.id, adapter, signal);
+  const { base, read } = await openSheetRead(wiring.documents, file, signal, 'scaffold');
   let data: Awaited<ReturnType<typeof createEditorData>> | null = null;
   try {
     const model = read.model;

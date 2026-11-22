@@ -390,6 +390,10 @@ describe('hebra_read_sheet (H-78)', () => {
     const out = await read(h, { id, sheet: 'Datos', range: 'A1:A3' });
     expect(out.range.rows).toEqual([[1], [2], [3]]);
     expect(typeof out.layoutRevision).toBe('string');
+    // Sin andamio en memoria (`headless: 'empty'`): la misma lectura da la misma revisión.
+    const again = await read(h, { id, sheet: 'Datos', range: 'A1:A3' });
+    expect(again.revision).toBe(out.revision);
+    expect(again.layoutRevision).toBe(out.layoutRevision);
     expect((await h.port.documentSource().port.docRead(id)).head).toBeNull();
   });
 
@@ -461,6 +465,7 @@ describe('hebra_read_sheet (H-78)', () => {
       fileId: 'f1',
       head: null,
       base: bytes,
+      baseSha256: sha(bytes),
       segments: [],
       pending: [],
       request: { sheet: 'Datos', range: 'A1:B2', include: ['values'], maxCells: 500, offset: 0 }

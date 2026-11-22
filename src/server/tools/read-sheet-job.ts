@@ -7,12 +7,13 @@
  * leer lo que la herramienta no comprobó.
  *
  * Qué hace:
- * 1. Arma el `Y.Doc` con los segmentos y pendientes y lo proyecta con el adaptador real de hojas
- *    (`createSheetAdapter`). Las revisiones salen de una `DocSession` de solo lectura, con la misma
- *    fórmula que la sesión de escritura (`openDocumentRead` hace lo mismo en el proceso lector):
- *    así `revision` y `layoutRevision` son las que `hebra_edit_sheet` compara con
- *    `expectedRevision` y `expectedLayout` (decisión 18). Un documento sin cabecera se lee con un
- *    `Y.Doc` vacío sobre los bytes del fichero, sin andamiaje: leer no escribe nada.
+ * 1. Abre el documento con la lectura común de hojas (`openSheetRead` de `./sheet-read.ts`, la misma
+ *    de `hebra_render_sheet`), sobre el estado que mandó la herramienta (`pinnedSource`): el `Y.Doc`
+ *    con los segmentos y pendientes, proyectado con el adaptador real, y las revisiones de
+ *    `openDocumentRead`, con la fórmula de la sesión de escritura. Así `revision` y
+ *    `layoutRevision` son las que `hebra_edit_sheet` compara con `expectedRevision` y
+ *    `expectedLayout` (decisión 18). Un documento sin cabecera se lee con un `Y.Doc` vacío
+ *    (`headless: 'empty'`), sin andamio: la misma lectura da la misma revisión y no se escribe nada.
  * 2. Sin hoja ni rango: el resumen del libro, sin celdas.
  * 3. Con hoja o rango: una página de filas enteras del rango, con hasta `maxCells` celdas. Los
  *    valores de las fórmulas los calcula el motor (`createNodeFormulaEngine`, H-09) en su propio
@@ -23,24 +24,19 @@
  * documento y va solo en campos de datos. Un error sale como código cerrado (`DocumentError`), sin
  * texto del documento.
  */
-import * as Y from 'yjs';
-import type { DocHeadRecord, DocStoreAtomicPort } from '../../../vendor/hebra/src/lib/documents/contract';
-import { createDocSession } from '../../../vendor/hebra/src/lib/documents/session';
+import type * as Y from 'yjs';
+import type { DocHeadRecord } from '../../../vendor/hebra/src/lib/documents/contract';
 import { DEFAULT_ZIP_LIMITS, readSafeZip } from '../../../vendor/hebra/src/lib/portability/zip-read';
-import { columnIndex, columnLetters, MAX_COLS, MAX_ROWS, type FormulaScope } from '../../../vendor/hebra/src/lib/sheets/formula/canon';
-import { createFormulaLocale } from '../../../vendor/hebra/src/lib/sheets/formula/locale';
+import { columnIndex, columnLetters, MAX_COLS, MAX_ROWS } from '../../../vendor/hebra/src/lib/sheets/formula/canon';
 import { inventoryOds } from '../../../vendor/hebra/src/lib/sheets/ods/inventory';
 import { readOdsStylesFromBytes, type OdsStyleBook, type ResolvedCellStyle } from '../../../vendor/hebra/src/lib/sheets/ods/read-styles';
-import { OdsReadError } from '../../../vendor/hebra/src/lib/sheets/ods/read-workbook';
 import { CELL_STYLES_MAP, readCellStyle } from '../../../vendor/hebra/src/lib/sheets/ops/apply-cell';
 import {
+  createFormulaLocale,
   createNodeFormulaEngine,
-  createSheetAdapter,
   createSheetEngineProjection,
   formulaText,
-  prepareSheetBase,
   type BookEngineSettings,
-  type CanonFormula,
   type CellValue,
   type FormulaEngineWithValues,
   type GridRange,
@@ -49,7 +45,9 @@ import {
   type SheetModelSheet
 } from '../../sheets';
 import type { DocumentError } from '../../store/document-types';
+import { ToolError } from '../errors';
 import type { ReadSheetInclude } from './read-sheet';
+import { isFormula, openSheetRead, pinnedSource, scopeOf, sheetOf, type OpenedSheet } from './sheet-read';
 
 /** La petición ya validada por la herramienta. */
 export interface ReadSheetJobRequest {
@@ -74,6 +72,8 @@ export interface ReadSheetJobInput {
   head: DocHeadRecord | null;
   /** Bytes del último punto de control, o de la base; sin cabecera, los del fichero. */
   base: Uint8Array;
+  /** SHA-256 de `base`: el punto de control de la cabecera, o el del fichero si no tiene. */
+  baseSha256: string;
   segments: readonly Uint8Array[];
   pending: readonly Uint8Array[];
   request: ReadSheetJobRequest;
@@ -154,16 +154,6 @@ export interface ReadSheetJobOptions {
 /** Hilo del motor junto al empaquetado (`dist/sheet-engine-worker.mjs`, H-173). */
 const ENGINE_WORKER_URL = new URL('./sheet-engine-worker.mjs', import.meta.url);
 
-/** El puerto de la sesión de lectura: escribir por él es un fallo (como `openDocumentRead`). */
-const readOnlyPort: DocStoreAtomicPort = {
-  docRead: () => Promise.reject(new Error('document_read_only')),
-  docAppend: () => Promise.reject(new Error('document_read_only')),
-  docAppendWith: () => Promise.reject(new Error('document_read_only')),
-  docCompact: () => Promise.reject(new Error('document_read_only')),
-  docSetHead: () => Promise.reject(new Error('document_read_only')),
-  docDrop: () => Promise.reject(new Error('document_read_only'))
-};
-
 const A1_CELL = /^\$?([A-Za-z]{1,3})\$?(\d{1,7})$/;
 
 type Rect = { r1: number; c1: number; r2: number; c2: number };
@@ -189,29 +179,9 @@ export const cellA1 = (row: number, col: number): string => `${columnLetters(col
 const rectA1 = (r: Rect): string =>
   r.r1 === r.r2 && r.c1 === r.c2 ? cellA1(r.r1, r.c1) : `${cellA1(r.r1, r.c1)}:${cellA1(r.r2, r.c2)}`;
 
-const isFormula = (value: CellValue): value is { f: CanonFormula } =>
-  typeof value === 'object' && value !== null && 'f' in value;
 const isStoredError = (value: CellValue): value is { err: string } =>
   typeof value === 'object' && value !== null && 'err' in value;
 const isEmpty = (value: CellValue | undefined): boolean => value === undefined || value === null || value === '';
-
-/** Ámbito de las fórmulas con los nombres de hoja de la persona (no los internos del motor). */
-function scopeOf(model: SheetModel, sheet: string): FormulaScope {
-  return {
-    sheet,
-    axes(id) {
-      const s = model.sheets.find((x) => x.id === id);
-      return s ? { rows: s.rows, cols: s.cols } : null;
-    },
-    sheetIdByName(name) {
-      const lower = name.toLowerCase();
-      return model.sheets.find((x) => x.name.toLowerCase() === lower)?.id ?? null;
-    },
-    sheetNameById(id) {
-      return model.sheets.find((x) => x.id === id)?.name ?? null;
-    }
-  };
-}
 
 /** Posición (fila y columna, base 0) de una clave `${RowId}:${ColId}` del modelo. */
 function positionOf(sheet: SheetModelSheet, key: string): { row: number; col: number } | null {
@@ -350,11 +320,7 @@ async function formulaErrors(
 
 /** Hoja pedida por id o por nombre (sin distinguir mayúsculas). */
 function findSheet(model: SheetModel, wanted: string | undefined): SheetModelSheet | null {
-  if (wanted === undefined) return model.sheets[0] ?? null;
-  const byId = model.sheets.find((s) => s.id === wanted);
-  if (byId) return byId;
-  const key = wanted.normalize('NFC').toLowerCase();
-  return model.sheets.find((s) => s.name.normalize('NFC').toLowerCase() === key) ?? null;
+  return wanted === undefined ? (model.sheets[0] ?? null) : sheetOf(model, wanted);
 }
 
 const BOOLEAN_STYLES = new Set(['bold', 'italic', 'underline', 'strike', 'wrap']);
@@ -571,9 +537,12 @@ async function pageOf(
 
 /** Un fallo del lector de `.ods` a su código cerrado. */
 function readFailure(error: unknown): ReadSheetJobResult {
-  if (error instanceof OdsReadError) {
-    return { ok: false, error: { code: error.code === 'too_large' ? 'document_too_complex' : 'document_invalid' } };
+  // `openSheetRead` ya da el código cerrado; los campos de `file_too_large` no hacen falta aquí,
+  // porque la herramienta mira el tamaño antes de mandar el trabajo.
+  if (error instanceof ToolError && (error.code === 'document_too_complex' || error.code === 'file_unavailable')) {
+    return { ok: false, error: { code: error.code } };
   }
+  if (error instanceof ToolError && error.code === 'file_too_large') return { ok: false, error: { code: 'document_too_complex' } };
   return { ok: false, error: { code: 'document_invalid' } };
 }
 
@@ -587,38 +556,19 @@ export async function runReadSheetJob(
 ): Promise<ReadSheetJobResult> {
   if (input.format !== 'ods') return { ok: false, error: { code: 'op_unsupported' } };
   const signal = options.signal ?? new AbortController().signal;
-  let base: SheetBase;
+  let opened: OpenedSheet;
   try {
-    base = await prepareSheetBase(input.base);
+    // El estado ya leído por la herramienta, sin volver al almacén (aquí no hay ninguno).
+    const stored = { head: input.head, segments: [...input.segments], pending: [...input.pending], pendingSeqs: [] };
+    const source = pinnedSource(stored, input.baseSha256, input.base);
+    opened = await openSheetRead(source, { id: input.fileId, sha256: input.baseSha256 }, signal, 'empty');
   } catch (error) {
     return readFailure(error);
   }
-  const adapter = createSheetAdapter(base);
-  const doc = new Y.Doc();
   try {
-    try {
-      for (const piece of [...input.segments, ...input.pending]) Y.applyUpdateV2(doc, piece);
-    } catch {
-      return { ok: false, error: { code: 'document_invalid' } };
-    }
-    const session = createDocSession({
-      fileId: input.fileId,
-      doc,
-      generation: input.head?.generation ?? '',
-      adapter,
-      port: readOnlyPort,
-      base: input.base,
-      signal
-    });
-    try {
-      let model: SheetModel;
-      try {
-        model = await adapter.project(input.base, doc, signal);
-      } catch (error) {
-        return readFailure(error);
-      }
-      const revision = session.revision();
-      const layoutRevision = session.layoutRevision();
+    {
+      const { sheetBase: base, read } = opened;
+      const { model, revision, layoutRevision, doc } = read;
       const { request } = input;
       if (request.sheet === undefined && request.range === undefined) {
         const hasFormulas = model.sheets.some((s) => [...s.cells.values()].some(isFormula));
@@ -648,13 +598,11 @@ export async function runReadSheetJob(
       const cols = Math.min(MAX_COLS, sheet.cols.length());
       if (rect.r2 >= Math.max(rows, 1) || rect.c2 >= Math.max(cols, 1)) return { ok: false, invalid: 'range' };
       if (rect.c2 - rect.c1 + 1 > request.maxCells) return { ok: false, error: { code: 'document_too_complex' } };
-      const page = await pageOf(doc, base, input.base, model, sheet, rect, request, options);
+      const page = await pageOf(doc, base, opened.base, model, sheet, rect, request, options);
       return { ok: true, revision, layoutRevision, page };
-    } finally {
-      await session.close();
     }
   } finally {
-    doc.destroy();
+    await opened.close();
   }
 }
 

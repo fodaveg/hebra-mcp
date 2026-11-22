@@ -279,6 +279,7 @@ async function readStored(ctx: ToolContext, deps: ReadSheetDeps, id: string, req
       fileId: id,
       head,
       base: bytes,
+      baseSha256: sha256,
       segments: stored.segments,
       pending: stored.pending,
       request: {
