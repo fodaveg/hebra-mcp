@@ -63,10 +63,10 @@ function content(bytes: number, cellsPerRow: 8 | 64): string {
 }
 
 /** El `.ods` de la plantilla con ese `content.xml` y, si se pide, una entrada más. */
-function book(xml: string, extra?: { path: string; data: Uint8Array; level: 0 | 9 }): Uint8Array {
+function book(xml: string, extras: Array<{ path: string; data: Uint8Array; level: 0 | 9 }> | { path: string; data: Uint8Array; level: 0 | 9 } = []): Uint8Array {
   const entries: Zippable = {};
   for (const [path, data] of Object.entries(unzipSync(buildOds(xml)))) entries[path] = [data, { level: path === 'mimetype' ? 0 : 9 }];
-  if (extra) {
+  for (const extra of Array.isArray(extras) ? extras : [extras]) {
     // Declarada en el manifiesto, como una imagen real: sin ello el guardado lanza `manifest_incoherent`.
     const manifest = new TextDecoder().decode((entries['META-INF/manifest.xml'] as [Uint8Array, unknown])[0]);
     const type = extra.path.endsWith('.svg') ? 'image/svg+xml' : 'image/png';
@@ -94,9 +94,12 @@ out('foto', photoOds());
 const xml8 = content(XML, 8);
 const base8 = book(xml8);
 const rawBase = Object.values(unzipSync(base8)).reduce((n, e) => n + e.length, 0);
-// Relleno comprimible hasta 8 MiB menos 64 KiB descomprimidos (el hexadecimal de bytes al azar baja a la mitad).
+// Relleno comprimible hasta 8 MiB menos 64 KiB descomprimidos (el hexadecimal de bytes al azar baja a la
+// mitad). En DOS entradas: cada una tiene que caber en `maxEntryBytes` (4 MiB).
 const fill = 8 * MIB - 64 * 1024 - rawBase;
-out('limite8', book(xml8, { path: 'Pictures/relleno.svg', data: new TextEncoder().encode(randomBytes(Math.floor(fill / 2)).toString('hex')), level: 9 }));
+const half = Math.floor(fill / 4); // bytes al azar de cada entrada: el doble en caracteres
+const fillEntry = (name: string) => ({ path: `Pictures/${name}.svg`, data: new TextEncoder().encode(randomBytes(half).toString('hex')), level: 9 as const });
+out('limite8', book(xml8, [fillEntry('relleno-a'), fillEntry('relleno-b')]));
 
 // Relleno incompresible hasta unos 4 MiB de .ods (el tope es 4 MiB: 4.194.304).
 const padding = 4_150_000 - base8.length;

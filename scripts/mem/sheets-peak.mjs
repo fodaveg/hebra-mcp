@@ -41,7 +41,10 @@ const CASOS = {
   'libro39-leer': { fx: 'libro39', op: 'read' },
   // Descomposición del pintado: el mismo rango en un libro pequeño y un rango pequeño en el del tope.
   'pintar-libro-corto': { fx: 'pintar200', op: 'render' },
-  'pintar-rango-corto': { fx: 'pintar', op: 'render', rango: 'A1:H10' }
+  'pintar-rango-corto': { fx: 'pintar', op: 'render', rango: 'A1:H10' },
+  // Barrido del rango (30 columnas por 100 filas) en el libro del tope y en el corto.
+  'pintar-medio': { fx: 'pintar', op: 'render', rango: 'A1:AD100' },
+  'pintar-libro-corto-medio': { fx: 'pintar200', op: 'render', rango: 'A1:AD100' }
 };
 const casos = (o.casos ?? 'foto,limite8,pintar,libro39,libro39-leer').split(',');
 

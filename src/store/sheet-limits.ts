@@ -48,10 +48,37 @@
  *    4 MiB en total y da `document_too_complex` en 0,3 s, con el pico en 301 MiB. Sin
  *    `--liftoff-only`, el de 3,9 MiB vuelve a morir por OOM (salida 137).
  *
- * No medido aquí: la edición (`hebra_edit_sheet` proyecta y exporta en el hilo principal), el
- * pintado (`hebra_render_sheet`), un servidor con otro número de núcleos y libros reales de
- * usuarios. La edición y la fase de lectura del pintado abren el mismo libro con la misma lectura
- * común (`openSheetRead`) y el mismo motor, así que apartan la misma reserva que la lectura.
+ * 5. Con los topes de H-TOPES-MCP (H-95c, 22 nov 2026, el mismo contenedor, `--liftoff-only`, 220 MiB
+ *    de lastre, 512 MiB; `scripts/mem/sheets-peak.mjs` hace la sonda repetible: `npm run build`, un
+ *    volumen por corrida, `runEditSheet` por el escritor real, el exportador de `.ods` del MCP y
+ *    `runRenderSheet` con el motor y `@napi-rs/canvas` empaquetados). Pico de `memory.peak` en MiB
+ *    (tres corridas) y, entre paréntesis, lo que sube sobre el uso de antes (253 a 256):
+ *
+ *      caso                                          fichero   pico             sube
+ *      leer el libro de 4 MiB y 3,9 de XML (control)  4,0 MiB  416,0 417,6 415,9  163
+ *      editar y guardar ese libro                     4,0 MiB  397,6 398,1 396,4  144
+ *      guardar el `.ods` con fotos (`photo-ods.ts`)   3,9 MiB  360,2 362,4 363,6  110
+ *      guardar un `.ods` de 7,94 MiB descomprimidos   2,6 MiB  395,6 398,9 394,6  143
+ *      pintar `A1:BH200` (el máximo), libro de 3,9 MiB XML  0,2 MiB  OOM en 3 de 3 (con 1 GiB: 854)
+ *      pintar `A1:BH200`, libro corto de 0,7 MiB XML 0,04 MiB  611 (con 1 GiB)
+ *      pintar `A1:AD100`, libro de 3,9 / de 0,7 MiB XML      493 / 475 (con 1 GiB)
+ *      pintar `A1:H10`, libro de 3,9 MiB XML                 424 (con 1 GiB)
+ *
+ *    El control reproduce a H-95b: la lectura sube 163 MiB (163,6 entonces). El guardado, que
+ *    descomprime hasta los 8 MiB del inventario, y la edición con el libro de 3,9 MiB de XML caben
+ *    en la reserva de 168 MiB y por debajo del presupuesto de 409,6: el mayor son 398,9. El guardado
+ *    con las imágenes de `photo-ods.ts` es el más bajo porque su XML es pequeño. Un `.ods` legal de
+ *    8 MiB descomprimidos necesita al menos dos entradas grandes: `maxEntryBytes` es de 4 MiB.
+ *    El pintado NO cabe: el rango máximo (60 columnas por 200 filas) pasa de 512 MiB con el libro del
+ *    tope (OOM) y con uno corto, y ni `A1:AD100` baja de 409,6. Lo que lo come no es el libro (de
+ *    `A1:H10` a `A1:BH200` suben de 424 a 854 con el mismo libro) sino el rango y su PNG de 2 Mpx
+ *    en el hilo de pintado, sumado a lo que deja la lectura sin devolver. No se cambia el tope a ojo:
+ *    queda para una pasada que barra rango y píxeles (H-95d).
+ *
+ * No medido aquí: la edición con el escritor en otro proceso (cola del lector), un servidor con otro
+ * número de núcleos, el pintado con imágenes en la hoja y libros reales de usuarios. La lectura
+ * del pintado abre el mismo libro con la misma lectura común (`openSheetRead`) y el mismo motor, así
+ * que aparta la misma reserva que la lectura; el pintado en sí no tiene medida que lo cubra (punto 5).
  *
  * Por parámetro a Hebra (H-TOPES-MCP): el libro (`prepareSheetBase`), los datos del pintado
  * (`createEditorData`, también las imágenes) y la lengua del libro (`readBookSettings`,
