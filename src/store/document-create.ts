@@ -54,8 +54,8 @@ export interface CreatedDocument {
   replayed?: true;
 }
 
-/** Tipo con que se guarda cada formato. */
-const DOCUMENT_MIME: Record<DocFormat, string> = {
+/** Tipo con que se guarda cada formato (y el `mimetype` que exige su ZIP). */
+export const DOCUMENT_MIME: Record<DocFormat, string> = {
   ods: 'application/vnd.oasis.opendocument.spreadsheet',
   odp: 'application/vnd.oasis.opendocument.presentation'
 };

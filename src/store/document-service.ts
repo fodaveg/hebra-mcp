@@ -5,6 +5,8 @@
  * - `runDocumentRequest`: un lote (`runDocumentOps`), un deshacer (`undoDocumentOps`) o una
  *   creación (`createDocumentFile`), con el turno real (`documentTurnOf`). Lo creado sale ya con
  *   su cabecera `/h` (`ensureCreatedHead`, H-79), lista para editarse desde el MCP.
+ * - Antes de una edición que escribe sobre un documento sin cabecera (nunca abierto en el
+ *   editor), su cabecera, como al crearlo (`handleFor`, H-80).
  * - Tras un lote o un deshacer que escribieron: `checkpointThenClean`, con el exportador
  *   registrado, el diario en disco y `otherPins` leído de `doc_pins`. Nunca lanza: lo aplicado
  *   no se rompe por un punto de control que falle. Después, la ronda de sync.
@@ -14,7 +16,9 @@
  *
  * Los formatos se registran con `registerDocumentFormat` y hoy no hay ninguno: sin el suyo, un
  * lote responde `op_unsupported` sin tocar nada. Los dan de alta los paquetes de integración de
- * cada editor (`P-110`, `H-177`), junto con sus herramientas.
+ * cada editor (`P-110`, `H-177`), junto con sus herramientas. Un formato puede dar un adaptador
+ * fijo o uno por documento (`forDocument`): el de hojas se crea con los bytes base de cada `.ods`
+ * (`createSheetDocumentFormat`, H-80).
  */
 import type { DocFormat, DocFormatAdapter } from '../../vendor/hebra/src/lib/documents/contract';
 import { checkpointPins } from '../../vendor/hebra/src/lib/documents/sync/checkpoint';
@@ -29,7 +33,7 @@ import {
 } from './document-blob-cleanup';
 import { getDocumentExporter, type DocumentChannelSource } from './document-channel';
 import { checkpointAfterBatch, type CheckpointOutcome } from './document-checkpoint';
-import { createDocumentFile } from './document-create';
+import { createDocumentFile, DOCUMENT_MIME, odfMimetypeOf } from './document-create';
 import {
   runDocumentOps,
   type DocumentComputeJob,
@@ -38,6 +42,8 @@ import {
   type DocumentOpsResult,
   type RunDocumentOpsOptions
 } from './document-ops';
+import { DOCUMENT_EDIT_TIMEOUT_MS } from './document-limits';
+import { guardDocumentWrite } from './document-privacy';
 import { documentBytesForCopy, DocumentReadError } from './document-read';
 import type { DocumentError } from './document-types';
 import { documentTurnOf, undoDocumentOps, type DocumentUndoInput } from './document-undo';
@@ -71,14 +77,34 @@ export type DocumentOpsOutcome = DocumentOpsResult | { ok: true; created: Docume
 /** El estado de sync de la ronda de después de escribir. No debe lanzar. */
 export type DocumentAfterCommit = () => Promise<{ sync: string; syncError?: string }>;
 
-/** Lo que un formato aporta para editarse desde el MCP. */
-export interface DocumentFormatEntry<Model = unknown, Op = unknown> {
+/** Lo que un formato aporta para editar UN documento desde el MCP. */
+export interface DocumentFormatHandle<Model = unknown, Op = unknown> {
   adapter: DocFormatAdapter<Model, Op>;
   /** Fase 2 de `runDocumentOps`: el cálculo en el hilo. */
   compute(job: DocumentComputeJob, signal: AbortSignal): Promise<DocumentComputeResult>;
   /** Si una operación direcciona por A1 o índice (regla de `./document-address.ts`). */
   isAddressed?: RunDocumentOpsOptions<Op>['isAddressed'];
 }
+
+/**
+ * Un formato cuyo adaptador depende de los bytes base del documento (hojas, H-80: el adaptador de
+ * `.ods` se crea con `prepareSheetBase` de un fichero concreto). `forDocument` da el adaptador y el
+ * cálculo de ESTE documento, antes de las fases y fuera de todo turno. No decide nada de
+ * privacidad: corre antes de la fase 1, así que no lanza ni responde con lo que lea; un fallo
+ * suyo lo devuelve el cálculo o el adaptador cuando la fase 1 ya ha visto el documento.
+ */
+export interface DocumentFormatPerDocument<Model = unknown, Op = unknown> {
+  forDocument(
+    source: DocumentChannelSource,
+    fileId: string,
+    signal: AbortSignal
+  ): Promise<DocumentFormatHandle<Model, Op>>;
+}
+
+/** Lo que un formato aporta para editarse desde el MCP: fijo, o por documento. */
+export type DocumentFormatEntry<Model = unknown, Op = unknown> =
+  | DocumentFormatHandle<Model, Op>
+  | DocumentFormatPerDocument<Model, Op>;
 
 const formats = new Map<DocFormat, DocumentFormatEntry>();
 
@@ -185,17 +211,20 @@ export async function runDocumentRequest(
     target.writeExclusive((store) => operation(documentTurnOf(store, privacy)));
   try {
     let result: DocumentOpsResult;
-    if (!entry) {
+    const handle = entry ? await handleFor(target, request, entry) : null;
+    if (!handle) {
       result = { ok: false, error: { code: 'op_unsupported' } };
+    } else if ('error' in handle) {
+      result = { ok: false, error: handle.error };
     } else if (request.action === 'edit') {
       result = await runDocumentOps(
-        { turn, compute: (job, signal) => entry.compute(job, signal), now: () => Date.now(), afterCommit },
+        { turn, compute: (job, signal) => handle.compute(job, signal), now: () => Date.now(), afterCommit },
         request.input,
-        entry.adapter,
-        entry.isAddressed ? { isAddressed: entry.isAddressed } : {}
+        handle.adapter,
+        handle.isAddressed ? { isAddressed: handle.isAddressed } : {}
       );
     } else {
-      result = await undoDocumentOps({ turn, now: () => Date.now(), afterCommit }, request.input, entry.adapter);
+      result = await undoDocumentOps({ turn, now: () => Date.now(), afterCommit }, request.input, handle.adapter);
     }
     logDocumentEvent(resultEvent(request, result));
     return result;
@@ -215,6 +244,44 @@ export async function runDocumentRequest(
     });
     throw error;
   }
+}
+
+/**
+ * El adaptador y el cálculo del documento de la petición (`DocumentFormatPerDocument`, o el
+ * formato fijo tal cual). Antes, si es una edición que va a escribir (no `dryRun`) sobre un
+ * documento sin cabecera ni estado (un `.ods` subido o importado que nadie abrió en el editor), le
+ * pone la cabecera como la app al abrirlo (`ensureCreatedHead`, H-80), tras comprobar en su turno
+ * que el documento se ve: oculto, inexistente o en la papelera es `not_found` sin escribir nada.
+ * Sin cabecera, la sesión de la fase 3 daría `doc_head_invalid` hasta que la app lo abriera. El
+ * andamio del formato no se escribe aquí: lo escribe el propio lote, en su mismo update.
+ */
+async function handleFor(
+  target: DocumentServiceTarget,
+  request: Extract<DocumentOpsRequest, { action: 'edit' | 'undo' }>,
+  entry: DocumentFormatEntry
+): Promise<DocumentFormatHandle | { error: DocumentError }> {
+  const fileId = request.input.id;
+  if (typeof fileId !== 'string' || fileId.length === 0) {
+    return { error: { code: 'batch_invalid', issues: [{ opIndex: 0, path: 'id', reason: 'id vacio' }] } };
+  }
+  const source = target.port.documentSource();
+  if (request.action === 'edit' && request.input.dryRun !== true) {
+    const stored = await source.port.docRead(fileId);
+    if (!stored.head && stored.segments.length === 0 && stored.pending.length === 0) {
+      const document = await target.writeExclusive(async (store) =>
+        guardDocumentWrite({ store, privacy: request.privacy }, fileId)
+      );
+      // El tipo por el contenido, antes de escribir nada: una cabecera `ods` en un PDF no se pone.
+      const bytes = await source.port.blobRead(document.sha256).catch(() => null);
+      if (!bytes) return { error: { code: 'file_unavailable' } };
+      if (odfMimetypeOf(bytes) !== DOCUMENT_MIME[request.format]) return { error: { code: 'document_invalid' } };
+      if (!(await ensureCreatedHead(target, request.format, fileId, document.sha256))) {
+        return { error: { code: 'doc_head_invalid' } };
+      }
+    }
+  }
+  if (!('forDocument' in entry)) return entry;
+  return entry.forDocument(source, fileId, AbortSignal.timeout(DOCUMENT_EDIT_TIMEOUT_MS));
 }
 
 /**
