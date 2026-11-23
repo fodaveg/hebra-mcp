@@ -326,7 +326,7 @@ describe('tablas dinámicas (PIV)', () => {
     // arriba; con `grand-total="column"`, sin fila de totales), así que la salida se mueve con un
     // `pivot.set` y lo que sobra de la anterior se vacía.
     const writes = writesOf(out.ops, datos);
-    expect(Object.values(writes)).toEqual(expect.arrayContaining(['Filtro', 'Región', 'Norte', 150, 'Sur', 225]));
+    expect(Object.values(writes)).toEqual(expect.arrayContaining(['Filtrar', 'Región', 'Norte', 150, 'Sur', 225]));
     expect(Object.values(writes)).not.toContain(999);
     expect(Object.values(writes)).not.toContain(1149);
     expect(out.ops.filter((op) => op.type === 'pivot.edit')).toHaveLength(1);

@@ -60,6 +60,9 @@ import {
   type SheetOp,
   type SheetOpType
 } from '../../src/sheets';
+import type { ChartModel, ChartRef, ChartSeriesModel } from '../../vendor/hebra/src/lib/sheets/opt/cht/model';
+import { newPivotTable } from '../../vendor/hebra/src/lib/sheets/opt/piv/model';
+import { serializeTableBody, type TableBody } from '../../vendor/hebra/src/lib/sheets/opt/tab/model';
 import { createDocSession } from '../../vendor/hebra/src/lib/documents/session';
 import { newDocumentHead } from '../../vendor/hebra/src/lib/documents/sync/lifecycle';
 import { buildOds } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
@@ -1011,6 +1014,93 @@ function preparacion(c: Contexto): SheetOp[] {
   ];
 }
 
+/** Cuerpo de una tabla `Ventas` sobre `A1:B3` de `Hoja1`, como lo compila `createTable`. */
+const tablaVentas = (c: Contexto): SheetOp => {
+  const body: TableBody = {
+    v: 1,
+    name: 'Ventas',
+    sheet: c.s0,
+    top: c.fila(0),
+    bottom: c.fila(2),
+    left: c.col(0),
+    right: c.col(1),
+    header: true,
+    totals: false,
+    filterButtons: true,
+    bands: null
+  };
+  return { type: 'table.put', id: 'h171-tabla', body: serializeTableBody(body) };
+};
+
+/** Un `ChartRef` sobre `A1:A3` de `Hoja1`. */
+const refDelGrafico = (c: Contexto): ChartRef => ({ sheet: c.s0, from: [c.fila(0), c.col(0)], to: [c.fila(2), c.col(0)] });
+
+const serieDelGrafico = (c: Contexto, id: string): ChartSeriesModel => ({
+  id,
+  props: { kind: null, name: null, values: [refDelGrafico(c)], domains: [], color: null }
+});
+
+/** Gráfico de barras `h171-grafico` con una serie `h171-serie`, como lo compila `createChart`. */
+const graficoDe = (c: Contexto): ChartModel => ({
+  id: 'h171-grafico',
+  sheet: c.s0,
+  object: null,
+  props: {
+    kind: 'bar',
+    horizontal: false,
+    stacking: 'none',
+    title: 'Ventas',
+    subtitle: null,
+    categories: [],
+    legend: 'bottom',
+    'axis.x.title': null,
+    'axis.x.visible': true,
+    'axis.x.grid': false,
+    'axis.x.min': null,
+    'axis.x.max': null,
+    'axis.y.title': null,
+    'axis.y.visible': true,
+    'axis.y.grid': true,
+    'axis.y.min': null,
+    'axis.y.max': null,
+    position: { cell: null, x: 10, y: 20 },
+    size: { w: 400, h: 300 }
+  },
+  series: [serieDelGrafico(c, 'h171-serie')]
+});
+
+const altaDeGrafico = (c: Contexto): SheetOp => ({ type: 'chart.create', chart: graficoDe(c) });
+
+/** Una imagen flotante en `Hoja1!B2`: solo propiedades, sin bytes (el `asset` es un SHA-256). */
+const imagenDe = (c: Contexto): SheetOp => ({
+  type: 'image.set',
+  sheet: c.s0,
+  id: 'h171-imagen',
+  patch: {
+    anchor: { rowId: c.fila(1), colId: c.col(1), rowAt: 1, colAt: 1, dx: 0, dy: 0 },
+    size: { w: 120, h: 80 },
+    alt: 'Logo',
+    z: 1,
+    asset: 'a'.repeat(64),
+    deleted: false
+  }
+});
+
+/** Una tabla dinámica `Resumen` de `Hoja1!A1:A3` pintada en `Hoja2!A10:B12`. */
+const altaDePivot = (): SheetOp => ({
+  type: 'pivot.edit',
+  edit: {
+    type: 'pivot.create',
+    table: newPivotTable({
+      id: 'h171-pivot',
+      name: 'Resumen',
+      source: { kind: 'range', sheet: 'Hoja1', range: { from: { row: 0, col: 0 }, to: { row: 2, col: 0 } } },
+      target: { sheet: 'Hoja2', range: { from: { row: 9, col: 0 }, to: { row: 11, col: 1 } } },
+      headers: ['Valor']
+    })
+  }
+});
+
 /**
  * Un caso por cada `SHEET_OP_TYPES`. Las cuatro que solo genera una inversa (`cell.unset`,
  * `axis.restore`, `axis.runs`, `range.restore`) también van: la app las despacha al deshacer.
@@ -1061,7 +1151,44 @@ const CASOS_DE_OP: Record<SheetOpType, CasoDeOp> = {
     }
   },
   'rule.put': { lote: () => [nombre('otro', 'Otro', 'Hoja2!$A$1')] },
-  'rule.delete': { lote: () => [{ type: 'rule.delete', kind: 'name', id: 'total' }] }
+  'rule.delete': { lote: () => [{ type: 'rule.delete', kind: 'name', id: 'total' }] },
+  // Bloques opcionales (H-170/H-171): el MCP los emite con `createTable`, `insertImage`,
+  // `createChart` y `pivotCreate` (`src/server/tools/sheet-op-schemas.ts`). Ninguno escribe celdas
+  // por sí mismo: el caso comprueba que la app los acepta y que el MCP sigue calculando lo mismo
+  // sobre el libro con ellos.
+  'table.put': { lote: (c) => [tablaVentas(c)] },
+  'table.delete': { preparar: (c) => [tablaVentas(c)], lote: () => [{ type: 'table.delete', id: 'h171-tabla' }] },
+  // La inversa de borrar una tabla del fichero: el MCP la despacha con `undoOperationId`.
+  'table.restore': {
+    preparar: (c) => [tablaVentas(c), { type: 'table.delete', id: 'h171-tabla' }],
+    lote: () => [{ type: 'table.restore', id: 'h171-tabla' }]
+  },
+  'image.set': { lote: (c) => [imagenDe(c)] },
+  // La inversa de `image.set` (solo se pide con `undoOperationId`): retira las versiones de `alt`.
+  'image.unset': {
+    preparar: (c) => [imagenDe(c)],
+    lote: (c) => [{ type: 'image.unset', sheet: c.s0, id: 'h171-imagen', prop: 'alt', replaces: [] }]
+  },
+  'chart.create': { lote: (c) => [altaDeGrafico(c)] },
+  'chart.delete': { preparar: (c) => [altaDeGrafico(c)], lote: () => [{ type: 'chart.delete', chart: 'h171-grafico' }] },
+  'chart.set': { preparar: (c) => [altaDeGrafico(c)], lote: () => [{ type: 'chart.set', chart: 'h171-grafico', prop: 'title', value: 'Otro título' }] },
+  'chart.series.add': {
+    preparar: (c) => [altaDeGrafico(c)],
+    lote: (c) => [{ type: 'chart.series.add', chart: 'h171-grafico', series: serieDelGrafico(c, 'h171-serie2'), after: null }]
+  },
+  'chart.series.remove': {
+    preparar: (c) => [altaDeGrafico(c)],
+    lote: () => [{ type: 'chart.series.remove', chart: 'h171-grafico', series: 'h171-serie' }]
+  },
+  'chart.series.move': {
+    preparar: (c) => [altaDeGrafico(c), { type: 'chart.series.add', chart: 'h171-grafico', series: serieDelGrafico(c, 'h171-serie2'), after: 'h171-serie' }],
+    lote: () => [{ type: 'chart.series.move', chart: 'h171-grafico', series: 'h171-serie2', after: null }]
+  },
+  'chart.series.set': {
+    preparar: (c) => [altaDeGrafico(c)],
+    lote: () => [{ type: 'chart.series.set', chart: 'h171-grafico', series: 'h171-serie', prop: 'color', value: '#ff0000' }]
+  },
+  'pivot.edit': { lote: () => [altaDePivot()] }
 };
 
 /** Tipos de operación sin caso ni exclusión. Vacío si la tabla cubre la lista. */
