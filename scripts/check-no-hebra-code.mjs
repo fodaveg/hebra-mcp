@@ -27,6 +27,19 @@
  *    correcta comparte un puñado de líneas (imports, una firma de función, un literal de
  *    ruta); un fichero que copió su lógica comparte decenas.
  *
+ *    Cambio del 23 nov 2026 (decisión de David): solo cuentan las líneas significativas que
+ *    forman parte de un BLOQUE de 3 o más líneas significativas SEGUIDAS (en el fichero propio)
+ *    que también aparecen seguidas en un mismo fichero de Hebra (`shared-lines.mjs`). Una frase
+ *    suelta de 1 o 2 líneas ya no cuenta. Motivo: con `vendor/hebra` en `4aed5e54f`,
+ *    `src/server/tools/sheet-opt.ts` pasó a 37 líneas compartidas, y eran 37 frases sueltas
+ *    sin copia (`const row = sheet.rows.indexOf(key.slice(0, colon));`, `for (const sheet of
+ *    model.sheets) {`...) repartidas por ~900 líneas; Hebra no exporta un helper que importar.
+ *    El filtro de línea significativa y el umbral (25) no cambian. Con la regla nueva, medido
+ *    en el repo ese día, el máximo es 11 (`src/server/tools/sheet-opt.ts`; el siguiente, 10 en
+ *    `src/store/search-safe.ts`). Pruebas en `test/scripts/check-no-hebra-code.test.ts`: 30
+ *    líneas seguidas copiadas de un fichero real de Hebra dan rojo, las mismas 30 sueltas dan
+ *    verde y el fichero real de `sheet-opt.ts` da verde.
+ *
  *    Umbral (`MAX_SHARED_LINES`), medido el 26 sep 2026 con este mismo algoritmo (script
  *    de medida ad hoc, borrado tras medir, no versionado): los ficheros propios
  *    legítimos comparten entre 9 y 15 líneas así (`test/sync/sync-runner.node.test.ts`,
@@ -53,13 +66,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { addVendorRuns, sharedLineCount } from './shared-lines.mjs';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const vendorDir = join(root, 'vendor', 'hebra');
 /** Blob de git de un fichero vacío: siempre el mismo hash, no es una coincidencia real. */
 const EMPTY_BLOB = 'e69de29bb2d1d6434b8b29ae775ad8c2e48c5391';
-/** Más de esta longitud (tras recortar espacios) para contar como línea significativa. */
-const SIGNIFICANT_LINE_LEN = 30;
 /** Líneas significativas compartidas con Hebra que tolera un fichero propio (ver §2 de
  *  arriba: medido entre 9 y 15 en los legítimos de hoy, +10 de margen). */
 const MAX_SHARED_LINES = 25;
@@ -109,20 +121,13 @@ for (const relPath of tracked) {
 
 // --- 2. Solapamiento de líneas -----------------------------------------------------
 
-function significantLines(text) {
-  return text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > SIGNIFICANT_LINE_LEN);
-}
-
-// Todas las líneas significativas de los dos motores de Hebra (TS y Rust), en un solo
-// set: no hace falta saber DE QUÉ fichero viene una línea para decidir que se comparte.
+// Los bloques de líneas significativas seguidas de los dos motores de Hebra (TS y Rust), en un
+// solo set: un bloque ya es de un único fichero, así que no hace falta guardar cuál.
 // Desde el 10 oct 2026 también las del prototipo de la opción D (`scripts/sonda-d`,
 // `hebra-d.ts` y su arnés): `src/workdir/` reimplementa lo mismo desde el contrato, y una
 // copia del prototipo tiene que saltar aquí igual que una del motor (prueba negativa en la
 // cabecera).
-const vendorLines = new Set();
+const vendorRuns = new Set();
 const vendorSourceDirs = ['src', join('src-tauri', 'src'), join('scripts', 'sonda-d')];
 for (const line of git(['ls-tree', '-r', '--name-only', 'HEAD'], vendorDir).trim().split('\n')) {
   if (!vendorSourceDirs.some((dir) => line.startsWith(`${dir}/`))) continue;
@@ -132,7 +137,7 @@ for (const line of git(['ls-tree', '-r', '--name-only', 'HEAD'], vendorDir).trim
   } catch {
     continue; // binario o borrado en el árbol de trabajo del submódulo: no aporta líneas.
   }
-  for (const shared of significantLines(text)) vendorLines.add(shared);
+  addVendorRuns(vendorRuns, text);
 }
 
 const lineMatches = [];
@@ -143,7 +148,7 @@ for (const relPath of tracked) {
   } catch {
     continue; // binario o borrado en el árbol de trabajo: no hay líneas que contar.
   }
-  const shared = significantLines(text).filter((line) => vendorLines.has(line)).length;
+  const shared = sharedLineCount(text, vendorRuns);
   if (shared > MAX_SHARED_LINES) lineMatches.push({ path: relPath, shared });
 }
 
