@@ -923,7 +923,8 @@ describe('casos de fórmula sueltos en la app y en el MCP', () => {
       'VALOR_PUNTO: es error #VALUE!, en num 1.5',
       'TEXTO_MILES_ES: es str "1.234,50", en str "1,234.5000"',
       'TEXTO_MILES_EN: es str "1.234,50", en str "1,234.50"',
-      'TEXTO_PORCIENTO: es str "12,5%", en str "12%"',
+      // H-FLECOS (vendor/hebra 0936cfbed): TEXTO redondea los empates lejos del cero, como Calc.
+      'TEXTO_PORCIENTO: es str "12,5%", en str "13%"',
       'NUMERO_A_TEXTO: es str "1.5", en str "1.5"',
       'PUNTO_Y_COMA_EN_CADENA: es str "a;bc", en str "a;bc"',
       'MATRIZ_EN_LINEA: es num 21, en num 21',
