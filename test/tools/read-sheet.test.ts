@@ -56,6 +56,10 @@ import { createFormulaLocale, createSheetAdapter, prepareSheetBase } from '../..
 import { isFormulaParseError } from '../../vendor/hebra/src/lib/sheets/contracts/locale';
 import { buildOds, ctxOf } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
 import { newDocumentHead } from '../../vendor/hebra/src/lib/documents/sync/lifecycle';
+import { withSpillRefs } from '../../vendor/hebra/src/lib/sheets/opt/arr/hash';
+import { odsWithChart } from '../../vendor/hebra/src/lib/sheets/opt/cht/test-ods';
+import { buildImageBook } from '../../vendor/hebra/src/lib/sheets/opt/img/img.fixture';
+import { tableOds } from '../fixtures/table-ods';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PRIVACY: PrivacyConfig = { privateFolders: [['diario']], privateTags: [] };
@@ -720,5 +724,88 @@ describe('hebra_read_sheet: topes de hojas (H-95b)', () => {
     expect(SHEET_ODS_INVENTORY_LIMITS.maxEntryBytes).toBeLessThan(5 * MIB);
     const cut = await read(h, { id: await addDocument(h, h.folders.hojas, 'macro-grande.ods', big) });
     expect(cut.workbook.sheets[0].preserved).toEqual([]);
+  });
+});
+
+/** Una fórmula como `cell.set` con el locale que entiende `A1#` (el de la rejilla y del MCP). */
+async function formulaOp(bytes: Uint8Array, sheetName: string, text: string, row: number, col: number): Promise<SheetOp> {
+  const model = (await prepareSheetBase(bytes)).model;
+  const sheet = model.sheets.find((s) => s.name === sheetName)!;
+  const f = withSpillRefs(createFormulaLocale()).toCanon(text, scopeOf(model, sheet.id), { row, col }, 'en');
+  if (isFormulaParseError(f)) throw new Error(f.error);
+  return { type: 'cell.set', sheet: sheet.id, row: sheet.rows.idAt(row), col: sheet.cols.idAt(col), value: { f }, replaces: [] };
+}
+
+/**
+ * Bloques opcionales en la lectura (H-171). Pruebas negativas hechas a mano al escribirlo (se
+ * rompe, el test cae, se restaura):
+ * - no cargar el motor para `objects` (`engine: null`): caen «los datos de un gráfico» (la serie
+ *   con la fórmula sale `reliable: false`) y «los desbordes» (sin `spills`);
+ * - no quitar de las imágenes la de reemplazo de un gráfico: cae «el resumen» (`imageCount: 1` en
+ *   `Hoja1`, que solo tiene el gráfico);
+ * - dar `objects` en todas las páginas: cae «solo en la primera página»;
+ * - escribir las fórmulas con el locale sin `withSpillRefs`: cae «A1#».
+ */
+describe('hebra_read_sheet con los bloques opcionales (H-171)', () => {
+  it('el resumen dice las tablas, imágenes y gráficos de cada hoja, solo si los tiene', async () => {
+    const h = await harness();
+    const charts = await read(h, { id: await addDocument(h, h.folders.hojas, 'grafico.ods', odsWithChart()) });
+    expect(charts.workbook.sheets.map((s: Record<string, unknown>) => [s.name, s.chartCount, s.tables, s.imageCount])).toEqual([
+      ['Hoja1', 1, undefined, undefined],
+      ['Otra', undefined, undefined, undefined]
+    ]);
+    const tables = await read(h, { id: await addDocument(h, h.folders.hojas, 'tabla.ods', tableOds()) });
+    expect(tables.workbook.sheets[0]).toMatchObject({ name: 'Ventas', tables: ['Ventas2026'] });
+    const images = await read(h, { id: await addDocument(h, h.folders.hojas, 'imagenes.ods', buildImageBook()) });
+    expect(images.workbook.sheets.find((s: Record<string, unknown>) => s.name === 'Otra')).toMatchObject({ imageCount: 1 });
+  });
+
+  it('los datos de un gráfico salen recalculados por el motor, y fiables', async () => {
+    const h = await harness();
+    const bytes = odsWithChart();
+    const id = await addDocument(h, h.folders.hojas, 'grafico.ods', bytes);
+    // B2 pasa a ser una fórmula: su valor solo lo sabe el motor.
+    await appendOps(h, id, bytes, [await formulaOp(bytes, 'Hoja1', '=1+3', 1, 1)]);
+    const out = await read(h, { id, sheet: 'Hoja1', range: 'A1:B2', include: ['values', 'objects'] });
+    const [chart] = out.range.objects.charts;
+    expect(chart).toMatchObject({ id: 'base-object-1', reliable: true });
+    expect(chart.series[0]).toMatchObject({ name: 'Norte', values: [4, 4, 7, 2], reliable: true, valuesRanges: ['Hoja1!B2:B5'] });
+    expect(out.range.objects).toMatchObject({ tables: [], images: [] });
+  });
+
+  it('las tablas y las imágenes de la hoja, con lo que citan los comandos', async () => {
+    const h = await harness();
+    const table = await read(h, { id: await addDocument(h, h.folders.hojas, 'tabla.ods', tableOds()), sheet: 'Ventas', include: ['objects'] });
+    expect(table.range.objects.tables).toEqual([
+      { name: 'Ventas2026', range: 'A1:B4', header: true, totals: false, columns: ['Mes', 'Importe'], style: null, filteredColumns: [], sortedBy: null }
+    ]);
+    // Sin título ni descripción, el texto alternativo es el `draw:name` del marco (como en la app).
+    const images = await read(h, { id: await addDocument(h, h.folders.hojas, 'imagenes.ods', buildImageBook()), sheet: 'Otra', include: ['objects'] });
+    expect(images.range.objects.images).toEqual([{ id: expect.any(String), cell: 'A1', dx: 0, dy: 0, width: expect.any(Number), height: expect.any(Number), alt: 'Otra' }]);
+  });
+
+  it('los desbordes de la hoja, con su rango y su referencia A1#; una fórmula que cita uno se lee con A1#', async () => {
+    const h = await harness();
+    const bytes = buildOds();
+    const id = await addDocument(h, h.folders.hojas, 'libro.ods', bytes);
+    await appendOps(h, id, bytes, [...(await spillOps(bytes)), await formulaOp(bytes, 'Datos', '=SUM(D1#)', 0, 4)]);
+    const out = await read(h, { id, sheet: 'Datos', range: 'D1:E1', include: ['values', 'formulas', 'objects'] });
+    expect(out.range.objects.spills).toEqual([
+      { anchor: 'D1', range: 'D1:D7', ref: 'D1#', blocked: false },
+      { anchor: 'C2', range: 'C2:C3', ref: 'C2#', blocked: false }
+    ]);
+    expect(out.range.formulas).toMatchObject({ E1: '=SUM(D1#)' });
+    expect(out.range.rows).toEqual([[1, 28]]);
+  });
+
+  it('objects va solo en la primera página', async () => {
+    const h = await harness();
+    const id = await addDocument(h, h.folders.hojas, 'grafico.ods', odsWithChart());
+    const first = await read(h, { id, sheet: 'Hoja1', range: 'A1:E5', maxCells: 5, include: ['values', 'objects'] });
+    expect(first.range.objects.charts).toHaveLength(1);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await read(h, { id, sheet: 'Hoja1', range: 'A1:E5', maxCells: 5, include: ['values', 'objects'], cursor: first.nextCursor });
+    expect(second.range.objects).toBeUndefined();
+    expect(second.range.rows).toHaveLength(1);
   });
 });

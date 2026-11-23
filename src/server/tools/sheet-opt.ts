@@ -44,6 +44,7 @@ import {
 } from '../../../vendor/hebra/src/lib/sheets/opt/tab/model';
 import { readTablesFromOds } from '../../../vendor/hebra/src/lib/sheets/opt/tab/persist';
 import { readChartFrames } from '../../../vendor/hebra/src/lib/sheets/opt/cht/frame';
+import { childNamed, findAll, parseTree } from '../../../vendor/hebra/src/lib/sheets/opt/cht/xml-tree';
 import { readChartModel } from '../../../vendor/hebra/src/lib/sheets/opt/cht/read-model';
 import { gridFromModel, rangeFromRef, type ChartGrid, type ChartModel, type ChartOp } from '../../../vendor/hebra/src/lib/sheets/opt/cht/model';
 import { readCharts } from '../../../vendor/hebra/src/lib/sheets/opt/cht/concur';
@@ -71,6 +72,30 @@ export interface BaseObjects {
   tables: readonly TableRecord[];
   /** Gráficos del fichero que se saben dibujar, por id (`base-object-1`). */
   charts: ReadonlyMap<string, ChartModel>;
+  /**
+   * Por hoja, la posición (base 0, entre todos los `draw:frame` de la hoja, como `frame` de las
+   * imágenes del editor) de los marcos que son un objeto incrustado. Un gráfico de LibreOffice
+   * lleva en su marco la imagen de reemplazo (`ObjectReplacements/Object N`), y los datos del
+   * editor la dan como una imagen más: no lo es, y un `deleteImage` sobre ella tocaría el marco del
+   * gráfico al guardar.
+   */
+  objectFrames: ReadonlyMap<SheetId, ReadonlySet<number>>;
+}
+
+/** Las posiciones de los marcos de objeto incrustado de cada hoja (ver `BaseObjects.objectFrames`). */
+function readObjectFrames(text: string, base: SheetModel): Map<SheetId, Set<number>> {
+  const out = new Map<SheetId, Set<number>>();
+  const tables = parseTree(text).children.flatMap((node) => findAll(node, 'table:table')).filter((t) => t.parent?.name === 'office:spreadsheet');
+  tables.forEach((table, index) => {
+    const sheet = base.sheets[index];
+    if (!sheet) return;
+    const frames = new Set<number>();
+    findAll(table, 'draw:frame').forEach((frame, ordinal) => {
+      if (childNamed(frame, 'draw:object') || childNamed(frame, 'draw:object-ole')) frames.add(ordinal);
+    });
+    if (frames.size > 0) out.set(sheet.id, frames);
+  });
+  return out;
 }
 
 const OBJECT_CONTENT = /^Object \d+\/content\.xml$/;
@@ -79,13 +104,14 @@ const baseObjectsCache = new WeakMap<Uint8Array, Promise<BaseObjects>>();
 async function readBaseObjects(sheetBase: SheetBase, limits: Readonly<OdsReadLimits>): Promise<BaseObjects> {
   const entries = await readOdsParts(sheetBase.bytes, limits, (path) => path === 'content.xml' || OBJECT_CONTENT.test(path));
   const content = entries.find((entry) => entry.path === 'content.xml');
-  if (!content) return { tables: [], charts: new Map() };
+  if (!content) return { tables: [], charts: new Map(), objectFrames: new Map() };
   const text = decodeXml(content.bytes);
   const base = sheetBase.model;
   const tables = text.includes('<table:database-range')
     ? readTablesFromOds(content.bytes, base.sheets, (sheet, row) => sheetBase.hidden.kindAt(sheet, 'row', row) === 'filter')
     : [];
   const charts = new Map<string, ChartModel>();
+  const objectFrames = text.includes('<draw:object') ? readObjectFrames(text, base) : new Map<SheetId, Set<number>>();
   if (text.includes('<draw:object')) {
     const grid = gridFromModel(base);
     for (const frame of readChartFrames(text)) {
@@ -102,7 +128,7 @@ async function readBaseObjects(sheetBase: SheetBase, limits: Readonly<OdsReadLim
       if (model) charts.set(model.id, model);
     }
   }
-  return { tables, charts };
+  return { tables, charts, objectFrames };
 }
 
 /**
@@ -137,22 +163,23 @@ export function liveCharts(doc: Y.Doc, base: BaseObjects): ChartModel[] {
 
 /**
  * Las imágenes de cada hoja, en orden de apilado, con lo propio del documento encima: las del
- * fichero salen de los datos del editor (`createEditorData`, el mismo que pinta la rejilla).
+ * fichero salen de los datos del editor (`createEditorData`, el mismo que pinta la rejilla). Sin
+ * la imagen de reemplazo de un objeto incrustado (`BaseObjects.objectFrames`): no se lista ni la
+ * puede citar un comando de imagen.
  */
-export async function liveImages(doc: Y.Doc, bytes: Uint8Array, model: SheetModel): Promise<Map<SheetId, ImageState[]>> {
+export async function liveImages(doc: Y.Doc, bytes: Uint8Array, model: SheetModel, base: BaseObjects): Promise<Map<SheetId, ImageState[]>> {
   const data = await createEditorData({ doc, base: bytes, limits: SHEET_ODS_READ_LIMITS });
   try {
     const out = new Map<SheetId, ImageState[]>();
     for (const sheet of model.sheets) {
-      out.set(
-        sheet.id,
-        resolveImageStates({
-          fileImages: data.images(sheet.id),
-          overlay: readImageOverlay(doc, sheet.id),
-          rows: sheet.rows,
-          cols: sheet.cols
-        })
-      );
+      const objects = base.objectFrames.get(sheet.id);
+      const images = resolveImageStates({
+        fileImages: data.images(sheet.id),
+        overlay: readImageOverlay(doc, sheet.id),
+        rows: sheet.rows,
+        cols: sheet.cols
+      });
+      out.set(sheet.id, objects ? images.filter((image) => image.frame === undefined || !objects.has(image.frame)) : images);
     }
     return out;
   } finally {
@@ -337,7 +364,7 @@ export async function sheetObjectsOf(input: {
   const tables = liveTables(doc, base, model)
     .filter((table) => table.body.sheet === sheet.id)
     .map((table) => describeTable(table, sheet));
-  const images = ((await liveImages(doc, input.bytes, model)).get(sheet.id) ?? []).map(describeImage);
+  const images = ((await liveImages(doc, input.bytes, model, base)).get(sheet.id) ?? []).map(describeImage);
   const charts = liveCharts(doc, base).filter((chart) => chart.sheet === sheet.id);
   const grid = gridFromModel(model);
   const computed = await chartValues(charts, grid, model, engine);
@@ -372,7 +399,7 @@ export async function objectCountsOf(doc: Y.Doc, bytes: Uint8Array, sheetBase: S
     const counts = out.get(chart.sheet);
     if (counts) counts.charts += 1;
   }
-  for (const [sheet, images] of await liveImages(doc, bytes, model)) {
+  for (const [sheet, images] of await liveImages(doc, bytes, model, base)) {
     const counts = out.get(sheet);
     if (counts) counts.images = images.length;
   }
@@ -443,7 +470,7 @@ export async function compileImageRun(
   state: OptCompileState,
   resolveAsset: (ref: string) => Promise<ImageAssetLookup>
 ): Promise<OptCompileResult> {
-  const images = await liveImages(state.doc, state.bytes, state.model);
+  const images = await liveImages(state.doc, state.bytes, state.model, await baseObjectsOf(state.sheetBase));
   const ids = optIds(state.seed, 'img');
   const out = await compileImageCommands(
     run.map((item) => item.command),
