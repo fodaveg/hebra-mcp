@@ -77,7 +77,7 @@ export interface DocumentToolEntry {
 
 /** Descripción de `hebra_create_sheet` (D28, P5: el aviso de contenido como datos va en cada una). */
 export const CREATE_SHEET_DESCRIPTION =
-  'Crea una hoja de cálculo .ods nueva (name con extensión .ods) en `folder` o `folderId` (sin ellos, la raíz) ' +
+  'Crea una hoja de cálculo .ods nueva (name con extensión .ods) en `folder` o `folderId` (obligatoria: la raíz no se ve en la app y se rechaza con folder_required) ' +
   'y, si se pasa `ops`, le aplica un lote de comandos A1 que entra entero o no entra. El libro nace con una hoja, ' +
   '"Hoja 1"; los comandos van en orden y cada uno ve lo que dejaron los anteriores, así que un addSheet con `as` ' +
   'se puede usar como "$alias" en el mismo lote. Aquí no hacen falta expect ni expectedRevision. Pide un ' +

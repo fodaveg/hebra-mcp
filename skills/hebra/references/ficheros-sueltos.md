@@ -25,9 +25,9 @@ Un fichero suelto no es un adjunto. Los adjuntos de una nota (`![[sha256:…]]`)
 | `hebra_restore_file` | `id` (de `hebra_list_files` con `trashed: true`) | Idempotente. `{id, folderPath, sync}`. |
 | `hebra_read_file` | `id` (vivo), `offset?` (0), `maxChars?` (1-100 000, def. 100 000) | Bloque `{id, name, folderPath, mimeType, byteLength, sha256, updatedAt}` y el contenido: texto (`.base` y `.yaml` como `text/yaml`, `.md`, `.txt`, `.json`, `.csv`) por tramos con `{totalChars, truncated, nextOffset}`; imagen PNG/JPEG/GIF/WebP como imagen; PDF como recurso. Uno de la papelera no se lee. |
 | `hebra_replace_file_text` | `id`, `expectedSha256` (el `sha256` leído), `text` (el contenido ENTERO nuevo, hasta 1 000 000 bytes) **o** `undoOperationId`, `operationId` | `{id, outcome: "saved" \| "already", sha256, byteLength, mimeType, previousSha256, replayed?, sync}`, leídos de lo guardado. |
-| `hebra_create_file` | `folder?` (ruta) **o** `folderId?` (sin ninguno, la raíz), `name` (con extensión `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`; hasta 255; sin `/`, `\|`, `[`, `]`, `\`, `#` ni saltos de línea), `text` (hasta 1 000 000 bytes), `operationId` | `{id, name, folderPath, sha256, byteLength, mimeType, outcome, replayed?, sync}`. |
+| `hebra_create_file` | `folder` (ruta) **o** `folderId` (obligatoria una; la raíz da `folder_required`), `name` (con extensión `.base`, `.yaml`, `.yml`, `.json`, `.csv` o `.txt`; hasta 255; sin `/`, `\|`, `[`, `]`, `\`, `#` ni saltos de línea), `text` (hasta 1 000 000 bytes), `operationId` | `{id, name, folderPath, sha256, byteLength, mimeType, outcome, replayed?, sync}`. |
 | `hebra_rename_file` | `id` (vivo), `name` (misma extensión), `operationId` | Misma salida, más `relinked`. El nombre que ya tiene: `outcome: "already"`. |
-| `hebra_move_file` | `id`, `folder?` **o** `folderId?` (sin ninguno, la raíz), `operationId` | Misma salida. Ya estaba ahí: `already`. |
+| `hebra_move_file` | `id`, `folder` **o** `folderId` (obligatoria una; la raíz da `folder_required`), `operationId` | Misma salida. Ya estaba ahí: `already`. |
 | `hebra_duplicate_file` | `id`, `name` (misma extensión), `folder?` **o** `folderId?` (sin ninguno, la carpeta del original), `operationId` | Fichero NUEVO con los mismos bytes (mismo `sha256`), hasta 5 MiB. Misma salida. |
 
 Sacar de la papelera devuelve el fichero a su carpeta; si esa carpeta ya no existe, a la raíz.
@@ -94,7 +94,7 @@ ni copia de conflicto, así que se reescribe entero sobre el contenido leído.
   `file_exists` con su `id`. Con más de 5000 notas que arreglar, `too_many_linked_notes` sin
   escribir nada. Duplicar copia los mismos bytes, hasta 5 MiB; sin `folder`, a la carpeta del
   original.
-- **Mover** (`hebra_move_file`): a otra carpeta (`folder` o `folderId`); sin ninguno, a la raíz.
+- **Mover** (`hebra_move_file`): a otra carpeta (`folder` o `folderId`, obligatoria); la raíz no se ve en la app y da `folder_required`.
   Para archivarlo dentro de un ID de Johnny.Decimal, `hebra_jd_move` (ver
   [Johnny.Decimal](johnny-decimal.md)).
 - **Nombre repetido**: si en la carpeta ya hay un fichero con ese nombre (sin distinguir

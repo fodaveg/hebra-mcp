@@ -69,6 +69,9 @@ export type ToolErrorCode =
   // `src/store/file-verbs.ts`).
   | 'file_exists'
   | 'file_name_unavailable'
+  // Un fichero de trabajo (hoja, .base, .json…) no se crea ni se mueve a la raíz: la app no
+  // la deja seleccionar y el fichero quedaría invisible. Se elige carpeta (H-MCP-SIN-RAIZ).
+  | 'folder_required'
   // Renombrar con más notas que arreglar de las que juzga la puerta final (D23).
   | 'too_many_linked_notes'
   // Mover a un ID (D19): el destino no se puede usar así (privacidad); un solo código.

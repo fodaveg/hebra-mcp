@@ -189,7 +189,7 @@ decía `undoAvailable: false` (el lote era demasiado grande para guardar su inve
 ## Crear: `hebra_create_sheet`
 
 - `name` con extensión `.ods` (si no, `invalid_input`), en `folder` (la ruta, como `path` de
-  `hebra_list_folders`) o `folderId` (no los dos; sin ninguno, la raíz). Una carpeta que no existe o
+  `hebra_list_folders`) o `folderId` (no los dos; obligatoria una: la raíz no se ve en la app y da `folder_required`). Una carpeta que no existe o
   es privada, `not_found`. Si ya hay un fichero visible con ese nombre, `file_exists` con su `id`.
 - El libro nace con una hoja, `Hoja 1`. `ops` es opcional y es el mismo lote de comandos.
 - Aquí NO hace falta `expect` ni `expectedRevision`: en un libro que todavía no existe nadie puede

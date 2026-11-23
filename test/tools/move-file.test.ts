@@ -20,7 +20,7 @@ describe('hebra_move_file (D17)', () => {
     return h;
   }
 
-  it('lo mueve por ruta y lo devuelve a la raíz sin carpeta: mismo id, nombre y bytes', async () => {
+  it('lo mueve por ruta: mismo id, nombre y bytes; sin carpeta o a la raíz, folder_required (H-MCP-SIN-RAIZ)', async () => {
     const { call, rawFiles, test } = await start();
     const id = test.library.files.inventario;
     const before = rawFiles().find((row) => row.id === id)!;
@@ -43,9 +43,10 @@ describe('hebra_move_file (D17)', () => {
       name: FILE_NAMES.inventario,
       sha256: before.sha256
     });
-    const back = await call('hebra_move_file', { id, operationId: 'op-m2' });
-    expect(back.value).toMatchObject({ id, folderPath: '', outcome: 'saved' });
-    expect(rawFiles().find((row) => row.id === id)!.folderId).toBe('root');
+    const required = { isError: true, value: { error: 'folder_required', message: expect.stringContaining('raíz') } };
+    expect(await call('hebra_move_file', { id, operationId: 'op-m2' })).toEqual(required);
+    expect(await call('hebra_move_file', { id, folderId: 'root', operationId: 'op-m3' })).toEqual(required);
+    expect(rawFiles().find((row) => row.id === id)!.folderId).toBe(test.library.folders.proyectos);
   });
 
   it('por id de carpeta, y cualquier tipo (un PDF)', async () => {

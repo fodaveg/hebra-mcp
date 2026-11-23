@@ -63,7 +63,7 @@ describe('hebra_import_office (C-25)', () => {
     return error as ToolError;
   }
 
-  const valid: ImportOfficeInput = { name: 'Libro.xlsx', dataBase64: B64, operationId: 'op-1' };
+  const valid: ImportOfficeInput = { name: 'Libro.xlsx', dataBase64: B64, folder: 'Proyectos', operationId: 'op-1' };
 
   it('un xlsx en base64: llega al escritor con el modo por defecto y devuelve el contrato', async () => {
     const { ctx, calls } = await setup();
@@ -74,7 +74,7 @@ describe('hebra_import_office (C-25)', () => {
       format: 'xlsx',
       mode: 'convert-and-keep',
       preview: false,
-      folderId: 'root',
+      folderId: harness!.test.library.folders.proyectos,
       operationId: 'op-1'
     });
     expect(Buffer.from(calls[0]!.bytes!).equals(ZIP)).toBe(true);
@@ -152,7 +152,7 @@ describe('hebra_import_office (C-25)', () => {
         reason: 'encrypted',
         losses: []
       });
-      const out = await runImportOffice(ctx, { name: 'Libro.xlsx', dataBase64: B64, preview: true });
+      const out = await runImportOffice(ctx, { name: 'Libro.xlsx', dataBase64: B64, folder: 'Proyectos', preview: true });
       expect(calls[0]).toMatchObject({ preview: true });
       expect(calls[0]).not.toHaveProperty('operationId');
       expect(out).toEqual({
@@ -179,17 +179,24 @@ describe('hebra_import_office (C-25)', () => {
       const { ctx, calls } = await setup();
       const proyectos = harness!.test.library.folders.proyectos;
       await runImportOffice(ctx, { ...valid, folder: 'Proyectos' });
-      await runImportOffice(ctx, { ...valid, folderId: proyectos, operationId: 'op-2' });
+      await runImportOffice(ctx, { ...valid, folder: undefined, folderId: proyectos, operationId: 'op-2' });
       expect(calls.map((call) => call.folderId)).toEqual([proyectos, proyectos]);
     });
 
     it('carpeta privada, inexistente o ruta desconocida: not_found sin llegar al escritor', async () => {
       const { ctx, importOffice } = await setup();
       const { folders } = harness!.test.library;
-      await expectCode(runImportOffice(ctx, { ...valid, folderId: folders.diario }), 'not_found');
-      await expectCode(runImportOffice(ctx, { ...valid, folderId: folders.diario2026 }), 'not_found');
-      await expectCode(runImportOffice(ctx, { ...valid, folderId: 'no-existe' }), 'not_found');
+      await expectCode(runImportOffice(ctx, { ...valid, folder: undefined, folderId: folders.diario }), 'not_found');
+      await expectCode(runImportOffice(ctx, { ...valid, folder: undefined, folderId: folders.diario2026 }), 'not_found');
+      await expectCode(runImportOffice(ctx, { ...valid, folder: undefined, folderId: 'no-existe' }), 'not_found');
       await expectCode(runImportOffice(ctx, { ...valid, folder: 'Diario' }), 'not_found');
+      expect(importOffice).not.toHaveBeenCalled();
+    });
+
+    it('sin carpeta con bytes propios, o con la raíz: folder_required sin llegar al escritor (H-MCP-SIN-RAIZ)', async () => {
+      const { ctx, importOffice } = await setup();
+      await expectCode(runImportOffice(ctx, { ...valid, folder: undefined }), 'folder_required');
+      await expectCode(runImportOffice(ctx, { ...valid, folder: undefined, folderId: 'root' }), 'folder_required');
       expect(importOffice).not.toHaveBeenCalled();
     });
 

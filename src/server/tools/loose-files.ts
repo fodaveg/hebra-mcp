@@ -39,7 +39,6 @@
  * destino es una carpeta, y lo que decide si el resultado quedaría oculto lo juzga el
  * escritor en su turno, con su propio filtro.
  */
-import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';
 import {
@@ -53,7 +52,7 @@ import { prepareCreate, type LooseFileWriteInput } from '../../store/file-verbs'
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { syncOf, type LooseFileOutcome, type SyncFields } from '../write-context';
-import { requireValidOperationId } from './guards';
+import { requireNonRootFolder, requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
 
 export type LooseFileOutput = {
@@ -91,6 +90,7 @@ function destinationOf(
     id = fallback;
   }
   if (id === undefined) return undefined;
+  requireNonRootFolder(id);
   if (!ctx.privacy.folderExists(id) || ctx.privacy.isFolderHidden(id)) {
     throw new ToolError('not_found');
   }
@@ -165,7 +165,7 @@ function requireWriter(ctx: ToolContext, operationId: string): void {
   requireValidOperationId(operationId);
 }
 
-/** `hebra_create_file`: un fichero de texto nuevo en una carpeta visible (o la raíz). */
+/** `hebra_create_file`: un fichero de texto nuevo en una carpeta visible; la raíz, `folder_required`. */
 export async function runCreateFile(
   ctx: ToolContext,
   input: { folder?: string; folderId?: string; name: string; text: string; operationId: string }
@@ -183,7 +183,8 @@ export async function runCreateFile(
       maxBytes: FILE_CREATE_MAX_BYTES
     });
   }
-  const folderId = destinationOf(ctx, input, ROOT_FOLDER_ID)!;
+  const folderId = destinationOf(ctx, input, undefined);
+  requireNonRootFolder(folderId);
   const result = await write(ctx, {
     action: 'createFile',
     folderId,
@@ -216,7 +217,7 @@ export async function runRenameFile(
   return outputOf(ctx, 'file.rename', result);
 }
 
-/** `hebra_move_file`: a otra carpeta visible (o la raíz), con el mismo nombre. */
+/** `hebra_move_file`: a otra carpeta visible (no la raíz: `folder_required`), con el mismo nombre. */
 export async function runMoveFile(
   ctx: ToolContext,
   input: { id: string; folder?: string; folderId?: string; operationId: string }
@@ -224,7 +225,8 @@ export async function runMoveFile(
   requireWriter(ctx, input.operationId);
   if (input.folder !== undefined && input.folderId !== undefined) throw new ToolError('invalid_input');
   await sourceOf(ctx, input.id);
-  const folderId = destinationOf(ctx, input, ROOT_FOLDER_ID)!;
+  const folderId = destinationOf(ctx, input, undefined);
+  requireNonRootFolder(folderId);
   const result = await write(ctx, {
     action: 'moveFile',
     id: input.id,
@@ -247,6 +249,8 @@ export async function runDuplicateFile(
   const source = await sourceOf(ctx, input.id);
   if (nameExtension(name) !== nameExtension(source.file.name)) throw new ToolError('invalid_input');
   const folderId = destinationOf(ctx, input, undefined);
+  // Sin destino, la copia queda en la carpeta del original: si ese es la raíz, tampoco.
+  requireNonRootFolder(folderId ?? source.file.folderId);
   const known = source.file.byteLength;
   const tooLarge = (byteLength: number | null): ToolError =>
     new ToolError('file_too_large', {

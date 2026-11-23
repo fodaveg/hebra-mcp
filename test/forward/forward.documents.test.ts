@@ -141,8 +141,12 @@ async function documentPair() {
 
 /** Crea `Cuentas.ods` desde el lector, con `Total | 42` en A1:B1. */
 async function createBook(client: Awaited<ReturnType<typeof documentPair>>['client']) {
+  // La raíz no admite hojas (H-MCP-SIN-RAIZ): van a una carpeta, que se crea si falta.
+  const folder = await call(client, 'hebra_create_folder', { name: 'Hojas' });
+  expect(folder.isError, JSON.stringify(folder.value)).toBe(false);
   const created = await call(client, 'hebra_create_sheet', {
     name: 'Cuentas.ods',
+    folder: 'Hojas',
     ops: [{ type: 'setCells', sheet: 'Hoja 1', start: 'A1', rows: [['Total', 42]] }],
     operationId: randomUUID()
   });

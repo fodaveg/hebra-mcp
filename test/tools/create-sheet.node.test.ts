@@ -294,18 +294,37 @@ describe('hebra_create_sheet (H-79)', () => {
         }
       }
     ];
+    const hojas = async (port: NodeLibraryPort): Promise<string> =>
+      port.writeExclusive(async (store) => (await store.folderCreate('root', 'Hojas')).id);
     const readonly = await open(true);
+    const readonlyFolder = await hojas(readonly);
     await readonly.syncStorePort().syncApplyPage(incoming(3));
     const before = await snapshot(readonly);
     await expectCode(
-      runCreateSheet(await contextOf(readonly, space), { name: 'Espacio.ods', ops: LOTE.slice(0, 2), operationId: 'op-1' }, writerOf(readonly)),
+      runCreateSheet(await contextOf(readonly, space), { name: 'Espacio.ods', folderId: readonlyFolder, ops: LOTE.slice(0, 2), operationId: 'op-1' }, writerOf(readonly)),
       'client_outdated'
     );
     expect(await snapshot(readonly)).toBe(before);
 
     const writable = await open(true);
-    const made = await runCreateSheet(await contextOf(writable, space), { name: 'Espacio.ods', operationId: 'op-1' }, writerOf(writable));
+    const writableFolder = await hojas(writable);
+    const made = await runCreateSheet(await contextOf(writable, space), { name: 'Espacio.ods', folderId: writableFolder, operationId: 'op-1' }, writerOf(writable));
     expect((await writable.filesIndex()).files.map((file) => file.id)).toContain(made.id);
+  });
+
+  it('sin carpeta o con la raíz: folder_required, sin tocar el escritor ni escribir (H-MCP-SIN-RAIZ)', async () => {
+    const { port } = await world();
+    const before = await snapshot(port);
+    const writer = writerOf(port);
+    for (const input of [{}, { folderId: 'root' }]) {
+      const error = await expectCode(
+        runCreateSheet(await contextOf(port), { name: 'Raiz.ods', operationId: 'op-1', ...input }, writer),
+        'folder_required'
+      );
+      expect(error.extra).toEqual({ message: expect.stringContaining('raíz') });
+    }
+    expect(writer.calls).toBe(0);
+    expect(await snapshot(port)).toBe(before);
   });
 
   it('un homónimo visible es file_exists con su id; un nombre que no es .ods, invalid_input', async () => {

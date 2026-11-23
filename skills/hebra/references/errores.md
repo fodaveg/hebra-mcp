@@ -57,6 +57,7 @@ diga otra cosa, un error de escritura no ha escrito nada.
 | `capacity_wait_timeout` | `hebra_import_office`: no hubo memoria libre a tiempo para convertir. No se escribió nada, ni el original. | Reintenta pasado un rato con el mismo `operationId`: no duplica. |
 | `unsupported_format` | `hebra_import_office`: el fichero no es `.xlsx`, `.pptx` ni `.docx` (`.doc`, `.xls` y `.ppt` no se importan). No se escribió nada. | Díselo; que lo guarde como `.xlsx`, `.pptx` o `.docx` desde su programa. |
 | `file_exists` | En la carpeta de destino ya hay un fichero suelto visible con ese nombre (sin distinguir mayúsculas); trae su `id`. Al renombrar, también si otro fichero visible de otra carpeta ya tiene el nombre nuevo y hay notas que arreglar. | Elige otro nombre o trabaja sobre ese fichero. |
+| `folder_required` | Al crear o mover un fichero de trabajo (hoja `.ods`, `.base`, `.json`…): no se dio carpeta o se dio la raíz, que la app de Hebra no deja seleccionar y el fichero quedaría invisible. No se escribió nada. | Elige una carpeta de `hebra_list_folders` (pregunta al usuario si no es obvia) y repite. Las notas no lo piden. |
 | `file_name_unavailable` | Al crear: ese nombre no se puede usar (por la configuración de privacidad del dueño). Sin más detalle. | No insistas con variantes; dile al usuario que elija otro nombre o lo haga desde la app. |
 | `too_many_linked_notes` | `hebra_rename_file`: más de 5000 notas incrustan ese fichero. | No se puede renombrar desde aquí; díselo al usuario. |
 

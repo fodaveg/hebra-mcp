@@ -36,7 +36,7 @@ import type {
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { syncOf, type OfficeImportOutcome, type SyncFields } from '../write-context';
-import { requireValidOperationId } from './guards';
+import { requireNonRootFolder, requireValidOperationId } from './guards';
 import { OFFICE_DATA_MAX_BYTES, OFFICE_FILE_ID_MAX_BYTES } from './office-limits';
 import { mapWriteError } from './write-errors';
 
@@ -106,6 +106,8 @@ function destinationOf(ctx: ToolContext, input: ImportOfficeInput, fallback: str
     if (!byPath) throw new ToolError('not_found');
     id = byPath;
   }
+  // La raíz no se ve en la app (H-MCP-SIN-RAIZ): el fichero importado quedaría invisible.
+  requireNonRootFolder(id);
   if (!ctx.privacy.folderExists(id) || ctx.privacy.isFolderHidden(id)) throw new ToolError('not_found');
   usageOf(ctx).folder(id, ctx.privacy.folderPath(id));
   return id;

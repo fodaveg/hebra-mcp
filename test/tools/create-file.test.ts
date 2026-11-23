@@ -35,8 +35,9 @@ describe('hebra_create_file (D17)', () => {
   }
 
   it('aceptación: crea «📚 Base - Diccionario.base» y hebra_read_file lo lee igual, con el mismo sha256', async () => {
-    const { call, callRaw, rawFiles } = await start();
+    const { call, callRaw, rawFiles, test } = await start();
     const created = await call('hebra_create_file', {
+      folder: 'Proyectos',
       name: BASE_NAME,
       text: BASE_YAML,
       operationId: 'op-base'
@@ -46,7 +47,7 @@ describe('hebra_create_file (D17)', () => {
       value: {
         id: expect.any(String),
         name: BASE_NAME,
-        folderPath: '',
+        folderPath: 'proyectos',
         sha256: sha256(BASE_YAML),
         byteLength: Buffer.byteLength(BASE_YAML),
         mimeType: 'text/yaml',
@@ -56,7 +57,7 @@ describe('hebra_create_file (D17)', () => {
     });
     const id = created.value.id as string;
     const row = rawFiles().find((entry) => entry.id === id)!;
-    expect(row).toMatchObject({ name: BASE_NAME, folderId: 'root', sha256: sha256(BASE_YAML) });
+    expect(row).toMatchObject({ name: BASE_NAME, folderId: test.library.folders.proyectos, sha256: sha256(BASE_YAML) });
 
     const read = await callRaw('hebra_read_file', { id });
     expect(read.isError).not.toBe(true);
@@ -95,14 +96,14 @@ describe('hebra_create_file (D17)', () => {
       ['config.yml', 'text/yaml'],
       ['config.yaml', 'text/yaml']
     ] as const) {
-      const result = await call('hebra_create_file', { name, text: 'x: 1\n', operationId: `op-${name}` });
+      const result = await call('hebra_create_file', { folder: 'Proyectos', name, text: 'x: 1\n', operationId: `op-${name}` });
       expect(result.value, name).toMatchObject({ name, mimeType, outcome: 'saved' });
     }
     // Un .json que no se lee como JSON se guarda igual, y se lee como texto plano.
-    const loose = await call('hebra_create_file', { name: 'roto.json', text: '{', operationId: 'op-roto' });
+    const loose = await call('hebra_create_file', { folder: 'Proyectos', name: 'roto.json', text: '{', operationId: 'op-roto' });
     expect(loose.value).toMatchObject({ outcome: 'saved', mimeType: 'text/plain' });
     // El nombre se recorta.
-    const trimmed = await call('hebra_create_file', { name: '  espacios.txt  ', text: '', operationId: 'op-sp' });
+    const trimmed = await call('hebra_create_file', { folder: 'Proyectos', name: '  espacios.txt  ', text: '', operationId: 'op-sp' });
     expect(trimmed.value).toMatchObject({ name: 'espacios.txt', byteLength: 0 });
   });
 
@@ -140,33 +141,48 @@ describe('hebra_create_file (D17)', () => {
     ).toEqual({ isError: true, value: { error: 'file_too_large', byteLength: 1_000_002, maxBytes: 1_000_000 } });
     expect(rawFiles()).toEqual(before);
     // 1 000 000 bytes justos sí.
-    const max = await call('hebra_create_file', { name: 'justo.txt', text: 'a'.repeat(1_000_000), operationId: 'op-max' });
+    const max = await call('hebra_create_file', { folder: 'Proyectos', name: 'justo.txt', text: 'a'.repeat(1_000_000), operationId: 'op-max' });
     expect(max.value).toMatchObject({ outcome: 'saved', byteLength: 1_000_000 });
   });
 
   it('nombre repetido en la carpeta (sin distinguir mayúsculas): file_exists con el id del que ya está', async () => {
     const { call, rawFiles, test, engineFile } = await start();
+    const existing = await engineFile(test.library.folders.proyectos, FILE_NAMES.inventario, 'x: 0\n');
     const before = rawFiles();
     expect(
-      await call('hebra_create_file', { name: 'INVENTARIO.base', text: 'x: 1\n', operationId: 'op-dup' })
-    ).toEqual({ isError: true, value: { error: 'file_exists', id: test.library.files.inventario } });
+      await call('hebra_create_file', { folder: 'Proyectos', name: 'INVENTARIO.base', text: 'x: 1\n', operationId: 'op-dup' })
+    ).toEqual({ isError: true, value: { error: 'file_exists', id: existing } });
     // Uno en la papelera no cuenta (no está vivo), ni uno de otra carpeta.
     expect(
-      (await call('hebra_create_file', { name: 'Borrador tirado.txt', text: 'x', operationId: 'op-t' })).value
+      (await call('hebra_create_file', { folder: 'Proyectos', name: 'Borrador tirado.txt', text: 'x', operationId: 'op-t' })).value
     ).toMatchObject({ outcome: 'saved' });
     const other = await call('hebra_create_file', {
-      folder: 'Proyectos',
+      folder: 'Proyectos/Lumbre',
       name: FILE_NAMES.inventario,
       text: 'x: 2\n',
       operationId: 'op-otra'
     });
-    expect(other.value).toMatchObject({ outcome: 'saved', folderPath: 'proyectos' });
+    expect(other.value).toMatchObject({ outcome: 'saved', folderPath: 'proyectos/lumbre' });
     // La forma de una tilde (NFD frente a NFC) tampoco distingue.
-    const nfc = await engineFile(null, 'Canción.txt', 'la');
+    const nfc = await engineFile(test.library.folders.proyectos, 'Canción.txt', 'la');
     expect(
-      await call('hebra_create_file', { name: 'Canción.txt', text: 'x', operationId: 'op-nfd' })
+      await call('hebra_create_file', { folder: 'Proyectos', name: 'Canción.txt', text: 'x', operationId: 'op-nfd' })
     ).toEqual({ isError: true, value: { error: 'file_exists', id: nfc } });
     expect(rawFiles().length).toBe(before.length + 3);
+  });
+
+  it('sin carpeta o con la raíz: folder_required, sin escribir (H-MCP-SIN-RAIZ)', async () => {
+    const { call, rawFiles } = await start();
+    const before = rawFiles();
+    const required = {
+      isError: true,
+      value: { error: 'folder_required', message: expect.stringContaining('raíz') }
+    };
+    expect(await call('hebra_create_file', { name: 'Raiz.base', text: BASE_YAML, operationId: 'op-r1' })).toEqual(required);
+    expect(
+      await call('hebra_create_file', { folderId: 'root', name: 'Raiz.base', text: BASE_YAML, operationId: 'op-r2' })
+    ).toEqual(required);
+    expect(rawFiles()).toEqual(before);
   });
 
   it('carpeta inexistente: not_found, por ruta y por id', async () => {
@@ -178,7 +194,7 @@ describe('hebra_create_file (D17)', () => {
 
   it('idempotente: el mismo operationId con la misma petición devuelve lo anotado; con otra, operation_id_reused', async () => {
     const { call, rawFiles } = await start();
-    const args = { name: 'Una.base', text: BASE_YAML, operationId: 'op-idem' };
+    const args = { folder: 'Proyectos', name: 'Una.base', text: BASE_YAML, operationId: 'op-idem' };
     const first = await call('hebra_create_file', args);
     const count = rawFiles().length;
     const again = await call('hebra_create_file', args);

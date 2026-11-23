@@ -482,13 +482,13 @@ const FILE_NAME_HINT =
   'Nombre del fichero CON extensión (hasta 255 caracteres; sin / | [ ] \\ # ni saltos de línea; se recortan los espacios de los extremos).';
 const FILE_FOLDER_HINT = 'Ruta de la carpeta de destino, como `path` de hebra_list_folders.';
 const FILE_FOLDER_ID_HINT =
-  'Id de la carpeta de destino (hebra_list_folders; "root" es la raíz), en vez de `folder`.';
+  'Id de la carpeta de destino (hebra_list_folders), en vez de `folder`. "root" (la raíz) se rechaza con folder_required: no se ve en la app.';
 const FILE_OPERATION_ID = z
   .string()
   .describe('Id único de esta operación (un UUID). Reintentar con el mismo no vuelve a escribir.');
 
 export const createFileInputShape = {
-  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la raíz.`),
+  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Obligatoria \`folder\` o \`folderId\`: la raíz no se ve en la app (folder_required).`),
   folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
   name: z
     .string()
@@ -505,7 +505,7 @@ export const renameFileInputShape = {
 
 export const moveFileInputShape = {
   id: z.string().describe('Id de un fichero de hebra_list_files (vivo).'),
-  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la raíz.`),
+  folder: z.string().optional().describe(`${FILE_FOLDER_HINT} Obligatoria \`folder\` o \`folderId\`: la raíz no se ve en la app (folder_required).`),
   folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
   operationId: FILE_OPERATION_ID
 };
@@ -516,7 +516,7 @@ export const duplicateFileInputShape = {
   folder: z
     .string()
     .optional()
-    .describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la carpeta del original.`),
+    .describe(`${FILE_FOLDER_HINT} Sin \`folder\` ni \`folderId\`, la carpeta del original (si es la raíz, folder_required).`),
   folderId: z.string().optional().describe(FILE_FOLDER_ID_HINT),
   operationId: FILE_OPERATION_ID
 };

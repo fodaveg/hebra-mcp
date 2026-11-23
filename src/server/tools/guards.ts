@@ -2,6 +2,7 @@
  * Comprobaciones previas que comparten varias herramientas (visibilidad de la nota y
  * longitud de `operationId`). Cada una lanza `ToolError`, igual que antes estaban copiadas.
  */
+import { ROOT_FOLDER_ID } from '../../hebra';
 import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
 import { REVISION_MAX_LENGTH } from '../../store/revision';
 import { usageOf, type ToolContext } from '../context';
@@ -62,5 +63,21 @@ export function requireValidRevision(revision: string | undefined): void {
 export function requireValidOperationId(operationId: string): void {
   if (operationId.length === 0 || operationId.length > OPERATION_ID_MAX_LENGTH) {
     throw new ToolError('invalid_input');
+  }
+}
+
+/** Texto del error `folder_required`, sin eco de la entrada. */
+export const FOLDER_REQUIRED_MESSAGE =
+  'La raíz de la biblioteca no se ve en la app de Hebra: elige una carpeta (`folder` o `folderId`, de hebra_list_folders).';
+
+/**
+ * Un fichero de trabajo (hoja, .base, .json…) nunca vive en la raíz: la app de Hebra no deja
+ * seleccionarla y el fichero quedaría invisible (H-MCP-SIN-RAIZ, 23 nov 2026). `id` es la
+ * carpeta ya resuelta (por `folderId`, por ruta o por defecto); la raíz, o ninguna carpeta
+ * donde hacía falta una, es `folder_required`, sin tocar el almacén. Las notas no pasan por aquí.
+ */
+export function requireNonRootFolder(id: string | undefined): asserts id is string {
+  if (id === undefined || id === ROOT_FOLDER_ID) {
+    throw new ToolError('folder_required', { message: FOLDER_REQUIRED_MESSAGE });
   }
 }

@@ -43,7 +43,6 @@
 import { createHash } from 'node:crypto';
 import * as Y from 'yjs';
 import { z } from 'zod';
-import { ROOT_FOLDER_ID } from '../../hebra';
 import type { PrivacyConfig } from '../../privacy/config';
 import {
   compileBatch,
@@ -67,7 +66,7 @@ import { nameExtension, validFileName } from '../../store/file-content';
 import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
-import { requireValidOperationId } from './guards';
+import { requireNonRootFolder, requireValidOperationId } from './guards';
 import { isSheetLimitError } from './sheet-read';
 import { parseSheetAssets, parseSheetCommands, sheetAssetsField, sheetOpsField } from './sheet-op-schemas';
 import { mapWriteError } from './write-errors';
@@ -107,11 +106,11 @@ const STRUCTURAL: ReadonlySet<SheetCommand['type']> = new Set([
 /** Esquema de entrada para el registro (H-177). Lo que cruza campos lo valida `runCreateSheet`. */
 export const createSheetInputShape = {
   name: z.string().describe('Nombre del fichero CON extensión .ods.'),
-  folder: z.string().optional().describe('Ruta de la carpeta de destino, como `path` de hebra_list_folders.'),
+  folder: z.string().optional().describe('Ruta de la carpeta de destino, como `path` de hebra_list_folders. Obligatoria `folder` o `folderId`.'),
   folderId: z
     .string()
     .optional()
-    .describe('Id de la carpeta de destino (hebra_list_folders; "root" es la raíz), en vez de `folder`. Sin ninguno, la raíz.'),
+    .describe('Id de la carpeta de destino (hebra_list_folders; "root" es la raíz), en vez de `folder`. Obligatoria una de las dos: la raíz no se ve en la app y se rechaza con folder_required.'),
   ops: sheetOpsField.optional(),
   assets: sheetAssetsField,
   operationId: z
@@ -355,7 +354,7 @@ async function freshRevisions(
 
 /** La carpeta de destino visible; una ruta que no existe, una privada o un id ajeno, `not_found`. */
 function destinationOf(ctx: ToolContext, input: CreateSheetInput): string {
-  let id = ROOT_FOLDER_ID;
+  let id: string | undefined;
   if (input.folderId !== undefined) {
     id = input.folderId;
   } else if (input.folder !== undefined) {
@@ -363,6 +362,8 @@ function destinationOf(ctx: ToolContext, input: CreateSheetInput): string {
     if (!byPath) throw new ToolError('not_found');
     id = byPath;
   }
+  // La raíz no se ve en la app (H-MCP-SIN-RAIZ): sin carpeta, o con la raíz, `folder_required`.
+  requireNonRootFolder(id);
   if (!ctx.privacy.folderExists(id) || ctx.privacy.isFolderHidden(id)) throw new ToolError('not_found');
   usageOf(ctx).folder(id, ctx.privacy.folderPath(id));
   return id;

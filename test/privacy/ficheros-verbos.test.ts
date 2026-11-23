@@ -123,13 +123,13 @@ describe('ficheros sueltos, crear, renombrar, mover y duplicar (D17): privacidad
     );
     const before = rawFiles();
     expect(
-      await call('hebra_create_file', { name: 'Oculta.base', text: 'views: []\n', operationId: 'op-c' })
+      await call('hebra_create_file', { folder: 'Proyectos', name: 'Oculta.base', text: 'views: []\n', operationId: 'op-c' })
     ).toEqual(NAME_UNAVAILABLE);
     expect(
       await call('hebra_rename_file', { id: test.library.files.inventario, name: 'Oculta.base', operationId: 'op-r' })
     ).toEqual(NOT_FOUND);
     expect(
-      await call('hebra_duplicate_file', { id: test.library.files.inventario, name: 'Oculta.base', operationId: 'op-d' })
+      await call('hebra_duplicate_file', { id: test.library.files.inventario, name: 'Oculta.base', folder: 'Proyectos', operationId: 'op-d' })
     ).toEqual(NOT_FOUND);
     // Una nota de la papelera oculta cuenta igual (por etiqueta, la de la papelera).
     await withEngine(async (engine) => {
@@ -137,12 +137,12 @@ describe('ficheros sueltos, crear, renombrar, mover y duplicar (D17): privacidad
       await engine.noteTrash(note.id);
     });
     expect(
-      await call('hebra_create_file', { name: 'Tirada.base', text: 'x', operationId: 'op-c2' })
+      await call('hebra_create_file', { folder: 'Proyectos', name: 'Tirada.base', text: 'x', operationId: 'op-c2' })
     ).toEqual(NAME_UNAVAILABLE);
     expect(rawFiles()).toEqual(before);
     // El mismo nombre, enlazado solo desde una nota VISIBLE, se crea sin más.
     await withEngine((engine) => createNote(engine, null, '# Plan público\n\n![[Visible.base]]\n'));
-    expect((await call('hebra_create_file', { name: 'Visible.base', text: 'x', operationId: 'op-v' })).value).toMatchObject({
+    expect((await call('hebra_create_file', { folder: 'Proyectos', name: 'Visible.base', text: 'x', operationId: 'op-v' })).value).toMatchObject({
       outcome: 'saved'
     });
   });
@@ -152,26 +152,34 @@ describe('ficheros sueltos, crear, renombrar, mover y duplicar (D17): privacidad
     const before = rawFiles();
     // Los bytes del adjunto de la nota de `Diario/2026` (`privateAttachmentSha`).
     const text = `${BAIT_FOLDER} en un adjunto privado\n`;
-    expect(await call('hebra_create_file', { name: 'Copia.txt', text, operationId: 'op-h' })).toEqual(NAME_UNAVAILABLE);
+    expect(await call('hebra_create_file', { folder: 'Proyectos', name: 'Copia.txt', text, operationId: 'op-h' })).toEqual(NAME_UNAVAILABLE);
     expect(rawFiles()).toEqual(before);
   });
 
   it('un homónimo OCULTO nunca da file_exists: se crea al lado; uno oculto por el nombre, file_name_unavailable', async () => {
-    const { call, rawFiles, test } = await start();
+    const { call, rawFiles, test, exec } = await start();
+    // Los ocultos nacen en la raíz, que no admite ficheros de trabajo (H-MCP-SIN-RAIZ): se llevan a
+    // `Proyectos` para que el homónimo se cree «al lado».
+    exec(
+      'UPDATE files SET folder_id = ? WHERE id IN (?, ?)',
+      test.library.folders.proyectos,
+      test.library.files.referencedByHash,
+      test.library.files.referencedByName
+    );
     const hiddenByHash = rawFiles().find((row) => row.id === test.library.files.referencedByHash)!;
     const created = await call('hebra_create_file', {
+      folder: 'Proyectos',
       name: hiddenByHash.name,
       text: 'otro contenido, visible',
       operationId: 'op-homo'
     });
-    expect(created.value).toMatchObject({ outcome: 'saved', name: hiddenByHash.name, folderPath: '' });
+    expect(created.value).toMatchObject({ outcome: 'saved', name: hiddenByHash.name, folderPath: 'proyectos' });
     expect(created.value.id).not.toBe(test.library.files.referencedByHash);
-    // Mover uno visible a su lado tampoco choca: Diario es privada, así que se prueba en la
-    // raíz con un duplicado de nombre igual al oculto.
+    // Duplicar uno visible con el nombre del oculto, en otra carpeta, tampoco choca.
     const dup = await call('hebra_duplicate_file', {
       id: created.value.id,
       name: hiddenByHash.name.toUpperCase(),
-      folder: 'Proyectos',
+      folder: 'Proyectos/Lumbre',
       operationId: 'op-homo-dup'
     });
     expect(dup.value).toMatchObject({ outcome: 'saved' });
@@ -194,7 +202,7 @@ describe('ficheros sueltos, crear, renombrar, mover y duplicar (D17): privacidad
     const { call, rawFiles } = await start({ lockedNote: true });
     const before = rawFiles();
     for (const name of ['Nueva.base', 'datos.json', 'tabla.csv', 'notas.txt']) {
-      expect(await call('hebra_create_file', { name, text: 'x', operationId: `op-${name}` }), name).toEqual(
+      expect(await call('hebra_create_file', { folder: 'Proyectos', name, text: 'x', operationId: `op-${name}` }), name).toEqual(
         NAME_UNAVAILABLE
       );
     }
@@ -253,7 +261,7 @@ describe('ficheros sueltos, crear, renombrar, mover y duplicar (D17): privacidad
 
   it('idempotencia: repetición con replayed, otra petición operation_id_reused, y un reintento de algo ya oculto es not_found', async () => {
     const { call, rawFiles, withEngine } = await start();
-    const args = { name: 'Temporal.base', text: 'views: []\n', operationId: 'op-idem' };
+    const args = { folder: 'Proyectos', name: 'Temporal.base', text: 'views: []\n', operationId: 'op-idem' };
     const first = await call('hebra_create_file', args);
     expect(first.value).toMatchObject({ outcome: 'saved' });
     expect(await call('hebra_create_file', args)).toEqual({ isError: false, value: { ...first.value, replayed: true } });
@@ -342,14 +350,15 @@ describe('reenvío lector→escritor (D17)', () => {
     };
 
     const yaml = 'views:\n  - type: table\n    name: Reenviada\n';
-    const args = { name: 'Reenviada.base', text: yaml, operationId: 'op-fwd' };
+    const args = { folder: 'Origen', name: 'Reenviada.base', text: yaml, operationId: 'op-fwd' };
+    expect((await call('hebra_create_folder', { name: 'Origen' })).isError).toBe(false);
     const created = await call('hebra_create_file', args);
     expect(created).toEqual({
       isError: false,
       value: {
         id: expect.any(String),
         name: 'Reenviada.base',
-        folderPath: '',
+        folderPath: 'origen',
         sha256: sha256(yaml),
         byteLength: Buffer.byteLength(yaml),
         mimeType: 'text/yaml',

@@ -121,7 +121,7 @@ servidor no da la versión, `history_unavailable` sin escribir nada. Con `author
 
 | Herramienta | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_import_office` (D27) | `dataBase64` (con `name`, con extensión) **o** `fileId`, exactamente uno; `folder` **o** `folderId`, como mucho uno (sin ninguno, la carpeta del `fileId` o la raíz); `mode` (`convert-and-keep` por defecto, `convert-only`, `keep-only`); `preview`; `operationId` (obligatorio salvo con `preview`) | `{format, mode, outcome, convertible, reason?, losses, note?, convertedFile?, original?, replayed?, sync, syncError?}`. `outcome`: `converted`, `kept_original` (solo el original), `already` (con `keep-only`, si no hay nada que escribir) o `preview`. |
+| `hebra_import_office` (D27) | `dataBase64` (con `name`, con extensión) **o** `fileId`, exactamente uno; `folder` **o** `folderId`, como mucho uno (sin ninguno, la carpeta del `fileId`; con `dataBase64` es obligatoria; la raíz da `folder_required`); `mode` (`convert-and-keep` por defecto, `convert-only`, `keep-only`); `preview`; `operationId` (obligatorio salvo con `preview`) | `{format, mode, outcome, convertible, reason?, losses, note?, convertedFile?, original?, replayed?, sync, syncError?}`. `outcome`: `converted`, `kept_original` (solo el original), `already` (con `keep-only`, si no hay nada que escribir) o `preview`. |
 
 - Formatos: `.xlsx`, `.pptx` y `.docx`. `.doc`, `.xls`, `.ppt` y cualquier otra extensión dan `unsupported_format`.
 - `convert-only`: si la conversión sale bien y el origen es un `fileId`, el original va a la papelera, que es reversible. Con `dataBase64` y conversión correcta no se guarda original.
