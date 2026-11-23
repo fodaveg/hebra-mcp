@@ -15,7 +15,8 @@
  *   depende de un desborde bloqueado (lo prueba `test/tools/edit-sheet.node.test.ts`).
  *
  * Pruebas negativas hechas a mano al escribir lo de H-171 (se rompe, el test cae, se restaura): un
- * `kind` de gráfico que no existe en un ejemplo; quitar la fila de `moveSeries` del texto. Y el
+ * `kind` de gráfico que no existe en un ejemplo; quitar la fila de `moveSeries` del texto; una tabla
+ * dinámica que pone en filas un campo que el origen no tiene (`Categoria`). Y el
  * test cazó un ejemplo de verdad roto: `setTableTotals` sobre una tabla con el total debajo.
  *
  * Además, que el texto nombre cada herramienta, cada comando del contrato y los topes vigentes.
@@ -41,10 +42,13 @@ import {
   baseObjectsOf,
   compileChartRun,
   compileImageRun,
+  compilePivotRun,
   compileTableAt,
   type Indexed,
   type OptCompileState
 } from '../src/server/tools/sheet-opt';
+import { applyPivotSheetOp, type PivotSheetOp } from '../vendor/hebra/src/lib/sheets/opt/piv/concur';
+import type { PivotCommand } from '../vendor/hebra/src/lib/sheets/opt/piv/llm-write';
 import {
   compileBatch,
   createSheetAdapter,
@@ -163,8 +167,10 @@ const PNG_1X1 = Uint8Array.from(
 /**
  * Compila un lote con comandos de los bloques sobre `bytes`, tramo a tramo como
  * `hebra_edit_sheet` (`segmentsOf`), con la función de cada bloque. Entre tramos aplica lo
- * compilado a la copia: las operaciones `table.*` con `applyTableOp` del bloque (lo que hará la
- * app con H-170) y las demás con el adaptador. Cada imagen del lote es un PNG de 1 x 1.
+ * compilado a la copia: las operaciones `table.*` con `applyTableOp` y las `pivot.edit` con
+ * `applyPivotSheetOp`, las de sus bloques (lo que hará la app con H-170), y las demás con el
+ * adaptador. Cada imagen del lote es un PNG de 1 x 1. Sin motor: un origen de tabla dinámica en
+ * una hoja con fórmulas no se lee (por eso el ejemplo usa `Movimientos`, sin fórmulas).
  */
 async function compileExample(bytes: Uint8Array, commands: readonly SheetEditCommand[]): Promise<{ ok: true } | { ok: false; at: number; error: unknown }> {
   const sheetBase = await prepareSheetBase(bytes, SHEET_ODS_READ_LIMITS);
@@ -187,12 +193,15 @@ async function compileExample(bytes: Uint8Array, commands: readonly SheetEditCom
           ? await compileTableAt(segment.items[0] as Indexed<TableCommand>, state)
           : segment.kind === 'cht'
             ? compileChartRun(segment.items as Indexed<ChartCommand>[], state, await baseObjectsOf(sheetBase))
-            : await compileImageRun(segment.items as Indexed<ImageCommand>[], state, async () => ({ status: 'ok', bytes: PNG_1X1 }));
+            : segment.kind === 'piv'
+              ? await compilePivotRun(segment.items as Indexed<PivotCommand>[], state, await baseObjectsOf(sheetBase))
+              : await compileImageRun(segment.items as Indexed<ImageCommand>[], state, async () => ({ status: 'ok', bytes: PNG_1X1 }));
       if (!out.ok) return { ok: false, at: segment.items[0]!.index, error: out.error };
       ops = out.ops;
     }
     for (const op of ops) {
       if (op.type.startsWith('table.')) applyTableOp(doc, op as TableOp, context);
+      else if (op.type === 'pivot.edit') applyPivotSheetOp(doc, op as PivotSheetOp, context, (await baseObjectsOf(sheetBase)).pivots);
       else if (Object.hasOwn(OP_TABLE, op.type)) adapter.applyOp(doc, op as SheetOp, context);
     }
     model = await adapter.project(bytes, doc, AbortSignal.timeout(20_000));
@@ -261,7 +270,7 @@ describe('referencia de hojas de cálculo de la skill (H-180)', () => {
     const examplesWithBlocks = EDIT.filter(hasOptCommands);
     // Uno por familia: tablas, gráficos, imágenes y `clearSpillBlockers`; y una fórmula con `A1#`.
     const types = new Set(examplesWithBlocks.flatMap((example) => (example.input.ops as { type: string }[]).map((op) => op.type)));
-    for (const type of ['createTable', 'createChart', 'insertImage', 'clearSpillBlockers']) expect(types.has(type), type).toBe(true);
+    for (const type of ['createTable', 'createChart', 'insertImage', 'clearSpillBlockers', 'pivotCreate']) expect(types.has(type), type).toBe(true);
     expect(EDIT.some((example) => JSON.stringify(example.input.ops).includes('#)'))).toBe(true);
     const bytes = await bookBytesOf(CREATE[0] as Example);
     for (const example of examplesWithBlocks) {
@@ -323,7 +332,7 @@ describe('referencia de hojas de cálculo de la skill (H-180)', () => {
     expect(SHEET_COMMAND_TYPES.filter((name) => !mentioned(name))).toEqual([]);
     // Y los de los bloques opcionales (H-171), con lo que los lee y lo que dicen sus errores.
     expect(OPT_COMMAND_TYPES.filter((name) => !mentioned(name))).toEqual([]);
-    for (const word of ['objects', 'imageCount', 'chartCount', 'assets', 'spill', 'blockedBy', 'reliable', 'createdIds', 'op_unsupported']) {
+    for (const word of ['objects', 'imageCount', 'chartCount', 'assets', 'spill', 'blockedBy', 'reliable', 'createdIds', 'op_unsupported', 'pivots', 'unreliable', 'trust', '$valores', 'pivotRefresh']) {
       expect(mentioned(word), word).toBe(true);
     }
     for (const word of ['expect', 'expectedRevision', 'expectedLayout', 'layoutRevision', 'nextCursor', 'dryRun', 'undoOperationId', 'untrustedContent', 'spilled']) {

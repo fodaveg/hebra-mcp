@@ -58,10 +58,11 @@ pintada con `hebra_render_sheet`.
 - **Sin `sheet` ni `range`**: `workbook` con `sheets` (`sheetId`, `name`, `hidden`, `usedRange`,
   `formulaCount`, `errorCount` y `preserved`, lo que el editor conserva sin entender), los
   `namedRanges` y `calculated`. Sin celdas, sin páginas. Una hoja oculta se lee igual que las demás.
-  Una hoja con tablas, imágenes o gráficos lo dice: `tables` (los nombres), `imageCount` y
-  `chartCount`; sin ellos, esos campos no salen. Para verlos, `include: ["objects"]` en esa hoja.
+  Una hoja con tablas, imágenes, gráficos o tablas dinámicas lo dice: `tables` (los nombres),
+  `imageCount`, `chartCount` y `pivots` (los nombres de las tablas dinámicas que pintan en ella);
+  sin ellos, esos campos no salen. Para verlos, `include: ["objects"]` en esa hoja.
 - **Con `sheet` o `range`**: una página de filas enteras. Sin `sheet`, la primera hoja. Trae
-  `range: {sheet, sheetId, address, rows, spilled?, formulas?, comments?, formats?, styles?, objects?}`.
+  `range: {sheet, sheetId, address, rows, spilled?, formulas?, comments?, formats?, styles?, objects?, unreliable?}`.
   - `address` es el rango de la página (por ejemplo `A2:D41`); `rows` es una lista de filas, cada
     una con sus valores de izquierda a derecha, y la primera fila de la lista es la primera de
     `address`.
@@ -80,7 +81,7 @@ pintada con `hebra_render_sheet`.
   - Una fórmula que cita lo que derrama otra sale con `A1#` (`"=SUM(D1#)"`): el rango entero que
     derrama la fórmula de D1, crezca o mengüe.
   - `objects` (con `include: ["objects"]`, solo en la primera página) es todo lo de la HOJA, no
-    solo lo del rango: `{tables, images, charts, spills?}`.
+    solo lo del rango: `{tables, images, charts, spills?, pivots}`.
     - `tables`: `{name, range, header, totals, columns, style, filteredColumns, sortedBy}`. Los
       comandos de tabla citan la tabla por `name` y la columna por su nombre de `columns`.
     - `images`: `{id, cell, dx, dy, width, height, alt}`, en píxeles de la hoja (96 por pulgada).
@@ -91,6 +92,15 @@ pintada con `hebra_render_sheet`.
       valores; lee las celdas. Los comandos de gráfico lo citan por `id`, y a la serie por el suyo.
     - `spills`: cada fórmula que se derrama, `{anchor, range, ref, blocked: false}` (`ref` es el
       `A1#` que la cita), y las bloqueadas, `{anchor, blocked: true}`.
+    - `pivots`: las tablas dinámicas que pintan en la hoja, `{id, name, source, output, rows,
+      columns, pages, values, filters, groups, grandTotals, valuesIn, trust, reliable, note}`. Los
+      campos van por la cabecera de su columna (`field`), con su `id` para citar una copia, y el
+      campo de valores es `$valores`. Su salida es un volcado que nadie recalcula solo: `trust` es
+      `recalculated` (Hebra la calculó con el origen y la definición de ahora: `reliable: true`),
+      `from_file` (son los valores que guardó el fichero) o `stale` (cambió el origen o la tabla
+      después). Si no es fiable, no uses esos números: actualízala con `pivotRefresh`.
+  - `unreliable` (si la página toca la salida de una tabla dinámica no fiable, pidas o no
+    `objects`): `[{range, trust, note}]` con el rango de esa salida y el aviso.
 - **Páginas**: cada página lleva `maxCells` celdas como mucho, siempre filas enteras (con 4
   columnas y 500 celdas, 125 filas). Una respuesta no pasa de 30000 caracteres: si no caben, la
   página trae menos filas. `truncated: true` y `nextCursor` dicen que hay más; `nextCursor: null`
@@ -139,9 +149,9 @@ Comandos con direcciones (necesitan garantía): `setCells`, `setFormat`, `insert
 `setSheetHidden`, `deleteSheet`, `renameSheet`, `moveSheet`, `freeze`, `putRule`, `deleteRule`)
 no las necesitan.
 
-Los comandos de imágenes, tablas y gráficos no llevan `expect`: un lote con alguno necesita
-`expectedRevision` o `expectedLayout` (si no, `batch_invalid` con `path: "expectedLayout"` en ese
-comando). `clearSpillBlockers` vacía celdas por dirección sin `expect`: necesita `expectedRevision`.
+Los comandos de imágenes, tablas, gráficos y tablas dinámicas no llevan `expect`: un lote con
+alguno necesita `expectedRevision` o `expectedLayout` (si no, `batch_invalid` con
+`path: "expectedLayout"` en ese comando). `clearSpillBlockers` vacía celdas por dirección sin `expect`: necesita `expectedRevision`.
 
 ### Qué lleva `expect`
 
@@ -258,10 +268,10 @@ o la columna A); `to` de `moveSheet`, en 0.
 `setAxisSize`, `setSheetHidden` y `addSheet` con `hidden` son comandos del mismo contrato que usa la
 rejilla de la app: lo que ves allí (ancho de una columna, una hoja oculta) se puede pedir aquí.
 
-Lo que no hay: comandos para ordenar un rango suelto (una tabla sí, con `sortTable`) ni para crear
-o editar tablas dinámicas. Si el usuario lo pide, díselo y ofrécele hacerlo en la app.
+Lo que no hay: comandos para ordenar un rango suelto (una tabla sí, con `sortTable`). Si el usuario
+lo pide, díselo y ofrécele hacerlo en la app.
 
-## Imágenes, tablas, gráficos y matrices
+## Imágenes, tablas, gráficos, matrices y tablas dinámicas
 
 Comandos de `hebra_edit_sheet` (no de `hebra_create_sheet`) que van en el mismo `ops`, mezclados
 con los demás y en orden. Los ids de imágenes y gráficos y los nombres de tablas y columnas salen
@@ -334,14 +344,40 @@ la fórmula en una celda y se derrama a las vecinas. Otra fórmula cita el rango
 |---|---|---|
 | `clearSpillBlockers` | `sheet`, `cell` (el ancla con `#SPILL!`) | Vacía las celdas que impiden el desborde. Sin nada que vaciar (no está bloqueada, o no cabe en la hoja), `batch_invalid`. Lleva `expectedRevision` |
 
+### Tablas dinámicas
+
+Una tabla se cita por su `id` o su `name` (de `objects.pivots`). Un campo, por la cabecera de su
+columna en el origen; una copia (el mismo campo dos veces en valores), por su `id` o su nombre
+visible; el campo de valores (dónde van los datos cuando hay varios) es `"$valores"`. El origen
+es un rango con la fila de cabeceras arriba, todas distintas y sin vacías. `function` es `auto`,
+`sum`, `count`, `countnums`, `average`, `max`, `min`, `product`, `stdev`, `stdevp`, `var`, `varp`
+o `median`.
+
+| Comando | Campos | Notas |
+|---|---|---|
+| `pivotCreate` | `name`, `source` (`{sheet, range}`), `output` (`{sheet, at}`, la celda de arriba a la izquierda), `rows?`, `columns?`, `pages?` (`[{field, selected?}]`), `values?` (`[{field, function?, label?}]`), `valuesIn?` (`rows` o `columns`) | Crea la tabla y pinta su salida |
+| `pivotDelete` | `pivot` | Quita la tabla y vacía su salida |
+| `pivotSet` | `pivot`, `name?`, `source?`, `output?`, `grandTotals?` (`{rows?, columns?}`), `showFilterButton?` | Un origen nuevo la vuelve a pintar |
+| `pivotPlace` | `pivot`, `field`, `area` (`row`, `column`, `page`, `data` o `hidden`), `index?` (desde 0), `copy?` | Mueve el campo a esa zona; `copy: true` pone una copia en `data` |
+| `pivotRemoveField` | `pivot`, `field` | Solo una copia; para quitar un campo de la tabla, `pivotPlace` con `area: "hidden"` |
+| `pivotFieldSet` | `pivot`, `field`, `function?`, `subtotals?`, `hidden?` (elementos ocultos), `selected?` (el de la página; `null`, todos), `sort?` (`{by: "name"\|"data"\|"none"\|"manual", ascending?, value?}`), `order?`, `label?`, `showEmpty?` | `sort` con `by: "data"` pide en `value` el campo de datos |
+| `pivotGroup` | `pivot`, `field`, `group` | `{by: "number", start?, end?, step}`, `{by: "date", parts, start?, end?}` (`parts` entre `years`, `quarters`, `months`, `days`, `hours`, `minutes`, `seconds`; fechas `AAAA-MM-DD`) o `null` para desagrupar |
+| `pivotRefresh` | `pivot` | Vuelve a calcular la salida con el origen de ahora |
+
+La salida se calcula al crear la tabla, al cambiarle el origen y con `pivotRefresh`; nada más.
+Tras colocar, filtrar, ordenar o agrupar una tabla que ya existía, termina el lote con su
+`pivotRefresh`, o su salida quedará `stale`. Si la salida nueva pisaría algo (un valor, una
+combinada, otra tabla dinámica), el lote es `batch_invalid` y el motivo nombra las celdas que
+estorban. La salida sale sin formato propio.
+
 ## Ejemplos de lote
 
 Cada bloque `json` de este fichero lo valida un test contra los esquemas y contra el motor, así que
 son lotes que entran. Los `id` y los `operationId` son de ejemplo: usa los tuyos (un UUID nuevo en
 cada `operationId`).
 
-Crear un presupuesto de dos hojas, con una oculta para cálculos, formato y fila inmovilizada.
-Aquí no se necesita `expect`:
+Crear un presupuesto con sus movimientos, una hoja de notas y otra oculta para cálculos, con formato
+y fila inmovilizada. Aquí no se necesita `expect`:
 
 ```json hebra_create_sheet
 {
@@ -355,6 +391,8 @@ Aquí no se necesita `expect`:
     { "type": "freeze", "sheet": "Hoja 1", "rows": 1, "cols": 0 },
     { "type": "addSheet", "sheet": "Notas", "as": "notas" },
     { "type": "setCells", "sheet": "$notas", "start": "A1", "rows": [["Revisar en enero"]] },
+    { "type": "addSheet", "sheet": "Movimientos", "as": "mov" },
+    { "type": "setCells", "sheet": "$mov", "start": "A1", "rows": [["Mes", "Concepto", "Importe"], ["Ene", "Alquiler", 900], ["Ene", "Comida", 350], ["Feb", "Alquiler", 900], ["Feb", "Comida", 410]] },
     { "type": "addSheet", "sheet": "Calculos", "hidden": true }
   ],
   "operationId": "7c1d2f64-3a0e-4f6b-9a52-0d5b8a7e1c01"
@@ -524,6 +562,32 @@ Poner un logo que ya está en la biblioteca (su `id` de `hebra_list_files`), con
   "operationId": "f4b1c8e3-2a69-4d07-9e5b-6c3a0d7f8b16"
 }
 ```
+
+Una tabla dinámica de los movimientos: conceptos en filas, meses en columnas y la suma del importe,
+con los conceptos de mayor a menor gasto. Se pinta en E1 al crearla:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    {
+      "type": "pivotCreate",
+      "name": "PorConcepto",
+      "source": { "sheet": "Movimientos", "range": "A1:C5" },
+      "output": { "sheet": "Movimientos", "at": "E1" },
+      "rows": ["Concepto"],
+      "columns": ["Mes"],
+      "values": [{ "field": "Importe", "function": "sum", "label": "Gasto" }]
+    },
+    { "type": "pivotFieldSet", "pivot": "PorConcepto", "field": "Concepto", "sort": { "by": "data", "ascending": false, "value": "Gasto" } }
+  ],
+  "expectedLayout": "layout-leida",
+  "operationId": "2c7e4a91-5f08-4b3d-a6c2-8e1d0b9f4a17"
+}
+```
+
+Después, otro lote que cambia una tabla que ya existe termina con su `pivotRefresh`; sin él, la
+salida queda como estaba y la lectura la da por `stale`.
 
 Deshacer el lote del `operationId` anterior, con un `operationId` nuevo y nada más:
 
