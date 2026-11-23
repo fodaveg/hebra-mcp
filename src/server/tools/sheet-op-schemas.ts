@@ -23,9 +23,35 @@
  *
  * Los errores no repiten la entrada: cada fallo lleva el índice del comando, la ruta del campo y
  * un motivo fijo (`BatchIssue`), hasta `BATCH_INVALID_ISSUES_MAX`.
+ *
+ * Bloques opcionales de hojas (H-171, segunda entrega del editor): imágenes flotantes (IMG,
+ * `ImageCommand`), tablas estructuradas (TAB, `TableCommand`), gráficos (CHT, `ChartCommand`) y
+ * matrices dinámicas (ARR, `SpillCommand`). Sus comandos NO son `SheetCommand` (`compileBatch` no
+ * los conoce): cada bloque tiene su tabla de esquemas con la misma regla de tipos (falta uno, o
+ * produce otra cosa, y no compila), sus líneas en `SHEET_OP_COVERAGE` y su entrada en
+ * `SHEET_OPT_BLOCKS`. Solo `hebra_edit_sheet` los admite (`parseSheetEditCommands`); los compila
+ * `./sheet-opt.ts` con las funciones del propio bloque (`vendor/hebra/src/lib/sheets/opt/`).
+ * Un bloque está ACTIVADO cuando el registro de operaciones de la app (`OP_TABLE`, H-170) ya
+ * aplica todas sus operaciones; si no, sus comandos responden `op_unsupported` y la descripción
+ * de la herramienta no los anuncia. Lo que falta para un bloque nuevo (las tablas dinámicas, PIV)
+ * está en el apartado «Bloques opcionales».
  */
 import { z } from 'zod';
-import { MAX_AXIS_PX, type SheetCommand, type SheetOpType } from '../../sheets';
+import {
+  MAX_IMAGE_ALT_CHARS,
+  MAX_IMAGE_ID_CHARS,
+  MAX_IMAGE_OFFSET_PX,
+  MAX_IMAGE_SIDE_PX,
+  IMAGE_OP_TYPES,
+  type ImageOpType
+} from '../../../vendor/hebra/src/lib/sheets/opt/img/ops';
+import { IMAGE_COMMAND_TYPES, type ImageCommand } from '../../../vendor/hebra/src/lib/sheets/opt/img/llm';
+import { MAX_TABLE_NAME, TABLE_OP_TYPES, TOTAL_FNS, type TableOpType } from '../../../vendor/hebra/src/lib/sheets/opt/tab/model';
+import type { TableCommand } from '../../../vendor/hebra/src/lib/sheets/opt/tab/llm';
+import { CHART_KINDS, CHART_OP_TYPES, type ChartOpType } from '../../../vendor/hebra/src/lib/sheets/opt/cht/model';
+import type { ChartCommand } from '../../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
+import type { SpillCommand } from '../../../vendor/hebra/src/lib/sheets/opt/arr/llm';
+import { MAX_AXIS_PX, OP_TABLE, type SheetCommand, type SheetOpType } from '../../sheets';
 import {
   ASSETS_MAX_BYTES,
   BATCH_INVALID_ISSUES_MAX,
@@ -121,17 +147,26 @@ export const sheetFormatSchema = z.strictObject({
 
 type CommandType = SheetCommand['type'];
 
-/** El comando del contrato con ese `type` (las variantes que comparten forma se separan). */
-export type SheetCommandOf<T extends CommandType> = SheetCommand extends infer C
-  ? C extends { type: infer U }
-    ? T extends U
-      ? Omit<C, 'type'> & { type: T }
-      : never
+/**
+ * La variante de una unión de comandos `C` con ese `type`. Las variantes que comparten forma (un
+ * `type` que es una unión, como `'merge' | 'unmerge'`) se separan: `Extract` no las daría.
+ */
+export type CommandVariant<C, T extends string> = C extends { type: infer U }
+  ? T extends U
+    ? Omit<C, 'type'> & { type: T }
     : never
   : never;
 
+/** El comando del contrato con ese `type` (las variantes que comparten forma se separan). */
+export type SheetCommandOf<T extends CommandType> = CommandVariant<SheetCommand, T>;
+
+/** Un esquema por cada comando de la unión `C`: falta uno, o produce otra cosa, y no compila. */
+export type CommandSchemaTable<C extends { type: string }> = {
+  readonly [T in C['type']]: z.ZodType<CommandVariant<C, T>>;
+};
+
 /** Un esquema por comando: falta uno, o produce otra cosa, y no compila. */
-export type SheetCommandSchemaTable = { readonly [T in CommandType]: z.ZodType<SheetCommandOf<T>> };
+export type SheetCommandSchemaTable = CommandSchemaTable<SheetCommand>;
 
 const axisCommand = <T extends 'insertAxis' | 'deleteAxis' | 'hideAxis' | 'showAxis'>(type: T) =>
   z.strictObject({
@@ -262,15 +297,377 @@ export const sheetCommandSchema = z.discriminatedUnion('type', [
   SHEET_COMMAND_SCHEMAS.deleteRule
 ]);
 
+// --- Bloques opcionales ---------------------------------------------------------------------------
+//
+// Un bloque opcional aporta, en este orden (el patrón que seguirá PIV, las tablas dinámicas):
+// 1. Su tabla de esquemas, `satisfies CommandSchemaTable<SuComando>`: un comando del bloque sin
+//    esquema, o un esquema que produce otra forma, no compila.
+// 2. Su cobertura de operaciones, `satisfies OptOpCoverageTable<SuOp['type']>`, que entra en
+//    `SHEET_OP_COVERAGE`: una operación del bloque sin su comando (o su exclusión escrita) no
+//    compila, tampoco cuando la app (H-170) la meta en `SheetOp`.
+// 3. Su tipo de comando en `OptCommand`, sus operaciones en `OptOpType` y su entrada en
+//    `SHEET_OPT_BLOCKS` (comandos y operaciones en tiempo de ejecución).
+// 4. Su compilación en `./sheet-opt.ts`, con la función del bloque (nunca un camino propio).
+
+/** Un comando de imagen nombra la imagen por el id que da `hebra_read_sheet`. */
+const imageRefSchema = z.string().min(1).max(MAX_IMAGE_ID_CHARS);
+/** El `ref` de un asset del lote (`sheetAssetSchema`). */
+const assetRefSchema = z.string().min(1).max(64);
+const imageSideSchema = z.number().positive().max(MAX_IMAGE_SIDE_PX);
+const imageOffsetSchema = z.number().min(-MAX_IMAGE_OFFSET_PX).max(MAX_IMAGE_OFFSET_PX);
+const imageAltSchema = z.string().max(MAX_IMAGE_ALT_CHARS);
+const byImage = <T extends 'deleteImage'>(type: T) =>
+  z.strictObject({ type: z.literal(type), sheet: sheetRefSchema, image: imageRefSchema });
+
+/** IMG (H-104): imágenes flotantes, en píxeles de la hoja (96 por pulgada). */
+export const IMAGE_COMMAND_SCHEMAS = {
+  insertImage: z.strictObject({
+    type: z.literal('insertImage'),
+    sheet: sheetRefSchema,
+    /** Celda de la esquina superior izquierda. */
+    at: a1CellSchema,
+    asset: assetRefSchema,
+    width: imageSideSchema.optional(),
+    height: imageSideSchema.optional(),
+    dx: imageOffsetSchema.optional(),
+    dy: imageOffsetSchema.optional(),
+    alt: imageAltSchema.optional(),
+    as: aliasSchema.optional()
+  }),
+  moveImage: z.strictObject({
+    type: z.literal('moveImage'),
+    sheet: sheetRefSchema,
+    image: imageRefSchema,
+    at: a1CellSchema,
+    dx: imageOffsetSchema.optional(),
+    dy: imageOffsetSchema.optional()
+  }),
+  resizeImage: z.strictObject({
+    type: z.literal('resizeImage'),
+    sheet: sheetRefSchema,
+    image: imageRefSchema,
+    width: imageSideSchema,
+    height: imageSideSchema
+  }),
+  setImageAlt: z.strictObject({
+    type: z.literal('setImageAlt'),
+    sheet: sheetRefSchema,
+    image: imageRefSchema,
+    alt: imageAltSchema
+  }),
+  reorderImage: z.strictObject({
+    type: z.literal('reorderImage'),
+    sheet: sheetRefSchema,
+    image: imageRefSchema,
+    order: z.enum(['front', 'back', 'forward', 'backward'])
+  }),
+  replaceImage: z.strictObject({
+    type: z.literal('replaceImage'),
+    sheet: sheetRefSchema,
+    image: imageRefSchema,
+    asset: assetRefSchema
+  }),
+  deleteImage: byImage('deleteImage')
+} as const satisfies CommandSchemaTable<ImageCommand>;
+
+/** Nombre de una tabla o de una columna de tabla, como lo escribe la persona. */
+const tableRefSchema = z.string().min(1).max(MAX_TABLE_NAME);
+const tableStyleSchema = z.string().regex(/^TableStyle(?:Light|Medium|Dark)\d{1,2}$/, 'estilo de tabla no válido');
+const tableTotalFnSchema = z.enum(TOTAL_FNS as readonly [(typeof TOTAL_FNS)[number], ...(typeof TOTAL_FNS)[number][]]);
+const finiteNumber = z.number().refine(Number.isFinite, 'número no finito');
+const tableFilterTestSchema = z.discriminatedUnion('kind', [
+  z.strictObject({
+    kind: z.literal('text'),
+    op: z.enum(['contains', 'notContains', 'begins', 'ends', 'equals', 'notEquals']),
+    text: z.string().max(SHEET_CELL_TEXT_MAX)
+  }),
+  z.strictObject({
+    kind: z.literal('number'),
+    op: z.enum(['=', '<>', '>', '>=', '<', '<=', 'between']),
+    value: finiteNumber,
+    value2: finiteNumber.optional()
+  }),
+  z.strictObject({
+    kind: z.literal('values'),
+    values: z.array(z.union([z.string().max(SHEET_CELL_TEXT_MAX), finiteNumber, z.boolean()])).max(10_000)
+  }),
+  z.strictObject({ kind: z.literal('blank') }),
+  z.strictObject({ kind: z.literal('nonBlank') })
+]);
+const tableBandsSchema = z.strictObject({
+  rows: z.boolean().optional(),
+  cols: z.boolean().optional(),
+  firstCol: z.boolean().optional(),
+  lastCol: z.boolean().optional()
+});
+const byTable = <T extends 'convertTableToRange' | 'deleteTable' | 'clearTableFilter'>(type: T) =>
+  z.strictObject({ type: z.literal(type), table: tableRefSchema });
+
+/** TAB (H-118): tablas estructuradas, por nombre de tabla y de columna. */
+export const TABLE_COMMAND_SCHEMAS = {
+  createTable: z.strictObject({
+    type: z.literal('createTable'),
+    sheet: sheetRefSchema,
+    range: a1RangeSchema,
+    name: tableRefSchema.optional(),
+    header: z.boolean().optional(),
+    totals: z.boolean().optional(),
+    style: tableStyleSchema.nullable().optional()
+  }),
+  convertTableToRange: byTable('convertTableToRange'),
+  deleteTable: byTable('deleteTable'),
+  resizeTable: z.strictObject({ type: z.literal('resizeTable'), table: tableRefSchema, range: a1RangeSchema }),
+  renameTable: z.strictObject({ type: z.literal('renameTable'), table: tableRefSchema, name: tableRefSchema }),
+  setTableTotals: z.strictObject({ type: z.literal('setTableTotals'), table: tableRefSchema, show: z.boolean() }),
+  setTableTotal: z.strictObject({
+    type: z.literal('setTableTotal'),
+    table: tableRefSchema,
+    column: tableRefSchema,
+    fn: tableTotalFnSchema
+  }),
+  setTableStyle: z
+    .strictObject({
+      type: z.literal('setTableStyle'),
+      table: tableRefSchema,
+      style: tableStyleSchema.nullable().optional(),
+      bands: tableBandsSchema.optional()
+    })
+    .refine((c) => c.style !== undefined || c.bands !== undefined, 'falta el estilo o las bandas'),
+  filterTable: z.strictObject({
+    type: z.literal('filterTable'),
+    table: tableRefSchema,
+    column: tableRefSchema,
+    tests: z.array(tableFilterTestSchema).max(2),
+    join: z.enum(['and', 'or']).optional()
+  }),
+  clearTableFilter: byTable('clearTableFilter'),
+  sortTable: z.strictObject({
+    type: z.literal('sortTable'),
+    table: tableRefSchema,
+    column: tableRefSchema,
+    order: z.enum(['asc', 'desc'])
+  })
+} as const satisfies CommandSchemaTable<TableCommand>;
+
+const chartKindSchema = z.enum(CHART_KINDS as readonly [(typeof CHART_KINDS)[number], ...(typeof CHART_KINDS)[number][]]);
+/** Un gráfico o una serie: el id de `hebra_read_sheet` o, dentro del lote, `"$alias"`. */
+const chartRefSchema = z.string().min(1).max(256);
+/** Uno o varios rangos A1 separados por espacios (`B2:B5`, `Hoja1!B2:B5`, `'Mi hoja'!B2`). */
+const chartRangesSchema = z.string().min(1).max(1024);
+const chartPointSchema = z.strictObject({ x: finiteNumber, y: finiteNumber });
+const chartSizeSchema = z.strictObject({
+  w: z.number().positive().max(20_000),
+  h: z.number().positive().max(20_000)
+});
+const chartTextSchema = z.string().max(1024).nullable();
+const chartColorSchema = z.string().regex(/^#[0-9a-f]{6}$/, 'color #rrggbb en minúsculas').nullable();
+const chartAxisSchema = z.strictObject({
+  title: chartTextSchema.optional(),
+  visible: z.boolean().optional(),
+  grid: z.boolean().optional(),
+  min: finiteNumber.nullable().optional(),
+  max: finiteNumber.nullable().optional()
+});
+
+/** CHT (H-132): gráficos, por id (de `hebra_read_sheet`) y rangos A1. */
+export const CHART_COMMAND_SCHEMAS = {
+  createChart: z.strictObject({
+    type: z.literal('createChart'),
+    sheet: sheetRefSchema,
+    range: chartRangesSchema,
+    kind: chartKindSchema.optional(),
+    seriesIn: z.enum(['cols', 'rows']).optional(),
+    firstRowLabels: z.boolean().optional(),
+    firstColLabels: z.boolean().optional(),
+    title: chartTextSchema.optional(),
+    position: chartPointSchema.optional(),
+    size: chartSizeSchema.optional(),
+    as: aliasSchema.optional()
+  }),
+  deleteChart: z.strictObject({ type: z.literal('deleteChart'), chart: chartRefSchema }),
+  setChart: z.strictObject({
+    type: z.literal('setChart'),
+    chart: chartRefSchema,
+    kind: chartKindSchema.optional(),
+    horizontal: z.boolean().optional(),
+    stacking: z.enum(['none', 'stacked', 'percent']).optional(),
+    title: chartTextSchema.optional(),
+    subtitle: chartTextSchema.optional(),
+    legend: z.enum(['none', 'top', 'bottom', 'start', 'end']).optional(),
+    categories: chartRangesSchema.nullable().optional(),
+    axes: z.strictObject({ x: chartAxisSchema.optional(), y: chartAxisSchema.optional() }).optional(),
+    position: chartPointSchema.optional(),
+    size: chartSizeSchema.optional()
+  }),
+  addSeries: z.strictObject({
+    type: z.literal('addSeries'),
+    chart: chartRefSchema,
+    after: chartRefSchema.nullable().optional(),
+    name: chartRangesSchema.nullable().optional(),
+    values: chartRangesSchema,
+    x: chartRangesSchema.nullable().optional(),
+    color: chartColorSchema.optional(),
+    kind: chartKindSchema.nullable().optional(),
+    as: aliasSchema.optional()
+  }),
+  removeSeries: z.strictObject({ type: z.literal('removeSeries'), chart: chartRefSchema, series: chartRefSchema }),
+  moveSeries: z.strictObject({
+    type: z.literal('moveSeries'),
+    chart: chartRefSchema,
+    series: chartRefSchema,
+    after: chartRefSchema.nullable()
+  }),
+  setSeries: z.strictObject({
+    type: z.literal('setSeries'),
+    chart: chartRefSchema,
+    series: chartRefSchema,
+    name: chartRangesSchema.nullable().optional(),
+    values: chartRangesSchema.optional(),
+    x: chartRangesSchema.nullable().optional(),
+    color: chartColorSchema.optional(),
+    kind: chartKindSchema.nullable().optional()
+  })
+} as const satisfies CommandSchemaTable<ChartCommand>;
+
+/**
+ * ARR (H-143): matrices dinámicas. Una fórmula de matriz es un `setCells` más (con `A1#` para
+ * citar lo que derrama otra); el único comando propio vacía lo que impide un desborde. Se expande
+ * a `setCells` de `null` antes de `compileBatch` (`expandClearSpillBlockers`), así que no tiene
+ * operaciones propias.
+ */
+export const SPILL_COMMAND_SCHEMAS = {
+  clearSpillBlockers: z.strictObject({
+    type: z.literal('clearSpillBlockers'),
+    sheet: sheetRefSchema,
+    /** Ancla de la fórmula con `#SPILL!`. */
+    cell: a1CellSchema
+  })
+} as const satisfies CommandSchemaTable<SpillCommand>;
+
+/** Los comandos de los bloques opcionales. Un bloque nuevo añade aquí el suyo (paso 3). */
+export type OptCommand = ImageCommand | TableCommand | ChartCommand | SpillCommand;
+export type OptCommandType = OptCommand['type'];
+/** Lo que admite `hebra_edit_sheet`: los comandos de la base y los de los bloques. */
+export type SheetEditCommand = SheetCommand | OptCommand;
+export type SheetEditCommandType = SheetEditCommand['type'];
+
+/** Las operaciones de los bloques opcionales (paso 3). Hoy la app aún no las mete en `SheetOp`. */
+export type OptOpType = ImageOpType | TableOpType | ChartOpType;
+
+/** Un esquema por cada comando de los bloques: falta uno y no compila. */
+export type OptCommandSchemaTable = CommandSchemaTable<OptCommand>;
+
+export const OPT_COMMAND_SCHEMAS = {
+  ...IMAGE_COMMAND_SCHEMAS,
+  ...TABLE_COMMAND_SCHEMAS,
+  ...CHART_COMMAND_SCHEMAS,
+  ...SPILL_COMMAND_SCHEMAS
+} as const satisfies OptCommandSchemaTable;
+
+/** Todos los comandos de los bloques, en el orden de la tabla. */
+export const OPT_COMMAND_TYPES = Object.keys(OPT_COMMAND_SCHEMAS) as OptCommandType[];
+
+/** Un bloque opcional en tiempo de ejecución: sus comandos y las operaciones que producen. */
+export interface SheetOptBlock {
+  /** Nombre para personas, en las descripciones y en los errores. */
+  label: string;
+  commands: readonly OptCommandType[];
+  /** Tipos de operación de la rejilla que produce. Vacío: se expande a comandos de la base. */
+  ops: readonly string[];
+}
+
+/** Los bloques opcionales (paso 3). Las tablas dinámicas (PIV) entrarán aquí. */
+export const SHEET_OPT_BLOCKS = {
+  img: { label: 'imágenes flotantes', commands: IMAGE_COMMAND_TYPES, ops: IMAGE_OP_TYPES },
+  tab: { label: 'tablas', commands: Object.keys(TABLE_COMMAND_SCHEMAS) as TableCommand['type'][], ops: TABLE_OP_TYPES },
+  cht: { label: 'gráficos', commands: Object.keys(CHART_COMMAND_SCHEMAS) as ChartCommand['type'][], ops: CHART_OP_TYPES },
+  arr: { label: 'matrices dinámicas', commands: Object.keys(SPILL_COMMAND_SCHEMAS) as SpillCommand['type'][], ops: [] }
+} as const satisfies Record<string, SheetOptBlock>;
+
+export type SheetOptBlockId = keyof typeof SHEET_OPT_BLOCKS;
+
+/** El bloque de un comando opcional, o `null` si es de la base o desconocido. */
+export function optBlockOf(type: unknown): SheetOptBlockId | null {
+  if (typeof type !== 'string') return null;
+  for (const [id, block] of Object.entries(SHEET_OPT_BLOCKS) as [SheetOptBlockId, SheetOptBlock][]) {
+    if (block.commands.includes(type as OptCommandType)) return id;
+  }
+  return null;
+}
+
+/**
+ * Si la app ya aplica todas las operaciones del bloque (las tiene `OP_TABLE`, H-170). Un bloque
+ * sin operaciones propias (ARR) lo está siempre. `registered` solo lo cambian los tests.
+ */
+export function isOptBlockActive(
+  id: SheetOptBlockId,
+  registered: (type: string) => boolean = (type) => Object.hasOwn(OP_TABLE, type)
+): boolean {
+  return SHEET_OPT_BLOCKS[id].ops.every(registered);
+}
+
+/** El primer comando de un bloque sin activar, con su bloque, o `null`. */
+export function inactiveOptCommand(
+  commands: readonly { type: string }[],
+  registered?: (type: string) => boolean
+): { opIndex: number; block: SheetOptBlockId } | null {
+  for (const [opIndex, command] of commands.entries()) {
+    const block = optBlockOf(command.type);
+    if (block !== null && !isOptBlockActive(block, registered)) return { opIndex, block };
+  }
+  return null;
+}
+
 // --- Paridad con la interfaz ---------------------------------------------------------------------
 
-/** De dónde sale cada operación de la rejilla en el MCP: un comando, o por qué no hay ninguno. */
-export type SheetOpCoverage = { readonly command: CommandType } | { readonly excluded: string };
+/**
+ * De dónde sale cada operación de la rejilla en el MCP: un comando (de la base o de un bloque), o
+ * por qué no hay ninguno.
+ */
+export type SheetOpCoverage = { readonly command: SheetEditCommandType } | { readonly excluded: string };
 
-/** Una línea por `SheetOp['type']`: falta una y no compila. */
-export type SheetOpCoverageTable = { readonly [T in SheetOpType]: SheetOpCoverage };
+/** La cobertura de las operaciones de un bloque (paso 2). */
+export type OptOpCoverageTable<O extends OptOpType> = { readonly [T in O]: SheetOpCoverage };
+
+/**
+ * Una línea por `SheetOp['type']` y por cada operación de los bloques: falta una y no compila.
+ * Va por la unión de las dos para que compile hoy (los bloques aún no están en `SheetOp`) y
+ * después de que H-170 los registre (entonces la unión es `SheetOpType`).
+ */
+export type SheetOpCoverageTable = { readonly [T in SheetOpType | OptOpType]: SheetOpCoverage };
+
+/** IMG: todo comando de imagen escribe `image.set` (H-99). */
+const IMAGE_OP_COVERAGE = {
+  // También `moveImage`, `resizeImage`, `setImageAlt`, `reorderImage`, `replaceImage` y `deleteImage`.
+  'image.set': { command: 'insertImage' },
+  'image.unset': { excluded: 'Solo la genera una inversa de image.set (H-99): se pide con undoOperationId.' }
+} as const satisfies OptOpCoverageTable<ImageOpType>;
+
+/** TAB: `TABLE_UI_PARITY` de `tab/llm.ts` da la paridad de cada acción de la interfaz. */
+const TABLE_OP_COVERAGE = {
+  // También `resizeTable`, `renameTable`, `setTableTotals`, `setTableTotal`, `setTableStyle`,
+  // `filterTable`, `clearTableFilter` y `sortTable`.
+  'table.put': { command: 'createTable' },
+  // También `convertTableToRange`.
+  'table.delete': { command: 'deleteTable' },
+  'table.restore': { excluded: 'Solo la genera la inversa de borrar una tabla del fichero: se pide con undoOperationId.' }
+} as const satisfies OptOpCoverageTable<TableOpType>;
+
+/** CHT: `CHART_OP_COVERAGE` de `cht/llm-write.ts` da además el campo de cada propiedad. */
+const CHART_OP_COVERAGE = {
+  'chart.create': { command: 'createChart' },
+  'chart.delete': { command: 'deleteChart' },
+  'chart.set': { command: 'setChart' },
+  'chart.series.add': { command: 'addSeries' },
+  'chart.series.remove': { command: 'removeSeries' },
+  'chart.series.move': { command: 'moveSeries' },
+  'chart.series.set': { command: 'setSeries' }
+} as const satisfies OptOpCoverageTable<ChartOpType>;
 
 export const SHEET_OP_COVERAGE = {
+  ...IMAGE_OP_COVERAGE,
+  ...TABLE_OP_COVERAGE,
+  ...CHART_OP_COVERAGE,
   'cell.set': { command: 'setCells' },
   'cell.unset': { excluded: 'Solo la genera una inversa al deshacer (H-25b): se pide con undoOperationId.' },
   'cell.style': { command: 'setFormat' },
@@ -375,16 +772,25 @@ function ruleBodyTooLarge(command: SheetCommand): boolean {
   return text === undefined || Buffer.byteLength(text, 'utf8') > RULE_BODY_MAX;
 }
 
+/** Qué comandos admite un lote: los de la base (`hebra_create_sheet`) o también los de los bloques. */
+type CommandSet = { types: readonly string[]; schemas: Readonly<Record<string, z.ZodType>> };
+
+const BASE_COMMANDS: CommandSet = { types: SHEET_COMMAND_TYPES, schemas: SHEET_COMMAND_SCHEMAS };
+const EDIT_COMMANDS: CommandSet = {
+  types: [...SHEET_COMMAND_TYPES, ...OPT_COMMAND_TYPES],
+  schemas: { ...SHEET_COMMAND_SCHEMAS, ...OPT_COMMAND_SCHEMAS }
+};
+
 /** El primer fallo de forma de un comando, con la ruta de zod sin el valor. */
-function shapeIssue(opIndex: number, raw: unknown): BatchIssue | null {
+function shapeIssue(opIndex: number, raw: unknown, set: CommandSet): BatchIssue | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return issue(opIndex, `ops.${opIndex}`, 'el comando debe ser un objeto');
   }
   const type = (raw as { type?: unknown }).type;
-  if (typeof type !== 'string' || !(SHEET_COMMAND_TYPES as string[]).includes(type)) {
-    return issue(opIndex, `ops.${opIndex}.type`, 'comando desconocido', SHEET_COMMAND_TYPES.join(', '));
+  if (typeof type !== 'string' || !set.types.includes(type)) {
+    return issue(opIndex, `ops.${opIndex}.type`, 'comando desconocido', set.types.join(', '));
   }
-  const parsed = SHEET_COMMAND_SCHEMAS[type as CommandType].safeParse(raw);
+  const parsed = set.schemas[type]!.safeParse(raw);
   if (parsed.success) return null;
   const first = parsed.error.issues[0];
   const path = ['ops', opIndex, ...(first?.path ?? [])].map(String).join('.');
@@ -399,7 +805,25 @@ function shapeIssue(opIndex: number, raw: unknown): BatchIssue | null {
  * y sin funciones de red. Devuelve hasta 20 fallos a la vez; no mira el libro.
  */
 export function parseSheetCommands(rawOps: unknown, rawAssets?: unknown): SheetCommandsParse {
-  const invalid = (issues: BatchIssue[]): SheetCommandsParse => ({
+  return parseCommands(rawOps, rawAssets, BASE_COMMANDS) as SheetCommandsParse;
+}
+
+/** Lo que da `parseSheetEditCommands`: comandos de la base y de los bloques. */
+export type SheetEditCommandsParse =
+  | { ok: true; ops: SheetEditCommand[]; assets: DocumentAsset[] }
+  | { ok: false; error: DocumentError<'batch_invalid' | 'too_large'> };
+
+/**
+ * Lo mismo que `parseSheetCommands` admitiendo además los comandos de los bloques opcionales
+ * (`OPT_COMMAND_SCHEMAS`). Es la entrada de `hebra_edit_sheet`. Que el bloque esté activado no se
+ * mira aquí (`inactiveOptCommand`): esto es solo la forma.
+ */
+export function parseSheetEditCommands(rawOps: unknown, rawAssets?: unknown): SheetEditCommandsParse {
+  return parseCommands(rawOps, rawAssets, EDIT_COMMANDS);
+}
+
+function parseCommands(rawOps: unknown, rawAssets: unknown, set: CommandSet): SheetEditCommandsParse {
+  const invalid = (issues: BatchIssue[]): SheetEditCommandsParse => ({
     ok: false,
     error: { code: 'batch_invalid', issues: issues.slice(0, BATCH_INVALID_ISSUES_MAX) }
   });
@@ -415,11 +839,16 @@ export function parseSheetCommands(rawOps: unknown, rawAssets?: unknown): SheetC
     return { ok: false, error: { code: 'too_large', ...detail } };
   }
   const issues: BatchIssue[] = [];
-  const ops: SheetCommand[] = [];
+  const ops: SheetEditCommand[] = [];
   for (const [index, raw] of rawOps.entries()) {
-    const shape = shapeIssue(index, raw);
+    const shape = shapeIssue(index, raw, set);
     if (shape) {
       issues.push(shape);
+      continue;
+    }
+    if (optBlockOf((raw as { type: unknown }).type) !== null) {
+      // Ningún comando de los bloques lleva fórmulas ni cuerpos de regla.
+      ops.push(raw as OptCommand);
       continue;
     }
     const command = raw as SheetCommand;
@@ -502,3 +931,48 @@ export const sheetAssetsField = z
   .array(z.record(z.string(), z.unknown()))
   .optional()
   .describe('Imágenes del lote: {ref, fileId}, {ref, noteId, attachmentId} o {ref, dataBase64, mimeType} (PNG, JPEG, GIF o WebP; 5 MiB en total). Nunca una URL.');
+
+/** Cómo se describe cada bloque opcional en `ops` de `hebra_edit_sheet` (paso 3 de un bloque). */
+export const SHEET_OPT_DESCRIPTIONS: { readonly [B in SheetOptBlockId]: string } = {
+  img:
+    'Imágenes flotantes (ids en hebra_read_sheet con include "objects"): `insertImage` {sheet, at:"B3", asset (el ref de assets), width?, height?, dx?, dy? (px), alt?, as?}, ' +
+    '`moveImage` {sheet, image, at, dx?, dy?}, `resizeImage` {sheet, image, width, height}, `setImageAlt` {sheet, image, alt}, ' +
+    '`reorderImage` {sheet, image, order:"front"|"back"|"forward"|"backward"}, `replaceImage` {sheet, image, asset}, `deleteImage` {sheet, image}. ',
+  tab:
+    'Tablas, por nombre de tabla y de columna: `createTable` {sheet, range, name?, header?, totals?, style?:"TableStyleMedium2"}, ' +
+    '`convertTableToRange` {table}, `deleteTable` {table} (vacía sus celdas), `resizeTable` {table, range}, `renameTable` {table, name}, ' +
+    '`setTableTotals` {table, show}, `setTableTotal` {table, column, fn:"sum"|"average"|"count"|"countNums"|"max"|"min"|"stdDev"|"var"|"none"}, ' +
+    '`setTableStyle` {table, style?, bands?:{rows,cols,firstCol,lastCol}}, `filterTable` {table, column, tests:[{kind:"text"|"number"|"values"|"blank"|"nonBlank",…}], join?}, ' +
+    '`clearTableFilter` {table}, `sortTable` {table, column, order:"asc"|"desc"}. ',
+  cht:
+    'Gráficos (ids en hebra_read_sheet con include "objects"): `createChart` {sheet, range, kind?:"bar"|"line"|"area"|"pie"|"doughnut"|"scatter", seriesIn?, firstRowLabels?, firstColLabels?, title?, position?:{x,y}, size?:{w,h}, as?}, ' +
+    '`deleteChart` {chart}, `setChart` {chart, kind?, horizontal?, stacking?, title?, subtitle?, legend?, categories?, axes?:{x,y}, position?, size?}, ' +
+    '`addSeries` {chart, values, name?, x?, color?:"#rrggbb", kind?, after?, as?}, `removeSeries` {chart, series}, `moveSeries` {chart, series, after}, `setSeries` {chart, series, name?, values?, x?, color?, kind?}. ',
+  arr:
+    '`clearSpillBlockers` {sheet, cell:"A1"} vacía las celdas que impiden que la fórmula de esa celda se desborde (#SPILL!). Una fórmula de matriz (SEQUENCE, FILTER, SORT, UNIQUE…) se desborda a las celdas vecinas; otra fórmula puede citar el rango entero como "A1#". '
+};
+
+/** Los bloques activados ahora, en el orden de `SHEET_OPT_BLOCKS`. */
+export function activeOptBlocks(registered?: (type: string) => boolean): SheetOptBlockId[] {
+  return (Object.keys(SHEET_OPT_BLOCKS) as SheetOptBlockId[]).filter((id) => isOptBlockActive(id, registered));
+}
+
+/**
+ * Descripción de `ops` de `hebra_edit_sheet`: la de la base y la de cada bloque ACTIVADO. Los
+ * comandos de un bloque sin activar no se anuncian (responden `op_unsupported`).
+ */
+export function sheetEditOpsDescription(registered?: (type: string) => boolean): string {
+  const blocks = activeOptBlocks(registered).map((id) => SHEET_OPT_DESCRIPTIONS[id]);
+  return blocks.length === 0 ? SHEET_OPS_DESCRIPTION : `${SHEET_OPS_DESCRIPTION} ${blocks.join('')}`.trim();
+}
+
+/** El campo `ops` de `hebra_edit_sheet`, laxo como `sheetOpsField`: lo valida `parseSheetEditCommands`. */
+export const sheetEditOpsField = z.array(z.record(z.string(), z.unknown())).describe(sheetEditOpsDescription());
+
+/** El campo `assets` de `hebra_edit_sheet`: las imágenes que citan `insertImage` y `replaceImage`. */
+export const sheetEditAssetsField = z
+  .array(z.record(z.string(), z.unknown()))
+  .optional()
+  .describe(
+    'Imágenes que citan insertImage y replaceImage por su ref: {ref, fileId}, {ref, noteId, attachmentId} o {ref, dataBase64, mimeType} (PNG, JPEG, GIF o WebP; 5 MiB en total). Nunca una URL. Una que no se ve da not_found.'
+  );

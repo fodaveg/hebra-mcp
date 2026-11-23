@@ -33,8 +33,9 @@
  * Fórmulas: se guardan sin valor en caché y LibreOffice las calcula al abrir (sonda S1 de H-06).
  * La caché con el motor de Node (H-09) es cosa del punto de control, no de la creación.
  *
- * Imágenes: ningún comando de hojas coloca imágenes todavía, así que `assets` solo se valida (una
- * URL nunca pasa) y, si llega alguno, el lote es `batch_invalid`.
+ * Imágenes: aquí no hay comando que coloque imágenes (los de los bloques opcionales, también
+ * `insertImage`, son solo de `hebra_edit_sheet`, H-171), así que `assets` solo se valida (una URL
+ * nunca pasa) y, si llega alguno, el lote es `batch_invalid`.
  *
  * Hojas ocultas: `addSheet` con `hidden: true` crea la hoja ya oculta. `compileBatch` lo convierte
  * en `sheet.add` seguido de `sheet.hide` (H-MCP-OCULTAS), y `writeNewOds` escribe la hoja con un
@@ -87,8 +88,8 @@ const NEW_SHEET_COLS = 16_384;
  */
 export const CREATE_SHEET_COMPILED_OPS_MAX = 200_000;
 
-/** Motivo de rechazo de `assets`: todavía no hay comando que coloque una imagen en una hoja. */
-const NO_IMAGE_COMMANDS = 'ningún comando de hojas coloca imágenes todavía';
+/** Motivo de rechazo de `assets`: las imágenes se colocan después, con `hebra_edit_sheet`. */
+const NO_IMAGE_COMMANDS = 'las imágenes se colocan con insertImage en hebra_edit_sheet, una vez creado el libro';
 
 /** Revisión que se da a `compileBatch` en un libro nuevo: nadie puede haber movido nada. */
 const NEW_BOOK_REVISION = 'hebra.create-sheet/new';

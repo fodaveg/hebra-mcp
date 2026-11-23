@@ -55,8 +55,24 @@
  * `path: "expectedLayout"`. Es la misma regla de `assertAddressRule`
  * (`../../store/document-address.ts`); un test las compara caso por caso.
  *
- * Imágenes: ningún comando de hojas coloca imágenes todavía, así que `assets` solo se valida (una
- * URL nunca pasa) y, si llega alguno, el lote es `batch_invalid`, como en `hebra_create_sheet`.
+ * Bloques opcionales (H-171): el lote admite también los comandos de imágenes, tablas, gráficos
+ * y matrices dinámicas (`parseSheetEditCommands`, esquemas en `./sheet-op-schemas.ts`). El de un
+ * bloque que la app aún no aplica (`OP_TABLE` sin sus operaciones) responde `op_unsupported` con
+ * su `opIndex`, antes de llegar al escritor. En la fase 2 el lote se parte en tramos: los comandos
+ * de la base seguidos (con `clearSpillBlockers` ya expandido a `setCells` y `A1#` pasado a
+ * `_xlfn.ANCHORARRAY`) van juntos por `compileBatch`; las imágenes seguidas, por
+ * `compileImageCommands`; cada comando de tabla, solo (las tablas cambian entre ellos); los
+ * gráficos seguidos, por `compileChartCommands` (todo en `./sheet-opt.ts`). Cada tramo se compila
+ * contra el libro que dejan los anteriores, aplicados en la copia del ensayo, y la fase 3 aplica
+ * las operaciones de todos en orden, en el mismo update. Un `$alias` vale dentro de su tramo.
+ * Los comandos de los bloques no llevan `expect`: un lote con alguno (salvo `clearSpillBlockers`,
+ * que es un `setCells`) necesita `expectedRevision` o `expectedLayout`.
+ *
+ * Imágenes del lote: `assets` solo vale con `insertImage` o `replaceImage`, y cada una tiene que
+ * citarse por su `ref`. La herramienta las juzga con el filtro de la llamada (oculta o
+ * inexistente, `not_found`, como un `.ods` oculto), y el escritor otra vez en las fases 1 y 3
+ * (`guardAsset`). Una URL nunca pasa. Los bytes en base64 se guardan como blob en la fase 3
+ * (`runDocumentOps`); los de un fichero o un adjunto ya están en la biblioteca.
  */
 import { createHash } from 'node:crypto';
 import * as Y from 'yjs';
@@ -67,8 +83,20 @@ import { CELLS_MAP } from '../../../vendor/hebra/src/lib/sheets/ops/apply-cell';
 import type { UndoStep } from '../../../vendor/hebra/src/lib/sheets/ops/invert';
 import { FileFilter } from '../../privacy/file-filter';
 import type { PrivacyConfig } from '../../privacy/config';
+import { hashToAnchorArray, withSpillRefs } from '../../../vendor/hebra/src/lib/sheets/opt/arr/hash';
+import {
+  expandClearSpillBlockers,
+  explainSpillErrors,
+  parseCell,
+  spillStatusAt,
+  type ClearSpillBlockers
+} from '../../../vendor/hebra/src/lib/sheets/opt/arr/llm';
+import type { ImageCommand } from '../../../vendor/hebra/src/lib/sheets/opt/img/llm';
+import type { TableCommand } from '../../../vendor/hebra/src/lib/sheets/opt/tab/llm';
+import type { ChartCommand } from '../../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
 import {
   compileBatch,
+  createFormulaLocale,
   createNodeFormulaEngine,
   createSheetEngineProjection,
   type FormulaEngine,
@@ -89,13 +117,31 @@ import {
   type DocumentFormatHandle,
   type DocumentFormatPerDocument
 } from '../../store/document-service';
-import type { BatchIssue, DocumentError, EditSheetOut, FormulaError, WriteOut } from '../../store/document-types';
+import type { BatchIssue, DocumentAsset, DocumentError, EditSheetOut, FormulaError, WriteOut } from '../../store/document-types';
 import type { DocumentUndoInput } from '../../store/document-undo';
 import { usageOf, type ToolContext } from '../context';
 import { ToolError } from '../errors';
 import { requireValidOperationId } from './guards';
-import { parseSheetCommands, sheetAssetsField, sheetOpsField } from './sheet-op-schemas';
-import { isFormula, openSheetRead, type OpenedSheet } from './sheet-read';
+import {
+  inactiveOptCommand,
+  optBlockOf,
+  parseSheetEditCommands,
+  sheetEditAssetsField,
+  sheetEditOpsField,
+  type SheetEditCommand
+} from './sheet-op-schemas';
+import {
+  baseObjectsOf,
+  compileChartRun,
+  compileImageRun,
+  compileTableAt,
+  resolveLotAsset,
+  type Indexed,
+  type OptCompileResult,
+  type OptCompileState,
+  type OptOp
+} from './sheet-opt';
+import { blobOf, isFormula, openSheetRead, type OpenedSheet } from './sheet-read';
 import { mapWriteError } from './write-errors';
 
 /** Nombre de la herramienta, para H-177. */
@@ -113,14 +159,20 @@ export const EXPECT_GUARD_IDS_MAX = 10_000;
 /** Largo máximo de un id, de una revisión o de un `operationId` que llega como texto. */
 const TEXT_MAX_LENGTH = 200;
 
-/** Motivo de rechazo de `assets`: todavía no hay comando que coloque una imagen en una hoja. */
-const NO_IMAGE_COMMANDS = 'ningún comando de hojas coloca imágenes todavía';
+/** Comandos que citan una imagen del lote por su `ref` (`asset`). */
+const ASSET_COMMANDS = new Set(['insertImage', 'replaceImage']);
 
 /** Prefijo de la versión de los ids deterministas del lote. */
 const SEED_PREFIX = 'hebra.edit-sheet/v1';
 
 /** Hilo del motor junto al empaquetado (`dist/sheet-engine-worker.mjs`, H-173). */
 const ENGINE_WORKER_URL = new URL('./sheet-engine-worker.mjs', import.meta.url);
+
+/** El locale de fórmulas que entiende `A1#` (matrices dinámicas, H-138), uno por proceso. */
+const SPILL_LOCALE = withSpillRefs(createFormulaLocale());
+
+/** La región del libro para evaluar una fórmula suelta (`es` o `en`). */
+const regionOf = (settings: { locale: string }): 'es' | 'en' => (settings.locale === 'es' ? 'es' : 'en');
 
 // --- Lo que viaja al escritor ----------------------------------------------------------------------
 
@@ -132,8 +184,12 @@ const ENGINE_WORKER_URL = new URL('./sheet-engine-worker.mjs', import.meta.url);
 export interface SheetBatchOp {
   type: 'sheet.batch';
   seed: string;
-  commands: SheetCommand[];
+  /** Los de la base y los de los bloques opcionales (H-171). */
+  commands: SheetEditCommand[];
 }
+
+/** Una operación del lote ya compilada: de la rejilla o de un bloque opcional. */
+type CompiledOp = SheetOp | OptOp;
 
 /** Lo que aplica el formato: un lote, o las inversas de un deshacer (operaciones de la rejilla). */
 export type SheetEditOp = SheetBatchOp | SheetOp;
@@ -160,7 +216,7 @@ interface CellGuard {
 
 /** Un lote ya compilado en la fase 2, con lo que la fase 3 vuelve a mirar. */
 interface CompiledSheetBatch {
-  ops: SheetOp[];
+  ops: CompiledOp[];
   createdIds: Record<string, string>;
   guards: CellGuard[];
   /** El comando del LLM del que sale la operación compilada `index`, o `null` si no se sabe. */
@@ -253,7 +309,7 @@ function idsOf(axis: SheetModelSheet['rows'], from: number, to: number): Set<str
 }
 
 /** Las guardas de cada `expect` del lote, leídas en el documento con que se compiló. */
-function guardsOf(commands: readonly SheetCommand[], model: SheetModel, doc: Y.Doc): CellGuard[] {
+function guardsOf(commands: readonly SheetEditCommand[], model: SheetModel, doc: Y.Doc): CellGuard[] {
   const guards: CellGuard[] = [];
   commands.forEach((command, opIndex) => {
     const expect = 'expect' in command ? command.expect : undefined;
@@ -288,7 +344,11 @@ function guardsOfJob(job: Pick<DocumentComputeJob, 'expectedRevision' | 'expecte
  * orden, que el principio del lote entero. Se busca el prefijo más corto que ya llega a `index`,
  * con unas pocas compilaciones y solo cuando algo falla. Se exporta para su test.
  */
-export function commandLocator(model: SheetModel, batch: SheetBatchOp, guards: BatchGuards): (index: number) => number | null {
+export function commandLocator(
+  model: SheetModel,
+  batch: { seed: string; commands: readonly SheetCommand[] },
+  guards: BatchGuards
+): (index: number) => number | null {
   const lengthOf = (count: number): number | null => {
     const out = compileBatch(model, { ops: batch.commands.slice(0, count), ...guards }, { newId: seededIds(batch.seed) });
     return 'error' in out ? null : out.ops.length;
@@ -386,8 +446,10 @@ function batchAdapter(
   captureUndo(doc: Y.Doc, ops: readonly SheetEditOp[], inverse: readonly SheetEditOp[]): unknown[];
   prepareUndo(doc: Y.Doc, steps: readonly unknown[]): SheetEditOp[];
 } {
+  // Las operaciones de los bloques las aplica el mismo adaptador (su `OP_TABLE`, H-170): para él
+  // son `SheetOp` (los comandos de un bloque sin activar no llegan aquí).
   const expand = (ops: readonly SheetEditOp[]): SheetOp[] =>
-    ops.flatMap((op) => (isBatchOp(op) ? (compiled.get(op)?.ops ?? []) : [op]));
+    ops.flatMap((op) => (isBatchOp(op) ? ((compiled.get(op)?.ops ?? []) as SheetOp[]) : [op]));
   return {
     format: 'ods',
     scaffold: (_bytes, doc) => inner.scaffold(baseBytes, doc),
@@ -409,7 +471,7 @@ function batchAdapter(
       const parts: (readonly SheetOp[])[] = [];
       batch.ops.forEach((sheetOp, index) => {
         try {
-          parts.push(inner.applyOp(doc, sheetOp, ctx));
+          parts.push(inner.applyOp(doc, sheetOp as SheetOp, ctx));
         } catch (error) {
           failure.command = batch.commandOf(index);
           throw error;
@@ -445,11 +507,11 @@ function unavailableAdapter(): DocFormatAdapter<SheetModel, SheetEditOp> {
 }
 
 /** Celdas cambiadas y hojas tocadas por las operaciones compiladas. */
-function changedOf(ops: readonly SheetOp[]): EditSheetOut['changed'] {
+function changedOf(ops: readonly CompiledOp[]): EditSheetOut['changed'] {
   const cells = new Set<string>();
   const sheets = new Set<string>();
   for (const op of ops) {
-    if ('sheet' in op) sheets.add(op.sheet);
+    if ('sheet' in op && typeof op.sheet === 'string') sheets.add(op.sheet);
     if (op.type === 'cell.set' || op.type === 'cell.style' || op.type === 'cell.unset') cells.add(`${op.sheet}/${op.row}:${op.col}`);
   }
   return { cells: cells.size, sheets: sheets.size };
@@ -458,25 +520,30 @@ function changedOf(ops: readonly SheetOp[]): EditSheetOut['changed'] {
 /**
  * Los errores de las fórmulas que escribe el lote, calculados con el motor sobre el libro de
  * después del ensayo (hasta `EDIT_SHEET_FORMULA_ERRORS_MAX`). Sin región admitida o si el motor
- * falla, ninguno y `calculated: false`: nunca un error inventado.
+ * falla, ninguno y `calculated: false`: nunca un error inventado. Un `#SPILL!` lleva su detalle
+ * (`spill`: el rango que ocuparía, lo que lo impide y qué hacer, `explainSpillErrors` de ARR).
  */
 async function formulaReport(
   after: SheetModel,
   opened: OpenedSheet,
-  ops: readonly SheetOp[],
+  ops: readonly CompiledOp[],
   engineOf: () => FormulaEngine,
   signal: AbortSignal
 ): Promise<Pick<SheetEditReport, 'recalculated' | 'formulaErrors' | 'calculated'>> {
   const started = Date.now();
-  const written = ops.filter((op): op is Extract<SheetOp, { type: 'cell.set' }> => op.type === 'cell.set' && isFormula(op.value));
+  const written = ops.filter(
+    (op): op is Extract<SheetOp, { type: 'cell.set' }> => op.type === 'cell.set' && isFormula((op as Extract<SheetOp, { type: 'cell.set' }>).value)
+  );
   if (written.length === 0) return { recalculated: { cells: 0, ms: 0 }, formulaErrors: [] };
   const settings = opened.sheetBase.engineSettings;
   if (!settings) return { recalculated: { cells: 0, ms: 0 }, formulaErrors: [], calculated: false };
   let formulas = 0;
   for (const sheet of after.sheets) for (const value of sheet.cells.values()) if (isFormula(value)) formulas += 1;
   const engine = engineOf();
+  // El locale que entiende `A1#` (H-138), el mismo en la proyección y en el diagnóstico.
+  const locale = SPILL_LOCALE;
   try {
-    await engine.load(createSheetEngineProjection(settings).book(after), settings, signal);
+    await engine.load(createSheetEngineProjection(settings, locale).book(after), settings, signal);
     const errors: FormulaError[] = [];
     for (const op of written) {
       if (errors.length >= EDIT_SHEET_FORMULA_ERRORS_MAX) break;
@@ -488,7 +555,8 @@ async function formulaReport(
       const [cell] = await engine.read(index, { from: { row, col }, to: { row, col } });
       if (cell?.kind === 'error') errors.push({ sheet: sheet.name, cell: `${columnLetters(col)}${row + 1}`, error: cell.shown });
     }
-    return { recalculated: { cells: formulas, ms: Date.now() - started }, formulaErrors: errors };
+    const explained = await explainSpillErrors(errors, { model: after, engine, locale, region: regionOf(settings) });
+    return { recalculated: { cells: formulas, ms: Date.now() - started }, formulaErrors: explained };
   } catch {
     return { recalculated: { cells: 0, ms: Date.now() - started }, formulaErrors: [], calculated: false };
   } finally {
@@ -541,7 +609,7 @@ export function createSheetDocumentFormat(
         adapter,
         compute: async (job, jobSignal) => {
           try {
-            return await computeBatch(job, read, adapter, compiled, failure, engineOf, jobSignal);
+            return await computeBatch(job, source, read, adapter, compiled, failure, engineOf, jobSignal);
           } finally {
             await close();
           }
@@ -571,6 +639,7 @@ export function registerSheetDocumentFormat(): void {
 /** Fase 2: comprobar, compilar, ensayar y preparar el informe (ver la cabecera). */
 async function computeBatch(
   job: DocumentComputeJob,
+  source: DocumentChannelSource,
   read: OpenedSheet,
   adapter: DocFormatAdapter<SheetModel, SheetEditOp>,
   compiled: WeakMap<object, CompiledSheetBatch>,
@@ -588,9 +657,223 @@ async function computeBatch(
     return { ok: false, error: { code: 'precondition_failed', opIndex: 0, target: 'expectedLayout' } };
   }
   const guards = guardsOfJob(job);
-  const out = compileBatch(state.model, { ops: envelope.commands, ...guards }, { newId: seededIds(envelope.seed) });
+  const commands = envelope.commands;
+  // Los comandos de los bloques no llevan `expect`: sin garantía del lote no entran.
+  if (guards.expectedRevision === undefined && guards.expectedLayout === undefined) {
+    const loose = commands.findIndex((command) => needsBatchGuarantee(command));
+    if (loose >= 0) return { ok: false, error: batchInvalid(loose, 'expectedLayout', OPT_NEEDS_GUARANTEE) };
+  }
+  const segments = segmentsOf(commands);
+  const ops: CompiledOp[] = [];
+  const createdIds: Record<string, string> = {};
+  /** Dónde empieza cada tramo en `ops` y cómo se llega de una operación a su comando. */
+  const located: { start: number; locate: (local: number) => number | null }[] = [];
+  const assets = (ref: string) =>
+    resolveLotAsset(job.assets, ref, {
+      sha: (index) => job.assetSha256?.[index] ?? null,
+      blob: (sha) => blobOf(source, sha)
+    });
+
+  // El ensayo, en una copia: cada tramo se compila contra lo que dejan los anteriores y se aplica
+  // en ella. Es lo mismo que hará la fase 3 con todas las operaciones, sin escribir.
+  const copy = new Y.Doc();
+  try {
+    Y.applyUpdateV2(copy, Y.encodeStateAsUpdateV2(state.doc));
+    const ctxIds = seededIds(`${envelope.seed}\u0000ensayo`);
+    let model = state.model;
+    for (const [k, segment] of segments.entries()) {
+      if (k > 0 && ops.length > 0) model = await adapter.project(read.base, copy, signal);
+      // El primer tramo con la semilla del lote: un lote sin bloques da los mismos ids de siempre.
+      const seed = k === 0 ? envelope.seed : `${envelope.seed}\u0000t${k}`;
+      const step = await compileSegment(segment, { model, copy, read, seed, guards, engineOf, signal, assets });
+      if (!step.ok) return { ok: false, error: step.error };
+      try {
+        copy.transact(() => {
+          if (copy.getMap('sheetMeta').get('v') === undefined) read.adapter.scaffold(read.base, copy);
+          step.ops.forEach((op, index) => {
+            try {
+              read.adapter.applyOp(copy, op as SheetOp, { newId: ctxIds });
+            } catch (error) {
+              failure.command = step.locate(index);
+              throw error;
+            }
+          });
+        }, 'agent');
+      } catch (error) {
+        if (error instanceof DocOpError) return { ok: false, error: opFailure(error, failure.command) };
+        throw error;
+      }
+      located.push({ start: ops.length, locate: step.locate });
+      ops.push(...step.ops);
+      Object.assign(createdIds, step.createdIds);
+    }
+    failure.command = null;
+    compiled.set(envelope, {
+      ops,
+      createdIds,
+      // Los `expect` son de lo que se leyó: se miran contra el estado de partida.
+      guards: guardsOf(commands, state.model, state.doc),
+      commandOf: (index) => {
+        const at = located.findLast((segment) => segment.start <= index);
+        return at ? at.locate(index - at.start) : null;
+      }
+    });
+    const after = await adapter.project(read.base, copy, signal);
+    const formulas = await formulaReport(after, read, ops, engineOf, signal);
+    const report: SheetEditReport = {
+      changed: changedOf(ops),
+      ...formulas,
+      ...(Object.keys(createdIds).length > 0 ? { createdIds } : {})
+    };
+    return { ok: true, revision: state.revision, layoutRevision: state.layoutRevision, report };
+  } finally {
+    copy.destroy();
+  }
+}
+
+// --- Tramos del lote (H-171) --------------------------------------------------------------------
+
+/** Motivo de un comando de un bloque sin garantía del lote. */
+const OPT_NEEDS_GUARANTEE = 'los comandos de imágenes, tablas y gráficos necesitan expectedRevision o expectedLayout';
+
+/** Si el comando es de un bloque y no lleva `expect` propio (todos menos `clearSpillBlockers`). */
+function needsBatchGuarantee(command: SheetEditCommand): boolean {
+  const block = optBlockOf(command.type);
+  return block !== null && block !== 'arr';
+}
+
+/** Un comando de la base o `clearSpillBlockers`, que se expande a `setCells` antes de compilar. */
+type BaseItem = SheetCommand | ClearSpillBlockers;
+
+/** Un tramo de comandos que se compilan juntos (ver la cabecera). */
+type Segment =
+  | { kind: 'base'; items: Indexed<BaseItem>[] }
+  | { kind: 'img'; items: Indexed<ImageCommand>[] }
+  | { kind: 'tab'; items: Indexed<TableCommand>[] }
+  | { kind: 'cht'; items: Indexed<ChartCommand>[] };
+
+/** Parte el lote en tramos: seguidos del mismo bloque, salvo las tablas, que van de una en una. */
+export function segmentsOf(commands: readonly SheetEditCommand[]): Segment[] {
+  const out: Segment[] = [];
+  commands.forEach((command, index) => {
+    const block = optBlockOf(command.type);
+    const kind: Segment['kind'] = block === null || block === 'arr' ? 'base' : block;
+    const last = out[out.length - 1];
+    if (last && last.kind === kind && kind !== 'tab') (last.items as Indexed<SheetEditCommand>[]).push({ command, index });
+    else out.push({ kind, items: [{ command, index }] } as Segment);
+  });
+  return out;
+}
+
+/** Lo que necesita compilar un tramo. */
+interface SegmentContext {
+  model: SheetModel;
+  copy: Y.Doc;
+  read: OpenedSheet;
+  seed: string;
+  guards: BatchGuards;
+  engineOf: () => FormulaEngine;
+  signal: AbortSignal;
+  assets: (ref: string) => ReturnType<typeof resolveLotAsset>;
+}
+
+type SegmentResult =
+  | { ok: true; ops: CompiledOp[]; createdIds: Record<string, string>; locate: (local: number) => number | null }
+  | { ok: false; error: DocumentError };
+
+/** Un motor cargado con `model` y el locale de `A1#`, o `null` sin región admitida o si falla. */
+async function engineFor(context: SegmentContext): Promise<FormulaEngine | null> {
+  const settings = context.read.sheetBase.engineSettings;
+  if (!settings) return null;
+  const engine = context.engineOf();
+  try {
+    await engine.load(createSheetEngineProjection(settings, SPILL_LOCALE).book(context.model), settings, context.signal);
+    return engine;
+  } catch {
+    engine.dispose();
+    return null;
+  }
+}
+
+/** El comando con cada `A1#` de sus fórmulas pasado a `_xlfn.ANCHORARRAY(A1)` (lo que entiende `compileBatch`). */
+function withAnchorArrays(command: SheetCommand): SheetCommand {
+  if (command.type !== 'setCells') return command;
+  const rows = command.rows.map((row) =>
+    row.map((value) => (typeof value === 'string' && value.startsWith('=') ? hashToAnchorArray(value).text : value))
+  );
+  return { ...command, rows };
+}
+
+async function compileSegment(segment: Segment, context: SegmentContext): Promise<SegmentResult> {
+  if (segment.kind === 'base') return compileBaseSegment(segment.items, context);
+  // El motor de un tramo de un bloque, solo si lo pide (filtrar u ordenar columnas con fórmulas).
+  const slot: { loading: Promise<FormulaEngine | null> | null } = { loading: null };
+  const state: OptCompileState = {
+    model: context.model,
+    doc: context.copy,
+    bytes: context.read.base,
+    sheetBase: context.read.sheetBase,
+    seed: context.seed,
+    engine: () => (slot.loading ??= engineFor(context))
+  };
+  let out: OptCompileResult;
+  try {
+    if (segment.kind === 'img') out = await compileImageRun(segment.items, state, context.assets);
+    else if (segment.kind === 'tab') out = await compileTableAt(segment.items[0]!, state);
+    else out = compileChartRun(segment.items, state, await baseObjectsOf(context.read.sheetBase));
+  } finally {
+    (await slot.loading)?.dispose();
+  }
+  if (!out.ok) return out;
+  // Un tramo de un solo comando sabe de dónde sale cada operación; con varios, no se adivina.
+  const only = segment.items.length === 1 ? segment.items[0]!.index : null;
+  return { ok: true, ops: out.ops, createdIds: out.createdIds, locate: () => only };
+}
+
+/**
+ * Comandos de la base seguidos, por `compileBatch`: antes, cada `clearSpillBlockers` se expande a
+ * `setCells` de `null` con el estado de su ancla en el libro de ese momento
+ * (`expandClearSpillBlockers`), y cada `A1#` pasa a `_xlfn.ANCHORARRAY`.
+ */
+async function compileBaseSegment(items: readonly Indexed<BaseItem>[], context: SegmentContext): Promise<SegmentResult> {
+  const { model, guards, seed } = context;
+  const expanded: SheetCommand[] = [];
+  /** El índice en el lote de cada comando de `expanded`. */
+  const origin: number[] = [];
+  let engine: FormulaEngine | null | undefined;
+  try {
+    for (const { command, index } of items) {
+      if (command.type !== 'clearSpillBlockers') {
+        expanded.push(withAnchorArrays(command));
+        origin.push(index);
+        continue;
+      }
+      engine ??= await engineFor(context);
+      const settings = context.read.sheetBase.engineSettings;
+      const sheetIndex = model.sheets.findIndex((s) => s.name.toLowerCase() === command.sheet.toLowerCase());
+      const at = parseCell(command.cell);
+      let status = null;
+      if (engine && settings && sheetIndex >= 0 && at) {
+        try {
+          status = await spillStatusAt({ model, engine, locale: SPILL_LOCALE, region: regionOf(settings) }, sheetIndex, at);
+        } catch {
+          status = null;
+        }
+      }
+      if (!engine) return { ok: false, error: batchInvalid(index, `ops.${index}`, 'no se puede calcular el desborde de este libro') };
+      const out = expandClearSpillBlockers(model, command, status, index);
+      if ('error' in out) return { ok: false, error: batchInvalid(index, `ops.${index}`, out.reason) };
+      for (const setCells of out) {
+        expanded.push(setCells);
+        origin.push(index);
+      }
+    }
+  } finally {
+    engine?.dispose();
+  }
+  const out = compileBatch(model, { ops: expanded, ...guards }, { newId: seededIds(seed) });
   if ('error' in out) {
-    const opIndex = out.opIndex ?? 0;
+    const opIndex = out.opIndex === null ? 0 : (origin[out.opIndex] ?? 0);
     if (out.error === 'precondition_failed') {
       // Sin comando (`opIndex` null), lo que falla es la disposición del libro.
       return { ok: false, error: { code: 'precondition_failed', opIndex, target: out.opIndex === null ? 'expectedLayout' : `ops.${opIndex}` } };
@@ -599,35 +882,16 @@ async function computeBatch(
     const path = out.opIndex !== null ? `ops.${opIndex}` : guards.expectedLayout === undefined ? 'expectedLayout' : 'ops';
     return { ok: false, error: batchInvalid(opIndex, path, out.reason) };
   }
-  compiled.set(envelope, {
+  const locate = commandLocator(model, { seed, commands: expanded }, guards);
+  return {
+    ok: true,
     ops: out.ops,
     createdIds: out.createdIds,
-    guards: guardsOf(envelope.commands, state.model, state.doc),
-    commandOf: commandLocator(state.model, envelope, guards)
-  });
-
-  // El ensayo, en una copia: lo mismo que hará la fase 3, sin escribir.
-  const copy = new Y.Doc();
-  try {
-    Y.applyUpdateV2(copy, Y.encodeStateAsUpdateV2(state.doc));
-    try {
-      const ctxIds = seededIds(`${envelope.seed}\u0000ensayo`);
-      copy.transact(() => adapter.applyOp(copy, envelope, { newId: ctxIds }), 'agent');
-    } catch (error) {
-      if (error instanceof DocOpError) return { ok: false, error: opFailure(error, failure.command) };
-      throw error;
+    locate: (local) => {
+      const at = locate(local);
+      return at === null ? null : (origin[at] ?? null);
     }
-    const after = await adapter.project(read.base, copy, signal);
-    const formulas = await formulaReport(after, read, out.ops, engineOf, signal);
-    const report: SheetEditReport = {
-      changed: changedOf(out.ops),
-      ...formulas,
-      ...(Object.keys(out.createdIds).length > 0 ? { createdIds: out.createdIds } : {})
-    };
-    return { ok: true, revision: state.revision, layoutRevision: state.layoutRevision, report };
-  } finally {
-    copy.destroy();
-  }
+  };
 }
 
 // --- La herramienta ----------------------------------------------------------------------------------
@@ -635,8 +899,8 @@ async function computeBatch(
 /** Esquema de entrada para el registro (H-177). Lo que cruza campos lo valida `runEditSheet`. */
 export const editSheetInputShape = {
   id: z.string().describe('Id de un fichero .ods de hebra_list_files.'),
-  ops: sheetOpsField.optional(),
-  assets: sheetAssetsField,
+  ops: sheetEditOpsField.optional(),
+  assets: sheetEditAssetsField,
   expectedRevision: z
     .string()
     .optional()
@@ -700,6 +964,27 @@ function optionalText(value: unknown, field: string): string | undefined {
   return value;
 }
 
+/**
+ * Por qué no valen las imágenes del lote frente a sus comandos, o `null`: cada `ref` una sola vez
+ * y citada por algún `insertImage` o `replaceImage` (una imagen sin usar no se guarda). Un `asset`
+ * de un comando que no está en `assets` lo dice el escritor (`not_found`, como uno oculto).
+ */
+function assetsIssue(commands: readonly SheetEditCommand[], assets: readonly DocumentAsset[]): DocumentError | null {
+  const cited = new Set<string>();
+  for (const command of commands) {
+    if (ASSET_COMMANDS.has(command.type) && 'asset' in command) cited.add(command.asset);
+  }
+  const seen = new Set<string>();
+  for (const [index, asset] of assets.entries()) {
+    if (seen.has(asset.ref)) return batchInvalid(0, `assets.${index}.ref`, 'ref repetido');
+    seen.add(asset.ref);
+    if (!cited.has(asset.ref)) {
+      return batchInvalid(0, `assets.${index}`, 'imagen del lote sin usar: cítala por su ref con insertImage o replaceImage');
+    }
+  }
+  return null;
+}
+
 /** El error recuperable de un documento como error de herramienta (con sus campos, sin `code`). */
 function documentRefusal(error: DocumentError): ToolError {
   const { code, ...extra } = error;
@@ -712,11 +997,25 @@ function documentRefusal(error: DocumentError): ToolError {
  * de control que enlaza algo oculto también. Más de `SHEET_DOCUMENT_MAX_BYTES` (4 MiB, H-95),
  * `file_too_large`. El escritor lo vuelve a comprobar en sus turnos (`openSheetRead`, con los bytes
  * que de verdad abre). Devuelve el tamaño conocido del fichero, o `null`.
+ *
+ * Las imágenes del lote, con el mismo filtro (H-171): un fichero oculto, inexistente o en la
+ * papelera, o un adjunto cuyos bytes son de algo oculto, da `not_found`, igual que un `.ods`
+ * oculto. La nota del adjunto la juzga el escritor en su turno (`guardAsset`).
  */
-async function requireVisibleSheet(ctx: ToolContext, id: string): Promise<number | null> {
+async function requireVisibleSheet(ctx: ToolContext, id: string, assets: readonly DocumentAsset[] = []): Promise<number | null> {
   const filter = await FileFilter.build(ctx.port, ctx.privacy, ctx.privacyConfig);
   const content = filter.contentOf(id);
   if (!content || content.file.trashedAt !== null) throw new ToolError('not_found');
+  for (const asset of assets) {
+    if ('fileId' in asset) {
+      const image = filter.contentOf(asset.fileId);
+      if (!image || image.file.trashedAt !== null) throw new ToolError('not_found');
+      // La puerta final lo vuelve a juzgar con su sello, como el `.ods`.
+      usageOf(ctx).file(asset.fileId, filter.sealOf(asset.fileId));
+    } else if ('attachmentId' in asset && filter.hidesContent(asset.attachmentId.toLowerCase())) {
+      throw new ToolError('not_found');
+    }
+  }
   const used = usageOf(ctx);
   used.file(id, filter.sealOf(id));
   used.folder(content.file.folderId, ctx.privacy.folderPath(content.file.folderId));
@@ -776,15 +1075,26 @@ export async function runEditSheet(
   if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean') throw invalid('dryRun');
   if ((input.ops === undefined) === (undoOperationId === undefined)) throw invalid('ops');
   let request: EditSheetRequest;
+  let assets: readonly DocumentAsset[] = [];
+  let inactive: ReturnType<typeof inactiveOptCommand> = null;
   if (undoOperationId !== undefined) {
     if (input.assets !== undefined || input.dryRun !== undefined || expectedRevision !== undefined || expectedLayout !== undefined) {
       throw invalid('undoOperationId');
     }
     request = { format: 'ods', privacy: ctx.privacyConfig, action: 'undo', input: { id, operationId: input.operationId, undoOperationId } };
   } else {
-    const parsed = parseSheetCommands(input.ops, input.assets);
+    const parsed = parseSheetEditCommands(input.ops, input.assets);
     if (!parsed.ok) throw documentRefusal(parsed.error);
-    if (parsed.assets.length > 0) throw documentRefusal(batchInvalid(0, 'assets', NO_IMAGE_COMMANDS));
+    inactive = inactiveOptCommand(parsed.ops);
+    // La misma regla que la fase 2 (que la vuelve a mirar para un lote reenviado): sin `expect`
+    // propio, un comando de un bloque necesita la garantía del lote.
+    if (expectedRevision === undefined && expectedLayout === undefined) {
+      const loose = parsed.ops.findIndex((command) => needsBatchGuarantee(command));
+      if (loose >= 0) throw documentRefusal(batchInvalid(loose, 'expectedLayout', OPT_NEEDS_GUARANTEE));
+    }
+    const assetIssue = assetsIssue(parsed.ops, parsed.assets);
+    if (assetIssue) throw documentRefusal(assetIssue);
+    assets = parsed.assets;
     const batch: SheetBatchOp = { type: 'sheet.batch', seed: input.operationId, commands: parsed.ops };
     request = {
       format: 'ods',
@@ -794,6 +1104,7 @@ export async function runEditSheet(
         id,
         operationId: input.operationId,
         ops: [batch],
+        ...(parsed.assets.length > 0 ? { assets: parsed.assets } : {}),
         ...(expectedRevision !== undefined ? { expectedRevision } : {}),
         ...(expectedLayout !== undefined ? { expectedLayout } : {}),
         ...(input.dryRun === true ? { dryRun: true } : {})
@@ -801,8 +1112,11 @@ export async function runEditSheet(
     };
   }
 
-  // 2. Privacidad con el filtro de esta llamada.
-  const byteLength = await requireVisibleSheet(ctx, id);
+  // 2. Privacidad con el filtro de esta llamada: el documento y cada imagen del lote.
+  const byteLength = await requireVisibleSheet(ctx, id, assets);
+  // Un comando de un bloque que la app aún no aplica: no se compila ni llega al escritor. Después
+  // de la privacidad, para que un documento o una imagen ocultos respondan siempre `not_found`.
+  if (inactive) throw new ToolError('op_unsupported', { opIndex: inactive.opIndex });
 
   // 3. El escritor lo vuelve a comprobar todo en sus turnos. Abre el libro entero en su hilo
   // principal (proyección, motor y exportación), y en local, como en el contenedor HTTP, es este

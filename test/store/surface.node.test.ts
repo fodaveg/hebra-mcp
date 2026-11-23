@@ -248,7 +248,10 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
           // B-N20: el documento `.ods` o `.odp` que crea `createDocumentFile`, en el turno del escritor.
           'src/store/document-create.ts',
           // B-N14: el blob del punto de control, en el turno que antes aplica la regla (b).
-          'src/store/document-checkpoint.ts'
+          'src/store/document-checkpoint.ts',
+          // H-171: las imágenes en base64 de un lote de hojas, en la fase 3 (el turno del escritor),
+          // tras volver a juzgar el documento y cada imagen (`guardAsset`) en ese mismo turno.
+          'src/store/document-ops.ts'
         ]
       ]
     ];

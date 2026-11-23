@@ -62,7 +62,19 @@ export type WriteOut = {
   syncError?: string;
 };
 
-export type FormulaError = { sheet: string; cell: string; error: string };
+/**
+ * Detalle de un `#SPILL!` (matrices dinámicas, H-143): el rango que ocuparía el resultado, las
+ * celdas que lo impiden (hasta 100) y qué hacer. Es `SpillErrorDetail` de
+ * `vendor/hebra/src/lib/sheets/opt/arr/llm.ts`.
+ */
+export type FormulaSpillDetail = {
+  range: string | null;
+  blockedBy: string[];
+  blockedCount: number;
+  offSheet: boolean;
+  hint: string;
+};
+export type FormulaError = { sheet: string; cell: string; error: string; spill?: FormulaSpillDetail };
 export type EditSheetOut = WriteOut & {
   changed: { cells: number; sheets: number };
   recalculated: { cells: number; ms: number };
@@ -130,7 +142,8 @@ export type DocumentErrorDetail = {
   file_exists: { id: string };
   operation_id_reused: NoDetail;
   writer_outdated: NoDetail;
-  not_found: NoDetail;
+  /** `opIndex`: el comando que nombra algo que no existe o no se ve (una imagen de hojas). */
+  not_found: { opIndex?: number };
   space_access_denied: NoDetail;
   doc_head_invalid: NoDetail;
 };

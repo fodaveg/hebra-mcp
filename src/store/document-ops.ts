@@ -9,7 +9,8 @@
  * 2. Fuera del turno, en el hilo (`compute`): proyectar, validar y preparar el informe. Con
  *    `dryRun` se termina aquí (`validated`), sin tocar el registro.
  * 3. Otro turno: se repite TODO lo del primero (la privacidad y el acceso pueden haber
- *    cambiado durante el cálculo, que dura hasta 15 s) y se llama a `session.apply(ops, 'agent')`,
+ *    cambiado durante el cálculo, que dura hasta 15 s), se guardan como blob las imágenes en
+ *    base64 del lote (H-171) y se llama a `session.apply(ops, 'agent')`,
  *    que vuelve a evaluar cada `expect` sobre el estado de ahora. En la MISMA transacción que el
  *    `docAppend` (el `inTx` de `apply`) se guarda la inversa para deshacer y `log.finish`: o se
  *    confirma todo o nada, así que un corte entre el append y la respuesta no deja un lote
@@ -27,6 +28,7 @@
  * los traduce la capa de herramientas, igual que en el resto de escrituras.
  */
 import { createHash } from 'node:crypto';
+import { decodeAttachmentBase64 } from './attachment-content';
 import { assertAddressRule, DocumentAddressError } from './document-address';
 import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES, UNDO_ENTRY_MAX_BYTES, UNDO_MAX_AGE_DAYS } from './document-limits';
 import {
@@ -96,6 +98,12 @@ export interface DocumentComputeJob {
   sha256: string;
   ops: readonly unknown[];
   assets: readonly DocumentAsset[];
+  /**
+   * El SHA-256 de cada imagen de `assets` (misma posición) por `fileId` o adjunto, tal como lo
+   * juzgó la fase 1 en su turno (`guardAsset`); `null` para las de base64. Con él el cálculo lee
+   * los bytes sin leer filas del almacén.
+   */
+  assetSha256?: readonly (string | null)[];
   expectedRevision?: string;
   expectedLayout?: string;
 }
@@ -129,8 +137,11 @@ export type DocumentOpsResult =
   | { ok: true; out: WriteOut; report?: unknown }
   | { ok: false; error: DocumentError };
 
-/** Un reintento ya hecho, o el visto bueno de la fase 1. */
-type Gate = { kind: 'replay'; out: WriteOut } | { kind: 'go'; sha256: string } | { kind: 'refused'; error: DocumentError };
+/** Un reintento ya hecho, o el visto bueno de la fase 1 (con el SHA de cada imagen juzgada). */
+type Gate =
+  | { kind: 'replay'; out: WriteOut }
+  | { kind: 'go'; sha256: string; assetSha256: (string | null)[] }
+  | { kind: 'refused'; error: DocumentError };
 
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
@@ -222,7 +233,8 @@ async function gateIn<Op>(
   turn.operations.purgeExpired(now);
   // Lanza `not_found` igual para oculto, inexistente, lápida y papelera.
   const document = guardDocumentWrite(turn, input.id);
-  for (const asset of input.assets ?? []) await guardAsset(turn, asset);
+  const assetSha256: (string | null)[] = [];
+  for (const asset of input.assets ?? []) assetSha256.push((await guardAsset(turn, asset)).sha256);
   if (input.dryRun !== true) {
     const record = turn.operations.lookup(input.operationId);
     if (record) {
@@ -241,7 +253,7 @@ async function gateIn<Op>(
       });
     }
   }
-  return { kind: 'go', sha256: document.sha256 };
+  return { kind: 'go', sha256: document.sha256, assetSha256 };
 }
 
 /**
@@ -280,6 +292,7 @@ export async function runDocumentOps<Model, Op>(
       sha256: first.sha256,
       ops: input.ops,
       assets: input.assets ?? [],
+      ...((input.assets ?? []).length > 0 ? { assetSha256: first.assetSha256 } : {}),
       ...(input.expectedRevision !== undefined ? { expectedRevision: input.expectedRevision } : {}),
       ...(input.expectedLayout !== undefined ? { expectedLayout: input.expectedLayout } : {})
     },
@@ -332,6 +345,17 @@ async function applyIn<Model, Op>(
     }
     if (input.expectedLayout !== undefined && input.expectedLayout !== session.layoutRevision()) {
       return { ok: false, error: { code: 'precondition_failed', opIndex: 0, target: 'expectedLayout' } };
+    }
+
+    // Las imágenes en base64 del lote, como blobs, antes de aplicar (H-171): las operaciones las
+    // citan por su SHA-256. Las de un fichero o un adjunto ya están en la biblioteca. La fase 1
+    // ya comprobó base64, firma y tope (`documentAssetsRefusal`).
+    for (const asset of input.assets ?? []) {
+      if (!('dataBase64' in asset)) continue;
+      const decoded = decodeAttachmentBase64(asset.dataBase64);
+      if (!decoded.ok) return invalid('assets', 'imagen en base64 no válida');
+      const sha256 = createHash('sha256').update(decoded.bytes).digest('hex');
+      await turn.store.blobPut(decoded.bytes, { mime: asset.mimeType, expectedSha256: sha256 });
     }
 
     const withLayout = adapter.format === 'ods';

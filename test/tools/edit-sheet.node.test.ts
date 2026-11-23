@@ -60,7 +60,7 @@ import {
   type SheetBatchOp,
   type SheetEditOp
 } from '../../src/server/tools/edit-sheet';
-import { parseSheetCommands } from '../../src/server/tools/sheet-op-schemas';
+import { isOptBlockActive, parseSheetCommands } from '../../src/server/tools/sheet-op-schemas';
 import { openSheetRead } from '../../src/server/tools/sheet-read';
 import { createEditorData, type SheetCommand, type SheetModel, type SheetModelSheet } from '../../src/sheets';
 import { UnlinkedStatusSource } from '../../src/status/status-source';
@@ -907,6 +907,134 @@ describe('la regla de direcciones es la misma en hebra_edit_sheet y en assertAdd
         rule = false;
       }
       expect({ name: item.name, tool, rule }).toEqual({ name: item.name, tool: item.ok, rule: item.ok });
+    }
+    expect(await stored(h)).toEqual({ head: null, updates: 0 });
+  });
+});
+
+/** Los valores de unas celdas de `Datos`, en el estado guardado de ahora. */
+async function cellsNow(h: { port: NodeLibraryPort; fileId: string; bytes: Uint8Array }, addresses: readonly string[]) {
+  const opened = await openSheetRead(h.port.documentSource(), { id: h.fileId, sha256: sha(h.bytes) }, live, 'empty');
+  try {
+    const sheet = opened.read.model.sheets.find((s) => s.name === 'Datos')!;
+    return { revision: opened.read.revision, cells: Object.fromEntries(addresses.map((a) => [a, cellOf(sheet, a)])) };
+  } finally {
+    await opened.close();
+  }
+}
+
+/** Un PNG de 1 x 1 subido como fichero suelto en `Hojas` o en la carpeta privada `Diario`. */
+async function uploadPng(h: { port: NodeLibraryPort; diario: string }, where: 'Hojas' | 'Diario'): Promise<string> {
+  const png = Uint8Array.from(
+    Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGD4DwABBAEAwS2OUAAAAABJRU5ErkJggg==', 'base64')
+  );
+  return h.port.writeExclusive(async (store) => {
+    await store.blobPut(png, { mime: 'image/png', expectedSha256: sha(png) });
+    const folder = where === 'Diario' ? h.diario : (await store.folderCreate('root', 'Imagenes')).id;
+    return (await store.fileCreate(folder, `logo-${where}.png`, sha(png))).id;
+  });
+}
+
+/**
+ * Bloques opcionales (H-171). Pruebas negativas hechas a mano al escribirlo (se rompe, el test
+ * cae, se restaura):
+ * - no pasar `explainSpillErrors` en `formulaReport`: cae «un desborde bloqueado» (sin `spill`);
+ * - no expandir `clearSpillBlockers` (que vaya a `compileBatch` tal cual): cae el mismo test con
+ *   `batch_invalid` en vez de vaciar D2;
+ * - no pasar `A1#` por `hashToAnchorArray` antes de `compileBatch`: cae «A1# en una fórmula»;
+ * - mover el `op_unsupported` justo tras validar la forma: caen «las imágenes del lote» (una
+ *   imagen oculta responde `op_unsupported` antes de juzgarse) y «sin garantía»;
+ * - quitar la regla de garantía de los comandos de los bloques en `runEditSheet`: cae «sin
+ *   garantía» (llega `op_unsupported`).
+ */
+describe('hebra_edit_sheet con los bloques opcionales (H-171)', () => {
+  it('un desborde bloqueado sale con su detalle en formulaErrors y clearSpillBlockers lo suelta', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const out = await h.edit({ operationId: 'arr-1', expectedRevision: before.revision, ops: [set('D2', [[9]]), set('D1', [['=SEQUENCE(3)']])] });
+    expect(out.formulaErrors).toEqual([
+      {
+        sheet: 'Datos',
+        cell: 'D1',
+        error: '#SPILL!',
+        spill: { range: 'D1:D3', blockedBy: ['D2'], blockedCount: 1, offSheet: false, hint: expect.stringContaining('clearSpillBlockers') }
+      }
+    ]);
+    const now = await cellsNow(h, ['D1', 'D2']);
+    expect(now.cells.D2).toBe(9);
+    const freed = await h.edit({
+      operationId: 'arr-2',
+      expectedRevision: now.revision,
+      ops: [{ type: 'clearSpillBlockers', sheet: 'Datos', cell: 'D1' }]
+    });
+    expect(freed).toMatchObject({ outcome: 'saved', changed: { cells: 1, sheets: 1 }, formulaErrors: [] });
+    expect((await cellsNow(h, ['D2'])).cells.D2).toBeNull();
+    // Sin nada que soltar ya, el mismo comando es `batch_invalid` en su índice.
+    const again = await expectCode(
+      h.edit({ operationId: 'arr-3', expectedRevision: freed.revision, ops: [set('E4', [[1]]), { type: 'clearSpillBlockers', sheet: 'Datos', cell: 'D1' }] }),
+      'batch_invalid'
+    );
+    expect(again.extra).toMatchObject({ issues: [{ opIndex: 1, path: 'ops.1' }] });
+  });
+
+  it('A1# en una fórmula cita lo que derrama otra (H-138)', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const out = await h.edit({
+      operationId: 'arr-hash',
+      expectedRevision: before.revision,
+      ops: [set('D1', [['=SEQUENCE(3)']]), set('E1', [['=SUM(D1#)']])]
+    });
+    expect(out).toMatchObject({ outcome: 'saved', formulaErrors: [] });
+    expect(JSON.stringify((await cellsNow(h, ['E1'])).cells.E1)).toMatch(/ANCHORARRAY/i);
+  });
+
+  it('un comando de un bloque sin garantía del lote es batch_invalid con path expectedLayout', async () => {
+    const h = await world();
+    const error = await expectCode(
+      h.edit({ operationId: 'opt-1', ops: [set('A1', [[1]], { A1: 1 }), { type: 'createChart', sheet: 'Datos', range: 'A1:A3' }] }),
+      'batch_invalid'
+    );
+    expect(error.extra).toMatchObject({ issues: [{ opIndex: 1, path: 'expectedLayout' }] });
+    expect(h.calls()).toBe(0);
+  });
+
+  it('las imágenes del lote: sin usar, batch_invalid; oculta, not_found; visible, lo que diga su bloque', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const visible = await uploadPng(h, 'Hojas');
+    const hidden = await uploadPng(h, 'Diario');
+    const insert = { type: 'insertImage', sheet: 'Datos', at: 'D4', asset: 'logo' };
+    const unused = await expectCode(
+      h.edit({ operationId: 'img-1', expectedRevision: before.revision, ops: [set('A1', [[1]])], assets: [{ ref: 'logo', fileId: visible }] }),
+      'batch_invalid'
+    );
+    expect(unused.extra).toMatchObject({ issues: [{ path: 'assets.0' }] });
+    const secret = await expectCode(
+      h.edit({ operationId: 'img-2', expectedRevision: before.revision, ops: [insert], assets: [{ ref: 'logo', fileId: hidden }] }),
+      'not_found'
+    );
+    // Lo mismo que un fichero que no existe: no se distingue.
+    const missing = await expectCode(
+      h.edit({ operationId: 'img-3', expectedRevision: before.revision, ops: [insert], assets: [{ ref: 'logo', fileId: 'no-existe' }] }),
+      'not_found'
+    );
+    expect(secret.extra).toEqual(missing.extra);
+    const call = h.edit({
+      operationId: 'img-4',
+      expectedRevision: before.revision,
+      dryRun: true,
+      ops: [set('A1', [[1]]), insert],
+      assets: [{ ref: 'logo', fileId: visible }]
+    });
+    if (isOptBlockActive('img')) {
+      // Con H-170 la app aplica `image.set`: el ensayo entra.
+      await expect(call).resolves.toMatchObject({ outcome: 'validated' });
+    } else {
+      // Sin H-170, el comando de un bloque que la app no aplica responde op_unsupported con su índice.
+      const error = await expectCode(call, 'op_unsupported');
+      expect(error.extra).toEqual({ opIndex: 1 });
+      expect(h.calls()).toBe(0);
     }
     expect(await stored(h)).toEqual({ head: null, updates: 0 });
   });

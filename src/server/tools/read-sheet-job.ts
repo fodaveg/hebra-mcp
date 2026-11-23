@@ -31,6 +31,14 @@
  * Todo lo que sale de una celda (valor, fórmula, comentario, nombre de hoja) es un dato del
  * documento y va solo en campos de datos. Un error sale como código cerrado (`DocumentError`), sin
  * texto del documento.
+ *
+ * Bloques opcionales (H-171, `./sheet-opt.ts`): el resumen dice, por hoja, los nombres de sus
+ * tablas y cuántas imágenes y gráficos tiene; una página con `include: ["objects"]` trae, en la
+ * primera página, las tablas, las imágenes (con el id que citan los comandos), los gráficos con
+ * sus datos (`reliable: false` y el motivo si alguno no está recalculado: nunca un dato sin
+ * calcular como si lo estuviera) y los desbordes de las fórmulas de matriz (`spills`). Las
+ * fórmulas se escriben con `A1#` para citar lo que derrama otra (`withSpillRefs`, el mismo locale
+ * que la proyección al motor).
  */
 import type * as Y from 'yjs';
 import type { DocHeadRecord } from '../../../vendor/hebra/src/lib/documents/contract';
@@ -55,9 +63,14 @@ import {
 } from '../../sheets';
 import type { DocumentError } from '../../store/document-types';
 import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
+import { withSpillRefs } from '../../../vendor/hebra/src/lib/sheets/opt/arr/hash';
 import { ToolError } from '../errors';
 import type { ReadSheetInclude } from './read-sheet';
+import { objectCountsOf, sheetObjectsOf, type SheetObjects } from './sheet-opt';
 import { isFormula, openSheetRead, pinnedSource, scopeOf, sheetOf, type OpenedSheet } from './sheet-read';
+
+/** El locale de fórmulas que entiende `A1#` (H-138): en la proyección al motor y al escribirlas. */
+const FORMULAS = withSpillRefs(createFormulaLocale());
 
 /** La petición ya validada por la herramienta. */
 export interface ReadSheetJobRequest {
@@ -105,6 +118,12 @@ export interface SheetSummary {
   errorCount: number;
   /** Clases de contenido que el editor conserva sin entenderlas (inventario de H-16). */
   preserved: string[];
+  /** Nombres de sus tablas (H-171). Solo si tiene alguna. */
+  tables?: string[];
+  /** Cuántas imágenes flotantes tiene. Solo si tiene alguna. */
+  imageCount?: number;
+  /** Cuántos gráficos tiene. Solo si tiene alguno. */
+  chartCount?: number;
 }
 
 export interface WorkbookSummary {
@@ -151,6 +170,8 @@ export interface SheetPage {
    * de lo que derrama una matriz van a `null`.
    */
   calculated: boolean;
+  /** Tablas, imágenes, gráficos y desbordes de la hoja: con `objects`, en la primera página. */
+  objects?: SheetObjects;
 }
 
 export type ReadSheetJobResult =
@@ -297,7 +318,7 @@ async function loadEngine(
   if (!settings) return null;
   const engine = createNodeFormulaEngine({ workerUrl: options.engineWorkerUrl ?? ENGINE_WORKER_URL });
   try {
-    const book = createSheetEngineProjection(settings).book(model);
+    const book = createSheetEngineProjection(settings, FORMULAS).book(model);
     await engine.load(book, settings, options.signal ?? new AbortController().signal);
     return engine;
   } catch {
@@ -420,6 +441,21 @@ async function engineSheetFacts(
   return out;
 }
 
+/**
+ * Las tablas, imágenes y gráficos de cada hoja en el resumen (H-171), solo en las que tienen
+ * alguno: un libro sin ellos sale como siempre.
+ */
+async function addObjectCounts(workbook: WorkbookSummary, doc: Y.Doc, bytes: Uint8Array, base: SheetBase, model: SheetModel): Promise<void> {
+  const counts = await objectCountsOf(doc, bytes, base, model);
+  for (const summary of workbook.sheets) {
+    const found = counts.get(summary.sheetId);
+    if (!found) continue;
+    if (found.tables.length > 0) summary.tables = found.tables;
+    if (found.images > 0) summary.imageCount = found.images;
+    if (found.charts > 0) summary.chartCount = found.charts;
+  }
+}
+
 /** Hoja pedida por id o por nombre (sin distinguir mayúsculas). */
 function findSheet(model: SheetModel, wanted: string | undefined): SheetModelSheet | null {
   return wanted === undefined ? (model.sheets[0] ?? null) : sheetOf(model, wanted);
@@ -507,7 +543,7 @@ async function pageOf(
     if (!computed) calculated = false;
   }
 
-  const formulas = createFormulaLocale();
+  const formulas = FORMULAS;
   const scope = scopeOf(model, sheet.id);
 
   // Comentarios de la página, por posición.
@@ -695,7 +731,9 @@ export async function runReadSheetJob(
         } catch {
           findings = [];
         }
-        return { ok: true, revision, layoutRevision, workbook: summaryOf(model, findings, facts) };
+        const workbook = summaryOf(model, findings, facts);
+        await addObjectCounts(workbook, doc, input.base, base, model);
+        return { ok: true, revision, layoutRevision, workbook };
       }
 
       const sheet = findSheet(model, request.sheet);
@@ -724,6 +762,12 @@ export async function runReadSheetJob(
         if (rect.r2 >= Math.max(rows, 1) || rect.c2 >= Math.max(cols, 1)) return { ok: false, invalid: 'range' };
         if (rect.c2 - rect.c1 + 1 > request.maxCells) return { ok: false, error: { code: 'document_too_complex' } };
         const page = await pageOf(doc, base, opened.base, model, sheet, rect, request, engineOf);
+        if (request.include.includes('objects') && request.offset === 0) {
+          // El motor solo si hay fórmulas: da los valores de los gráficos y los desbordes.
+          const hasFormulas = model.sheets.some((s) => [...s.cells.values()].some(isFormula));
+          const engine = hasFormulas ? await engineOf() : null;
+          page.objects = await sheetObjectsOf({ doc, bytes: opened.base, sheetBase: base, model, sheet, engine });
+        }
         return { ok: true, revision, layoutRevision, page };
       } finally {
         (await slot.loading)?.dispose();
