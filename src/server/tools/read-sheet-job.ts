@@ -36,9 +36,11 @@
  * tablas y cuántas imágenes y gráficos tiene; una página con `include: ["objects"]` trae, en la
  * primera página, las tablas, las imágenes (con el id que citan los comandos), los gráficos con
  * sus datos (`reliable: false` y el motivo si alguno no está recalculado: nunca un dato sin
- * calcular como si lo estuviera) y los desbordes de las fórmulas de matriz (`spills`). Las
- * fórmulas se escriben con `A1#` para citar lo que derrama otra (`withSpillRefs`, el mismo locale
- * que la proyección al motor).
+ * calcular como si lo estuviera), los desbordes de las fórmulas de matriz (`spills`) y las tablas
+ * dinámicas (`pivots`, con `trust` y `reliable`). El resumen da también los nombres de las tablas
+ * dinámicas de cada hoja, y una página que cae en la salida de una tabla dinámica no fiable lo dice
+ * en `unreliable` con su rango y su aviso. Las fórmulas se escriben con `A1#` para citar lo que
+ * derrama otra (`withSpillRefs`, el mismo locale que la proyección al motor).
  */
 import type * as Y from 'yjs';
 import type { DocHeadRecord } from '../../../vendor/hebra/src/lib/documents/contract';
@@ -66,7 +68,7 @@ import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/s
 import { withSpillRefs } from '../../../vendor/hebra/src/lib/sheets/opt/arr/hash';
 import { ToolError } from '../errors';
 import type { ReadSheetInclude } from './read-sheet';
-import { objectCountsOf, sheetObjectsOf, type SheetObjects } from './sheet-opt';
+import { baseObjectsOf, livePivots, objectCountsOf, pivotWarningsOf, sheetObjectsOf, type PivotWarning, type SheetObjects } from './sheet-opt';
 import { isFormula, openSheetRead, pinnedSource, scopeOf, sheetOf, type OpenedSheet } from './sheet-read';
 
 /** El locale de fórmulas que entiende `A1#` (H-138): en la proyección al motor y al escribirlas. */
@@ -124,6 +126,8 @@ export interface SheetSummary {
   imageCount?: number;
   /** Cuántos gráficos tiene. Solo si tiene alguno. */
   chartCount?: number;
+  /** Nombres de las tablas dinámicas que pintan en ella. Solo si tiene alguna. */
+  pivots?: string[];
 }
 
 export interface WorkbookSummary {
@@ -170,8 +174,13 @@ export interface SheetPage {
    * de lo que derrama una matriz van a `null`.
    */
   calculated: boolean;
-  /** Tablas, imágenes, gráficos y desbordes de la hoja: con `objects`, en la primera página. */
+  /** Tablas, imágenes, gráficos, desbordes y tablas dinámicas de la hoja: con `objects`, en la primera página. */
   objects?: SheetObjects;
+  /**
+   * Salidas de tablas dinámicas de la hoja cuyos valores no son fiables (sin recalcular o con el
+   * origen cambiado): quien lee la página sabe que esas celdas no valen como dato.
+   */
+  unreliable?: PivotWarning[];
 }
 
 export type ReadSheetJobResult =
@@ -453,6 +462,7 @@ async function addObjectCounts(workbook: WorkbookSummary, doc: Y.Doc, bytes: Uin
     if (found.tables.length > 0) summary.tables = found.tables;
     if (found.images > 0) summary.imageCount = found.images;
     if (found.charts > 0) summary.chartCount = found.charts;
+    if (found.pivots.length > 0) summary.pivots = found.pivots;
   }
 }
 
@@ -762,6 +772,9 @@ export async function runReadSheetJob(
         if (rect.r2 >= Math.max(rows, 1) || rect.c2 >= Math.max(cols, 1)) return { ok: false, invalid: 'range' };
         if (rect.c2 - rect.c1 + 1 > request.maxCells) return { ok: false, error: { code: 'document_too_complex' } };
         const page = await pageOf(doc, base, opened.base, model, sheet, rect, request, engineOf);
+        // Las salidas de tablas dinámicas sin recalcular de la hoja, si hay alguna (registro de PIV 5.2).
+        const warnings = await pivotWarningsOf(livePivots(doc, await baseObjectsOf(base)), model, sheet, engineOf);
+        if (warnings.length > 0) page.unreliable = warnings;
         if (request.include.includes('objects') && request.offset === 0) {
           // El motor solo si hay fórmulas: da los valores de los gráficos y los desbordes.
           const hasFormulas = model.sheets.some((s) => [...s.cells.values()].some(isFormula));

@@ -999,6 +999,24 @@ describe('hebra_edit_sheet con los bloques opcionales (H-171)', () => {
     expect(h.calls()).toBe(0);
   });
 
+  it('una tabla dinámica: sin garantía, batch_invalid; con ella, lo que diga su bloque', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const create = { type: 'pivotCreate', name: 'T', source: { sheet: 'Datos', range: 'A1:A3' }, output: { sheet: 'Datos', at: 'H1' } };
+    const loose = await expectCode(h.edit({ operationId: 'piv-1', ops: [create] }), 'batch_invalid');
+    expect(loose.extra).toMatchObject({ issues: [{ opIndex: 0, path: 'expectedLayout' }] });
+    const call = h.edit({ operationId: 'piv-2', expectedLayout: before.layoutRevision, dryRun: true, ops: [create] });
+    if (isOptBlockActive('piv')) {
+      // Con H-170 la app aplica `pivot.edit`: el ensayo entra.
+      await expect(call).resolves.toMatchObject({ outcome: 'validated' });
+    } else {
+      const error = await expectCode(call, 'op_unsupported');
+      expect(error.extra).toEqual({ opIndex: 0 });
+      expect(h.calls()).toBe(0);
+    }
+    expect(await stored(h)).toEqual({ head: null, updates: 0 });
+  });
+
   it('las imágenes del lote: sin usar, batch_invalid; oculta, not_found; visible, lo que diga su bloque', async () => {
     const h = await world();
     const before = await readState(h);

@@ -13,6 +13,13 @@
  *   test.
  * - `liveImages` sin quitar los marcos de objeto (`objectFrames`): cae «la imagen de reemplazo de
  *   un gráfico» (sale como imagen y `deleteImage` compila contra el marco del gráfico).
+ * - PIV, `occupiedIn` que nunca ve nada ocupado: cae «una salida que pisa algo ocupado».
+ * - PIV, `rangeValuesOf` dando los valores escritos de una hoja con fórmulas sin motor: cae «un
+ *   origen con fórmulas sin motor».
+ * - PIV, sin `withRealSheets` (la hoja tal como la escribe el LLM): caen «pivotCreate crea» y
+ *   «una salida que pisa algo ocupado» (hoja que no existe).
+ * - PIV, sin el rechazo de una cabecera vacía o repetida (`readHeaders`): cae «una salida que pisa
+ *   algo ocupado».
  */
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
@@ -22,15 +29,22 @@ import {
   baseObjectsOf,
   compileChartRun,
   compileImageRun,
+  compilePivotRun,
   compileTableAt,
   describeTable,
   liveImages,
+  livePivots,
   liveTables,
+  objectCountsOf,
+  pivotViewsOf,
+  pivotWarningsOf,
   resolveLotAsset,
   sheetObjectsOf,
   type OptCompileState
 } from '../../src/server/tools/sheet-opt';
-import { compileBatch, createSheetAdapter, prepareSheetBase, type SheetModel } from '../../src/sheets';
+import { compileBatch, createSheetAdapter, prepareSheetBase, type SheetModel, type SheetOp } from '../../src/sheets';
+import { applyPivotSheetOp, type PivotSheetOp } from '../../vendor/hebra/src/lib/sheets/opt/piv/concur';
+import { pivotOds } from '../fixtures/pivot-ods';
 import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
 import { odsWithChart } from '../../vendor/hebra/src/lib/sheets/opt/cht/test-ods';
 import { buildImageBook, PNG_A } from '../../vendor/hebra/src/lib/sheets/opt/img/img.fixture';
@@ -242,5 +256,157 @@ describe('tramos del lote (hebra_edit_sheet)', () => {
       ['cht', [6]],
       ['base', [7]]
     ]);
+    // Los de tabla dinámica seguidos, juntos: `compilePivotCommands` los encadena.
+    const pivots = segmentsOf([
+      { type: 'pivotCreate', name: 'T', source: { sheet: 'A', range: 'A1:B3' }, output: { sheet: 'A', at: 'D1' } },
+      { type: 'pivotRefresh', pivot: 'T' },
+      set
+    ]);
+    expect(pivots.map((s) => [s.kind, s.items.map((item) => item.index)])).toEqual([
+      ['piv', [0, 1]],
+      ['base', [2]]
+    ]);
+  });
+});
+
+/** Las celdas que escribe un tramo, por dirección A1, como las vería la hoja `Datos`. */
+function writesOf(ops: readonly { type: string }[], sheet: SheetModel['sheets'][number]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const op of ops) {
+    if (op.type !== 'cell.set') continue;
+    const { row, col, value } = op as unknown as { row: string; col: string; value: unknown };
+    out[`${String.fromCharCode(65 + sheet.cols.indexOf(col)!)}${sheet.rows.indexOf(row)! + 1}`] = value;
+  }
+  return out;
+}
+
+/** Aplica lo compilado como lo hará la app con H-170: `pivot.edit` por su bloque, lo demás por el adaptador. */
+async function applyCompiled(book: Opened, ops: readonly { type: string }[], base: Awaited<ReturnType<typeof baseObjectsOf>>): Promise<SheetModel> {
+  let n = 0;
+  const ctx = { newId: () => `t${++n}` };
+  book.doc.transact(() => {
+    if (book.doc.getMap('sheetMeta').get('v') === undefined) book.adapter.scaffold(book.bytes, book.doc);
+    for (const op of ops) {
+      if (op.type === 'pivot.edit') applyPivotSheetOp(book.doc, op as PivotSheetOp, ctx, base.pivots);
+      else book.adapter.applyOp(book.doc, op as SheetOp, ctx);
+    }
+  });
+  return book.adapter.project(book.bytes, book.doc, live);
+}
+
+describe('tablas dinámicas (PIV)', () => {
+  it('lee la del fichero: el resumen la nombra y objects la describe como no fiable, con aviso en su salida', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    expect(Object.values(base.pivots.tables).map((t) => t.name)).toEqual(['Resumen']);
+    const datos = book.model.sheets[0]!;
+    expect((await objectCountsOf(book.doc, book.bytes, book.sheetBase, book.model)).get(datos.id)?.pivots).toEqual(['Resumen']);
+    const [view] = (await sheetObjectsOf({ ...book, sheet: datos, engine: null })).pivots;
+    expect(view).toMatchObject({
+      name: 'Resumen',
+      source: 'Datos!A1:C5',
+      output: 'Datos!E1:F4',
+      rows: [{ field: 'Región' }],
+      values: [{ field: 'Importe', function: 'suma' }],
+      trust: 'from_file',
+      reliable: false
+    });
+    const warnings = await pivotWarningsOf(livePivots(book.doc, base), book.model, datos, async () => null);
+    expect(warnings.map(({ range, trust }) => ({ range, trust }))).toEqual([{ range: 'E1:F4', trust: 'from_file' }]);
+  });
+
+  it('pivotRefresh recalcula la del fichero: escribe su salida con el origen de ahora y queda fiable', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    const datos = book.model.sheets[0]!;
+    const out = await compilePivotRun([{ index: 3, command: { type: 'pivotRefresh', pivot: 'Resumen' } }], stateOf(book), base);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    // Sur suma 225, no los 999 que guardó el fichero. La disposición es la de Calc (fila de filtro
+    // arriba; con `grand-total="column"`, sin fila de totales), así que la salida se mueve con un
+    // `pivot.set` y lo que sobra de la anterior se vacía.
+    const writes = writesOf(out.ops, datos);
+    expect(Object.values(writes)).toEqual(expect.arrayContaining(['Filtro', 'Región', 'Norte', 150, 'Sur', 225]));
+    expect(Object.values(writes)).not.toContain(999);
+    expect(Object.values(writes)).not.toContain(1149);
+    expect(out.ops.filter((op) => op.type === 'pivot.edit')).toHaveLength(1);
+    const model = await applyCompiled(book, out.ops, base);
+    const [view] = await pivotViewsOf(livePivots(book.doc, base), model, async () => null);
+    expect(view).toMatchObject({ trust: 'recalculated', reliable: true });
+    // Y si cambia el origen después, deja de serlo.
+    const changed = compileBatch(model, { ops: [{ type: 'setCells', sheet: 'Datos', start: 'C2', rows: [[1]] }], expectedRevision: 'x' }, { newId: () => 'c2' });
+    if ('error' in changed) throw new Error(changed.reason);
+    const after = await applyCompiled(book, changed.ops, base);
+    expect((await pivotViewsOf(livePivots(book.doc, base), after, async () => null))[0]).toMatchObject({ trust: 'stale', reliable: false });
+  });
+
+  it('pivotCreate crea, calcula y escribe la salida; los ids salen de la semilla del tramo', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    const datos = book.model.sheets[0]!;
+    const create = {
+      type: 'pivotCreate' as const,
+      name: 'PorMes',
+      source: { sheet: 'datos', range: 'A1:C5' },
+      output: { sheet: 'DATOS', at: 'H1' },
+      rows: ['Mes'],
+      values: [{ field: 'Importe', function: 'sum' as const }]
+    };
+    const out = await compilePivotRun([{ index: 0, command: create }], stateOf(book), base);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const [first] = out.ops as PivotSheetOp[];
+    expect(first).toMatchObject({ type: 'pivot.edit', edit: { type: 'pivot.create', table: { name: 'PorMes', target: { sheet: 'Datos' }, source: { sheet: 'Datos' } } } });
+    const writes = writesOf(out.ops, datos);
+    expect(Object.keys(writes).every((cell) => /^[HI]\d+$/.test(cell))).toBe(true);
+    expect(Object.values(writes)).toEqual(expect.arrayContaining(['Ene', 'Feb', 300, 75, 375]));
+    const again = await compilePivotRun([{ index: 0, command: create }], stateOf(book), base);
+    expect(again).toEqual(out);
+  });
+
+  it('una salida que pisa algo ocupado, una hoja o una cabecera que no valen: batch_invalid en su comando, sin escribir', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    const create = (output: string, source = 'A1:C5', sheet = 'Datos') => ({
+      type: 'pivotCreate' as const,
+      name: 'Otra',
+      source: { sheet, range: source },
+      output: { sheet: 'Datos', at: output },
+      rows: ['Región']
+    });
+    // B2 tiene datos del origen: la salida no puede ir encima.
+    const busy = await compilePivotRun([{ index: 2, command: create('B2') }], stateOf(book), base);
+    expect(busy).toMatchObject({ ok: false, error: { code: 'batch_invalid', issues: [{ opIndex: 2, path: 'ops.2' }] } });
+    // La salida de la otra tabla dinámica también está ocupada.
+    const overPivot = await compilePivotRun([{ index: 0, command: create('E3') }], stateOf(book), base);
+    expect(overPivot).toMatchObject({ ok: false, error: { code: 'batch_invalid' } });
+    const noSheet = await compilePivotRun([{ index: 1, command: create('H1', 'A1:C5', 'NoEsta') }], stateOf(book), base);
+    expect(noSheet).toMatchObject({ ok: false, error: { issues: [{ opIndex: 1, path: 'ops.1.source.sheet' }] } });
+    // D no tiene cabecera: la interfaz tampoco la acepta.
+    const noHeader = await compilePivotRun([{ index: 0, command: create('H1', 'A1:D5') }], stateOf(book), base);
+    expect(noHeader).toMatchObject({ ok: false, error: { issues: [{ reason: expect.stringContaining('no tiene cabecera') }] } });
+    const unknown = await compilePivotRun([{ index: 4, command: { type: 'pivotDelete', pivot: 'NoEsta' } }], stateOf(book), base);
+    expect(unknown).toMatchObject({ ok: false, error: { issues: [{ opIndex: 4, reason: expect.stringContaining('(not_found)') }] } });
+  });
+
+  it('pivotDelete quita la tabla y vacía su salida', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    const out = await compilePivotRun([{ index: 0, command: { type: 'pivotDelete', pivot: 'Resumen' } }], stateOf(book), base);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    const writes = writesOf(out.ops, book.model.sheets[0]!);
+    expect(Object.keys(writes).sort()).toEqual(['E1', 'E2', 'E3', 'E4', 'F1', 'F2', 'F3', 'F4']);
+    expect(Object.values(writes).every((value) => value === null)).toBe(true);
+  });
+
+  it('un origen con fórmulas sin motor no se calcula con valores inventados', async () => {
+    const book = await open(pivotOds());
+    const base = await baseObjectsOf(book.sheetBase);
+    const formula = compileBatch(book.model, { ops: [{ type: 'setCells', sheet: 'Datos', start: 'C2', rows: [['=40+60']] }], expectedRevision: 'x' }, { newId: () => 'f' });
+    if ('error' in formula) throw new Error(formula.reason);
+    const model = await applyCompiled(book, formula.ops, base);
+    const out = await compilePivotRun([{ index: 0, command: { type: 'pivotRefresh', pivot: 'Resumen' } }], stateOf(book, model), base);
+    expect(out).toMatchObject({ ok: false, error: { issues: [{ reason: expect.stringContaining('no se puede leer el origen') }] } });
   });
 });

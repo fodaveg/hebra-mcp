@@ -55,14 +55,17 @@
  * `path: "expectedLayout"`. Es la misma regla de `assertAddressRule`
  * (`../../store/document-address.ts`); un test las compara caso por caso.
  *
- * Bloques opcionales (H-171): el lote admite también los comandos de imágenes, tablas, gráficos
- * y matrices dinámicas (`parseSheetEditCommands`, esquemas en `./sheet-op-schemas.ts`). El de un
+ * Bloques opcionales (H-171): el lote admite también los comandos de imágenes, tablas, gráficos,
+ * matrices dinámicas y tablas dinámicas (`parseSheetEditCommands`, esquemas en
+ * `./sheet-op-schemas.ts`). El de un
  * bloque que la app aún no aplica (`OP_TABLE` sin sus operaciones) responde `op_unsupported` con
  * su `opIndex`, antes de llegar al escritor. En la fase 2 el lote se parte en tramos: los comandos
  * de la base seguidos (con `clearSpillBlockers` ya expandido a `setCells` y `A1#` pasado a
  * `_xlfn.ANCHORARRAY`) van juntos por `compileBatch`; las imágenes seguidas, por
  * `compileImageCommands`; cada comando de tabla, solo (las tablas cambian entre ellos); los
- * gráficos seguidos, por `compileChartCommands` (todo en `./sheet-opt.ts`). Cada tramo se compila
+ * gráficos seguidos, por `compileChartCommands`; las tablas dinámicas seguidas, por
+ * `compilePivotCommands`, y las salidas que hay que pintar, como `cell.set` (todo en
+ * `./sheet-opt.ts`). Cada tramo se compila
  * contra el libro que dejan los anteriores, aplicados en la copia del ensayo, y la fase 3 aplica
  * las operaciones de todos en orden, en el mismo update. Un `$alias` vale dentro de su tramo.
  * Los comandos de los bloques no llevan `expect`: un lote con alguno (salvo `clearSpillBlockers`,
@@ -94,6 +97,7 @@ import {
 import type { ImageCommand } from '../../../vendor/hebra/src/lib/sheets/opt/img/llm';
 import type { TableCommand } from '../../../vendor/hebra/src/lib/sheets/opt/tab/llm';
 import type { ChartCommand } from '../../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
+import type { PivotCommand } from '../../../vendor/hebra/src/lib/sheets/opt/piv/llm-write';
 import {
   compileBatch,
   createFormulaLocale,
@@ -134,6 +138,7 @@ import {
   baseObjectsOf,
   compileChartRun,
   compileImageRun,
+  compilePivotRun,
   compileTableAt,
   resolveLotAsset,
   type Indexed,
@@ -734,7 +739,7 @@ async function computeBatch(
 // --- Tramos del lote (H-171) --------------------------------------------------------------------
 
 /** Motivo de un comando de un bloque sin garantía del lote. */
-const OPT_NEEDS_GUARANTEE = 'los comandos de imágenes, tablas y gráficos necesitan expectedRevision o expectedLayout';
+const OPT_NEEDS_GUARANTEE = 'los comandos de imágenes, tablas, gráficos y tablas dinámicas necesitan expectedRevision o expectedLayout';
 
 /** Si el comando es de un bloque y no lleva `expect` propio (todos menos `clearSpillBlockers`). */
 function needsBatchGuarantee(command: SheetEditCommand): boolean {
@@ -750,7 +755,8 @@ type Segment =
   | { kind: 'base'; items: Indexed<BaseItem>[] }
   | { kind: 'img'; items: Indexed<ImageCommand>[] }
   | { kind: 'tab'; items: Indexed<TableCommand>[] }
-  | { kind: 'cht'; items: Indexed<ChartCommand>[] };
+  | { kind: 'cht'; items: Indexed<ChartCommand>[] }
+  | { kind: 'piv'; items: Indexed<PivotCommand>[] };
 
 /** Parte el lote en tramos: seguidos del mismo bloque, salvo las tablas, que van de una en una. */
 export function segmentsOf(commands: readonly SheetEditCommand[]): Segment[] {
@@ -820,6 +826,7 @@ async function compileSegment(segment: Segment, context: SegmentContext): Promis
   try {
     if (segment.kind === 'img') out = await compileImageRun(segment.items, state, context.assets);
     else if (segment.kind === 'tab') out = await compileTableAt(segment.items[0]!, state);
+    else if (segment.kind === 'piv') out = await compilePivotRun(segment.items, state, await baseObjectsOf(context.read.sheetBase));
     else out = compileChartRun(segment.items, state, await baseObjectsOf(context.read.sheetBase));
   } finally {
     (await slot.loading)?.dispose();

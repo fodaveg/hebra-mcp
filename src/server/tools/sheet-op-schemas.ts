@@ -25,16 +25,17 @@
  * un motivo fijo (`BatchIssue`), hasta `BATCH_INVALID_ISSUES_MAX`.
  *
  * Bloques opcionales de hojas (H-171, segunda entrega del editor): imágenes flotantes (IMG,
- * `ImageCommand`), tablas estructuradas (TAB, `TableCommand`), gráficos (CHT, `ChartCommand`) y
- * matrices dinámicas (ARR, `SpillCommand`). Sus comandos NO son `SheetCommand` (`compileBatch` no
- * los conoce): cada bloque tiene su tabla de esquemas con la misma regla de tipos (falta uno, o
+ * `ImageCommand`), tablas estructuradas (TAB, `TableCommand`), gráficos (CHT, `ChartCommand`),
+ * matrices dinámicas (ARR, `SpillCommand`) y tablas dinámicas (PIV, `PivotCommand`). Sus comandos
+ * NO son `SheetCommand` (`compileBatch` no los conoce): cada bloque tiene su tabla de esquemas con
+ * la misma regla de tipos (falta uno, o
  * produce otra cosa, y no compila), sus líneas en `SHEET_OP_COVERAGE` y su entrada en
  * `SHEET_OPT_BLOCKS`. Solo `hebra_edit_sheet` los admite (`parseSheetEditCommands`); los compila
  * `./sheet-opt.ts` con las funciones del propio bloque (`vendor/hebra/src/lib/sheets/opt/`).
  * Un bloque está ACTIVADO cuando el registro de operaciones de la app (`OP_TABLE`, H-170) ya
  * aplica todas sus operaciones; si no, sus comandos responden `op_unsupported` y la descripción
- * de la herramienta no los anuncia. Lo que falta para un bloque nuevo (las tablas dinámicas, PIV)
- * está en el apartado «Bloques opcionales».
+ * de la herramienta no los anuncia. Lo que aporta un bloque nuevo está en el apartado «Bloques
+ * opcionales».
  */
 import { z } from 'zod';
 import {
@@ -51,7 +52,19 @@ import type { TableCommand } from '../../../vendor/hebra/src/lib/sheets/opt/tab/
 import { CHART_KINDS, CHART_OP_TYPES, type ChartOpType } from '../../../vendor/hebra/src/lib/sheets/opt/cht/model';
 import type { ChartCommand } from '../../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
 import type { SpillCommand } from '../../../vendor/hebra/src/lib/sheets/opt/arr/llm';
+import {
+  PIVOT_DATE_PARTS,
+  PIVOT_FUNCTIONS,
+  type PivotDatePart,
+  type PivotFunction,
+  type PivotOp
+} from '../../../vendor/hebra/src/lib/sheets/opt/piv/model';
+import { PIVOT_OP_COVERAGE, type PivotCommand } from '../../../vendor/hebra/src/lib/sheets/opt/piv/llm-write';
+import type { PivotSheetOp } from '../../../vendor/hebra/src/lib/sheets/opt/piv/concur';
 import { MAX_AXIS_PX, OP_TABLE, type SheetCommand, type SheetOpType } from '../../sheets';
+
+/** La operación de rejilla de PIV (registro de PIV 1.1): una sola, que envuelve un `PivotOp`. */
+export const PIVOT_SHEET_OP_TYPES = ['pivot.edit'] as const satisfies readonly PivotSheetOp['type'][];
 import {
   ASSETS_MAX_BYTES,
   BATCH_INVALID_ISSUES_MAX,
@@ -299,7 +312,7 @@ export const sheetCommandSchema = z.discriminatedUnion('type', [
 
 // --- Bloques opcionales ---------------------------------------------------------------------------
 //
-// Un bloque opcional aporta, en este orden (el patrón que seguirá PIV, las tablas dinámicas):
+// Un bloque opcional aporta, en este orden (el patrón que siguió PIV, el último en entrar):
 // 1. Su tabla de esquemas, `satisfies CommandSchemaTable<SuComando>`: un comando del bloque sin
 //    esquema, o un esquema que produce otra forma, no compila.
 // 2. Su cobertura de operaciones, `satisfies OptOpCoverageTable<SuOp['type']>`, que entra en
@@ -544,15 +557,104 @@ export const SPILL_COMMAND_SCHEMAS = {
   })
 } as const satisfies CommandSchemaTable<SpillCommand>;
 
+/** Una tabla dinámica (su id o su nombre) o un campo (su cabecera, su id o su nombre visible). */
+const pivotRefSchema = z.string().min(1).max(256);
+const pivotFunctionSchema = z.enum(PIVOT_FUNCTIONS as readonly [PivotFunction, ...PivotFunction[]]);
+const pivotDatePartSchema = z.enum(PIVOT_DATE_PARTS as readonly [PivotDatePart, ...PivotDatePart[]]);
+/** Un elemento de un campo (lo que sale en una celda del origen), como texto. */
+const pivotItemSchema = z.string().max(SHEET_CELL_TEXT_MAX);
+const pivotCellRefSchema = z.strictObject({ sheet: sheetRefSchema, at: a1CellSchema });
+const pivotRangeRefSchema = z.strictObject({ sheet: sheetRefSchema, range: a1RangeSchema });
+const pivotIsoDateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'fecha AAAA-MM-DD');
+const pivotLimitSchema = finiteNumber.nullable().optional();
+
+/**
+ * PIV (H-166): tablas dinámicas, los comandos de `piv/llm-write.ts` (`PivotCommand`). Los campos se
+ * citan por la cabecera de su columna; una copia, por su id o su nombre visible; el campo de
+ * valores es `"$valores"`. Esquemas de `impl/opcionales/registro-piv.md` 5.4, con las listas de
+ * funciones y de partes de fecha leídas del modelo.
+ */
+export const PIVOT_COMMAND_SCHEMAS = {
+  pivotCreate: z.strictObject({
+    type: z.literal('pivotCreate'),
+    name: z.string().min(1).max(256),
+    source: pivotRangeRefSchema,
+    output: pivotCellRefSchema,
+    rows: z.array(pivotRefSchema).max(64).optional(),
+    columns: z.array(pivotRefSchema).max(64).optional(),
+    pages: z.array(z.strictObject({ field: pivotRefSchema, selected: pivotItemSchema.nullable().optional() })).max(64).optional(),
+    values: z
+      .array(z.strictObject({ field: pivotRefSchema, function: pivotFunctionSchema.optional(), label: z.string().min(1).max(256).optional() }))
+      .max(64)
+      .optional(),
+    valuesIn: z.enum(['rows', 'columns']).optional()
+  }),
+  pivotDelete: z.strictObject({ type: z.literal('pivotDelete'), pivot: pivotRefSchema }),
+  pivotSet: z.strictObject({
+    type: z.literal('pivotSet'),
+    pivot: pivotRefSchema,
+    name: z.string().min(1).max(256).optional(),
+    source: pivotRangeRefSchema.optional(),
+    output: pivotCellRefSchema.optional(),
+    grandTotals: z.strictObject({ rows: z.boolean().optional(), columns: z.boolean().optional() }).optional(),
+    showFilterButton: z.boolean().optional()
+  }),
+  pivotPlace: z.strictObject({
+    type: z.literal('pivotPlace'),
+    pivot: pivotRefSchema,
+    field: pivotRefSchema,
+    area: z.enum(['row', 'column', 'page', 'data', 'hidden']),
+    index: z.number().int().min(0).optional(),
+    copy: z.boolean().optional()
+  }),
+  pivotRemoveField: z.strictObject({ type: z.literal('pivotRemoveField'), pivot: pivotRefSchema, field: pivotRefSchema }),
+  pivotFieldSet: z.strictObject({
+    type: z.literal('pivotFieldSet'),
+    pivot: pivotRefSchema,
+    field: pivotRefSchema,
+    function: pivotFunctionSchema.optional(),
+    subtotals: z.array(pivotFunctionSchema).max(PIVOT_FUNCTIONS.length).optional(),
+    hidden: z.array(pivotItemSchema).max(10_000).optional(),
+    selected: pivotItemSchema.nullable().optional(),
+    sort: z
+      .strictObject({ by: z.enum(['name', 'data', 'none', 'manual']), ascending: z.boolean().optional(), value: pivotRefSchema.optional() })
+      .optional(),
+    order: z.array(pivotItemSchema).max(10_000).optional(),
+    label: z.string().min(1).max(256).nullable().optional(),
+    showEmpty: z.boolean().optional()
+  }),
+  pivotGroup: z.strictObject({
+    type: z.literal('pivotGroup'),
+    pivot: pivotRefSchema,
+    field: pivotRefSchema,
+    group: z
+      .discriminatedUnion('by', [
+        z.strictObject({ by: z.literal('number'), start: pivotLimitSchema, end: pivotLimitSchema, step: finiteNumber.refine((n) => n > 0, 'paso mayor que 0') }),
+        z.strictObject({
+          by: z.literal('date'),
+          parts: z.array(pivotDatePartSchema).min(1).max(PIVOT_DATE_PARTS.length),
+          start: pivotIsoDateSchema.nullable().optional(),
+          end: pivotIsoDateSchema.nullable().optional()
+        })
+      ])
+      .nullable()
+  }),
+  pivotRefresh: z.strictObject({ type: z.literal('pivotRefresh'), pivot: pivotRefSchema })
+} as const satisfies CommandSchemaTable<PivotCommand>;
+
 /** Los comandos de los bloques opcionales. Un bloque nuevo añade aquí el suyo (paso 3). */
-export type OptCommand = ImageCommand | TableCommand | ChartCommand | SpillCommand;
+export type OptCommand = ImageCommand | TableCommand | ChartCommand | SpillCommand | PivotCommand;
 export type OptCommandType = OptCommand['type'];
 /** Lo que admite `hebra_edit_sheet`: los comandos de la base y los de los bloques. */
 export type SheetEditCommand = SheetCommand | OptCommand;
 export type SheetEditCommandType = SheetEditCommand['type'];
 
-/** Las operaciones de los bloques opcionales (paso 3). Hoy la app aún no las mete en `SheetOp`. */
-export type OptOpType = ImageOpType | TableOpType | ChartOpType;
+/**
+ * Las operaciones de los bloques opcionales (paso 3). Hoy la app aún no las mete en `SheetOp`.
+ * PIV entra en la rejilla como una sola, `pivot.edit` (registro de PIV 1.1), que envuelve un
+ * `PivotOp`: su detalle por operación del modelo es `PIVOT_OP_COVERAGE`.
+ */
+export type OptOpType = ImageOpType | TableOpType | ChartOpType | PivotSheetOp['type'];
 
 /** Un esquema por cada comando de los bloques: falta uno y no compila. */
 export type OptCommandSchemaTable = CommandSchemaTable<OptCommand>;
@@ -561,7 +663,8 @@ export const OPT_COMMAND_SCHEMAS = {
   ...IMAGE_COMMAND_SCHEMAS,
   ...TABLE_COMMAND_SCHEMAS,
   ...CHART_COMMAND_SCHEMAS,
-  ...SPILL_COMMAND_SCHEMAS
+  ...SPILL_COMMAND_SCHEMAS,
+  ...PIVOT_COMMAND_SCHEMAS
 } as const satisfies OptCommandSchemaTable;
 
 /** Todos los comandos de los bloques, en el orden de la tabla. */
@@ -576,12 +679,13 @@ export interface SheetOptBlock {
   ops: readonly string[];
 }
 
-/** Los bloques opcionales (paso 3). Las tablas dinámicas (PIV) entrarán aquí. */
+/** Los bloques opcionales (paso 3). */
 export const SHEET_OPT_BLOCKS = {
   img: { label: 'imágenes flotantes', commands: IMAGE_COMMAND_TYPES, ops: IMAGE_OP_TYPES },
   tab: { label: 'tablas', commands: Object.keys(TABLE_COMMAND_SCHEMAS) as TableCommand['type'][], ops: TABLE_OP_TYPES },
   cht: { label: 'gráficos', commands: Object.keys(CHART_COMMAND_SCHEMAS) as ChartCommand['type'][], ops: CHART_OP_TYPES },
-  arr: { label: 'matrices dinámicas', commands: Object.keys(SPILL_COMMAND_SCHEMAS) as SpillCommand['type'][], ops: [] }
+  arr: { label: 'matrices dinámicas', commands: Object.keys(SPILL_COMMAND_SCHEMAS) as SpillCommand['type'][], ops: [] },
+  piv: { label: 'tablas dinámicas', commands: Object.keys(PIVOT_COMMAND_SCHEMAS) as PivotCommand['type'][], ops: PIVOT_SHEET_OP_TYPES }
 } as const satisfies Record<string, SheetOptBlock>;
 
 export type SheetOptBlockId = keyof typeof SHEET_OPT_BLOCKS;
@@ -664,10 +768,24 @@ const CHART_OP_COVERAGE = {
   'chart.series.set': { command: 'setSeries' }
 } as const satisfies OptOpCoverageTable<ChartOpType>;
 
+/**
+ * PIV: todo comando de tabla dinámica escribe `pivot.edit`. Qué comando da cada `PivotOp` lo dice
+ * `PIVOT_OP_COVERAGE` de `piv/llm-write.ts`, que no compila si falta una; y aquí cada comando que
+ * nombra tiene que tener su esquema (`PIVOT_OP_COVERAGE_HAS_SCHEMAS`).
+ */
+const PIVOT_COVERAGE = {
+  // También `pivotDelete`, `pivotSet`, `pivotPlace`, `pivotRemoveField`, `pivotFieldSet` y `pivotGroup`.
+  'pivot.edit': { command: 'pivotCreate' }
+} as const satisfies OptOpCoverageTable<PivotSheetOp['type']>;
+
+/** Cada comando de `PIVOT_OP_COVERAGE` tiene su esquema: uno sin él no compila. */
+export const PIVOT_OP_COVERAGE_HAS_SCHEMAS: { readonly [T in PivotOp['type']]: readonly (keyof typeof PIVOT_COMMAND_SCHEMAS)[] } = PIVOT_OP_COVERAGE;
+
 export const SHEET_OP_COVERAGE = {
   ...IMAGE_OP_COVERAGE,
   ...TABLE_OP_COVERAGE,
   ...CHART_OP_COVERAGE,
+  ...PIVOT_COVERAGE,
   'cell.set': { command: 'setCells' },
   'cell.unset': { excluded: 'Solo la genera una inversa al deshacer (H-25b): se pide con undoOperationId.' },
   'cell.style': { command: 'setFormat' },
@@ -949,7 +1067,14 @@ export const SHEET_OPT_DESCRIPTIONS: { readonly [B in SheetOptBlockId]: string }
     '`deleteChart` {chart}, `setChart` {chart, kind?, horizontal?, stacking?, title?, subtitle?, legend?, categories?, axes?:{x,y}, position?, size?}, ' +
     '`addSeries` {chart, values, name?, x?, color?:"#rrggbb", kind?, after?, as?}, `removeSeries` {chart, series}, `moveSeries` {chart, series, after}, `setSeries` {chart, series, name?, values?, x?, color?, kind?}. ',
   arr:
-    '`clearSpillBlockers` {sheet, cell:"A1"} vacía las celdas que impiden que la fórmula de esa celda se desborde (#SPILL!). Una fórmula de matriz (SEQUENCE, FILTER, SORT, UNIQUE…) se desborda a las celdas vecinas; otra fórmula puede citar el rango entero como "A1#". '
+    '`clearSpillBlockers` {sheet, cell:"A1"} vacía las celdas que impiden que la fórmula de esa celda se desborde (#SPILL!). Una fórmula de matriz (SEQUENCE, FILTER, SORT, UNIQUE…) se desborda a las celdas vecinas; otra fórmula puede citar el rango entero como "A1#". ',
+  piv:
+    'Tablas dinámicas (ids en hebra_read_sheet con include "objects"): los campos se citan por la cabecera de su columna, una copia por su id o su nombre visible, y el campo de valores es "$valores". ' +
+    '`pivotCreate` {name, source:{sheet, range:"A1:D50"}, output:{sheet, at:"F2"}, rows?, columns?, pages?:[{field, selected?}], values?:[{field, function?:"sum"|"count"|"average"|…, label?}], valuesIn?:"rows"|"columns"}, ' +
+    '`pivotDelete` {pivot}, `pivotSet` {pivot, name?, source?, output?, grandTotals?:{rows?, columns?}, showFilterButton?}, `pivotPlace` {pivot, field, area:"row"|"column"|"page"|"data"|"hidden", index?, copy?}, ' +
+    '`pivotRemoveField` {pivot, field}, `pivotFieldSet` {pivot, field, function?, subtotals?, hidden?, selected?, sort?:{by:"name"|"data"|"none"|"manual", ascending?, value?}, order?, label?, showEmpty?}, ' +
+    '`pivotGroup` {pivot, field, group:{by:"number", start?, end?, step} | {by:"date", parts:["years"|"quarters"|"months"|…], start?, end?} | null}, `pivotRefresh` {pivot}. ' +
+    'Crear, cambiar el origen o pivotRefresh recalcula la salida; los demás cambios no (termina el lote con pivotRefresh). Si una celda ocupada lo impide, el lote falla con las celdas que estorban. '
 };
 
 /** Los bloques activados ahora, en el orden de `SHEET_OPT_BLOCKS`. */

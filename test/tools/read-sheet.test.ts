@@ -60,6 +60,7 @@ import { withSpillRefs } from '../../vendor/hebra/src/lib/sheets/opt/arr/hash';
 import { odsWithChart } from '../../vendor/hebra/src/lib/sheets/opt/cht/test-ods';
 import { buildImageBook } from '../../vendor/hebra/src/lib/sheets/opt/img/img.fixture';
 import { tableOds } from '../fixtures/table-ods';
+import { pivotOds } from '../fixtures/pivot-ods';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PRIVACY: PrivacyConfig = { privateFolders: [['diario']], privateTags: [] };
@@ -743,6 +744,8 @@ async function formulaOp(bytes: Uint8Array, sheetName: string, text: string, row
  *   con la fórmula sale `reliable: false`) y «los desbordes» (sin `spills`);
  * - no quitar de las imágenes la de reemplazo de un gráfico: cae «el resumen» (`imageCount: 1` en
  *   `Hoja1`, que solo tiene el gráfico);
+ * - dar `unreliable` en toda página de la hoja (sin mirar si toca la salida), o no darlo: cae «una
+ *   tabla dinámica del fichero»;
  * - dar `objects` en todas las páginas: cae «solo en la primera página»;
  * - escribir las fórmulas con el locale sin `withSpillRefs`: cae «A1#».
  */
@@ -807,5 +810,25 @@ describe('hebra_read_sheet con los bloques opcionales (H-171)', () => {
     const second = await read(h, { id, sheet: 'Hoja1', range: 'A1:E5', maxCells: 5, include: ['values', 'objects'], cursor: first.nextCursor });
     expect(second.range.objects).toBeUndefined();
     expect(second.range.rows).toHaveLength(1);
+  });
+
+  it('una tabla dinámica del fichero: el resumen la nombra, objects la describe y su salida avisa de que no es fiable', async () => {
+    const h = await harness();
+    const id = await addDocument(h, h.folders.hojas, 'dinamica.ods', pivotOds());
+    const summary = await read(h, { id });
+    expect(summary.workbook.sheets[0]).toMatchObject({ name: 'Datos', pivots: ['Resumen'] });
+    const objects = await read(h, { id, sheet: 'Datos', range: 'A1:C5', include: ['values', 'objects'] });
+    expect(objects.range.objects.pivots).toEqual([
+      expect.objectContaining({ name: 'Resumen', source: 'Datos!A1:C5', output: 'Datos!E1:F4', trust: 'from_file', reliable: false })
+    ]);
+    // El origen no es salida: sin aviso.
+    expect(objects.range.unreliable).toBeUndefined();
+    // La salida sí: los 999 son los del fichero, no un cálculo de Hebra.
+    const output = await read(h, { id, sheet: 'Datos', range: 'E1:F4' });
+    expect(output.range.rows[2]).toEqual(['Sur', 999]);
+    expect(output.range.unreliable).toEqual([{ range: 'E1:F4', trust: 'from_file', note: expect.stringContaining('No son fiables') }]);
+    // Una página que solo toca una esquina de la salida también avisa.
+    const corner = await read(h, { id, sheet: 'Datos', range: 'D4:E5' });
+    expect(corner.range.unreliable).toHaveLength(1);
   });
 });

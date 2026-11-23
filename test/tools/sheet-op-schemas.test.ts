@@ -26,6 +26,9 @@ import {
   parseSheetAssets,
   parseSheetCommands,
   parseSheetEditCommands,
+  PIVOT_COMMAND_SCHEMAS,
+  PIVOT_OP_COVERAGE_HAS_SCHEMAS,
+  PIVOT_SHEET_OP_TYPES,
   SHEET_COMMAND_SCHEMAS,
   SHEET_COMMAND_TYPES,
   SHEET_OP_COVERAGE,
@@ -52,6 +55,7 @@ import type { TableCommand } from '../../vendor/hebra/src/lib/sheets/opt/tab/llm
 import { CHART_OP_TYPES } from '../../vendor/hebra/src/lib/sheets/opt/cht/model';
 import type { ChartCommand } from '../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
 import type { SpillCommand } from '../../vendor/hebra/src/lib/sheets/opt/arr/llm';
+import type { PivotCommand } from '../../vendor/hebra/src/lib/sheets/opt/piv/llm-write';
 import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES } from '../../src/store/document-limits';
 
 /** Un ejemplo válido de cada comando del contrato. */
@@ -94,7 +98,7 @@ describe('paridad por tipos con la interfaz', () => {
     expect(Object.keys(incomplete)).not.toContain('axis.size');
     // Las de la rejilla y las de los bloques, sin repetir (cuando H-170 meta las de los bloques en
     // `SheetOp`, las dos listas se solapan y la unión sigue siendo la misma).
-    const expected = new Set<string>([...SHEET_OP_TYPES, ...IMAGE_OP_TYPES, ...TABLE_OP_TYPES, ...CHART_OP_TYPES]);
+    const expected = new Set<string>([...SHEET_OP_TYPES, ...IMAGE_OP_TYPES, ...TABLE_OP_TYPES, ...CHART_OP_TYPES, ...PIVOT_SHEET_OP_TYPES]);
     expect(Object.keys(SHEET_OP_COVERAGE).sort()).toEqual([...expected].sort());
     const commands: string[] = [...SHEET_COMMAND_TYPES, ...OPT_COMMAND_TYPES];
     for (const [type, coverage] of Object.entries(SHEET_OP_COVERAGE)) {
@@ -115,6 +119,24 @@ describe('paridad por tipos con la interfaz', () => {
     // @ts-expect-error un comando que no existe no cubre nada: no debe compilar.
     const invented: SheetOpCoverageTable = { ...SHEET_OP_COVERAGE, 'image.set': { command: 'pasteImage' } };
     expect([noImage, noMove, tables, invented].map((t) => Object.keys(t).length)).not.toContain(0);
+  });
+
+  it('PIV: pivot.edit tiene su línea y cada comando de PIVOT_OP_COVERAGE tiene esquema', () => {
+    const { 'pivot.edit': _pivot, ...withoutPivot } = SHEET_OP_COVERAGE;
+    // @ts-expect-error falta la línea de `pivot.edit`: no debe compilar.
+    const noPivot: SheetOpCoverageTable = withoutPivot;
+    const { pivotGroup: _group, ...noGroup } = PIVOT_COMMAND_SCHEMAS;
+    // @ts-expect-error falta el esquema de `pivotGroup`: no debe compilar.
+    const pivots: CommandSchemaTable<PivotCommand> = noGroup;
+    // @ts-expect-error `pivot.field.move` sin comando: la cobertura de PIV no compila.
+    const coverage: typeof PIVOT_OP_COVERAGE_HAS_SCHEMAS = { ...PIVOT_OP_COVERAGE_HAS_SCHEMAS, 'pivot.field.move': ['pivotMove'] };
+    expect([noPivot, pivots, coverage].every((t) => typeof t === 'object')).toBe(true);
+    // En ejecución: cada `PivotOp` del modelo tiene al menos un comando, y todos con esquema.
+    for (const [op, commands] of Object.entries(PIVOT_OP_COVERAGE_HAS_SCHEMAS)) {
+      expect(commands.length, op).toBeGreaterThan(0);
+      for (const command of commands) expect(Object.hasOwn(PIVOT_COMMAND_SCHEMAS, command), `${op} ${command}`).toBe(true);
+    }
+    expect(SHEET_OPT_BLOCKS.piv.ops).toEqual(['pivot.edit']);
   });
 
   it('cada comando de cada bloque tiene su esquema, y producirlo es lo que compila (H-171)', () => {
@@ -169,7 +191,34 @@ const OPT_EXAMPLES: { [T in OptCommandType]: CommandVariant<OptCommand, T> } = {
   removeSeries: { type: 'removeSeries', chart: 'base-object-1', series: 's1' },
   moveSeries: { type: 'moveSeries', chart: 'base-object-1', series: 's1', after: null },
   setSeries: { type: 'setSeries', chart: 'base-object-1', series: 's1', kind: null, color: null },
-  clearSpillBlockers: { type: 'clearSpillBlockers', sheet: 'Ventas', cell: 'A1' }
+  clearSpillBlockers: { type: 'clearSpillBlockers', sheet: 'Ventas', cell: 'A1' },
+  pivotCreate: {
+    type: 'pivotCreate',
+    name: 'Resumen',
+    source: { sheet: 'Ventas', range: 'A1:C20' },
+    output: { sheet: 'Ventas', at: 'F2' },
+    rows: ['Región'],
+    columns: ['Mes'],
+    pages: [{ field: 'Canal', selected: null }],
+    values: [{ field: 'Importe', function: 'sum', label: 'Total' }],
+    valuesIn: 'columns'
+  },
+  pivotDelete: { type: 'pivotDelete', pivot: 'Resumen' },
+  pivotSet: { type: 'pivotSet', pivot: 'Resumen', name: 'Por región', grandTotals: { rows: true, columns: false }, showFilterButton: true },
+  pivotPlace: { type: 'pivotPlace', pivot: 'Resumen', field: 'Importe', area: 'data', index: 0, copy: true },
+  pivotRemoveField: { type: 'pivotRemoveField', pivot: 'Resumen', field: 'Importe-d1' },
+  pivotFieldSet: {
+    type: 'pivotFieldSet',
+    pivot: 'Resumen',
+    field: 'Región',
+    subtotals: ['sum', 'average'],
+    hidden: ['Norte'],
+    sort: { by: 'data', ascending: false, value: 'Importe' },
+    label: null,
+    showEmpty: true
+  },
+  pivotGroup: { type: 'pivotGroup', pivot: 'Resumen', field: 'Fecha', group: { by: 'date', parts: ['years', 'months'], start: '2026-01-01', end: null } },
+  pivotRefresh: { type: 'pivotRefresh', pivot: 'Resumen' }
 };
 
 describe('comandos de los bloques opcionales (H-171)', () => {
@@ -205,7 +254,13 @@ describe('comandos de los bloques opcionales (H-171)', () => {
     ['color de serie en mayúsculas', { type: 'addSeries', chart: 'g', values: 'B2:B5', color: '#FF0000' }, 'ops.0.color'],
     ['eje con un campo inventado', { type: 'setChart', chart: 'g', axes: { z: {} } }, 'ops.0.axes'],
     ['moveSeries sin after', { type: 'moveSeries', chart: 'g', series: 's' }, 'ops.0.after'],
-    ['clearSpillBlockers con un rango', { type: 'clearSpillBlockers', sheet: 'A', cell: 'A1:A3' }, 'ops.0.cell']
+    ['clearSpillBlockers con un rango', { type: 'clearSpillBlockers', sheet: 'A', cell: 'A1:A3' }, 'ops.0.cell'],
+    ['tabla dinámica con salida en un rango', { type: 'pivotCreate', name: 'T', source: { sheet: 'A', range: 'A1:B5' }, output: { sheet: 'A', at: 'D1:E2' } }, 'ops.0.output.at'],
+    ['función de tabla dinámica inventada', { type: 'pivotFieldSet', pivot: 'T', field: 'C', function: 'mode' }, 'ops.0.function'],
+    ['zona de tabla dinámica inventada', { type: 'pivotPlace', pivot: 'T', field: 'C', area: 'filter' }, 'ops.0.area'],
+    ['agrupar por números con paso 0', { type: 'pivotGroup', pivot: 'T', field: 'C', group: { by: 'number', step: 0 } }, 'ops.0.group.step'],
+    ['agrupar fechas con una fecha que no es ISO', { type: 'pivotGroup', pivot: 'T', field: 'C', group: { by: 'date', parts: ['months'], start: '01/02/2026' } }, 'ops.0.group.start'],
+    ['tabla dinámica sin nombre', { type: 'pivotCreate', name: '', source: { sheet: 'A', range: 'A1:B5' }, output: { sheet: 'A', at: 'D1' } }, 'ops.0.name']
   ];
   it.each(bad)('%s es batch_invalid con la ruta del campo', (_label, op, path) => {
     const parsed = parseSheetEditCommands([op]);
