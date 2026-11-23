@@ -16,7 +16,7 @@ duplicarlo o tirarlo a la papelera valen las herramientas de [ficheros sueltos](
 |---|---|---|---|
 | `hebra_read_sheet` | Lee, solo lectura | `id`, `sheet?`, `range?`, `include?`, `maxCells?`, `cursor?` | El resumen del libro o una página de filas. Siempre `revision` y `layoutRevision` |
 | `hebra_create_sheet` | Crea un `.ods` nuevo, con un lote opcional | `name` (con `.ods`), `folder` o `folderId`, `ops?`, `operationId` | `{id, name, outcome, revision, layoutRevision, createdIds?, sync}` |
-| `hebra_edit_sheet` | Aplica un lote de comandos, o deshace uno | `id`, `ops` o `undoOperationId`, `expectedRevision?`, `expectedLayout?`, `dryRun?`, `operationId` | `{id, outcome, revision, layoutRevision, changed, recalculated, formulaErrors, undoUntil, sync}` |
+| `hebra_edit_sheet` | Aplica un lote de comandos, o deshace uno | `id`, `ops` o `undoOperationId`, `expectedRevision?`, `expectedLayout?`, `assets?`, `dryRun?`, `operationId` | `{id, outcome, revision, layoutRevision, changed, recalculated, formulaErrors, undoUntil, sync}` |
 | `hebra_render_sheet` | Pinta un rango como imagen PNG, solo lectura | `id`, `sheet`, `range`, `width?`, `showFormulas?` | Un bloque JSON con el tamaño y la imagen detrás |
 
 Todas aceptan `space`. Un `.ods` oculto por la privacidad, inexistente o en la papelera responde
@@ -51,15 +51,17 @@ pintada con `hebra_render_sheet`.
 | `id` | El `.ods` (de `hebra_list_files`) |
 | `sheet` | Nombre de la hoja o su `sheetId` (el del resumen) |
 | `range` | `A1` o `A1:D20`. No admite columnas ni filas enteras (`A:C`). Sin `range`, el rango usado de la hoja |
-| `include` | Qué dar de cada celda: `values` (por defecto), `formulas`, `formats`, `comments`. Sin repetir |
+| `include` | Qué dar de cada celda: `values` (por defecto), `formulas`, `formats`, `comments`; y `objects`, las tablas, imágenes, gráficos y desbordes de la hoja. Sin repetir |
 | `maxCells` | Celdas por página, de 1 a 2000 (500 por defecto) |
 | `cursor` | El `nextCursor` de la página anterior |
 
 - **Sin `sheet` ni `range`**: `workbook` con `sheets` (`sheetId`, `name`, `hidden`, `usedRange`,
   `formulaCount`, `errorCount` y `preserved`, lo que el editor conserva sin entender), los
   `namedRanges` y `calculated`. Sin celdas, sin páginas. Una hoja oculta se lee igual que las demás.
+  Una hoja con tablas, imágenes o gráficos lo dice: `tables` (los nombres), `imageCount` y
+  `chartCount`; sin ellos, esos campos no salen. Para verlos, `include: ["objects"]` en esa hoja.
 - **Con `sheet` o `range`**: una página de filas enteras. Sin `sheet`, la primera hoja. Trae
-  `range: {sheet, sheetId, address, rows, spilled?, formulas?, comments?, formats?, styles?}`.
+  `range: {sheet, sheetId, address, rows, spilled?, formulas?, comments?, formats?, styles?, objects?}`.
   - `address` es el rango de la página (por ejemplo `A2:D41`); `rows` es una lista de filas, cada
     una con sus valores de izquierda a derecha, y la primera fila de la lista es la primera de
     `address`.
@@ -75,6 +77,20 @@ pintada con `hebra_render_sheet`.
     qué significa cada `styleId`.
   - `calculated: false` sale si el motor no pudo calcular alguna fórmula de la página: sus valores
     (y los de lo que derraman) van a `null`; no los des por vacíos.
+  - Una fórmula que cita lo que derrama otra sale con `A1#` (`"=SUM(D1#)"`): el rango entero que
+    derrama la fórmula de D1, crezca o mengüe.
+  - `objects` (con `include: ["objects"]`, solo en la primera página) es todo lo de la HOJA, no
+    solo lo del rango: `{tables, images, charts, spills?}`.
+    - `tables`: `{name, range, header, totals, columns, style, filteredColumns, sortedBy}`. Los
+      comandos de tabla citan la tabla por `name` y la columna por su nombre de `columns`.
+    - `images`: `{id, cell, dx, dy, width, height, alt}`, en píxeles de la hoja (96 por pulgada).
+      Los comandos de imagen la citan por `id`.
+    - `charts`: `{id, kind, title, series, categories, ...}`. Cada serie trae sus `values` y sus
+      rangos (`valuesRanges`, como `Hoja1!B2:B5`). `reliable` en `false` (con `reasons` y
+      `staleCells`) dice que algún dato no está recalculado: no saques conclusiones de esos
+      valores; lee las celdas. Los comandos de gráfico lo citan por `id`, y a la serie por el suyo.
+    - `spills`: cada fórmula que se derrama, `{anchor, range, ref, blocked: false}` (`ref` es el
+      `A1#` que la cita), y las bloqueadas, `{anchor, blocked: true}`.
 - **Páginas**: cada página lleva `maxCells` celdas como mucho, siempre filas enteras (con 4
   columnas y 500 celdas, 125 filas). Una respuesta no pasa de 30000 caracteres: si no caben, la
   página trae menos filas. `truncated: true` y `nextCursor` dicen que hay más; `nextCursor: null`
@@ -123,6 +139,10 @@ Comandos con direcciones (necesitan garantía): `setCells`, `setFormat`, `insert
 `setSheetHidden`, `deleteSheet`, `renameSheet`, `moveSheet`, `freeze`, `putRule`, `deleteRule`)
 no las necesitan.
 
+Los comandos de imágenes, tablas y gráficos no llevan `expect`: un lote con alguno necesita
+`expectedRevision` o `expectedLayout` (si no, `batch_invalid` con `path: "expectedLayout"` en ese
+comando). `clearSpillBlockers` vacía celdas por dirección sin `expect`: necesita `expectedRevision`.
+
 ### Qué lleva `expect`
 
 Un objeto de direcciones A1 (`B3` o un rango `A5:B6`, también `A:A` o `3:5`) a lo que leíste:
@@ -157,10 +177,14 @@ si escribió en otra celda, el lote entra y no pierde lo del otro.
 - Respuesta: `{id, outcome, revision, layoutRevision, previousRevision?, createdIds?, undoUntil?,
   undoAvailable?, replayed?, changed: {cells, sheets}, recalculated: {cells, ms}, formulaErrors,
   calculated?, sync, syncError?}`.
-  - `formulaErrors` (hasta 50): `{sheet, cell, error}` de las fórmulas que ESCRIBE el lote y dan
-    error (`#DIV/0!`, `#NAME?`...). Si no está vacío, díselo al usuario o corrígelo. Con
+  - `formulaErrors` (hasta 50): `{sheet, cell, error, spill?}` de las fórmulas que ESCRIBE el lote
+    y dan error (`#DIV/0!`, `#NAME?`...). Si no está vacío, díselo al usuario o corrígelo. Con
     `calculated: false` el motor no pudo calcularlas: no hay errores inventados, pero tampoco están
     comprobadas.
+  - Un `#SPILL!` (una fórmula de matriz que no cabe) trae `spill: {range, blockedBy, blockedCount,
+    offSheet, hint}`: el rango que ocuparía, las celdas que lo impiden y qué hacer. Si las celdas
+    que bloquean sobran, `clearSpillBlockers` en esa celda las vacía (en otro lote); si no, mueve
+    la fórmula. Con `offSheet: true` no cabe en la hoja y vaciar no lo arregla.
   - `createdIds`: el id real de cada `as` del lote.
   - `sync`: como en las demás escrituras (`uploaded`, `pending`, `error`, `not_linked`);
     `not_applicable` con `dryRun`.
@@ -170,7 +194,9 @@ si escribió en otra celda, el lote entra y no pierde lo del otro.
   direcciones: va en otro lote (en `hebra_create_sheet` sí se puede, ver abajo).
 - Una hoja del lote se cita por su nombre, o por `"$alias"` si la creó un `addSheet` con `as`
   antes en el mismo lote (sirve para `renameSheet`, `setSheetHidden`, `moveSheet`, `freeze`...).
-- No hay comando que coloque imágenes: `assets`, si se manda, da `batch_invalid`. Una URL nunca pasa.
+- `assets`: las imágenes que citan `insertImage` y `replaceImage` por su `ref` (ver
+  [imágenes](#imágenes)). Un asset que ningún comando cita, o un `ref` repetido, es `batch_invalid`.
+  Una URL nunca pasa.
 - Sin red: una fórmula con `WEBSERVICE`, `IMAGE`, `RTD` o `DDE` (en un valor o en el cuerpo de una
   regla) es `batch_invalid`.
 
@@ -232,8 +258,81 @@ o la columna A); `to` de `moveSheet`, en 0.
 `setAxisSize`, `setSheetHidden` y `addSheet` con `hidden` son comandos del mismo contrato que usa la
 rejilla de la app: lo que ves allí (ancho de una columna, una hoja oculta) se puede pedir aquí.
 
-Lo que no hay: comandos para ordenar un rango ni para crear o editar gráficos, tablas dinámicas o
-imágenes flotantes. Si el usuario lo pide, díselo y ofrécele hacerlo en la app.
+Lo que no hay: comandos para ordenar un rango suelto (una tabla sí, con `sortTable`) ni para crear
+o editar tablas dinámicas. Si el usuario lo pide, díselo y ofrécele hacerlo en la app.
+
+## Imágenes, tablas, gráficos y matrices
+
+Comandos de `hebra_edit_sheet` (no de `hebra_create_sheet`) que van en el mismo `ops`, mezclados
+con los demás y en orden. Los ids de imágenes y gráficos y los nombres de tablas y columnas salen
+de `hebra_read_sheet` con `include: ["objects"]`. Lo que crea un comando con `as` se cita después
+en el mismo lote como `"$alias"`, y su id real sale en `createdIds`.
+
+Cada familia depende de que la app de este servidor la aplique. Si aún no, sus comandos responden
+`op_unsupported` con `opIndex` (sin escribir nada) y la descripción de `ops` de la herramienta no
+los anuncia. Las fórmulas de matriz y `clearSpillBlockers` están siempre.
+
+### Imágenes
+
+| Comando | Campos | Notas |
+|---|---|---|
+| `insertImage` | `sheet`, `at` (`"B3"`, la esquina de arriba a la izquierda), `asset` (el `ref` de `assets`), `width?`, `height?`, `dx?`, `dy?`, `alt?`, `as?` | Medidas en píxeles de la hoja; sin `width` ni `height`, el tamaño de la imagen |
+| `moveImage` | `sheet`, `image`, `at`, `dx?`, `dy?` | |
+| `resizeImage` | `sheet`, `image`, `width`, `height` | Hasta 20000 px por lado |
+| `setImageAlt` | `sheet`, `image`, `alt` | Texto alternativo, hasta 1000 caracteres |
+| `reorderImage` | `sheet`, `image`, `order` (`front`, `back`, `forward`, `backward`) | Encima o debajo de las demás |
+| `replaceImage` | `sheet`, `image`, `asset` | Otra imagen en el mismo marco |
+| `deleteImage` | `sheet`, `image` | |
+
+`assets` es una lista de `{ref, fileId}` (un fichero suelto de la biblioteca), `{ref, noteId,
+attachmentId}` (un adjunto de una nota) o `{ref, dataBase64, mimeType}` (PNG, JPEG, GIF o WebP),
+hasta 5 MiB en total. Una imagen que no ves (privada, en la papelera o que no existe) responde
+`not_found` con el `opIndex` del comando que la cita, igual en los tres casos. La imagen de
+reemplazo que lleva un gráfico no es una imagen: no sale en `images`.
+
+### Tablas
+
+Se citan por nombre (sin distinguir mayúsculas), y sus columnas, por el texto de la cabecera.
+
+| Comando | Campos | Notas |
+|---|---|---|
+| `createTable` | `sheet`, `range`, `name?`, `header?`, `totals?`, `style?` | No puede pisar otra tabla. `style` como `"TableStyleMedium2"` (`Light`, `Medium` o `Dark` y un número) |
+| `convertTableToRange` | `table` | Deja las celdas y quita la tabla |
+| `deleteTable` | `table` | Quita la tabla Y vacía sus celdas |
+| `resizeTable` | `table`, `range` | |
+| `renameTable` | `table`, `name` | Hasta 255 caracteres, sin repetir |
+| `setTableTotals` | `table`, `show` | Muestra u oculta la fila de totales. Para mostrarla, la fila de debajo de la tabla tiene que estar vacía |
+| `setTableTotal` | `table`, `column`, `fn` | `fn`: `sum`, `average`, `count`, `countNums`, `max`, `min`, `stdDev`, `var` o `none` |
+| `setTableStyle` | `table`, `style?`, `bands?` (`{rows?, cols?, firstCol?, lastCol?}`) | Al menos uno de los dos |
+| `filterTable` | `table`, `column`, `tests` (hasta 2), `join?` (`and` u `or`) | Un test: `{kind: "text", op, text}` (`contains`, `notContains`, `begins`, `ends`, `equals`, `notEquals`), `{kind: "number", op, value, value2?}` (`=`, `<>`, `>`, `>=`, `<`, `<=`, `between`), `{kind: "values", values}`, `{kind: "blank"}` o `{kind: "nonBlank"}` |
+| `clearTableFilter` | `table` | |
+| `sortTable` | `table`, `column`, `order` (`asc` o `desc`) | Ordena las filas de datos por los valores calculados |
+
+### Gráficos
+
+`kind` es `bar`, `line`, `area`, `pie`, `doughnut` o `scatter`. Los rangos van en A1, con la hoja
+si es otra (`Hoja1!B2:B5`, `'Mi hoja'!B2`), varios separados por espacios.
+
+| Comando | Campos | Notas |
+|---|---|---|
+| `createChart` | `sheet`, `range`, `kind?`, `seriesIn?` (`cols` o `rows`), `firstRowLabels?`, `firstColLabels?`, `title?`, `position?` (`{x, y}`), `size?` (`{w, h}`), `as?` | Una serie por columna (o fila) del rango; la primera fila y columna, de rótulos si lo parecen |
+| `deleteChart` | `chart` | |
+| `setChart` | `chart`, `kind?`, `horizontal?`, `stacking?` (`none`, `stacked`, `percent`), `title?`, `subtitle?`, `legend?` (`none`, `top`, `bottom`, `start`, `end`), `categories?`, `axes?` (`{x?, y?}`, cada uno `{title?, visible?, grid?, min?, max?}`), `position?`, `size?` | Un `null` en un texto lo quita |
+| `addSeries` | `chart`, `values`, `name?`, `x?`, `color?` (`"#rrggbb"`, en minúsculas), `kind?`, `after?`, `as?` | `after`: el id de la serie tras la que va; `null`, la primera |
+| `removeSeries` | `chart`, `series` | |
+| `moveSeries` | `chart`, `series`, `after` | |
+| `setSeries` | `chart`, `series`, `name?`, `values?`, `x?`, `color?`, `kind?` | |
+
+### Matrices que se derraman
+
+Una fórmula de matriz (`SEQUENCE`, `FILTER`, `SORT`, `UNIQUE`...) es un `setCells` más: escribe
+la fórmula en una celda y se derrama a las vecinas. Otra fórmula cita el rango entero con `A1#`
+(`"=SUM(D1#)"`). Si no cabe porque hay algo escrito, da `#SPILL!` y `formulaErrors` trae su
+`spill`.
+
+| Comando | Campos | Notas |
+|---|---|---|
+| `clearSpillBlockers` | `sheet`, `cell` (el ancla con `#SPILL!`) | Vacía las celdas que impiden el desborde. Sin nada que vaciar (no está bloqueada, o no cabe en la hoja), `batch_invalid`. Lleva `expectedRevision` |
 
 ## Ejemplos de lote
 
@@ -346,6 +445,86 @@ Ensayar sin escribir (`outcome: "validated"`):
 }
 ```
 
+Ver las tablas, imágenes, gráficos y desbordes de una hoja:
+
+```json hebra_read_sheet
+{ "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10", "sheet": "Hoja 1", "range": "A1:B4", "include": ["values", "objects"] }
+```
+
+Una matriz que se derrama y una fórmula que la cita entera con `A1#`:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "setCells", "sheet": "Hoja 1", "start": "D1", "rows": [["=SEQUENCE(3)"], [null], [null]], "expect": { "D1:D3": null } },
+    { "type": "setCells", "sheet": "Hoja 1", "start": "E1", "rows": [["=SUM(D1#)"]], "expect": { "E1": null } }
+  ],
+  "expectedLayout": "layout-leida",
+  "operationId": "b5e8d2a0-1c47-4f93-8a6e-2d9b0c7f1e11"
+}
+```
+
+Si `formulaErrors` trae un `#SPILL!` en D1 con `blockedBy`, y esas celdas sobran:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "clearSpillBlockers", "sheet": "Hoja 1", "cell": "D1" }
+  ],
+  "expectedRevision": "revision-leida",
+  "operationId": "d07a3f5c-8e21-4b6d-9c40-7f1e2a5b8d12"
+}
+```
+
+Convertir los datos en una tabla, filtrarla y ordenarla por importe (la fila 4, el total, queda
+fuera de la tabla). Los comandos de tabla van con `expectedLayout` (o `expectedRevision`) en el
+lote:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "createTable", "sheet": "Hoja 1", "range": "A1:B3", "name": "Gastos", "style": "TableStyleMedium2" },
+    { "type": "setTableStyle", "table": "Gastos", "bands": { "rows": true } },
+    { "type": "filterTable", "table": "Gastos", "column": "Importe", "tests": [{ "kind": "number", "op": ">", "value": 100 }] },
+    { "type": "sortTable", "table": "Gastos", "column": "Importe", "order": "desc" }
+  ],
+  "expectedLayout": "layout-leida",
+  "operationId": "1e6c9b47-3d08-4a52-b7f1-5c2e8d0a9f13"
+}
+```
+
+Un gráfico de barras de los gastos, con título, y una serie más citando el gráfico por su alias:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "createChart", "sheet": "Hoja 1", "range": "A1:B3", "kind": "bar", "title": "Gastos", "as": "grafico" },
+    { "type": "setChart", "chart": "$grafico", "legend": "bottom" },
+    { "type": "addSeries", "chart": "$grafico", "values": "B2:B3", "name": "A1", "color": "#2f6fdf" }
+  ],
+  "expectedLayout": "layout-leida",
+  "operationId": "8a2d5f90-6b13-4e7c-a0d4-3f9c1b7e2a14"
+}
+```
+
+Poner un logo que ya está en la biblioteca (su `id` de `hebra_list_files`), con texto alternativo:
+
+```json hebra_edit_sheet
+{
+  "id": "f3a9c1e2-8d47-4b0a-91c6-2e5d7a4b6c10",
+  "ops": [
+    { "type": "insertImage", "sheet": "Hoja 1", "at": "D2", "asset": "logo", "width": 120, "height": 40, "alt": "Logo de la empresa" }
+  ],
+  "assets": [{ "ref": "logo", "fileId": "0c4b7e21-9a3d-4f58-b6e2-71d0a8c5f315" }],
+  "expectedLayout": "layout-leida",
+  "operationId": "f4b1c8e3-2a69-4d07-9e5b-6c3a0d7f8b16"
+}
+```
+
 Deshacer el lote del `operationId` anterior, con un `operationId` nuevo y nada más:
 
 ```json hebra_edit_sheet
@@ -447,7 +626,7 @@ Un error llega como `{error: "<código>", ...}`. Nada se ha escrito salvo que se
 
 | Código | Cuándo | Qué hacer |
 |---|---|---|
-| `batch_invalid` | Con `issues` (hasta 20): `{opIndex, path, reason, expected?}`. Un comando con forma mala, un campo no admitido, una hoja que no existe, una dirección fuera de la hoja, una fórmula que no se entiende o que usa red, una dirección sin garantía, direcciones tras insertar o borrar filas en el mismo lote, ocultar la última hoja visible, `assets`. | Corrige el comando de `opIndex` (`path` dice el campo). No repitas el lote igual. |
+| `batch_invalid` | Con `issues` (hasta 20): `{opIndex, path, reason, expected?}`. Un comando con forma mala, un campo no admitido, una hoja que no existe, una dirección fuera de la hoja, una fórmula que no se entiende o que usa red, una dirección sin garantía, direcciones tras insertar o borrar filas en el mismo lote, ocultar la última hoja visible, un comando de imagen, tabla o gráfico sin `expectedRevision` ni `expectedLayout`, una tabla o un gráfico que no existe, un asset que ningún comando cita o un `ref` repetido. | Corrige el comando de `opIndex` (`path` dice el campo). No repitas el lote igual. |
 | `precondition_failed` | `opIndex` y `target`: `ops.<n>` (el `expect` de ese comando no casa), `expectedRevision`, `expectedLayout`, `cursor` (en la lectura) o `inverse[<n>]` (al deshacer). | Alguien cambió el destino: relee con `hebra_read_sheet` y rehaz el lote. Al deshacer, díselo al usuario. |
 | `invalid_input` | Entrada mal formada, con `field` en la lectura y el pintado. `hebra_edit_sheet`: ni `ops` ni `undoOperationId`, o los dos; `undoOperationId` con `dryRun`, garantías o `assets`; un `operationId` vacío o de más de 200 caracteres. `hebra_create_sheet`: `name` sin `.ods`, o `folder` junto con `folderId`. | Corrige la entrada. |
 | `too_large` | Un lote de más de 512 KiB (trae `maxBytes`), o una respuesta de lectura que no cabe en 30000 caracteres (trae `maxChars`). | Parte el lote en varios, o acota el rango. |
@@ -455,12 +634,12 @@ Un error llega como `{error: "<código>", ...}`. Nada se ha escrito salvo que se
 | `document_busy` | Sin hueco ahora mismo para trabajar; trae `retryAfterSeconds`. | Espera esos segundos y reintenta una vez. |
 | `generation_changed` | El documento cambió de base mientras se aplicaba el lote. | Relee y rehaz el lote. |
 | `operation_id_reused` | Ese `operationId` ya se usó con otro lote. | UUID nuevo. |
-| `not_found` | Fichero que no existe, está oculto o en la papelera, o carpeta de destino que no existe. En un deshacer, lote que no está (caducó, ya se deshizo, de otro documento). | Busca de nuevo con `hebra_list_files`; si sigue, díselo sin suponer la causa. |
+| `not_found` | Fichero que no existe, está oculto o en la papelera, o carpeta de destino que no existe. En un deshacer, lote que no está (caducó, ya se deshizo, de otro documento). Con `opIndex`: la imagen de `assets` que cita ese comando no se ve o no existe, o la imagen que nombra no está en la hoja. | Busca de nuevo con `hebra_list_files`; si sigue, díselo sin suponer la causa. |
 | `file_exists` | Al crear, ya hay un fichero con ese nombre en la carpeta; trae su `id`. | Otro nombre, o trabaja sobre ese. |
 | `file_type_not_allowed`, `document_invalid` | El fichero no es un `.ods` o no se puede leer como hoja. | Díselo. No lo repares desde aquí. |
 | `file_too_large`, `file_unavailable` | El `.ods` pasa de 25 MiB, o sus bytes no están aquí (sin sync). | `hebra_status`; reintenta una vez más tarde. |
 | `client_outdated`, `writer_outdated`, `space_access_denied` | Espacio de solo lectura para este servidor, escritor de una versión anterior, o espacio no disponible. | Como en [errores](errores.md): no pruebes otras vías ni escribas en otra biblioteca. |
-| `op_unsupported`, `op_invalid`, `doc_head_invalid` | Formato que no es `.ods`; una operación que el motor rechazó (un nombre definido repetido, por ejemplo); el documento aún sin cabecera de sincronización válida. | Díselo con el código y no insistas. |
+| `op_unsupported`, `op_invalid`, `doc_head_invalid` | Formato que no es `.ods`, o (con `opIndex`) un comando de imágenes, tablas o gráficos que este servidor aún no aplica; una operación que el motor rechazó (un nombre definido repetido, por ejemplo); el documento aún sin cabecera de sincronización válida. | Díselo con el código y no insistas. |
 
 Los códigos comunes a todo documento (`.ods` y presentaciones) están descritos en
 [errores](errores.md), en "Documentos".
