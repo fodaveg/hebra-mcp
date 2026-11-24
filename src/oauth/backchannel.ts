@@ -119,6 +119,13 @@ export interface SumegoExchangeInput {
   transactionId: string;
   idToken: string;
   clientId: string;
+  deliveryId?: string;
+}
+
+export interface ExchangeDeliveryRef {
+  requestId: string;
+  transactionId: string;
+  deliveryId: string;
 }
 
 /** Tope del cuerpo del canje con Sumego (SPEC.md §12.9). */
@@ -147,7 +154,7 @@ export class LumbreBackchannel {
     this.api = `${this.appOrigin}/api/integrations/hebra-mcp`;
   }
 
-  private async post(path: string, body: object, maxBodyBytes?: number): Promise<unknown> {
+  private async send(path: string, body: object, maxBodyBytes?: number): Promise<Response> {
     const payload = JSON.stringify(body);
     if (maxBodyBytes !== undefined && Buffer.byteLength(payload) > maxBodyBytes) throw new BackchannelError('invalid');
     let response: Response;
@@ -158,6 +165,14 @@ export class LumbreBackchannel {
         body: payload
       });
     } catch { throw new BackchannelError('unavailable'); }
+    return response;
+  }
+
+  private async post(path: string, body: object, maxBodyBytes?: number): Promise<unknown> {
+    return this.readPost(await this.send(path, body, maxBodyBytes));
+  }
+
+  private async readPost(response: Response): Promise<unknown> {
     if (response.status === 429) {
       throw new BackchannelError('rate_limited', retryAfterSeconds(response.headers.get('retry-after'), Date.now()), 429);
     }
@@ -182,7 +197,7 @@ export class LumbreBackchannel {
     let length = 0;
     try {
       for (;;) {
-        const part = await reader.read();
+        const part = await reader.read().catch(() => { throw new BackchannelError('unavailable'); });
         if (part.done) break;
         length += part.value.byteLength;
         if (length > 65536) throw new BackchannelError('invalid');
@@ -220,8 +235,38 @@ export class LumbreBackchannel {
     return { requestId: value.requestId, expiresAt: value.expiresAt };
   }
 
-  async exchange(requestId: string, transactionId: string): Promise<Grant> {
-    return this.grantFrom(await this.post('exchange', { requestId, transactionId }));
+  async exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<Grant> {
+    return this.grantFrom(await this.post('exchange', { requestId, transactionId, ...(deliveryId ? { deliveryId } : {}) }));
+  }
+
+  /** Solo la respuesta afirmativa del canal autenticado permite reintentar el canje. */
+  async exchangeDeliverySupported(): Promise<boolean> {
+    try {
+      return object(await this.post('exchange/capabilities', {}), ['deliveryId'])?.deliveryId === true;
+    } catch (error) {
+      if (error instanceof BackchannelError) return false;
+      throw error;
+    }
+  }
+
+  async recoverExchangeDelivery(reference: ExchangeDeliveryRef): Promise<Grant | 'pending' | 'closed'> {
+    const response = await this.send('exchange/recover', reference);
+    if (response.status === 202) {
+      if (object(await this.readJson(response), ['state'])?.state === 'pending') return 'pending';
+      throw new BackchannelError('invalid');
+    }
+    if (response.status === 404 || response.status === 410) {
+      const code = errorCode(await this.readJson(response).catch(() => null));
+      if (response.status === 404 && code === 'transaction_not_found' ||
+          response.status === 410 && code === 'pairing_revoked') return 'closed';
+      throw new BackchannelError('invalid', undefined, response.status);
+    }
+    return this.grantFrom(await this.readPost(response));
+  }
+
+  async acknowledgeExchangeDelivery(reference: ExchangeDeliveryRef): Promise<void> {
+    if (object(await this.post('exchange/ack', reference), ['acknowledged'])?.acknowledged !== true)
+      throw new BackchannelError('invalid');
   }
 
   /**

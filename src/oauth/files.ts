@@ -15,7 +15,8 @@
  */
 import { randomBytes } from 'node:crypto';
 import { chmod, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { FileSecretStore, type SecretStore } from '../secrets';
 
 export const OAUTH_TOKENS_FILE = 'oauth-tokens.json';
 
@@ -55,6 +56,13 @@ async function syncDirectory(path: string): Promise<void> {
   } finally {
     await handle.close();
   }
+}
+
+/** Hace durable una cesión de custodia antes de confirmarla al otro servicio. */
+export async function flushSecretStore(store: SecretStore): Promise<void> {
+  if (!(store instanceof FileSecretStore)) return;
+  await store.flush();
+  await syncDirectory(dirname(dirname(store.path)));
 }
 
 /** El JSON de `path`, `null` si no existe. Un JSON corrupto lanza `SyntaxError`. */

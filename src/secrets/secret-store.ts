@@ -29,7 +29,8 @@ export const SECRET_KEYS = ['lumbre-connection', 'recovery-code', 'device-identi
  * (`../accounts/control-secrets.ts`).
  */
 export const CONTROL_SECRET_KEYS = [
-  'hebra-mcp-oauth-grants', 'hebra-mcp-oauth-pending', 'hebra-mcp-sumego-refresh-key'
+  'hebra-mcp-oauth-grants', 'hebra-mcp-oauth-pending', 'hebra-mcp-sumego-refresh-key',
+  'hebra-mcp-oauth-exchange-deliveries', 'hebra-mcp-oauth-grant-key'
 ] as const;
 
 /** Marca de `control/secrets.json`: una vuelta atrás dejó en `secrets.json` la fuente vigente. */

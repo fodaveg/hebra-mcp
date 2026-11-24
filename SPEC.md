@@ -2524,6 +2524,19 @@ sin `initiate_login_uri`.
    concesión: hace falta además un ID token fresco de Sumego para esa persona. Desde ese
    momento el código OAuth, el canje, las familias, la introspección y `/renew` siguen el
    camino de hoy.
+
+   Si el backchannel autenticado `POST /exchange/capabilities` anuncia `{deliveryId:true}`,
+   el broker registra un `deliveryId` antes de enviar `exchange` o `sumego/exchange`. Ante
+   pérdida de respuesta vuelve a comprobar la capacidad y reenvía una vez el mismo cuerpo con
+   el mismo identificador. Una versión sin esa capacidad recibe un solo canje histórico.
+   La concesión recuperada debe seguir activa, con los mismos datos y vínculo. Tras comprobarla
+   se guarda el bearer sellado y se confirma la entrega en `POST /exchange/ack` antes de emitir
+   un código OAuth. El bearer sigue sellado al promocionarlo a familia.
+
+   Tras reiniciar, `POST /exchange/recover` solo permite identificar y revocar la entrega
+   huérfana. Una respuesta pendiente conserva el diario. Este guarda identificadores del
+   backchannel sin guardar el ID token. El consentimiento, PKCE y los códigos OAuth públicos
+   conservan su uso único.
 5. Cada familia guarda el `sub` y el `sid` del ID token (en `oauth-tokens.json`, que pasa a v3,
    con migración que deja `sub`/`sid` a `null` en las familias existentes), y el refresh de
    Sumego CIFRADO con su última renovación (`sumegoRefresh`, `sumegoRenewedAt`). El cifrado es

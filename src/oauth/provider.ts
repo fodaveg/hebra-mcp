@@ -28,6 +28,7 @@ import { RevocationFile } from './owner';
 import { sendAgentRevokedPage, sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendFamilyRateLimitedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
 import { SumegoError, type SumegoOidc } from './sumego';
 import type { RefreshSealer } from './sumego-refresh';
+import type { DeliveredGrant, ExchangeDelivery } from './exchange-delivery';
 import { familyRateKey, FamilyRateLimitedError, logoutMatches, TokenStore, type FamilyIdentity, type IssuedTokens, type LogoutSelector, type SumegoRefreshState } from './token-store';
 
 export const OAUTH_SCOPE = 'hebra:mcp';
@@ -142,6 +143,7 @@ interface AuthorizationCode {
   challenge: string;
   resource: string;
   grant: Grant;
+  stageHash: string;
   issuedAt: number;
   expiresAt: number;
   /** `sub`/`sid` del ID token de Sumego; `null` con el login de Lumbre. */
@@ -218,6 +220,7 @@ export interface HebraOAuthProviderOptions {
   revocations: RevocationFile;
   tokens: TokenStore;
   grants: GrantSecrets;
+  exchangeDelivery?: ExchangeDelivery;
   secrets: SecretStore;
   backchannel: LumbreBackchannel;
   clients?: ClaudeClientsStore;
@@ -258,6 +261,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private readonly revocations: RevocationFile;
   private readonly tokens: TokenStore;
   private readonly grants: GrantSecrets;
+  private readonly exchangeDelivery?: ExchangeDelivery;
   private readonly secrets: SecretStore;
   private readonly backchannel: LumbreBackchannel;
   private readonly clients: ClaudeClientsStore;
@@ -300,6 +304,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     this.revocations = options.revocations;
     this.tokens = options.tokens;
     this.grants = options.grants;
+    this.exchangeDelivery = options.exchangeDelivery;
     this.secrets = options.secrets;
     this.backchannel = options.backchannel;
     this.clients = options.clients ?? new ClaudeClientsStore({ now: options.now });
@@ -425,6 +430,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       this.discardCode(hash, code);
     }
     this.closedLogouts = this.closedLogouts.filter((entry) => entry.until > now);
+    void this.exchangeDelivery?.recover().catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
   }
 
   private discardPending(id: string, pending: PendingAuthorization): void {
@@ -469,7 +475,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
   private discardCode(hash: string, code: AuthorizationCode): void {
     this.codes.delete(hash);
     void this.backchannel.revoke(code.grant.accessToken)
-      .then(() => this.grants.unstage(hash))
+      .then(() => this.grants.unstage(code.stageHash))
       .catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
   }
 
@@ -828,9 +834,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     if (pending.claimed) { this.pending.delete(key); sendUnavailablePage(res); return; }
     pending.claimed = true;
-    let grant: Grant;
+    const exchangeInput = { requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId };
+    let delivered: DeliveredGrant;
     try {
-      grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId });
+      delivered = await this.deliverExchange(pending, deliveryId => this.backchannel.sumegoExchange({ ...exchangeInput, deliveryId }));
     } catch (error) {
       const revoked = pending.binding !== null && this.pairingRevokedBy(error, pending.binding);
       const status = error instanceof BackchannelError ? error.status : undefined;
@@ -870,15 +877,29 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     try {
       // Un logout pudo llegar mientras Lumbre canjeaba.
       if (this.loggedOut(authorization.identity, authorization.idTokenIat)) throw new Error('logged_out');
-      const target = await this.issueCode(key, pending, grant, authorization);
+      const target = await this.issueCode(key, pending, delivered.grant, authorization, delivered.stageHash);
       logEvent({ event: 'oauth.consent', result: 'approved' });
       res.redirect(302, target);
     } catch {
       this.pending.delete(key);
-      await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      await this.revokeDeliveredGrant(delivered);
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       sendDeniedPage(res);
     }
+  }
+
+  private async deliverExchange(pending: PendingAuthorization, send: (deliveryId?: string) => Promise<Grant>): Promise<DeliveredGrant> {
+    if (!pending.requestId) throw new BackchannelError('invalid');
+    return this.exchangeDelivery
+      ? this.exchangeDelivery.exchange({ requestId: pending.requestId, transactionId: pending.transactionId }, send)
+      : { grant: await send() };
+  }
+
+  private async revokeDeliveredGrant({ grant, stageHash }: DeliveredGrant): Promise<void> {
+    try {
+      await this.backchannel.revoke(grant.accessToken);
+      if (stageHash) await this.grants.unstage(stageHash);
+    } catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); }
   }
 
   /**
@@ -886,7 +907,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * solicitud y el emparejado actual, y emite el código OAuth de un uso. Devuelve la URL del
    * callback del cliente; lanza si algo no casa (quien llama revoca la concesión).
    */
-  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null): Promise<string> {
+  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null,
+    storedStageHash?: string): Promise<string> {
     if (pending.createdAt <= await this.revokedBefore() || !pending.binding ||
       !sameBinding(grant, pending.binding) ||
       grant.clientId !== pending.clientId || grant.resource !== this.resource || Date.parse(grant.expiresAt) <= this.now()) {
@@ -906,12 +928,13 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     await this.assertAccountActive(account);
     const code = randomBytes(32).toString('base64url');
     const hash = sha256(code);
-    await this.grants.stage(hash, grant.accessToken);
+    const stageHash = storedStageHash ?? hash;
+    if (!storedStageHash) await this.grants.stage(stageHash, grant.accessToken);
     try { await this.assertAccountActive(account); }
-    catch (error) { await this.grants.unstage(hash).catch(() => undefined); throw error; }
+    catch (error) { if (!storedStageHash) await this.grants.unstage(stageHash).catch(() => undefined); throw error; }
     this.pending.delete(key);
     this.codes.set(hash, { clientId: pending.clientId, redirectUri: pending.redirectUri, challenge: pending.challenge,
-      resource: this.resource, grant, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS,
+      resource: this.resource, grant, stageHash, issuedAt: this.now(), expiresAt: this.now() + CODE_TTL_MS,
       identity: sumego?.identity ?? null, sumego });
     const target = new URL(pending.redirectUri);
     target.searchParams.set('code', code);
@@ -998,14 +1021,16 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       throw new Error('remote_pairing_identity_invalid');
     }
     await this.requestSumegoFor(pending, input.binding);
-    const grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId!,
-      transactionId: pending.transactionId, idToken: login.idToken, clientId: pending.clientId });
+    const exchangeInput = { requestId: pending.requestId!, transactionId: pending.transactionId,
+      idToken: login.idToken, clientId: pending.clientId };
+    const delivered = await this.deliverExchange(pending, deliveryId => this.backchannel.sumegoExchange({ ...exchangeInput, deliveryId }));
+    const { grant } = delivered;
     if (!sameBinding(grant, input.binding)) {
-      await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
+      await this.revokeDeliveredGrant(delivered);
       throw new Error('remote_pairing_binding_mismatch');
     }
-    const stage = sha256(`remote-pairing:${pending.transactionId}`);
-    try { await this.grants.stage(stage, grant.accessToken); }
+    const stage = delivered.stageHash ?? sha256(`remote-pairing:${pending.transactionId}`);
+    try { if (!delivered.stageHash) await this.grants.stage(stage, grant.accessToken); }
     catch {
       await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
       throw new BackchannelError('unavailable');
@@ -1031,8 +1056,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       refreshToken: login.refreshToken, refreshedAt: login.refreshedAt };
     if (this.loggedOut(authorization.identity, authorization.idTokenIat)) throw new Error('logged_out');
     const stage = pending.pairingStageHash;
-    const target = await this.issueCode(pending.transactionId, pending, pending.pairingGrant, authorization);
-    await this.grants.unstage(stage).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+    const target = await this.issueCode(pending.transactionId, pending, pending.pairingGrant, authorization, stage);
     login.idToken = null;
     login.refreshToken = null;
     return target;
@@ -1098,16 +1122,16 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (decision === 'denied') { res.status(400).json({ error: 'authorization_unavailable' }); return; }
     if (pending.claimed) { res.status(409).json({ error: 'authorization_unavailable' }); return; }
     pending.claimed = true;
-    let grant: Grant | null = null;
+    let delivered: DeliveredGrant | null = null;
     try {
-      grant = await this.backchannel.exchange(requestId, pending.transactionId);
-      const target = await this.issueCode(key, pending, grant, null);
+      delivered = await this.deliverExchange(pending, deliveryId => this.backchannel.exchange(requestId, pending.transactionId, deliveryId));
+      const target = await this.issueCode(key, pending, delivered.grant, null, delivered.stageHash);
       logEvent({ event: 'oauth.consent', result: 'approved' });
       res.redirect(302, target);
     } catch (error) {
       this.pending.delete(key);
       if (pending.binding) this.pairingRevokedBy(error, pending.binding);
-      if (grant) await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      if (delivered) await this.revokeDeliveredGrant(delivered);
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       res.status(400).json({ error: 'invalid_grant' });
     }
@@ -1248,7 +1272,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const cleanup = async () => {
       try {
         await this.backchannel.revoke(grant.accessToken);
-        await this.grants.unstage(hash);
+        await this.grants.unstage(entry.stageHash);
       } catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); }
     };
     if (entry.clientId !== client.client_id || redirectUri !== entry.redirectUri ||
@@ -1283,9 +1307,12 @@ export class HebraOAuthProvider implements OAuthServerProvider {
         grant: { ...metadata, active: true }, authorizedAt: entry.issuedAt, identity: entry.identity,
         sumego: sumego ? { sealedRefresh: this.sealer!.seal(sumego.refreshToken), renewedAt: sumego.refreshedAt } : null,
         loggedOut, authorize: () => this.assertAccountActive(account!) }, await this.revokedBefore(),
-      async (familyId, ids) => { await this.grants.markPromoting(hash, familyId); await this.grants.set(familyId, grant.accessToken, ids); });
+      async (familyId, ids) => {
+        await this.grants.markPromoting(entry.stageHash, familyId);
+        await this.grants.set(familyId, grant.accessToken, ids, entry.stageHash);
+      });
       await this.assertAccountActive(account);
-      await this.grants.unstage(hash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+      await this.grants.unstage(entry.stageHash).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
       logEvent({ event: 'oauth.token', grant: 'authorization_code', result: 'issued' });
       return this.tokensResponse(issued);
     } catch (error) {

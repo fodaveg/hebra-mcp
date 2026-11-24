@@ -84,6 +84,7 @@ async function expectNothingLostNorDivergent(dataDir: string, expected: StoredSe
   const inControl = await rawGlobals(control);
   for (const key of CONTROL_SECRET_KEYS) {
     const found = [inLegacy[key], inControl[key]].filter((value) => value !== undefined);
+    if (expected[key] === undefined) { expect(found).toEqual([]); continue; }
     expect(found.length).toBeGreaterThan(0);
     for (const value of found) expect(value).toBe(expected[key]);
   }
@@ -111,7 +112,7 @@ describe('migrateControlSecrets', () => {
 
     const report = await migrateControlSecrets(legacy, control);
 
-    expect(report.retired.sort()).toEqual([...CONTROL_SECRET_KEYS].sort());
+    expect(report.retired.sort()).toEqual(Object.keys(expected).sort());
     await expectMigrated(dataDir, expected);
     expect((await stat(controlPath(dataDir))).mode & 0o777).toBe(0o600);
     expect((await stat(accountControlDir(dataDir))).mode & 0o777).toBe(0o700);
@@ -364,7 +365,7 @@ describe('vuelta atrás', () => {
 
     const report = await restoreControlSecrets(legacy, control);
 
-    expect(report.restored.sort()).toEqual([...CONTROL_SECRET_KEYS].sort());
+    expect(report.restored.sort()).toEqual(Object.keys(expected).sort());
     expect(await rawGlobals(legacy)).toEqual(expected);
     expect(await rawGlobals(control)).toEqual(expected);
     expect((await stat(fileSecretStorePath(dataDir))).mode & 0o777).toBe(0o600);
@@ -498,7 +499,7 @@ describe('vuelta atrás', () => {
 
     server.release();
     const report = await rollbackControlSecrets(dataDir);
-    expect(report.restored.sort()).toEqual([...CONTROL_SECRET_KEYS].sort());
+    expect(report.restored.sort()).toEqual(Object.keys(expected).sort());
     expect(await rawGlobals(openFileSecretStore(dataDir))).toEqual(expected);
     // `server.lock` se queda en disco, vacío, por diseño; la orden no deja ningún `writer.lock`.
     expect((await readdir(accountControlDir(dataDir))).sort()).toEqual(['secrets.json', 'server.lock']);

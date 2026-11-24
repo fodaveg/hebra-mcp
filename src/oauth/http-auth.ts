@@ -40,6 +40,7 @@ import { BackchannelError, DEFAULT_LUMBRE_APP_ORIGIN, LumbreBackchannel } from '
 import { BackchannelLogout } from './backchannel-logout';
 import { CLAUDE_CALLBACK, ClaudeClientsStore, isCodexCallback, LECHAT_CALLBACK } from './clients';
 import { installFailureLimits } from './failure-limit';
+import { ExchangeDelivery } from './exchange-delivery';
 import { GrantSecrets } from './grants';
 import { readLoginConfig } from './login-config';
 import { LogoutJtiStore } from './logout-jtis';
@@ -107,6 +108,8 @@ export async function loadOAuthHttpAuth(
   const grants = await GrantSecrets.open(control, tokens.familyIds());
   await GrantSecrets.recoverPending(control, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
   await grants.recoverOrphans(tokens.familyIds(), (token) => backchannel.revoke(token));
+  const exchangeDelivery = new ExchangeDelivery(control, grants, backchannel, config.resourceUrl);
+  await exchangeDelivery.recover().catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
   if (options.multiuser && !accounts.legacyAccount()) {
     const paired = await readPairedSecrets(secrets!);
     if (paired) {
@@ -133,6 +136,7 @@ export async function loadOAuthHttpAuth(
     revocations,
     tokens,
     grants,
+    exchangeDelivery,
     secrets: secrets!,
     backchannel,
     clients: new ClaudeClientsStore({ fetch: options.fetch, now }),
