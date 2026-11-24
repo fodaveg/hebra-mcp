@@ -101,6 +101,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     return response({ active: true, credentialId: GRANT_ID, clientId, resource, scope: 'hebra:mcp', accountId: ACCOUNT,
       pairedCredentialId: brokerPair, syncVaultId: brokerVault, opaqueDeviceId: brokerDevice, expiresAt: grantExpiresAt });
   }
+  if (path === 'exchange/capabilities') return response({ error: 'not_found' }, 404);
   if (path === 'renew') {
     renewCount += 1;
     expect(Object.keys(body)).toEqual(['accessToken']);

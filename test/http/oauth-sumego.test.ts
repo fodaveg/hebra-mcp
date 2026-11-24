@@ -187,6 +187,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
   if (path === 'introspect') {
     return json({ ...brokerGrant, active: true, clientId: DCR_CLIENT_ID, resource: app.config.resourceUrl, expiresAt: grantExpiresAt });
   }
+  if (path === 'exchange/capabilities') return json({ deliveryId: false });
   if (path === 'renew') {
     renewCount += 1;
     if (renewResponse) return renewResponse();

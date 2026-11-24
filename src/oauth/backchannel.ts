@@ -249,6 +249,15 @@ export class LumbreBackchannel {
     }
   }
 
+  /** La capacidad afirmativa de la base propia anuncia también el recibo de /renew. */
+  async renewalSupported(): Promise<boolean> {
+    const response = await this.send('exchange/capabilities', {});
+    if (response.status === 404 || response.status === 405) return false;
+    const supported = object(await this.readPost(response), ['deliveryId'])?.deliveryId;
+    if (typeof supported !== 'boolean') throw new BackchannelError('invalid');
+    return supported;
+  }
+
   async recoverExchangeDelivery(reference: ExchangeDeliveryRef): Promise<Grant | 'pending' | 'closed'> {
     const response = await this.send('exchange/recover', reference);
     if (response.status === 202) {
@@ -300,8 +309,16 @@ export class LumbreBackchannel {
    * oct 2026): la nueva caducidad, 30 días desde la renovación, o `null` si Lumbre ya no la
    * da por viva (caducada, revocada o desvinculada). La introspección no renueva nada.
    */
-  async renew(accessToken: string): Promise<string | null> {
-    const raw = await this.post('renew', { accessToken });
+  async renew(accessToken: string, renewalId?: string): Promise<string | null> {
+    const body = { accessToken, ...(renewalId ? { renewalId } : {}) };
+    let raw: unknown;
+    try { raw = await this.post('renew', body); }
+    catch (error) {
+      // Una respuesta perdida permite una repetición acotada si el destino sigue negociando el recibo.
+      if (!renewalId || !(error instanceof BackchannelError) || error.kind !== 'unavailable' ||
+        error.status !== undefined || !await this.renewalSupported()) throw error;
+      raw = await this.post('renew', body);
+    }
     if (object(raw, ['active'])?.active === false) return null;
     const value = object(raw, ['active', 'expiresAt']);
     if (!value || value.active !== true || !isoInstant(value.expiresAt)) throw new BackchannelError('invalid');

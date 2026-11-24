@@ -91,6 +91,7 @@ async function start(): Promise<void> {
           const path = new URL(String(input)).pathname;
           const who = (['david', 'mikel'] as const).find((name) => bearerOf(name) === body.accessToken);
           if (path.endsWith('/introspect')) return json(who ? grants[who] : { active: false });
+          if (path.endsWith('/exchange/capabilities')) return json({ deliveryId: false });
           if (path.endsWith('/renew')) { renewed.push(body.accessToken); return json({ active: true, expiresAt: grants.david.expiresAt }); }
           if (path.endsWith('/revoke')) { revoked.push(body.accessToken); return json({ revoked: true }); }
           throw new Error('unexpected_backchannel_route');

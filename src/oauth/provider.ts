@@ -1208,7 +1208,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * Un `null`, un desajuste o un error del backchannel nunca se guardan.
    */
   private async active(familyId: string, grant: ActiveGrant, identity: FamilyIdentity | null,
-    useCache: boolean): Promise<AuthorizedAccount | null> {
+    useCache: boolean, recoverRenewal = false): Promise<AuthorizedAccount | null> {
     let account = this.accounts.authorize(grant, identity?.sub ?? null);
     let legacyCandidate = false;
     if (!account) {
@@ -1226,7 +1226,8 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     const bearer = this.grants.get(familyId);
     if (!bearer) { this.forgetIntrospection(familyId); return null; }
-    if (account && useCache && this.cachedIntrospection(familyId, grantFingerprint(grant))) return account;
+    if (account && useCache && !this.tokens.pendingRenewal(familyId) &&
+      this.cachedIntrospection(familyId, grantFingerprint(grant))) return account;
     const epoch = this.introspectionEpoch;
     const checkedAt = this.now();
     const monotonicCheckedAt = performance.now();
@@ -1245,10 +1246,17 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (attempt.invalidated || epoch !== this.introspectionEpoch) return null;
     const sameGrant = inspected.credentialId === grant.credentialId && inspected.clientId === grant.clientId &&
       inspected.accountId === grant.accountId && sameBinding(inspected, grant);
-    if (!sameGrant || inspected.expiresAt !== grant.expiresAt) {
-      // Solo la fecha, con una renovación a medio guardar: transitorio, no se corta la familia.
-      if (sameGrant && this.renewing.has(familyId)) throw new BackchannelError('unavailable');
+    const sameExpiry = inspected.expiresAt === grant.expiresAt;
+    if (!sameGrant) {
       await this.dropFamily(familyId); return null;
+    }
+    if (!sameExpiry) {
+      const pendingRenewal = this.tokens.pendingRenewal(familyId);
+      // /mcp no acepta la fecha nueva hasta que la rotación recupere su recibo y la guarde.
+      if (!recoverRenewal || !pendingRenewal || Date.parse(inspected.expiresAt) < Date.parse(grant.expiresAt)) {
+        if (pendingRenewal || this.renewing.has(familyId)) throw new BackchannelError('unavailable');
+        await this.dropFamily(familyId); return null;
+      }
     }
     if (legacyCandidate) {
       try { account = await this.accounts.claimLegacy({ sub: identity!.sub, grant: inspected }); }
@@ -1257,7 +1265,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       await this.dropFamily(familyId); return null;
     }
     try { await this.assertAccountActive(account); } catch { await this.dropFamily(familyId); return null; }
-    this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
+    if (sameExpiry) this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
     return account;
   }
 
@@ -1413,25 +1421,39 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       const candidate = this.tokens.lookupRefresh(refreshToken, client.client_id, revokedBefore);
       if (!candidate) return this.rejectRefresh(refreshToken, client.client_id, revokedBefore);
       const { familyId } = candidate;
+      const pendingRenewal = this.tokens.pendingRenewal(familyId);
       // Emitir tokens nuevos exige una introspección fresca: la caché solo ahorra la de `/mcp`.
       let account: AuthorizedAccount;
       try {
-        const active = await this.active(familyId, candidate.grant, candidate.identity, false);
+        const active = await this.active(familyId, candidate.grant, candidate.identity, false, pendingRenewal !== undefined);
         if (!active) throw new InvalidGrantError('Refresh token no válido.');
         account = active;
       }
       catch (error) { if (error instanceof InvalidGrantError) throw error; throw new ServerError('Consentimiento temporalmente no disponible.'); }
       const bearer = this.grants.get(familyId);
       if (!bearer) { this.forgetIntrospection(familyId); throw new InvalidGrantError('Refresh token no válido.'); }
-      // Orden (SPEC.md §12.9): introspección fresca en Lumbre (arriba), renovación horaria con
-      // Sumego y, solo si la sesión de Sumego sigue viva, `/renew`, para que una sesión cerrada
-      // no alargue 30 días la concesión. El refresh rotado de Sumego se guarda en la misma
-      // escritura que rota el de Hebra; si algo falla antes, queda en memoria para el reintento.
-      const sumegoUpdate = await this.renewSumego(familyId);
+      let renewalSupported: boolean;
+      try { renewalSupported = await this.backchannel.renewalSupported(); }
+      catch { throw new ServerError('temporarily_unavailable'); }
+      if (pendingRenewal && !renewalSupported) throw new ServerError('temporarily_unavailable');
+      // La introspección y, si toca, la renovación horaria de Sumego preceden a /renew.
+      let sumegoUpdate = await this.renewSumego(familyId);
+      let renewalId: string | undefined;
+      if (renewalSupported) {
+        let prepared: string | null;
+        try {
+          prepared = await this.tokens.prepareRefreshRenewal(refreshToken, client.client_id,
+            await this.revokedBefore(), sumegoUpdate);
+        } catch { throw new ServerError('temporarily_unavailable'); }
+        if (prepared === null) throw new InvalidGrantError('Refresh token no válido.');
+        renewalId = prepared;
+        if (sumegoUpdate) this.sumegoRotations.delete(familyId);
+        sumegoUpdate = undefined;
+      }
       this.renewing.add(familyId);
       try {
         let renewed: string | null;
-        try { renewed = await this.backchannel.renew(bearer); }
+        try { renewed = await this.backchannel.renew(bearer, renewalId); }
         catch {
           logEvent({ event: 'oauth.renew', result: 'unavailable' });
           throw new ServerError('temporarily_unavailable');
@@ -1446,7 +1468,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
           logEvent({ event: 'oauth.renew', result: 'invalid' });
           throw new ServerError('temporarily_unavailable');
         }
-        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, revokedBefore, renewed,
+        const outcome = await this.tokens.rotateRefresh(refreshToken, client.client_id, await this.revokedBefore(), renewed,
           sumegoUpdate, () => this.assertAccountActive(account));
         // Guardada (o la familia ya no existe): la rotación en memoria ya no hace falta.
         if (sumegoUpdate) this.sumegoRotations.delete(familyId);

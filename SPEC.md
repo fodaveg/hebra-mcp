@@ -2229,13 +2229,20 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   que rota el refresh, antes de entregar tokens, porque la introspección siguiente la
   compara exactamente. `{active:false}` corta la familia y da `invalid_grant`: hay que
   volver a dar consentimiento. Red, 5xx, 429 o una respuesta inesperada dan `server_error`
-  (500) sin tocar la familia ni `oauth-tokens.json`, y el mismo refresh vale al reintentar.
+  (500) y el mismo refresh vale al reintentar mientras siga vigente.
   El handler de `/token` del SDK no deja fijar cabeceras desde el proveedor, así que el
   `Retry-After` de un 429 de Lumbre se lee pero no llega al cliente. Dos refresh de la misma
   familia se serializan: solo uno renueva. Mientras una renovación está a medio guardar,
   una introspección de `/mcp` que solo discrepa en la fecha da 503 y no corta la familia.
-  Si la escritura falla después de renovar, la familia queda con la fecha vieja y la
-  introspección siguiente la corta (cerrado ante la duda).
+  Con `POST /exchange/capabilities` y `{deliveryId:true}`, el broker guarda un `renewalId`
+  UUID en `oauth-tokens.json` antes de llamar a `/renew`, ligado al refresh vigente por su
+  hash. Si ya rotó el refresh de Sumego también guarda su valor sellado. Envía ese mismo
+  UUID al repetir tras pérdida de respuesta o reinicio, y lo borra en la escritura que
+  publica el refresh nuevo. El refresh vigente puede recuperar una fecha más reciente si
+  la introspección confirma la misma concesión. El recibo se comprueba con su autoridad
+  actual, también cuando ya se confirmó. Con un UUID pendiente y el destino sin capacidad
+  se devuelve indisponibilidad. Un destino legado conserva el cuerpo `{accessToken}` y,
+  tras perder la respuesta, corta la familia si la siguiente introspección discrepa.
 - El origen de Lumbre es `LUMBRE_APP_ORIGIN` (H36; por defecto `https://app.lumbre.pro`),
   validado como `HEBRA_MCP_PUBLIC_URL`: destino del backchannel y único origen admitido en
   la URL de consentimiento que devuelve `/requests`. Otro origen da 503 sin redirigir.

@@ -96,6 +96,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
     const grant = lumbreGrants.get(body.accessToken!);
     return json(grant ? { ...grant } : { active: false });
   }
+  if (path === 'exchange/capabilities') return json({ deliveryId: false });
   if (path === 'renew') {
     if (renewResponse) return renewResponse();
     const grant = lumbreGrants.get(body.accessToken!);

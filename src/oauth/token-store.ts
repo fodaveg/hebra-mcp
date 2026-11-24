@@ -33,7 +33,7 @@
  *   con su concesión. Crear familias tiene un ritmo por persona (`FAMILY_RATE_LIMIT` por hora) que
  *   solo la frena a ella. Vive en memoria: un reinicio lo pone a cero.
  */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { logEvent } from '../log/logger';
 import { readJsonOrNull, tokensFilePath, writeJsonAtomic } from './files';
 import { sameBinding, type ActiveGrant, type Binding } from './backchannel';
@@ -51,6 +51,7 @@ const ACCESS_PREFIX = 'hmcp_at_';
 const REFRESH_PREFIX = 'hmcp_rt_';
 const ACCESS_PATTERN = /^hmcp_at_[A-Za-z0-9_-]{43}$/;
 const REFRESH_PATTERN = /^hmcp_rt_([A-Za-z0-9_-]{22})\.[A-Za-z0-9_-]{43}$/;
+const RENEWAL_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 interface AccessEntry {
   hash: string;
@@ -65,6 +66,8 @@ interface Family {
   createdAt: number;
   expiresAt: number;
   refreshHash: string;
+  /** Intención de renovación upstream ligada al refresh vigente. Se borra al rotarlo. */
+  renewalId?: string;
   /** Hash del refresh anterior y cuándo se rotó: la ventana de gracia (`REFRESH_REUSE_GRACE_MS`). */
   previousRefreshHash?: string;
   rotatedAt?: number;
@@ -201,6 +204,7 @@ function isFamilyV2(value: unknown): value is Omit<Family, 'sub' | 'sid' | 'sume
     typeof family.createdAt === 'number' &&
     typeof family.expiresAt === 'number' &&
     typeof family.refreshHash === 'string' &&
+    (family.renewalId === undefined || typeof family.renewalId === 'string' && RENEWAL_ID.test(family.renewalId)) &&
     (family.previousRefreshHash === undefined || typeof family.previousRefreshHash === 'string') &&
     (family.rotatedAt === undefined || typeof family.rotatedAt === 'number') &&
     typeof family.grant === 'object' && family.grant !== null &&
@@ -449,6 +453,26 @@ export class TokenStore {
     }, () => { if (countedAt !== null) this.uncountFamilyStart(rateKey, countedAt); });
   }
 
+  pendingRenewal(familyId: string): string | undefined {
+    return this.lookups().byId.get(familyId)?.renewalId;
+  }
+
+  /** Guarda la intención y, si ya rotó Sumego, el refresh cifrado antes de enviar /renew. */
+  prepareRefreshRenewal(refreshToken: string, clientId: string, revokedBefore: number,
+    sumego?: SumegoRefreshState): Promise<string | null> {
+    return this.mutate(() => {
+      const candidate = this.lookupRefresh(refreshToken, clientId, revokedBefore);
+      if (!candidate) return null;
+      const family = this.lookups().byId.get(candidate.familyId)!;
+      family.renewalId ??= randomUUID();
+      if (sumego) {
+        family.sumegoRefresh = sumego.sealedRefresh;
+        family.sumegoRenewedAt = sumego.renewedAt;
+      }
+      return family.renewalId;
+    });
+  }
+
   /**
    * Rota un refresh. Reutilizar uno ya rotado revoca su familia entera. Con
    * `renewedExpiresAt` (la fecha que devolvió `/renew`), la familia y su concesión pasan a
@@ -493,6 +517,7 @@ export class TokenStore {
       await authorize?.();
       family.previousRefreshHash = family.refreshHash;
       family.rotatedAt = now;
+      delete family.renewalId;
       if (renewedExpiresAt !== undefined) {
         // En el sitio, no una copia: una verificación en vuelo que ya tiene la concesión
         // compara con la fecha nueva. Si la escritura falla, `mutate` restaura la copia previa.

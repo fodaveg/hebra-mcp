@@ -141,6 +141,7 @@ beforeEach(async () => {
         const grant = granted.get(body.accessToken);
         const path = new URL(String(input)).pathname;
         if (path.endsWith('/introspect')) return json(grant ?? { active: false });
+        if (path.endsWith('/exchange/capabilities')) return json({ deliveryId: false });
         if (path.endsWith('/renew')) { await beforeRenew?.(); return json({ active: true, expiresAt: grant!.expiresAt }); }
         if (path.endsWith('/revoke')) return json({ revoked: true });
         throw new Error('unexpected_backchannel_route');
