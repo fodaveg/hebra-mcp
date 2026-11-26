@@ -32,6 +32,7 @@ let requestsResponse: () => Promise<Response>;
 
 async function broker(input: string | URL, init?: RequestInit): Promise<Response> {
   const path = new URL(String(input)).pathname.split('/').at(-1);
+  if (path === 'capabilities') return new Response(null, { status: 404 });
   if (path !== 'requests') throw new Error('unexpected route');
   requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
   return requestsResponse();

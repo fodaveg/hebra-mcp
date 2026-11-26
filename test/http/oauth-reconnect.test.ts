@@ -69,6 +69,7 @@ async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Res
 
 async function broker(input: string | URL, _init?: RequestInit): Promise<Response> {
   const path = new URL(String(input)).pathname.replace('/api/integrations/hebra-mcp/', '');
+  if (path === 'exchange/capabilities') return new Response(null, { status: 404 });
   if (path === 'requests') {
     requestsCalls += 1;
     return requestsReply ? requestsReply() : json({ requestId: randomUUID(), expiresAt: new Date(Date.now() + 600_000).toISOString() });

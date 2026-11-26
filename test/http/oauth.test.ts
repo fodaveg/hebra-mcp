@@ -75,6 +75,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
   if (!available) throw new Error('offline');
   const body = JSON.parse(String(init?.body)) as Record<string, string>;
   const path = new URL(String(input)).pathname.split('/').at(-1);
+  if (path === 'capabilities') return new Response(null, { status: 404 });
   if (path === 'requests') {
     requestCount += 1;
     requestClientName = body.clientName;

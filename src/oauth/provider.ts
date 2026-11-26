@@ -5,7 +5,7 @@
  * propio de hebra-mcp en Sumego y la página de consentimiento de aquí, y Lumbre emite la
  * concesión a partir del ID token. Desde la concesión, el camino es el mismo.
  */
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response } from 'express';
 import type { OAuthRegisteredClientsStore } from '@modelcontextprotocol/sdk/server/auth/clients.js';
 import { InvalidGrantError, InvalidRequestError, InvalidScopeError, InvalidTargetError, InvalidTokenError, ServerError, TooManyRequestsError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
@@ -18,11 +18,11 @@ import { logEvent } from '../log/logger';
 import { hebraAccountIdOf } from '../pair/remote/account-id';
 import { readPairedSecrets, type SecretStore } from '../secrets';
 import { PairingRevocation } from '../status/pairing-revocation';
-import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type Grant, sameBinding } from './backchannel';
+import { BackchannelError, LumbreBackchannel, type ActiveGrant, type Binding, type DeliveryRef, type Grant, deliveryMayHaveIssued, sameBinding } from './backchannel';
 import { rateKey } from './backchannel-logout';
 import { ClaudeClientsStore, isAllowedRedirectUri } from './clients';
 import { sendTooManyRequests } from './failure-limit';
-import { GrantSecrets } from './grants';
+import { GrantSecrets, closedDelivery } from './grants';
 import type { LoginProvider } from './login-config';
 import { RevocationFile } from './owner';
 import { sendAgentRevokedPage, sendConsentExpiredPage, sendConsentPage, sendDeniedPage, sendFamilyRateLimitedPage, sendPairingRevokedPage, sendUnavailablePage } from './pages';
@@ -178,6 +178,12 @@ function pastLogin(pending: PendingAuthorization): boolean {
 }
 
 function sha256(value: string): string { return createHash('sha256').update(value).digest('hex'); }
+
+/** Id estable de una rotación OAuth, separado del hash que autentica el refresh local. */
+function renewalId(refreshToken: string): string {
+  const hex = sha256(`renew:${refreshToken}`);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}
 function s256(value: string): string { return createHash('sha256').update(value, 'ascii').digest('base64url'); }
 /**
  * Motivo cerrado de un fallo para el log: clase y `kind`/`code`/`reason` de los errores propios
@@ -828,9 +834,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     }
     if (pending.claimed) { this.pending.delete(key); sendUnavailablePage(res); return; }
     pending.claimed = true;
-    let grant: Grant;
+    let delivered: { grant: Grant; delivery?: DeliveryRef };
     try {
-      grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId });
+      const input = { requestId: pending.requestId, transactionId: pending.transactionId, idToken, clientId: pending.clientId };
+      delivered = await this.exchangeGrant(input, (id) => this.backchannel.sumegoExchange(input, id));
     } catch (error) {
       const revoked = pending.binding !== null && this.pairingRevokedBy(error, pending.binding);
       const status = error instanceof BackchannelError ? error.status : undefined;
@@ -870,15 +877,60 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     try {
       // Un logout pudo llegar mientras Lumbre canjeaba.
       if (this.loggedOut(authorization.identity, authorization.idTokenIat)) throw new Error('logged_out');
-      const target = await this.issueCode(key, pending, grant, authorization);
+      const target = await this.issueCode(key, pending, delivered.grant, authorization, delivered.delivery);
       logEvent({ event: 'oauth.consent', result: 'approved' });
       res.redirect(302, target);
     } catch {
       this.pending.delete(key);
-      await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      await this.discardGrant(delivered.grant, delivered.delivery);
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       sendDeniedPage(res);
     }
+  }
+
+  /** Registra la transacción antes de canjear y recupera solo la misma entrega. */
+  private async exchangeGrant(
+    request: Pick<DeliveryRef, 'requestId' | 'transactionId'>,
+    exchange: (id?: string) => Promise<Grant>
+  ): Promise<{ grant: Grant; delivery?: DeliveryRef }> {
+    if (!await this.backchannel.supportsDelivery()) return { grant: await exchange() };
+    const delivery = { requestId: request.requestId, transactionId: request.transactionId, deliveryId: randomUUID() };
+    await this.grants.recordDelivery(delivery);
+    try {
+      return { grant: await exchange(delivery.deliveryId), delivery };
+    } catch (error) {
+      if (!deliveryMayHaveIssued(error)) {
+        await this.forgetDelivery(delivery);
+        throw error;
+      }
+      try { return { grant: await this.backchannel.recoverDelivery(delivery), delivery }; }
+      catch (recovery) {
+        if (closedDelivery(recovery)) await this.forgetDelivery(delivery);
+        if (recovery instanceof BackchannelError && recovery.kind === 'pairing_revoked') throw recovery;
+        throw error;
+      }
+    }
+  }
+
+  private async forgetDelivery(delivery: DeliveryRef): Promise<void> {
+    await this.grants.forgetDelivery(delivery).catch(() => logEvent({ event: 'oauth.grant.cleanup', result: 'failed' }));
+  }
+
+  private async acceptDelivery(delivery: DeliveryRef): Promise<void> {
+    await this.grants.ownDelivery(delivery);
+    try { await this.backchannel.acknowledgeDelivery(delivery); }
+    catch { logEvent({ event: 'oauth.grant.ack', result: 'unavailable' }); return; }
+    await this.forgetDelivery(delivery);
+  }
+
+  private async discardGrant(grant: Grant, delivery?: DeliveryRef): Promise<void> {
+    try {
+      await this.backchannel.revoke(grant.accessToken);
+      if (delivery) {
+        await this.backchannel.acknowledgeDelivery(delivery);
+        await this.forgetDelivery(delivery);
+      }
+    } catch { logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }); }
   }
 
   /**
@@ -886,7 +938,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * solicitud y el emparejado actual, y emite el código OAuth de un uso. Devuelve la URL del
    * callback del cliente; lanza si algo no casa (quien llama revoca la concesión).
    */
-  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null): Promise<string> {
+  private async issueCode(key: string, pending: PendingAuthorization, grant: Grant, sumego: SumegoAuthorization | null, delivery?: DeliveryRef): Promise<string> {
     if (pending.createdAt <= await this.revokedBefore() || !pending.binding ||
       !sameBinding(grant, pending.binding) ||
       grant.clientId !== pending.clientId || grant.resource !== this.resource || Date.parse(grant.expiresAt) <= this.now()) {
@@ -907,6 +959,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     const code = randomBytes(32).toString('base64url');
     const hash = sha256(code);
     await this.grants.stage(hash, grant.accessToken);
+    if (delivery) await this.acceptDelivery(delivery);
     try { await this.assertAccountActive(account); }
     catch (error) { await this.grants.unstage(hash).catch(() => undefined); throw error; }
     this.pending.delete(key);
@@ -998,16 +1051,19 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       throw new Error('remote_pairing_identity_invalid');
     }
     await this.requestSumegoFor(pending, input.binding);
-    const grant = await this.backchannel.sumegoExchange({ requestId: pending.requestId!,
-      transactionId: pending.transactionId, idToken: login.idToken, clientId: pending.clientId });
+    const request = { requestId: pending.requestId!, transactionId: pending.transactionId, idToken: login.idToken, clientId: pending.clientId };
+    const { grant, delivery } = await this.exchangeGrant(request, (id) => this.backchannel.sumegoExchange(request, id));
     if (!sameBinding(grant, input.binding)) {
-      await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
+      await this.discardGrant(grant, delivery);
       throw new Error('remote_pairing_binding_mismatch');
     }
     const stage = sha256(`remote-pairing:${pending.transactionId}`);
-    try { await this.grants.stage(stage, grant.accessToken); }
+    try {
+      await this.grants.stage(stage, grant.accessToken);
+      if (delivery) await this.acceptDelivery(delivery);
+    }
     catch {
-      await this.backchannel.revoke(grant.accessToken).catch(() => undefined);
+      await this.discardGrant(grant, delivery);
       throw new BackchannelError('unavailable');
     }
     pending.pairingGrant = grant;
@@ -1098,16 +1154,17 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (decision === 'denied') { res.status(400).json({ error: 'authorization_unavailable' }); return; }
     if (pending.claimed) { res.status(409).json({ error: 'authorization_unavailable' }); return; }
     pending.claimed = true;
-    let grant: Grant | null = null;
+    let delivered: { grant: Grant; delivery?: DeliveryRef } | undefined;
     try {
-      grant = await this.backchannel.exchange(requestId, pending.transactionId);
-      const target = await this.issueCode(key, pending, grant, null);
+      delivered = await this.exchangeGrant({ requestId, transactionId: pending.transactionId },
+        (id) => this.backchannel.exchange(requestId, pending.transactionId, id));
+      const target = await this.issueCode(key, pending, delivered.grant, null, delivered.delivery);
       logEvent({ event: 'oauth.consent', result: 'approved' });
       res.redirect(302, target);
     } catch (error) {
       this.pending.delete(key);
       if (pending.binding) this.pairingRevokedBy(error, pending.binding);
-      if (grant) await this.backchannel.revoke(grant.accessToken).catch(() => logEvent({ event: 'oauth.grant.revoke', result: 'unavailable' }));
+      if (delivered) await this.discardGrant(delivered.grant, delivered.delivery);
       logEvent({ event: 'oauth.consent', result: 'rejected' });
       res.status(400).json({ error: 'invalid_grant' });
     }
@@ -1184,7 +1241,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
    * Un `null`, un desajuste o un error del backchannel nunca se guardan.
    */
   private async active(familyId: string, grant: ActiveGrant, identity: FamilyIdentity | null,
-    useCache: boolean): Promise<AuthorizedAccount | null> {
+    useCache: boolean, recovery?: { expiresAt?: string }): Promise<AuthorizedAccount | null> {
     let account = this.accounts.authorize(grant, identity?.sub ?? null);
     let legacyCandidate = false;
     if (!account) {
@@ -1221,10 +1278,17 @@ export class HebraOAuthProvider implements OAuthServerProvider {
     if (attempt.invalidated || epoch !== this.introspectionEpoch) return null;
     const sameGrant = inspected.credentialId === grant.credentialId && inspected.clientId === grant.clientId &&
       inspected.accountId === grant.accountId && sameBinding(inspected, grant);
-    if (!sameGrant || inspected.expiresAt !== grant.expiresAt) {
-      // Solo la fecha, con una renovación a medio guardar: transitorio, no se corta la familia.
-      if (sameGrant && this.renewing.has(familyId)) throw new BackchannelError('unavailable');
+    const changedExpiry = inspected.expiresAt !== grant.expiresAt;
+    const pendingRenewal = this.tokens.hasPendingRenewal(familyId);
+    if (!sameGrant || (changedExpiry && !pendingRenewal && !this.renewing.has(familyId))) {
       await this.dropFamily(familyId); return null;
+    }
+    if (changedExpiry) {
+      // Solo el refresh que dejó una marca durable puede reconciliar la fecha con /renew.
+      if (!recovery || !pendingRenewal || Date.parse(inspected.expiresAt) <= this.now()) {
+        throw new BackchannelError('unavailable');
+      }
+      recovery.expiresAt = inspected.expiresAt;
     }
     if (legacyCandidate) {
       try { account = await this.accounts.claimLegacy({ sub: identity!.sub, grant: inspected }); }
@@ -1233,7 +1297,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       await this.dropFamily(familyId); return null;
     }
     try { await this.assertAccountActive(account); } catch { await this.dropFamily(familyId); return null; }
-    this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
+    if (!changedExpiry) this.rememberIntrospection(familyId, grant, checkedAt, monotonicCheckedAt, epoch);
     return account;
   }
 
@@ -1388,8 +1452,9 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       const { familyId } = candidate;
       // Emitir tokens nuevos exige una introspección fresca: la caché solo ahorra la de `/mcp`.
       let account: AuthorizedAccount;
+      const recovery: { expiresAt?: string } = {};
       try {
-        const active = await this.active(familyId, candidate.grant, candidate.identity, false);
+        const active = await this.active(familyId, candidate.grant, candidate.identity, false, recovery);
         if (!active) throw new InvalidGrantError('Refresh token no válido.');
         account = active;
       }
@@ -1404,7 +1469,16 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       this.renewing.add(familyId);
       try {
         let renewed: string | null;
-        try { renewed = await this.backchannel.renew(bearer); }
+        try {
+          // El mismo refresh local conserva el id tras un fallo o un reinicio.
+          const id = await this.backchannel.supportsDelivery() ? renewalId(refreshToken) : undefined;
+          const pending = this.tokens.hasPendingRenewal(familyId);
+          if (!id && pending) throw new BackchannelError('unavailable');
+          if (id && !pending && !await this.tokens.beginRenewal(familyId, refreshToken, client.client_id, revokedBefore)) {
+            throw new BackchannelError('unavailable');
+          }
+          renewed = await this.backchannel.renew(bearer, id);
+        }
         catch {
           logEvent({ event: 'oauth.renew', result: 'unavailable' });
           throw new ServerError('temporarily_unavailable');
@@ -1415,7 +1489,7 @@ export class HebraOAuthProvider implements OAuthServerProvider {
           throw new InvalidGrantError('La autorización caducó: hay que volver a conectar.');
         }
         // «Activa» con una fecha ya pasada no es una renovación: no se toca la familia.
-        if (Date.parse(renewed) <= this.now()) {
+        if (Date.parse(renewed) <= this.now() || (recovery.expiresAt && renewed !== recovery.expiresAt)) {
           logEvent({ event: 'oauth.renew', result: 'invalid' });
           throw new ServerError('temporarily_unavailable');
         }

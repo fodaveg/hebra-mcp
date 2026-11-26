@@ -121,6 +121,16 @@ export interface SumegoExchangeInput {
   clientId: string;
 }
 
+export interface DeliveryRef {
+  requestId: string;
+  transactionId: string;
+  deliveryId: string;
+}
+
+export function deliveryMayHaveIssued(error: unknown): boolean {
+  return !(error instanceof BackchannelError) || error.status === undefined || error.status === 202 || error.status >= 500;
+}
+
 /** Tope del cuerpo del canje con Sumego (SPEC.md §12.9). */
 export const MAX_SUMEGO_EXCHANGE_BODY_BYTES = 16 * 1024;
 
@@ -167,6 +177,7 @@ export class LumbreBackchannel {
       const gone = await this.readJson(response).catch(() => null);
       throw new BackchannelError(errorCode(gone) === 'pairing_revoked' ? 'pairing_revoked' : 'invalid', undefined, 410);
     }
+    if (response.status === 202) throw new BackchannelError('unavailable', undefined, 202);
     if (response.status !== 200) throw new BackchannelError(response.status >= 500 ? 'unavailable' : 'invalid', undefined, response.status);
     return this.readJson(response);
   }
@@ -220,8 +231,21 @@ export class LumbreBackchannel {
     return { requestId: value.requestId, expiresAt: value.expiresAt };
   }
 
-  async exchange(requestId: string, transactionId: string): Promise<Grant> {
-    return this.grantFrom(await this.post('exchange', { requestId, transactionId }));
+  /** Un servidor anterior al protocolo de entrega desconoce esta ruta. */
+  async supportsDelivery(): Promise<boolean> {
+    let raw: unknown;
+    try { raw = await this.post('exchange/capabilities', {}); }
+    catch (error) {
+      if (error instanceof BackchannelError && error.status === 404) return false;
+      throw error;
+    }
+    const value = object(raw, ['deliveryId'])?.deliveryId;
+    if (typeof value !== 'boolean') throw new BackchannelError('invalid');
+    return value;
+  }
+
+  async exchange(requestId: string, transactionId: string, deliveryId?: string): Promise<Grant> {
+    return this.grantFrom(await this.post('exchange', { requestId, transactionId, deliveryId }));
   }
 
   /**
@@ -229,9 +253,19 @@ export class LumbreBackchannel {
    * Lumbre valida el ID token por su cuenta y responde la misma concesión que `exchange`.
    * El cuerpo no pasa de 16 KiB; si pasaría, no se envía.
    */
-  async sumegoExchange(input: SumegoExchangeInput): Promise<Grant> {
+  async sumegoExchange(input: SumegoExchangeInput, deliveryId?: string): Promise<Grant> {
     return this.grantFrom(await this.post('sumego/exchange',
-      { ...input, resource: this.resource, scope: OAUTH_SCOPE }, MAX_SUMEGO_EXCHANGE_BODY_BYTES));
+      { ...input, resource: this.resource, scope: OAUTH_SCOPE, deliveryId }, MAX_SUMEGO_EXCHANGE_BODY_BYTES));
+  }
+
+  async recoverDelivery(ref: DeliveryRef): Promise<Grant> {
+    return this.grantFrom(await this.post('exchange/recover', ref));
+  }
+
+  async acknowledgeDelivery(ref: DeliveryRef): Promise<void> {
+    if (object(await this.post('exchange/ack', ref), ['acknowledged'])?.acknowledged !== true) {
+      throw new BackchannelError('invalid');
+    }
   }
 
   /** La concesión de `exchange` y `sumego/exchange`: mismas claves, misma validación. */
@@ -255,8 +289,8 @@ export class LumbreBackchannel {
    * oct 2026): la nueva caducidad, 30 días desde la renovación, o `null` si Lumbre ya no la
    * da por viva (caducada, revocada o desvinculada). La introspección no renueva nada.
    */
-  async renew(accessToken: string): Promise<string | null> {
-    const raw = await this.post('renew', { accessToken });
+  async renew(accessToken: string, renewalId?: string): Promise<string | null> {
+    const raw = await this.post('renew', { accessToken, renewalId });
     if (object(raw, ['active'])?.active === false) return null;
     const value = object(raw, ['active', 'expiresAt']);
     if (!value || value.active !== true || !isoInstant(value.expiresAt)) throw new BackchannelError('invalid');

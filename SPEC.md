@@ -2218,6 +2218,14 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   restringido para Mistral Vibe y Le Chat, PKCE S256,
   state, códigos de un uso, access de una hora y refresh rotatorio. Un refresh reutilizado
   fuera de la ventana de gracia revoca su familia.
+- Antes del canje en `exchange` o `sumego/exchange`, el relé consulta
+  `POST /api/integrations/hebra-mcp/exchange/capabilities` con `{}`. Si anuncia
+  `{deliveryId:true}`, guarda la referencia del canje en los secretos de control antes de
+  enviar el identificador. Si pierde la respuesta consulta `exchange/recover` con la misma
+  referencia. Envía `exchange/ack` después de guardar el bearer localmente. Al reiniciar,
+  reintenta el acuse o revoca la concesión huérfana que devuelve la recuperación.
+  Un servidor anterior que responde 404 o anuncia `{deliveryId:false}` conserva el cuerpo
+  de canje histórico.
 - Caducidad de la familia (decisión del 17 oct 2026, H-dec4/H31 del audit «Lumbre ·
   integración con Hebra»; sustituye a los 30 días absolutos desde la autorización): la de
   su concesión de Lumbre (`expiresAt`), sin tope propio. Lumbre da 30 días al autorizar y
@@ -2229,13 +2237,17 @@ Diseño del 26 sep 2026 medido sobre hebra-mcp `5290cd1`, lumbre-mcp `186baec` y
   que rota el refresh, antes de entregar tokens, porque la introspección siguiente la
   compara exactamente. `{active:false}` corta la familia y da `invalid_grant`: hay que
   volver a dar consentimiento. Red, 5xx, 429 o una respuesta inesperada dan `server_error`
-  (500) sin tocar la familia ni `oauth-tokens.json`, y el mismo refresh vale al reintentar.
+  (500) sin rotar la familia, y el mismo refresh vale al reintentar.
   El handler de `/token` del SDK no deja fijar cabeceras desde el proveedor, así que el
   `Retry-After` de un 429 de Lumbre se lee pero no llega al cliente. Dos refresh de la misma
   familia se serializan: solo uno renueva. Mientras una renovación está a medio guardar,
   una introspección de `/mcp` que solo discrepa en la fecha da 503 y no corta la familia.
-  Si la escritura falla después de renovar, la familia queda con la fecha vieja y la
-  introspección siguiente la corta (cerrado ante la duda).
+  Con `deliveryId:true`, antes de renovar se guarda en `oauth-tokens.json` la intención de
+  renovar el refresh vigente. Un reintento, incluso tras reiniciar, envía el mismo
+  `renewalId`. Si la introspección ya ve otra fecha para esa concesión, la rotación solo
+  termina si el recibo confirma esa fecha. La rotación retira la intención. En el protocolo
+  histórico, si la escritura falla después de renovar, la familia queda con la fecha vieja
+  y la introspección siguiente la corta.
 - El origen de Lumbre es `LUMBRE_APP_ORIGIN` (H36; por defecto `https://app.lumbre.pro`),
   validado como `HEBRA_MCP_PUBLIC_URL`: destino del backchannel y único origen admitido en
   la URL de consentimiento que devuelve `/requests`. Otro origen da 503 sin redirigir.

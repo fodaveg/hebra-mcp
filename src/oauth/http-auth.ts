@@ -106,6 +106,7 @@ export async function loadOAuthHttpAuth(
   const control = await openControlSecrets(dataDir, secrets!);
   const grants = await GrantSecrets.open(control, tokens.familyIds());
   await GrantSecrets.recoverPending(control, tokens.familyIds(), grants, (token) => backchannel.revoke(token));
+  await grants.recoverDeliveries(backchannel);
   await grants.recoverOrphans(tokens.familyIds(), (token) => backchannel.revoke(token));
   if (options.multiuser && !accounts.legacyAccount()) {
     const paired = await readPairedSecrets(secrets!);

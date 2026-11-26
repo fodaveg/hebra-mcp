@@ -75,6 +75,7 @@ async function sumegoFetch(input: string | URL, init?: RequestInit): Promise<Res
 async function broker(input: string | URL, init?: RequestInit): Promise<Response> {
   const body = JSON.parse(String(init?.body)) as Record<string, string>;
   const path = new URL(String(input)).pathname.replace('/api/integrations/hebra-mcp/', '');
+  if (path === 'exchange/capabilities') return new Response(null, { status: 404 });
   if (path === 'requests') {
     const requestId = randomUUID();
     lumbreRequests.set(requestId, body);

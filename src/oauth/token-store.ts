@@ -65,6 +65,8 @@ interface Family {
   createdAt: number;
   expiresAt: number;
   refreshHash: string;
+  /** Intención de renovar el refresh vigente con un id deduplicado por el upstream. */
+  renewalPending?: true;
   /** Hash del refresh anterior y cuándo se rotó: la ventana de gracia (`REFRESH_REUSE_GRACE_MS`). */
   previousRefreshHash?: string;
   rotatedAt?: number;
@@ -183,6 +185,7 @@ function isFamily(value: unknown): value is Family {
   const sealed = family.sumegoRefresh ?? null;
   const renewedAt = family.sumegoRenewedAt ?? null;
   return nullableString(family.sub) && nullableString(family.sid) &&
+    (family.renewalPending === undefined || family.renewalPending === true) &&
     ((sealed === null && renewedAt === null) || (typeof sealed === 'string' && typeof renewedAt === 'number' && Number.isFinite(renewedAt)));
 }
 
@@ -493,6 +496,7 @@ export class TokenStore {
       await authorize?.();
       family.previousRefreshHash = family.refreshHash;
       family.rotatedAt = now;
+      delete family.renewalPending;
       if (renewedExpiresAt !== undefined) {
         // En el sitio, no una copia: una verificación en vuelo que ya tiene la concesión
         // compara con la fecha nueva. Si la escritura falla, `mutate` restaura la copia previa.
@@ -514,6 +518,21 @@ export class TokenStore {
     const family = this.lookups().byId.get(familyId);
     if (!family || family.sumegoRefresh === null || family.sumegoRenewedAt === null) return null;
     return { sealedRefresh: family.sumegoRefresh, renewedAt: family.sumegoRenewedAt };
+  }
+
+  hasPendingRenewal(familyId: string): boolean {
+    return this.lookups().byId.get(familyId)?.renewalPending === true;
+  }
+
+  /** La marca se guarda antes de enviar /renew; solo la rotación extingue la intención. */
+  beginRenewal(familyId: string, refreshToken: string, clientId: string, revokedBefore: number): Promise<boolean> {
+    return this.mutate(() => {
+      const family = this.lookups().byId.get(familyId);
+      if (!family || family.clientId !== clientId || !this.alive(family, revokedBefore, this.now()) ||
+        !sameHash(sha256(refreshToken), family.refreshHash)) return false;
+      family.renewalPending = true;
+      return true;
+    });
   }
 
   /**

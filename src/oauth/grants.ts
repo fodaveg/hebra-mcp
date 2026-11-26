@@ -4,14 +4,24 @@
  */
 import type { SecretStore } from '../secrets';
 import { logEvent } from '../log/logger';
+import { BackchannelError, type DeliveryRef, type LumbreBackchannel } from './backchannel';
 
 const KEY = 'hebra-mcp-oauth-grants';
 const PENDING_KEY = 'hebra-mcp-oauth-pending';
+const DELIVERY_KEY = 'hebra-mcp-oauth-deliveries';
 const FAMILY = /^[A-Za-z0-9_-]{22}$/;
 const TOKEN = /^[0-9a-f]{64}$/;
 const CODE_HASH = /^[0-9a-f]{64}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const TRANSACTION = /^[A-Za-z0-9_-]{32,256}$/;
+const MAX_DELIVERIES = 4096;
 
 interface PendingGrant { token: string; familyId?: string }
+interface PendingDelivery extends DeliveryRef { owned: boolean }
+
+export function closedDelivery(error: unknown): boolean {
+  return error instanceof BackchannelError && (error.status === 404 || error.status === 410);
+}
 
 function parsePending(raw: string | null): Record<string, PendingGrant> {
   if (raw === null) return {};
@@ -38,6 +48,70 @@ export class GrantSecrets {
   private queue: Promise<unknown> = Promise.resolve();
 
   private constructor(private readonly store: SecretStore) {}
+
+  private async deliveries(): Promise<PendingDelivery[]> {
+    const raw = await this.store.get(DELIVERY_KEY);
+    if (raw === null) return [];
+    let entries: unknown;
+    try { entries = JSON.parse(raw); }
+    catch { throw new Error('invalid_grant_deliveries'); }
+    if (!Array.isArray(entries) || entries.length > MAX_DELIVERIES || entries.some((entry) =>
+      !entry || typeof entry !== 'object' || typeof entry.requestId !== 'string' || !UUID.test(entry.requestId) ||
+      typeof entry.deliveryId !== 'string' || !UUID.test(entry.deliveryId) ||
+      typeof entry.transactionId !== 'string' || !TRANSACTION.test(entry.transactionId) || typeof entry.owned !== 'boolean'
+    )) throw new Error('invalid_grant_deliveries');
+    return entries as PendingDelivery[];
+  }
+
+  private updateDeliveries(update: (entries: PendingDelivery[]) => PendingDelivery[]): Promise<void> {
+    const run = this.queue.then(async () => {
+      await this.store.set(DELIVERY_KEY, JSON.stringify(update(await this.deliveries())));
+    });
+    this.queue = run.catch(() => undefined);
+    return run;
+  }
+
+  recordDelivery(ref: DeliveryRef): Promise<void> {
+    return this.updateDeliveries((entries) => {
+      if (entries.length >= MAX_DELIVERIES) throw new Error('grant_deliveries_full');
+      return [...entries, { ...ref, owned: false }];
+    });
+  }
+
+  ownDelivery(ref: DeliveryRef): Promise<void> {
+    return this.updateDeliveries((entries) => {
+      const entry = entries.find((item) => item.deliveryId === ref.deliveryId);
+      if (!entry) throw new Error('grant_delivery_missing');
+      entry.owned = true;
+      return entries;
+    });
+  }
+
+  forgetDelivery(ref: DeliveryRef): Promise<void> {
+    return this.updateDeliveries((entries) => entries.filter((entry) => entry.deliveryId !== ref.deliveryId));
+  }
+
+  /** Reanuda el acuse o revoca un canje que se interrumpió antes de tener custodia local. */
+  async recoverDeliveries(backchannel: LumbreBackchannel): Promise<void> {
+    const entries = await this.deliveries();
+    for (const { owned, requestId, transactionId, deliveryId } of entries) {
+      const ref = { requestId, transactionId, deliveryId };
+      try {
+        if (!owned) {
+          const grant = await backchannel.recoverDelivery(ref);
+          await backchannel.revoke(grant.accessToken);
+        }
+        await backchannel.acknowledgeDelivery(ref);
+      } catch (error) {
+        if (!closedDelivery(error)) {
+          // Si falla el canal, el resto queda para otro arranque.
+          if (!(error instanceof BackchannelError) || (error.status !== 202 && error.kind !== 'invalid')) return;
+          continue;
+        }
+      }
+      await this.forgetDelivery(ref);
+    }
+  }
 
   static async open(store: SecretStore, _liveIds: readonly string[]): Promise<GrantSecrets> {
     const result = new GrantSecrets(store);

@@ -169,6 +169,7 @@ async function broker(input: string | URL, init?: RequestInit): Promise<Response
   expect(init?.headers).toMatchObject({ authorization: `Bearer ${SECRET}` });
   const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
   const path = new URL(String(input)).pathname.replace('/api/integrations/hebra-mcp/', '');
+  if (path === 'exchange/capabilities') return new Response(null, { status: 404 });
   if (path === 'requests') {
     requestBodies.push(body);
     if (requestsResponse) return requestsResponse();
