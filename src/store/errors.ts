@@ -194,11 +194,21 @@ export class StoreError extends Error {
     readonly operationTarget?: string,
     /** De `file_exists` (D17): el id del fichero VISIBLE que ya tiene ese nombre en la
      *  carpeta de destino. Sale en la respuesta, y lo juzga antes la puerta final. */
-    readonly existingId?: string
+    readonly existingId?: string,
+    /** De un `invalid_input` por tamaño (27 nov 2026): qué campo, su límite y cuánto llegó, en
+     *  bytes. Números, nunca el texto. Cruza el socket del escritor. */
+    readonly size?: StoreSizeDetail
   ) {
     super(code);
     this.name = 'StoreError';
   }
+}
+
+/** El tamaño de un rechazo por tamaño (`StoreError.size`). */
+export interface StoreSizeDetail {
+  field: string;
+  limit: number;
+  received: number;
 }
 
 /** `operation_id_reused` sin haber escrito nada, con lo que nombra el registro. */

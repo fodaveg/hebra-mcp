@@ -66,8 +66,8 @@ y [Johnny.Decimal](johnny-decimal.md).
 
 | Herramienta | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_create_note` | `body` (hasta 100 000 caracteres), `folder?` (ruta) | El título sale del cuerpo (ver "Título de una nota" en `SKILL.md`). No devuelve `sync`. |
-| `hebra_append_to_note` | `id`, `text` (hasta 20 000 caracteres), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: "saved" \| "merged" \| "conflict_copy"`. Con `saved` o `merged`: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. No devuelve `sync`. |
+| `hebra_create_note` | `body` (hasta 2 031 588 bytes de JSON, unos 2 MB: lo que cabe en un sobre del relé), `folder?` (ruta) | El título sale del cuerpo (ver "Título de una nota" en `SKILL.md`). No devuelve `sync`. |
+| `hebra_append_to_note` | `id`, `text` (hasta 1 MiB de JSON por llamada; la nota entera, hasta el tope de `hebra_create_note`), `heading?`, `headingOccurrence?`, `operationId?` | Sin `heading`, añade `\n\n` + texto al final de la nota; con él, al final de ese apartado (subapartados incluidos). `outcome: "saved" \| "merged" \| "conflict_copy"`. Con `saved` o `merged`: `revision` nueva, `totalChars` y `appended: {chars, tail, line, heading?}` (`tail` = el final del texto, leído de la nota guardada). Con `conflict_copy` no hay prueba. Con `operationId`, reintentar con el mismo no lo añade dos veces (24 h): devuelve lo mismo con `replayed: true`. No devuelve `sync`. |
 | `hebra_edit_note` | `id`, `edits: [{find, replace}]` (1-50; suma de todos los `find` y `replace` hasta 100 000), `expectedRevision`, `operationId` | `outcome`, `revision` nueva, `totalChars`, `applied`, `copyId?`, `sync`, `replayed`. Ver "Cómo se edita" en `SKILL.md`. |
 
 ## Organizar y papelera

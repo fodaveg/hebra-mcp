@@ -63,8 +63,8 @@ describe('capacidades', () => {
     expect(capabilities.limits.listProperties).toEqual({ default: 100, max: 500, responseChars: 100_000 });
     expect(capabilities.limits.queryProperties).toEqual({ default: 50, max: 100, filters: 32, properties: 32, responseChars: 100_000 });
     expect(capabilities.limits.searchFilters).toEqual({ props: 32, linksTo: 8 });
-    expect(capabilities.limits.createNoteBodyChars).toBe(100_000);
-    expect(capabilities.limits.appendTextChars).toBe(20_000);
+    expect(capabilities.limits.noteBodyBytes).toBe(2 * 1024 * 1024 - 28 - 64 * 1024);
+    expect(capabilities.limits.appendTextBytes).toBe(1024 * 1024);
     // D9 (3 oct 2026): crear y renombrar carpetas y añadir adjuntos ya se permiten; mover
     // o borrar carpetas y cambiar o borrar adjuntos, no. D10 (9 oct 2026): listar los
     // ficheros sueltos y mandarlos a la papelera sí; D15 (10 oct 2026): leer su contenido

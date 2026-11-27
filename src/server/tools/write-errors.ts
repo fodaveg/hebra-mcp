@@ -19,7 +19,7 @@
  */
 import { LibraryError } from '../../hebra';
 import { isBusyOtherInstance, isWriteRejectionCode, StoreError } from '../../store/errors';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 
 const NOT_FOUND_LIBRARY_CODES = new Set(['note_not_found', 'folder_not_found']);
 
@@ -34,6 +34,10 @@ export function mapWriteError(error: unknown): ToolError {
     // final (`../privacy-gate.ts`), que mira que se siga viendo antes de responder.
     if (error.code === 'file_exists' && error.existingId !== undefined) {
       return new ToolError(error.code, { id: error.existingId });
+    }
+    // El cuerpo que se iba a guardar pasa del tope de una nota (`NOTE_BODY_MAX_BYTES`).
+    if (error.code === 'invalid_input' && error.size !== undefined) {
+      return tooLarge(error.size.field, error.size.limit, error.size.received, 'bytes');
     }
     const mapped =
       error.editIndex === undefined ? new ToolError(error.code) : new ToolError(error.code, { edit: error.editIndex });

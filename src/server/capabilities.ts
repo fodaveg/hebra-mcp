@@ -45,7 +45,7 @@ import {
   STORED_PLAN_CHARS_MAX,
   STORED_PLANS_MAX
 } from '../store/replace-plans';
-import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../store/writes';
+import { APPEND_TEXT_MAX_BYTES, NOTE_BODY_MAX_BYTES } from '../store/writes';
 import { JD_MOVE_UNDO_RETENTION_MS, JD_PLAN_APPLY_TTL_MS, JD_STORED_PLANS_MAX } from '../store/jd-plans';
 import { LIMITS } from './pagination';
 import { LINKS_TO_MAX, PROPS_FILTERS_MAX } from './schemas';
@@ -200,8 +200,9 @@ export interface Capabilities {
       storedPlans: number;
       storedPlanChars: number;
     };
-    createNoteBodyChars: number;
-    appendTextChars: number;
+    /** Tope del cuerpo de una nota (crear, añadir y editar), en bytes del JSON del sobre. */
+    noteBodyBytes: number;
+    appendTextBytes: number;
     editNote: { maxEdits: number; maxTotalChars: number; operationIdChars: number };
     /** Leer adjuntos: bytes descifrados por adjunto. */
     attachmentBytes: number;
@@ -304,8 +305,8 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
         storedPlans: STORED_PLANS_MAX,
         storedPlanChars: STORED_PLAN_CHARS_MAX
       },
-      createNoteBodyChars: CREATE_BODY_MAX_LENGTH,
-      appendTextChars: APPEND_TEXT_MAX_LENGTH,
+      noteBodyBytes: NOTE_BODY_MAX_BYTES,
+      appendTextBytes: APPEND_TEXT_MAX_BYTES,
       editNote: {
         maxEdits: EDITS_MAX_COUNT,
         maxTotalChars: EDITS_TOTAL_MAX_LENGTH,

@@ -16,7 +16,7 @@ import { runJdNewId } from '../../src/server/tools/jd';
 import { runJdMove } from '../../src/server/tools/jd-move';
 import { requireValidOperationId, requireValidRevision } from '../../src/server/tools/guards';
 import { toErrorResult, ToolError } from '../../src/server/errors';
-import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
+import { APPEND_TEXT_MAX_BYTES, jsonTextBytes, NOTE_BODY_MAX_BYTES } from '../../src/store/writes';
 import { EDITS_MAX_COUNT, EDITS_TOTAL_MAX_LENGTH } from '../../src/store/edits';
 import { OPERATION_ID_MAX_LENGTH } from '../../src/store/operations';
 import { REVISION_MAX_LENGTH } from '../../src/store/revision';
@@ -53,20 +53,42 @@ const tooLarge = (field: string, limit: number, received: number, unit = 'chars'
 });
 
 describe('invalid_input por tamaño lleva campo, límite y recibido', () => {
-  it('hebra_create_note con un cuerpo de 121 KB (lacre-27)', async () => {
+  it('tope honesto: lo que cabe en un sobre del relé (2 MiB) menos el margen de Hebra', () => {
+    expect(NOTE_BODY_MAX_BYTES).toBe(2 * 1024 * 1024 - 28 - 64 * 1024);
+    expect(APPEND_TEXT_MAX_BYTES).toBe(1024 * 1024);
+    // Bytes del JSON: comillas y escapes incluidos, nunca menos que `length`.
+    expect(jsonTextBytes('a')).toBe(3);
+    expect(jsonTextBytes('ñ')).toBe(4);
+    expect(jsonTextBytes('\u0001')).toBe(8);
+  });
+
+  it('hebra_create_note con un cuerpo de 121 KB (lacre-27) se crea; uno que no cabe en el sobre, no', async () => {
     test = await buildTestContext();
-    const body = 'x'.repeat(121_000);
+    const created = await runCreateNote(test.ctx, { body: `# Grande\n${'x'.repeat(121_000)}` });
+    expect((await test.ctx.port.noteRead(created.id))?.body.length).toBe(121_009);
+    const body = 'ñ'.repeat(NOTE_BODY_MAX_BYTES / 2);
     expect(await errorOf(() => runCreateNote(test!.ctx, { body }))).toEqual(
-      tooLarge('body', CREATE_BODY_MAX_LENGTH, 121_000)
+      tooLarge('body', NOTE_BODY_MAX_BYTES, jsonTextBytes(body), 'bytes')
     );
   });
 
-  it('hebra_append_to_note: el texto, en unidades UTF-16 (un emoji cuenta 2)', async () => {
+  it('hebra_append_to_note: el texto de una llamada hasta 1 MiB y la nota entera hasta su tope', async () => {
     test = await buildTestContext();
-    const text = '😀'.repeat(APPEND_TEXT_MAX_LENGTH / 2 + 1);
-    expect(await errorOf(() => runAppendToNote(test!.ctx, { id: 'n', text }))).toEqual(
-      tooLarge('text', APPEND_TEXT_MAX_LENGTH, APPEND_TEXT_MAX_LENGTH + 2)
+    const id = test.library.publicNote2Id;
+    const start = (await test.ctx.port.noteRead(id))!.body.length;
+    // Un append de 100 000 caracteres, que antes se rechazaba, entra.
+    await runAppendToNote(test.ctx, { id, text: 'a'.repeat(100_000) });
+    const text = 'b'.repeat(APPEND_TEXT_MAX_BYTES);
+    expect(await errorOf(() => runAppendToNote(test!.ctx, { id, text }))).toEqual(
+      tooLarge('text', APPEND_TEXT_MAX_BYTES, APPEND_TEXT_MAX_BYTES + 2, 'bytes')
     );
+    // Un append de casi 1 MiB cabe; el siguiente dejaría la nota por encima de su tope.
+    const chunk = 'c'.repeat(APPEND_TEXT_MAX_BYTES - 10);
+    await runAppendToNote(test.ctx, { id, text: chunk });
+    const error = await errorOf(() => runAppendToNote(test!.ctx, { id, text: chunk }));
+    expect(error).toMatchObject({ error: 'invalid_input', field: 'body', limit: NOTE_BODY_MAX_BYTES, unit: 'bytes' });
+    expect(error.received as number).toBeGreaterThan(NOTE_BODY_MAX_BYTES);
+    expect((await test.ctx.port.noteRead(id))?.body.length).toBe(start + 2 + 100_000 + 2 + chunk.length);
   });
 
   it('hebra_edit_note: demasiadas sustituciones o demasiado texto sumado', async () => {

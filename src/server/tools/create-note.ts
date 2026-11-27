@@ -26,7 +26,7 @@ import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
-import { CREATE_BODY_MAX_LENGTH as BODY_MAX_LENGTH } from '../../store/writes';
+import { jsonTextBytes, NOTE_BODY_MAX_BYTES } from '../../store/writes';
 import { mapWriteError } from './write-errors';
 
 export interface CreateNoteOutput {
@@ -40,7 +40,9 @@ export async function runCreateNote(
   input: { body: string; folder?: string }
 ): Promise<CreateNoteOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (input.body.length > BODY_MAX_LENGTH) throw tooLarge('body', BODY_MAX_LENGTH, input.body.length);
+  // Antes de mirar carpetas: el tope honesto de una nota, en bytes del sobre (`NOTE_BODY_MAX_BYTES`).
+  const bodyBytes = jsonTextBytes(input.body);
+  if (bodyBytes > NOTE_BODY_MAX_BYTES) throw tooLarge('body', NOTE_BODY_MAX_BYTES, bodyBytes, 'bytes');
 
   const folderId =
     input.folder === undefined ? ROOT_FOLDER_ID : ctx.privacy.folderIdForPath(input.folder);

@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 import { buildTestContext, openBusyWriteContext, type TestContext } from '../fixtures/test-context';
 import { runCreateNote } from '../../src/server/tools/create-note';
+import { NOTE_BODY_MAX_BYTES } from '../../src/store/writes';
 
 describe('hebra_create_note', () => {
   let test: TestContext | undefined;
@@ -31,10 +32,10 @@ describe('hebra_create_note', () => {
     expect(note?.folderId).toBe(test.ctx.privacy.folderIdForPath('Proyectos/Lumbre'));
   });
 
-  it('cuerpo por encima de 100 000 caracteres: invalid_input, sin tocar el almacén', async () => {
+  it('cuerpo por encima del tope de una nota (NOTE_BODY_MAX_BYTES): invalid_input, sin tocar el almacén', async () => {
     test = await buildTestContext();
     const before = (await test.ctx.port.notesPage(null, 200, { kind: 'all' })).items.length;
-    await expect(runCreateNote(test.ctx, { body: 'x'.repeat(100_001) })).rejects.toMatchObject({
+    await expect(runCreateNote(test.ctx, { body: 'x'.repeat(NOTE_BODY_MAX_BYTES) })).rejects.toMatchObject({
       code: 'invalid_input'
     });
     const after = (await test.ctx.port.notesPage(null, 200, { kind: 'all' })).items.length;

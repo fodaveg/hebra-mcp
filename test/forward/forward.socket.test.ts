@@ -14,9 +14,11 @@ import {
   requestWriter,
   type WriterSocketHandlers,
 } from "../../src/ipc/writer-socket";
-import { CREATE_BODY_MAX_LENGTH } from "../../src/store/writes";
+import { APPEND_TEXT_MAX_LENGTH, CREATE_BODY_MAX_LENGTH, jsonTextBytes, NOTE_BODY_MAX_BYTES } from "../../src/store/writes";
 import { FILE_TEXT_REPLACE_MAX_BYTES } from "../../src/store/file-content";
 import { EDITS_TOTAL_MAX_LENGTH } from "../../src/store/edits";
+import { StoreError } from "../../src/store/errors";
+import { mapWriteError } from "../../src/server/tools/write-errors";
 import {
   OPEN,
   servers,
@@ -164,6 +166,31 @@ describe('protocolo de writer.sock', () => {
     expect(seen).toHaveLength(2);
   });
 
+  it('el tamaño de un invalid_input del escritor cruza el socket (límite y recibido, nada más)', async () => {
+    const path = join(tempDataDir(), WRITER_SOCKET_FILE);
+    const size = { field: 'body', limit: NOTE_BODY_MAX_BYTES, received: NOTE_BODY_MAX_BYTES + 7 };
+    servers.push(
+      await WriterSocketServer.listen({
+        path,
+        handlers: {
+          ...handlers,
+          appendToNote: async () => {
+            throw new StoreError('invalid_input', undefined, undefined, undefined, undefined, size);
+          }
+        }
+      })
+    );
+    const error = await requestWriter(path, 'appendToNote', { id: 'n1', text: 'x', privacy: OPEN }, 2_000).catch(
+      (thrown: unknown) => thrown
+    );
+    expect(error).toBeInstanceOf(StoreError);
+    expect(error).toMatchObject({ code: 'invalid_input', size });
+    expect(mapWriteError(error)).toMatchObject({
+      code: 'invalid_input',
+      extra: { field: 'body', limit: NOTE_BODY_MAX_BYTES, received: NOTE_BODY_MAX_BYTES + 7, unit: 'bytes' }
+    });
+  });
+
   describe('conexiones ociosas (B4)', () => {
     /** Escucha con un plazo de ociosidad corto y un `appendToNote` que tarda `slowMs`. */
     async function listenIdle(idleTimeoutMs: number, slowMs = 0) {
@@ -223,10 +250,14 @@ describe('protocolo de writer.sock', () => {
   });
 
   it('el límite por defecto admite el cuerpo máximo de §5 en el peor escape JSON', () => {
+    // El tope de una nota ya se mide en bytes del JSON (`NOTE_BODY_MAX_BYTES`): el peor escape
+    // (`\u0001`, 6 bytes) que cabe en él.
+    const body = '\u0001'.repeat(Math.floor((NOTE_BODY_MAX_BYTES - 2) / 6));
+    expect(jsonTextBytes(body)).toBeLessThanOrEqual(NOTE_BODY_MAX_BYTES);
     const worst = JSON.stringify({
       id: 1,
       op: 'createNote',
-      params: { body: '\u0001'.repeat(CREATE_BODY_MAX_LENGTH), folderId: null }
+      params: { body, folderId: null }
     });
     expect(Buffer.byteLength(worst)).toBeLessThan(MAX_MESSAGE_BYTES);
   });
@@ -297,7 +328,7 @@ describe('protocolo de writer.sock', () => {
       requestWriter(path, 'createNote', { body: 'x'.repeat(CREATE_BODY_MAX_LENGTH + 1) }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
     await expect(
-      requestWriter(path, 'appendToNote', { id: 'n1', text: 'x'.repeat(20_001), privacy: OPEN }, 2_000)
+      requestWriter(path, 'appendToNote', { id: 'n1', text: 'x'.repeat(APPEND_TEXT_MAX_LENGTH + 1), privacy: OPEN }, 2_000)
     ).rejects.toMatchObject({ code: 'invalid_request' });
     // Sin la privacidad del lector, ninguna escritura: el escritor no supone la suya.
     await expect(

@@ -47,7 +47,7 @@ import { JD_PLAN_APPLY_TTL_MS } from './jd-plans';
 import { OPERATION_ID_MAX_LENGTH } from './operations';
 import { privacyFingerprint } from './replace';
 import {
-  CREATE_BODY_MAX_LENGTH,
+  requireNoteBodyFits,
   looseFilesFilterInTurn,
   hiddenOperationTarget,
   priorOperation,
@@ -241,8 +241,8 @@ function checkWrites(store: NoteWriteStore, privacy: PrivacyConfig, plan: NewIdP
       }
     } else {
       const body = bodyWithFrontmatterTitle(write.body, write.title) ?? write.body;
-      // El tope de `hebra_create_note`: una plantilla enorme no se escribe.
-      if (body.length > CREATE_BODY_MAX_LENGTH) throw writeRejected('invalid_input');
+      // El tope de una nota (`NOTE_BODY_MAX_BYTES`): una plantilla enorme no se escribe.
+      requireNoteBodyFits(body);
       if (filter.hidesAnyTag((deriveNote(body).tags ?? []).map(({ tag }) => tag))) throw writeRejected('not_found');
     }
   }

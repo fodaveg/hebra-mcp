@@ -72,7 +72,7 @@ import {
   type AppliedEdit,
   type TextEdit
 } from './edits';
-import { headingRejected, operationReused, writeRejected } from './errors';
+import { headingRejected, operationReused, StoreError, writeRejected } from './errors';
 import { planCreateFolder, planRenameFolder } from './folders';
 import type { OperationRecord, OperationStore } from './operations';
 import type { NoteStateEngine } from './note-state-engine';
@@ -320,13 +320,50 @@ export type AppendToNoteResult =
 /** Separador entre el cuerpo existente y lo añadido (SPEC.md §5). */
 export const APPEND_SEPARATOR = '\n\n';
 
-/** Límite del cuerpo de `hebra_create_note` (SPEC.md §5), en unidades UTF-16
- *  (`string.length`). Lo comprueban la herramienta y, otra vez, el socket del escritor
- *  (`src/ipc/writer-socket.ts`), que no se fía de lo que le llega. */
-export const CREATE_BODY_MAX_LENGTH = 100_000;
+/**
+ * Bytes que ocupa `text` dentro del JSON de un sobre: UTF-8, comillas y escapes incluidos
+ * (`JSON.stringify`), igual que cuenta el cuerpo `estimateEnvelopeBytes` de Hebra
+ * (`vendor/hebra/src/lib/library/space-crdt.ts`). Nunca es menor que `text.length`.
+ */
+export function jsonTextBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text), 'utf8');
+}
 
-/** Límite del texto de `hebra_append_to_note` (SPEC.md §5), igual que el de arriba. */
-export const APPEND_TEXT_MAX_LENGTH = 20_000;
+/**
+ * Tope honesto del cuerpo de una nota (David, 27 nov 2026: «se más permisivo con esas cosas,
+ * pon un límite honesto»): lo que cabe en un sobre del relé. Lumbre y hebra-server rechazan un
+ * registro cifrado de más de 2 MiB (`MAX_HEBRA_LIBRARY_RECORD_ENVELOPE_BYTES`, `protocol.ts` de
+ * `hebra-library`, medido sobre `nonce || ciphertext || tag`), sin comprimir. Hebra reserva
+ * 28 bytes de AES-GCM y 64 KiB para el resto de campos del sobre (`ENVELOPE_CRYPTO_OVERHEAD_BYTES`
+ * y `ENVELOPE_OTHER_FIELDS_BYTES` de `space-crdt.ts`); lo que queda es para el cuerpo, en
+ * `jsonTextBytes`. Una nota mayor no subiría nunca (`record_too_large` en cada ronda). En un
+ * espacio el sobre lleva además el `ydoc`; si no cabe, Hebra sube el cuerpo solo (§27.4 fila 6),
+ * así que el tope es el mismo. Antes: 100 000 unidades UTF-16 solo al crear.
+ */
+export const NOTE_BODY_MAX_BYTES = 2 * 1024 * 1024 - 28 - 64 * 1024;
+
+/** Tope del texto de una sola llamada a `hebra_append_to_note`, en `jsonTextBytes` (antes,
+ *  20 000 unidades UTF-16). Solo frena un abuso: el cuerpo resultante sigue sujeto a
+ *  `NOTE_BODY_MAX_BYTES`, que comprueba el escritor. */
+export const APPEND_TEXT_MAX_BYTES = 1024 * 1024;
+
+/** `body` como mucho `NOTE_BODY_MAX_BYTES`; si no, `invalid_input` con el tamaño, sin escribir.
+ *  Lo mira el escritor sobre el cuerpo que va a guardar (crear, añadir y editar). */
+export function requireNoteBodyFits(body: string): void {
+  const received = jsonTextBytes(body);
+  if (received > NOTE_BODY_MAX_BYTES) {
+    throw new StoreError('invalid_input', undefined, undefined, undefined, undefined, {
+      field: 'body',
+      limit: NOTE_BODY_MAX_BYTES,
+      received
+    });
+  }
+}
+
+/** Cotas en unidades UTF-16 para `MAX_WRITE_MESSAGE_BYTES` y el socket: como `jsonTextBytes`
+ *  nunca es menor que `string.length`, un texto dentro del tope en bytes cabe en ellas. */
+export const CREATE_BODY_MAX_LENGTH = NOTE_BODY_MAX_BYTES;
+export const APPEND_TEXT_MAX_LENGTH = APPEND_TEXT_MAX_BYTES;
 
 /** Límite del cuerpo entero que devuelven los ficheros de trabajo (`replaceBody`,
  *  SPEC.md §13; `./body-writes.ts`), en unidades UTF-16. Vive aquí y no en
@@ -339,9 +376,9 @@ export const REPLACE_BODY_MAX_LENGTH = 1_000_000;
  * Tope, en bytes, de una petición de escritura: una línea de `writer.sock`
  * (`MAX_MESSAGE_BYTES`, `src/ipc/writer-socket.ts`) y el cuerpo de `POST /mcp`
  * (`MAX_MCP_BODY_BYTES`, `src/http/app.ts`). Lo mayor entre:
- * - el cuerpo de `hebra_create_note` con el peor escape JSON (un carácter de control sale
- *   como `\uXXXX`, 6 bytes por unidad UTF-16; las sustituciones de `editNote` suman como
- *   mucho lo mismo), y
+ * - el cuerpo de `hebra_create_note`, que desde el 27 nov 2026 se mide ya en bytes del JSON
+ *   (`NOTE_BODY_MAX_BYTES`, escapes incluidos: no hace falta el ×6 del peor escape), y el de
+ *   las sustituciones de `editNote` con su peor escape (100 000 unidades, ×6), y
  * - el base64 de un adjunto de 5 MiB (`hebra_add_attachment`, D9), que JSON no escapa;
  * más un margen de 512 KiB (`WRITE_MESSAGE_MARGIN_BYTES`) para el sobre (ids, nombre,
  * `operationId`), la configuración de privados y los saltos de línea de un base64
@@ -355,7 +392,7 @@ export const REPLACE_BODY_MAX_LENGTH = 1_000_000;
 export const WRITE_MESSAGE_MARGIN_BYTES = 512 * 1024;
 export const MAX_WRITE_MESSAGE_BYTES =
   Math.max(
-    CREATE_BODY_MAX_LENGTH * 6,
+    NOTE_BODY_MAX_BYTES,
     REPLACE_BODY_MAX_LENGTH * 6,
     FILE_TEXT_REPLACE_MAX_BYTES * 6,
     ATTACHMENT_BASE64_MAX_CHARS
@@ -973,6 +1010,7 @@ export class NoteWriter {
       // cabecera v1 válida, una nota «bloqueada» con lo que el agente escribió. El MCP
       // nunca crea notas bloqueadas.
       if (input.body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
+      requireNoteBodyFits(input.body);
       // Solo carpetas y configuración: no juzga ninguna nota (A8).
       const filter = privacyInTurnFor(store, input.privacy, []);
       const folderId = input.folderId ?? ROOT_FOLDER_ID;
@@ -1066,6 +1104,7 @@ export class NoteWriter {
         sectionTitle = picked.section.heading;
         insertion = insertIntoSection(note.body, picked.section, input.text);
       }
+      requireNoteBodyFits(insertion.body);
       const saveInput = saveInputFor(note, insertion.body, {
         localSeq: note.localSeq,
         bodySha256: note.bodySha256,
@@ -1199,6 +1238,8 @@ export class NoteWriter {
       // en el editor de Hebra, en este mismo guardado (David, 4 oct 2026).
       const body = reorderToggledTasks(note.body, applied.body);
       if (body.startsWith(LOCKED_BODY_PREFIX)) throw writeRejected('invalid_input');
+      // Una nota que ya pasaba del tope se puede recortar; lo que no se deja es crecer por encima.
+      if (jsonTextBytes(body) > jsonTextBytes(note.body)) requireNoteBodyFits(body);
       if (body === note.body) {
         // Nada que guardar: ni sube `local_seq` ni hay ronda que pedir.
         const unchanged: EditNoteSaved = {

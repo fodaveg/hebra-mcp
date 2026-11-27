@@ -34,7 +34,7 @@
  * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
-import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH, type AppendedProof } from '../../store/writes';
+import { APPEND_TEXT_MAX_BYTES, jsonTextBytes, type AppendedProof } from '../../store/writes';
 import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
@@ -70,7 +70,9 @@ export async function runAppendToNote(
   }
 ): Promise<AppendToNoteOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (input.text.length > TEXT_MAX_LENGTH) throw tooLarge('text', TEXT_MAX_LENGTH, input.text.length);
+  // El texto de una llamada; el cuerpo resultante lo juzga el escritor (`NOTE_BODY_MAX_BYTES`).
+  const textBytes = jsonTextBytes(input.text);
+  if (textBytes > APPEND_TEXT_MAX_BYTES) throw tooLarge('text', APPEND_TEXT_MAX_BYTES, textBytes, 'bytes');
   requireValidHeadingInput(input);
   if (input.operationId !== undefined) requireValidOperationId(input.operationId);
 

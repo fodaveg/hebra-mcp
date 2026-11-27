@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { resolveToolContext } from '../../src/server/context';
 import { buildTestContext, openBusyWriteContext, type TestContext } from '../fixtures/test-context';
 import { runAppendToNote } from '../../src/server/tools/append-to-note';
-import { APPEND_SEPARATOR } from '../../src/store/writes';
+import { APPEND_SEPARATOR, APPEND_TEXT_MAX_BYTES } from '../../src/store/writes';
 
 describe('hebra_append_to_note', () => {
   let test: TestContext | undefined;
@@ -31,11 +31,11 @@ describe('hebra_append_to_note', () => {
     });
   });
 
-  it('texto por encima de 20 000 caracteres: invalid_input, sin tocar la nota', async () => {
+  it('texto por encima de APPEND_TEXT_MAX_BYTES: invalid_input, sin tocar la nota', async () => {
     test = await buildTestContext();
     const before = await test.ctx.port.noteRead(test.library.publicNote2Id);
     await expect(
-      runAppendToNote(test.ctx, { id: test.library.publicNote2Id, text: 'x'.repeat(20_001) })
+      runAppendToNote(test.ctx, { id: test.library.publicNote2Id, text: 'x'.repeat(APPEND_TEXT_MAX_BYTES) })
     ).rejects.toMatchObject({ code: 'invalid_input' });
     const after = await test.ctx.port.noteRead(test.library.publicNote2Id);
     expect(after?.body).toBe(before?.body);

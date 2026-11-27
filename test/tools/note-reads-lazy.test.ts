@@ -12,6 +12,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import type { PrivacyConfig } from '../../src/privacy';
+import { NOTE_BODY_MAX_BYTES } from '../../src/store/writes';
 import type { DirectoryView } from '../../src/server/context';
 import { callToolWithLoad, expectLazyEquivalent, type LoadedToolCall } from '../fixtures/privacy-load';
 import {
@@ -409,7 +410,7 @@ describe('hebra_create_note con privacyLoad lazy: igual que con la biblioteca en
   it('cuerpo de más: invalid_input, también igual', async () => {
     all = await lazyHarness(AUDIT_CONFIG);
     lazy = await lazyHarness(AUDIT_CONFIG);
-    const calls = await create({ body: 'x'.repeat(100_001) });
-    expect(calls.lazy.json).toEqual({ error: 'invalid_input', field: 'body', limit: 100_000, received: 100_001, unit: 'chars' });
+    const calls = await create({ body: 'x'.repeat(NOTE_BODY_MAX_BYTES + 1) });
+    expect(calls.lazy.json).toEqual({ error: 'invalid_input', field: 'body', limit: NOTE_BODY_MAX_BYTES, received: NOTE_BODY_MAX_BYTES + 3, unit: 'bytes' });
   });
 });

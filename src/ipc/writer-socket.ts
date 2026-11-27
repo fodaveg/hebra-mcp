@@ -185,6 +185,7 @@ import {
   StoreError,
   WRITE_REJECTION_CODES,
   writeRejected,
+  type StoreSizeDetail,
   type WriteRejectionCode
 } from '../store/errors';
 import { OPERATION_ID_MAX_LENGTH } from '../store/operations';
@@ -418,6 +419,7 @@ type ResponseEnvelope =
       candidates?: readonly SectionRef[];
       target?: string;
       existing?: string;
+      size?: StoreSizeDetail;
     };
 
 class InvalidRequest extends Error {
@@ -1451,6 +1453,7 @@ export class WriterSocketServer {
       if (candidates !== undefined) response.candidates = candidates;
       if (target !== undefined) response.target = target;
       if (existing !== undefined) response.existing = existing;
+      if (error instanceof StoreError && error.size !== undefined) response.size = error.size;
       logEvent({ event: 'writer.socket.request', op: envelope.op, outcome: 'error', code });
     }
     if (!socket.destroyed && socket.writable) socket.write(`${JSON.stringify(response)}\n`);
@@ -1518,7 +1521,8 @@ function remoteError(
   edit?: number,
   candidates?: readonly SectionRef[],
   target?: string,
-  existing?: string
+  existing?: string,
+  size?: StoreSizeDetail
 ): Error {
   if (code === 'busy_other_instance') return busyOtherInstance();
   if (REMOTE_LIBRARY_CODES.has(code)) return new LibraryError(code);
@@ -1528,10 +1532,20 @@ function remoteError(
       edit,
       code === 'ambiguous_heading' ? candidates : undefined,
       code === 'operation_id_reused' ? target : undefined,
-      code === 'file_exists' ? existing : undefined
+      code === 'file_exists' ? existing : undefined,
+      code === 'invalid_input' ? size : undefined
     );
   }
   return new WriterRemoteError(code);
+}
+
+/** El `size` de una respuesta de error: un campo corto y dos enteros no negativos, o nada. */
+function sizeOf(value: unknown): StoreSizeDetail | undefined {
+  if (!isPlainObject(value)) return undefined;
+  const { field, limit, received } = value;
+  const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+  if (typeof field !== 'string' || !/^[A-Za-z]{1,32}$/u.test(field) || !count(limit) || !count(received)) return undefined;
+  return { field, limit, received };
 }
 
 const KNOWN_ERROR_CODES = new Set<WriterSocketErrorCode>([
@@ -1658,7 +1672,8 @@ export function requestWriter(
           edit,
           sectionRefsOf(response.candidates),
           target,
-          existing
+          existing,
+          sizeOf(response.size)
         )
       });
     });
