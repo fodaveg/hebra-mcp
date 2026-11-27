@@ -17,9 +17,26 @@ import { buildCapabilities, type Capabilities } from '../capabilities';
  *  recupera solo al reactivarlo; si no está revocado, no aparece. */
 export async function runStatus(
   ctx: ToolContext,
-  serverVersion = 'unknown'
+  serverVersion = 'unknown',
+  /** Aperturas fallidas de espacios con concesión en este proceso, por código
+   *  (`SpaceRouter.errorCounts`): se suman a `errorsByCode`, que si no solo cuenta el sync y
+   *  diría `{}` con un espacio que no abre. */
+  spaceErrors: Record<string, number> = {}
 ): Promise<HebraStatus & { revokedReason?: string; capabilities: Capabilities }> {
   const status = await ctx.status.getStatus();
   const reason = status.revoked === true ? { revokedReason: status.revokedReason ?? AGENT_REVOKED_REASON } : {};
-  return { ...status, ...reason, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
+  const errorsByCode = mergeCounts(status.errorsByCode, spaceErrors);
+  return { ...status, errorsByCode, ...reason, capabilities: buildCapabilities(serverVersion, ctx.privacyConfig) };
+}
+
+/** `base` más `extra`, código a código. Sin nada que sumar, `base` tal cual (también `null`). */
+function mergeCounts(
+  base: Record<string, number> | null,
+  extra: Record<string, number>
+): Record<string, number> | null {
+  const entries = Object.entries(extra).filter(([, count]) => count > 0);
+  if (entries.length === 0) return base;
+  const merged: Record<string, number> = { ...(base ?? {}) };
+  for (const [code, count] of entries) merged[code] = (merged[code] ?? 0) + count;
+  return merged;
 }

@@ -36,6 +36,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { logToolError, logToolOk, type ToolErrorCode } from '../log/logger';
+import { reportException, reportServiceWarning, serviceWarningOf } from '../log/error-reports';
+import { ContextUnavailableError } from '../accounts/capacity';
 import { PrivacyConfigUnreadable } from '../privacy/config-source';
 import { runListOrganizations, runListSpaces } from '../spaces/directory';
 import {
@@ -482,13 +484,23 @@ async function discardPlan(server: ServerContext, outcome: ToolOutcome): Promise
     .catch(() => undefined);
 }
 
-/** Lo que hizo `run`: su valor, o el `ToolError` (cualquier otro fallo, `invalid_input`). */
-async function settle(run: () => Promise<unknown>): Promise<ToolOutcome> {
+/** Lo que hizo `run`: su valor, o el `ToolError` (cualquier otro fallo, `invalid_input`). Un
+ *  fallo que no es un `ToolError` es interno: además va a Bugsink (`../log/error-reports.ts`). */
+async function settle(name: string, run: () => Promise<unknown>): Promise<ToolOutcome> {
   try {
     return { ok: true, value: await run() };
   } catch (error) {
-    return { ok: false, error: error instanceof ToolError ? error : new ToolError('invalid_input') };
+    if (error instanceof ToolError) return { ok: false, error };
+    reportException(error, { tool: name, kind: 'internal' });
+    return { ok: false, error: new ToolError('invalid_input') };
   }
+}
+
+/** El log cerrado de un error de herramienta y, si deja al agente sin servicio, su aviso. */
+function noteToolError(name: string, error: ToolError): void {
+  logToolError(name, error.code);
+  const warning = serviceWarningOf(error.code, error.extra);
+  if (warning) reportServiceWarning(warning, { tool: name });
 }
 
 /**
@@ -519,7 +531,7 @@ async function runTool(
     await ctx.authorize?.();
     for (const run of deferred) run();
     if (!outcome.ok) {
-      logToolError(name, outcome.error.code);
+      noteToolError(name, outcome.error);
       return toErrorResult(outcome.error);
     }
     logToolOk(name, countOf(outcome.value));
@@ -543,7 +555,7 @@ async function runTool(
     }
     if (toolCtx.privacy.unresolved) return unresolved();
     toolCtx.deferred = [];
-    const outcome = await settle(() => run(toolCtx));
+    const outcome = await settle(name, () => run(toolCtx));
     const usage = usageOf(toolCtx);
     // El registro de un `operationId` que decidió el rechazo (R3-2 de la 3.ª revisión).
     if (!outcome.ok && outcome.error.operationTarget !== undefined) {
@@ -668,8 +680,12 @@ export function registerTools(
         ] };
         return result;
       } catch (error) {
-        if (!(error instanceof ToolError)) throw error;
-        logToolError(name, error.code);
+        if (!(error instanceof ToolError)) {
+          // Falta de capacidad (503 con `Retry-After` en `serve-http`) no es un fallo interno.
+          if (!(error instanceof ContextUnavailableError)) reportException(error, { tool: name, kind: 'internal' });
+          throw error;
+        }
+        noteToolError(name, error);
         return toErrorResult(error);
       }
     };
@@ -837,7 +853,7 @@ export function registerTools(
         'Estado del vínculo con Hebra y del sync, y `capabilities` (versión, herramientas, límites, lo que no permite). Sin contenido de notas.',
       annotations: READ_ONLY
     },
-    gated('hebra_status', (toolCtx) => runStatus(toolCtx, version), { privacyLoad: 'lazy' })
+    gated('hebra_status', (toolCtx) => runStatus(toolCtx, version, ctx.spaces?.errorCounts?.()), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

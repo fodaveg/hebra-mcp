@@ -35,6 +35,9 @@ export interface SpaceRouter {
   /** Los espacios con concesión. `openError` (sin él, `null`) es lo que impidió abrirlo la
    *  última vez en este proceso; `null` si se abrió o aún no se intentó. */
   list(): Promise<Array<{ spaceId: string; name: string | null; openError?: SpaceOpenError | null }>>;
+  /** Aperturas fallidas de espacios con concesión en este proceso, por código de error
+   *  (`hebra_status` las suma a `errorsByCode`). */
+  errorCounts?(): Record<string, number>;
   /** Abre el espacio y lo retiene hasta cerrar el router: el uso por stdio. */
   resolve(spaceId: string): Promise<ServerContext>;
   /** `serve-http`: cada uso se adquiere y se suelta, y el espacio se cierra cuando termina. */

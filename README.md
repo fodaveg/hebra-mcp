@@ -195,6 +195,19 @@ ni `keychain` falla en vez de arrancar con uno de los dos por sorpresa. En ese m
 los secretos globales del conector viven aparte, en `control/secrets.json` (D22,
 `deploy/README-deploy.md`).
 
+## Errores a Bugsink
+
+`serve` y `serve-http` mandan sus errores al proyecto `hebra` de Bugsink
+(`errores.dualhand.com`, `SPEC.md` §6.4): las excepciones no controladas, los fallos internos de
+una herramienta y, como aviso, los errores de espacio y de relé que dejan al agente sin servicio
+(`space_quota_exceeded`, `space_key_unreadable`, agente revocado, `rate_limited` y
+`relay_unavailable` repetido). Cada evento lleva solo el código, el tipo y la pila del error
+(ficheros sin directorios) y las etiquetas `code`, `tool`, `version`, `mode` (`stdio` o
+`serve-http`) y `kind`. Nunca el contenido ni el título de una nota, rutas, nombres de espacio o
+de carpeta, argumentos de herramienta, tokens, cabeceras, ids de cuenta ni el nombre de la
+máquina, tampoco en el conector multiusuario. El SDK (`@sentry/node`) se carga solo con el
+primer error. Se apaga con `HEBRA_MCP_ERRORES=0`.
+
 ## Conector remoto de Claude y Codex (`serve-http`)
 
 Para claude.ai (web, móvil y sesiones en la nube), hebra-mcp corre como servidor HTTP en

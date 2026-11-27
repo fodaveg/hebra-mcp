@@ -128,6 +128,10 @@ export class AgentSpaceManager implements SpaceRouter {
    *  vez en este proceso (`hebra_list_spaces`, `openError`). No guarda ninguna decisión: cada
    *  apertura vuelve a intentarlo entera, y una apertura correcta lo borra. */
   private readonly openErrors = new Map<string, SpaceOpenError>();
+  /** Cuántas aperturas de un espacio con concesión fallaron en este proceso, por código del
+   *  error; `hebra_status` lo suma a `errorsByCode` para que un espacio que falla no pase por
+   *  "sin errores". Sin ids ni nombres de espacio: solo el código. */
+  private readonly openFailureCounts = new Map<string, number>();
   private catalogueFlight: Promise<AgentSpaceAccess[]> | null = null;
   private queuedCatalogue: Promise<AgentSpaceAccess[]> | null = null;
   private lastCatalogue: { startedAt: number; spaces: AgentSpaceAccess[] } | null = null;
@@ -428,6 +432,11 @@ export class AgentSpaceManager implements SpaceRouter {
     return out;
   }
 
+  /** Las aperturas fallidas de espacios con concesión en este proceso, por código de error. */
+  errorCounts(): Record<string, number> {
+    return Object.fromEntries(this.openFailureCounts);
+  }
+
   /** El directorio de la persona (D22), fresco. Solo lectura: no abre ninguna biblioteca. */
   async directory(): Promise<DirectoryView> {
     this.assertAccountActive?.();
@@ -498,6 +507,9 @@ export class AgentSpaceManager implements SpaceRouter {
       return opened;
     } catch (error) {
       if (isOpenError(error)) this.openErrors.set(key, error.code);
+      if (error instanceof ToolError) {
+        this.openFailureCounts.set(error.code, (this.openFailureCounts.get(error.code) ?? 0) + 1);
+      }
       await this.closeInstance(entry);
       throw error;
     } finally {

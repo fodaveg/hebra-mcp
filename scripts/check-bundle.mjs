@@ -122,7 +122,13 @@ const DOM_EXEMPT_PACKAGES = [
   // Emscripten que mira `window`/`document` solo tras comprobar el entorno. Es la ÚNICA
   // exención nueva; si el paquete aún no está instalado, no cambia nada.
   'harfbuzzjs',
-  'harfbuzzjs/*'
+  'harfbuzzjs/*',
+  // Errores a Bugsink (`src/log/error-reports.ts`, 27 nov 2026): `@sentry/core`
+  // (`utils/isBrowser.js`: `typeof window !== "undefined" && ...`) y `@opentelemetry/api`
+  // (`internal/global-utils.mjs`: `typeof window === "object" ? window : ...`) solo miran si hay
+  // DOM antes de usarlo. Llegan por un `import()` dinámico que el arranque no carga.
+  '@sentry/*',
+  '@opentelemetry/*'
 ];
 /** Externos en el reempaquetado para que un import prohibido que no esté instalado
  *  aparezca en el metafile (y se informe) en vez de romper la resolución. */

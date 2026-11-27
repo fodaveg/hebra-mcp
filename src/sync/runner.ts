@@ -47,6 +47,7 @@ import {
   type SyncRoundResult
 } from '../hebra';
 import type { SyncStorePort } from '../store/sync-port';
+import { reportServiceWarning } from '../log/error-reports';
 import { documentSourceOf, wireDocuments } from '../store/document-channel';
 import type { DocumentSyncWiring } from '../../vendor/hebra/src/lib/documents/sync/wiring';
 import {
@@ -573,6 +574,8 @@ export class SyncRunner implements SyncStatusSource {
     this.revokedFlag = true;
     this.failedRetries = 0;
     this.safeEmit('pairing.revoked', { source });
+    // El relé deja al agente sin servicio: aviso a Bugsink (sin cuenta ni credencial).
+    reportServiceWarning('agent_revoked');
     this.stopInterval();
     this.scheduleRetry();
     this.notifyRevocation(true);

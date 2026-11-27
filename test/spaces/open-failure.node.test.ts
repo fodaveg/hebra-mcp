@@ -22,6 +22,8 @@ import { sealAgentSpaceGrant } from '../../vendor/hebra/src/lib/spaces/agent-spa
 import { validatePublicJwk } from '../../vendor/hebra/src/lib/spaces/account-key';
 import { deriveRecordKey, encodeRecordEnvelope } from '../../vendor/hebra/src/lib/library/envelope';
 import { FakeLumbre, LUMBRE } from '../pair/fake-lumbre';
+import * as Sentry from '@sentry/node';
+import { configureErrorReports, flushErrorReports, resetErrorReports } from '../../src/log/error-reports';
 
 type Fetcher = NonNullable<OpenServeOptions['fetcher']>;
 
@@ -154,6 +156,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  resetErrorReports();
   await client?.close();
   await server?.close();
   await served?.close();
@@ -175,6 +178,8 @@ describe('espacio con concesión que no abre', () => {
     expect(first.isError).toBe(true);
     expect(payload(first)).toEqual({ error: 'space_quota_exceeded' });
     expect(await spaceRow()).toMatchObject({ granted: true, openError: 'space_quota_exceeded' });
+    // hebra_status ya no dice errorsByCode {} con un espacio que no abre.
+    expect((payload(await call('hebra_status')).errorsByCode as Record<string, number>).space_quota_exceeded).toBe(1);
 
     // Ninguna decisión recordada: cada llamada vuelve a pedir el alta al relé.
     const before = fake.requested.filter((url) => url === SPACE_DEVICES).length;
@@ -187,6 +192,28 @@ describe('espacio con concesión que no abre', () => {
     expect(read.isError).toBeFalsy();
     expect(JSON.stringify(read)).toContain('Texto compartido');
     expect(await spaceRow()).toMatchObject({ granted: true, openError: null });
+  });
+
+  it('el 507 sale a Bugsink como aviso, con código y herramienta y sin el espacio', async () => {
+    const bodies: string[] = [];
+    configureErrorReports({ mode: 'stdio', version: 'test' }, {}, {
+      load: async () => Sentry,
+      transport: (options) =>
+        Sentry.createTransport(options, async (request) => {
+          bodies.push(typeof request.body === 'string' ? request.body : new TextDecoder().decode(request.body));
+          return { statusCode: 200 };
+        })
+    });
+    await grant();
+    deviceReply = () => new Response(JSON.stringify({ code: 'quota_exceeded' }), { status: 507 });
+    await call('hebra_list_notes', { space: SPACE });
+    await flushErrorReports(1000);
+    const text = bodies.join('\n');
+    expect(text).toContain('"message":"space_quota_exceeded"');
+    expect(text).toContain('"tool":"hebra_list_notes"');
+    expect(text).not.toContain(SPACE);
+    expect(text).not.toContain(SHARED_VAULT);
+    expect(text).not.toContain(directory);
   });
 
   it('relé caído al dar de alta: space_unavailable con relay_unavailable, sin openError', async () => {

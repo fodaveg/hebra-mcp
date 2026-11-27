@@ -30,6 +30,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 // `@tauri-apps/api`, solo por tipos: `src/vendor-types.d.ts`).
 import { version } from '../../package.json';
 import { logEvent } from '../log/logger';
+import { configureErrorReports, flushErrorReports, installCrashReports, reportException } from '../log/error-reports';
 import { acquireDataRootGuard, type ServerLock } from '../lock';
 import { requestAccountRemoval, rollbackControlSecrets } from '../accounts';
 import { PairError } from '../pair/errors';
@@ -107,6 +108,9 @@ function guardDataRoot(dataDir: string): void {
 }
 
 async function serve(): Promise<void> {
+  // Errores a Bugsink (`../log/error-reports.ts`); el SDK se carga solo con el primero.
+  configureErrorReports({ mode: 'stdio', version });
+  installCrashReports();
   const dataDir = resolveDataDir();
   guardDataRoot(dataDir);
   const { ctx, instance, close } = await openServeContext({
@@ -137,6 +141,9 @@ async function serve(): Promise<void> {
  * contenedor, `file`).
  */
 async function serveHttp(): Promise<void> {
+  // Igual que `serve`, sin ningún dato de usuario (multiusuario): ni cuenta ni credencial.
+  configureErrorReports({ mode: 'serve-http', version });
+  installCrashReports();
   const dataDir = resolveDataDir();
   let handle: ServeHttpHandle;
   try {
@@ -369,6 +376,8 @@ if (isMainModule) {
     process.stderr.write(
       `${JSON.stringify({ event: 'fatal', error: name, ...(typeof code === 'string' ? { code } : {}) })}\n`
     );
-    process.exit(1);
+    // Solo si `serve` o `serve-http` activaron el envío; los demás comandos no mandan nada.
+    reportException(error, { kind: 'fatal' });
+    void flushErrorReports().finally(() => process.exit(1));
   });
 }

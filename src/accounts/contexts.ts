@@ -186,6 +186,8 @@ function guardedContext(
       await accountActive();
       return result;
     },
+    // Solo recuentos por código de ESTA cuenta (su gestor de espacios), sin red.
+    errorCounts: () => ctx.spaces!.errorCounts?.() ?? {},
     resolve: async (spaceId: string) => {
       await accountActive();
       const selected = use && lifecycle
