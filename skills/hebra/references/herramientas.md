@@ -58,7 +58,7 @@ y [Johnny.Decimal](johnny-decimal.md).
 
 | Herramienta | Entrada | Salida y notas |
 |---|---|---|
-| `hebra_list_spaces` | sin argumentos | `{spaces: [{spaceId, name, organization: {orgId, name} \| null, granted}], organizationsAvailable}`. Detalle en [espacios y organizaciones](espacios-y-organizaciones.md). |
+| `hebra_list_spaces` | sin argumentos | `{spaces: [{spaceId, name, organization: {orgId, name} \| null, granted, openError}], organizationsAvailable}`. Detalle en [espacios y organizaciones](espacios-y-organizaciones.md). |
 | `hebra_list_organizations` | `limit?` 1-100, `cursor?` | `{organizations: [{orgId, name, members: [{accountId, role, name, isSelf}], spaces: [{spaceId, name, granted}]}], nextCursor}`. No abre contenido. |
 | `hebra_note_authors` | `id` | `lastEditor`, `declaredAuthorId`, `mismatch`, `namesResolved`. Solo hay autores en un espacio; detalle en [espacios y organizaciones](espacios-y-organizaciones.md). |
 

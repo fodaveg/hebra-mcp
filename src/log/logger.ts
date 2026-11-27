@@ -16,6 +16,11 @@ export type ToolErrorCode =
   | 'space_access_denied'
   // El relé de Lumbre no atiende ahora (429): no es una denegación; lleva `retryAfterSeconds`.
   | 'space_unavailable'
+  // El espacio tiene concesión, pero el relé no deja dar de alta a este agente en su bóveda
+  // (507 `quota_exceeded`: hoy, el tope de dispositivos activos del miembro en ese espacio).
+  | 'space_quota_exceeded'
+  // El espacio tiene concesión, pero su clave sellada para este agente no se abre.
+  | 'space_key_unreadable'
   | 'space_not_supported'
   // El directorio del agente no está disponible (D22, `src/spaces/directory.ts`).
   | 'organizations_unavailable'

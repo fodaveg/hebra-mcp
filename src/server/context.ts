@@ -23,8 +23,18 @@ import type { WriteContext } from './write-context';
  * sin él (solo lectura): `hebra_create_note`/`hebra_append_to_note` son las únicas
  * herramientas que lo necesitan.
  */
+/**
+ * Por qué un espacio con concesión no se pudo abrir la última vez que este proceso lo intentó
+ * (`hebra_list_spaces`, campo `openError`). No es una denegación: la concesión sigue en el
+ * catálogo. `space_quota_exceeded`: el relé no dejó dar de alta a este agente en la bóveda del
+ * espacio. `space_key_unreadable`: la clave sellada para este agente no se abre.
+ */
+export type SpaceOpenError = 'space_quota_exceeded' | 'space_key_unreadable';
+
 export interface SpaceRouter {
-  list(): Promise<Array<{ spaceId: string; name: string | null }>>;
+  /** Los espacios con concesión. `openError` (sin él, `null`) es lo que impidió abrirlo la
+   *  última vez en este proceso; `null` si se abrió o aún no se intentó. */
+  list(): Promise<Array<{ spaceId: string; name: string | null; openError?: SpaceOpenError | null }>>;
   /** Abre el espacio y lo retiene hasta cerrar el router: el uso por stdio. */
   resolve(spaceId: string): Promise<ServerContext>;
   /** `serve-http`: cada uso se adquiere y se suelta, y el espacio se cierra cuando termina. */

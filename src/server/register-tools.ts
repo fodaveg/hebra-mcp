@@ -693,7 +693,7 @@ export function registerTools(
 
   server.registerTool('hebra_list_spaces', {
     title: 'Espacios que vería la persona',
-    description: 'Lista los espacios que vería la persona de este agente, con `spaceId`, `name` (null si no se puede leer), `organization` ({orgId, name} o null) y `granted`. Solo con `granted: true` se puede usar spaceId como selector space; con false responde space_access_denied, aunque seas miembro de la organización. Omitir space siempre elige personal. Si `organizationsAvailable` es false, el directorio no está disponible y salen solo los espacios con concesión. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
+    description: 'Lista los espacios que vería la persona de este agente, con `spaceId`, `name` (null si no se puede leer), `organization` ({orgId, name} o null), `granted` y `openError`. Solo con `granted: true` (hay concesión) se puede usar spaceId como selector space; con false responde space_access_denied, aunque seas miembro de la organización. `openError` es null salvo si este proceso ya intentó abrirlo y no pudo: `space_quota_exceeded` (el relé no deja dar de alta a este agente en el espacio) o `space_key_unreadable` (la clave sellada para el agente no se abre); no es una denegación. Omitir space siempre elige personal. Si `organizationsAvailable` es false, el directorio no está disponible y salen solo los espacios con concesión. Las respuestas compartidas llevan un bloque de origen {spaceId, name}.',
     inputSchema: {}, annotations: READ_ONLY
   },
   // Solo el catálogo y el directorio del relé: no pregunta al filtro de privados por ninguna nota.

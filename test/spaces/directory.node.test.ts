@@ -192,15 +192,17 @@ describe('hebra_list_spaces con directorio', () => {
           // Sin meta en el relé: no hay nombre descifrado y queda el publicado.
           name: 'Nombre publicado',
           organization: { orgId: ORG_A, name: ORG_NAME },
-          granted: true
+          granted: true,
+          openError: null
         },
         {
           spaceId: ORG_ONLY_SPACE,
           name: 'Solo organización',
           organization: { orgId: ORG_A, name: ORG_NAME },
-          granted: false
+          granted: false,
+          openError: null
         },
-        { spaceId: LOOSE_SPACE, name: null, organization: null, granted: false }
+        { spaceId: LOOSE_SPACE, name: null, organization: null, granted: false, openError: null }
       ]
     });
   });
@@ -248,7 +250,7 @@ describe('hebra_list_spaces con directorio', () => {
     const { body } = await call(agent, 'hebra_list_spaces');
     expect(body).toEqual({
       organizationsAvailable: true,
-      spaces: [{ spaceId: GRANTED_SPACE, name: null, organization: null, granted: true }]
+      spaces: [{ spaceId: GRANTED_SPACE, name: null, organization: null, granted: true, openError: null }]
     });
   });
 });
@@ -305,7 +307,7 @@ describe('sin directorio', () => {
     expect(spaces.isError).toBe(false);
     expect(spaces.body).toEqual({
       organizationsAvailable: false,
-      spaces: [{ spaceId: GRANTED_SPACE, name: null, organization: null, granted: true }]
+      spaces: [{ spaceId: GRANTED_SPACE, name: null, organization: null, granted: true, openError: null }]
     });
     const organizations = await call(agent, 'hebra_list_organizations');
     expect(organizations.isError).toBe(true);

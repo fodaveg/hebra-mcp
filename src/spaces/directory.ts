@@ -8,7 +8,7 @@
  * biblioteca. Nombres de personas, organizaciones y espacios son contenido: nunca a logs.
  */
 import { ToolError } from '../server/errors';
-import type { DirectoryView, ServerContext } from '../server/context';
+import type { DirectoryView, ServerContext, SpaceOpenError } from '../server/context';
 import { effectiveLimit, LIMITS, sliceAfterKey, unwrapCursor, wrapCursor } from '../server/pagination';
 import { readLimitedJson, type AgentDevice } from './device';
 import { agentDirectorySchema, type AgentDirectory } from './protocol';
@@ -80,15 +80,24 @@ export async function fetchAgentDirectory(
   return directory;
 }
 
+type GrantedSpace = { spaceId: string; name: string | null; openError?: SpaceOpenError | null };
+
 /** El directorio ya cruzado con el catálogo fresco: un nombre descifrado gana al publicado, y
  *  `granted` dice si `space` lo aceptaría ahora. */
-function grantedView(granted: ReadonlyArray<{ spaceId: string; name: string | null }>) {
+function grantedView(granted: ReadonlyArray<GrantedSpace>) {
   const byId = new Map(granted.map((space) => [space.spaceId, space]));
   return (space: { spaceId: string; name: string | null }) => ({
     spaceId: space.spaceId,
     name: byId.get(space.spaceId)?.name ?? space.name,
     granted: byId.has(space.spaceId)
   });
+}
+
+/** Lo que impidió abrir un espacio con concesión la última vez en este proceso; `null` sin
+ *  concesión, si se abrió o si aún no se intentó (`AgentSpaceManager.list`). */
+function openErrorOf(granted: ReadonlyArray<GrantedSpace>) {
+  const byId = new Map(granted.map((space) => [space.spaceId, space.openError ?? null]));
+  return (spaceId: string): SpaceOpenError | null => byId.get(spaceId) ?? null;
 }
 
 /**
@@ -106,13 +115,15 @@ export async function runListSpaces(ctx: Pick<ServerContext, 'spaces' | 'directo
     if (!(error instanceof ToolError) || error.code !== 'organizations_unavailable') throw error;
   }
   const granted = await ctx.spaces.list();
+  const openError = openErrorOf(granted);
   if (!view) {
     return {
       spaces: granted.map((space) => ({
         spaceId: space.spaceId,
         name: space.name,
         organization: null,
-        granted: true
+        granted: true,
+        openError: openError(space.spaceId)
       })),
       organizationsAvailable: false
     };
@@ -136,7 +147,8 @@ export async function runListSpaces(ctx: Pick<ServerContext, 'spaces' | 'directo
       spaceId,
       name,
       organization,
-      granted: hasGrant
+      granted: hasGrant,
+      openError: openError(spaceId)
     })),
     organizationsAvailable: true
   };

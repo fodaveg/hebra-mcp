@@ -12,7 +12,14 @@ import { join } from 'node:path';
 import { ContextUnavailableError, DEFAULT_OPEN_WAIT_MS, type AdmissionTicket } from '../accounts/capacity';
 import { realClock, ResourceLifecycle, WAIT_BACKSTOP_MARGIN_MS, type Clock } from '../accounts/lifecycle';
 import { logEvent } from '../log/logger';
-import type { DirectoryView, ServerContext, SpaceLease, SpaceLifecycleControl, SpaceRouter } from '../server/context';
+import type {
+  DirectoryView,
+  ServerContext,
+  SpaceLease,
+  SpaceLifecycleControl,
+  SpaceOpenError,
+  SpaceRouter
+} from '../server/context';
 import { ToolError } from '../server/errors';
 import { LibraryInstance, type OpenLibraryInstanceOptions } from '../sync/library-instance';
 import { registerLinkedDevice } from '../sync/linked';
@@ -37,6 +44,34 @@ const NAME_FAILURE_TTL_MS = 60_000;
 const SYNC_CATALOGUE_WINDOW_MS = 2000;
 
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+/** La espera que se sugiere cuando el relé no atiende el alta del agente en un espacio. */
+const REGISTER_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * El fallo de `registerLinkedDevice` (el código cerrado de `classifyError`) al abrir un espacio
+ * con concesión. Solo el rechazo de la credencial es una denegación: el 507 `quota_exceeded` del
+ * relé es `space_quota_exceeded` y la falta de red o de servicio es `space_unavailable`, para que
+ * quien llama no confunda "no tienes permiso" con "el relé no te deja dar de alta aquí".
+ */
+function registrationError(code: string): ToolError {
+  if (code === 'quota_exceeded') return new ToolError('space_quota_exceeded');
+  if (code === 'rate_limited') {
+    return new ToolError('space_unavailable', { reason: 'rate_limited', retryAfterSeconds: REGISTER_RETRY_AFTER_SECONDS });
+  }
+  if (code === 'offline' || code === 'timeout' || code === 'http_5xx') {
+    return new ToolError('space_unavailable', { reason: 'relay_unavailable', retryAfterSeconds: REGISTER_RETRY_AFTER_SECONDS });
+  }
+  return new ToolError('space_access_denied');
+}
+
+/** ¿Es un fallo de apertura que `hebra_list_spaces` enseña en `openError`? */
+function isOpenError(error: unknown): error is ToolError & { code: SpaceOpenError } {
+  return (
+    error instanceof ToolError &&
+    (error.code === 'space_quota_exceeded' || error.code === 'space_key_unreadable')
+  );
+}
 /** JSONB puede reordenar las propiedades; eso no cambia la concesión ni su caché. */
 function grantHash(item: AgentSpaceAccess): string {
   const g = item.grant;
@@ -89,6 +124,10 @@ export class AgentSpaceManager implements SpaceRouter {
     string,
     { value: string | null; until: number; last: string | null }
   >();
+  /** Por la misma clave que `names`: lo que impidió abrir cada espacio con concesión la última
+   *  vez en este proceso (`hebra_list_spaces`, `openError`). No guarda ninguna decisión: cada
+   *  apertura vuelve a intentarlo entera, y una apertura correcta lo borra. */
+  private readonly openErrors = new Map<string, SpaceOpenError>();
   private catalogueFlight: Promise<AgentSpaceAccess[]> | null = null;
   private queuedCatalogue: Promise<AgentSpaceAccess[]> | null = null;
   private lastCatalogue: { startedAt: number; spaces: AgentSpaceAccess[] } | null = null;
@@ -281,6 +320,7 @@ export class AgentSpaceManager implements SpaceRouter {
       // Los nombres de espacios que ya no están en el catálogo no se guardan más.
       const live = new Set(result.spaces.map((item) => this.nameKey(item)));
       for (const key of [...this.names.keys()]) if (!live.has(key)) this.names.delete(key);
+      for (const key of [...this.openErrors.keys()]) if (!live.has(key)) this.openErrors.delete(key);
       return result.spaces;
     } catch (error) {
       if (error instanceof ToolError && error.code === 'space_unavailable') throw error;
@@ -330,7 +370,17 @@ export class AgentSpaceManager implements SpaceRouter {
     };
     let own: Uint8Array | undefined;
     try {
-      const vaultKey = key ?? (own = await this.device.openGrant(item));
+      let vaultKey = key;
+      if (!vaultKey) {
+        try {
+          vaultKey = own = await this.device.openGrant(item);
+        } catch (error) {
+          // El listado también enseña que la clave no se abre, sin esperar a un intento de abrir.
+          if (isOpenError(error)) this.openErrors.set(cacheKey, error.code);
+          throw error;
+        }
+        if (this.openErrors.get(cacheKey) === 'space_key_unreadable') this.openErrors.delete(cacheKey);
+      }
       const { apiOrigin, readToken, writeToken } = this.device.paired.connection;
       const check = async () => {
         const fresh = await this.catalogue(SYNC_CATALOGUE_WINDOW_MS);
@@ -361,15 +411,20 @@ export class AgentSpaceManager implements SpaceRouter {
     }
   }
 
-  async list(): Promise<Array<{ spaceId: string; name: string | null }>> {
+  /** Los espacios con concesión, con su nombre y, en `openError`, lo que impidió abrirlo la
+   *  última vez en este proceso (`null` si se abrió o aún no se intentó). */
+  async list(): Promise<Array<{ spaceId: string; name: string | null; openError: SpaceOpenError | null }>> {
     // Con la credencial revocada no se ofrece ningún espacio con concesión (D24), sin red.
     this.assertAccountActive?.();
     if (this.revokedNow()) return [];
     const before = await this.catalogue();
     const after = new Set((await this.catalogue()).map((s) => s.spaceId));
     const items = before.filter((s) => after.has(s.spaceId));
-    const out: Array<{ spaceId: string; name: string | null }> = [];
-    for (const item of items) out.push({ spaceId: item.spaceId, name: await this.readName(item) });
+    const out: Array<{ spaceId: string; name: string | null; openError: SpaceOpenError | null }> = [];
+    for (const item of items) {
+      const name = await this.readName(item);
+      out.push({ spaceId: item.spaceId, name, openError: this.openErrors.get(this.nameKey(item)) ?? null });
+    }
     return out;
   }
 
@@ -436,9 +491,13 @@ export class AgentSpaceManager implements SpaceRouter {
 
   private async openAdmitted(entry: Entry, signal: AbortSignal): Promise<ServerContext> {
     const ticket = await this.admit?.(signal);
+    const key = this.nameKey(entry.access);
     try {
-      return await this.open(entry);
+      const opened = await this.open(entry);
+      this.openErrors.delete(key);
+      return opened;
     } catch (error) {
+      if (isOpenError(error)) this.openErrors.set(key, error.code);
       await this.closeInstance(entry);
       throw error;
     } finally {
@@ -511,7 +570,7 @@ export class AgentSpaceManager implements SpaceRouter {
     );
     if (registered !== 'ok') {
       vaultKey.fill(0);
-      throw new ToolError('space_access_denied');
+      throw registrationError(registered);
     }
     // Unix limita la ruta del socket (~104 bytes en macOS). La SQLite conserva su
     // directorio completo; solo el IPC usa un directorio temporal privado por usuario.

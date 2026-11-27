@@ -344,7 +344,12 @@ export class AgentDevice {
     }
   }
 
-  /** Abre únicamente los 32 bytes de la clave DEL ESPACIO, con todos sus bindings. */
+  /**
+   * Abre únicamente los 32 bytes de la clave DEL ESPACIO, con todos sus bindings. Unos bindings
+   * que no son los de este agente son una denegación (`space_access_denied`); unos bindings
+   * correctos con un sobre que no abre con la privada de este agente no lo son: la concesión
+   * existe pero se selló mal o para otra clave, y responde `space_key_unreadable`.
+   */
   async openGrant(access: AgentSpaceAccess): Promise<Uint8Array<ArrayBuffer>> {
     const r = await this.ensureRegistered();
     const g = access.grant;
@@ -357,8 +362,9 @@ export class AgentDevice {
       g.keyId !== r.keyId
     )
       throw new ToolError('space_access_denied');
+    let key: Uint8Array<ArrayBuffer>;
     try {
-      const key = new Uint8Array(
+      key = new Uint8Array(
         await openAgentSpaceGrant({
           grant: g,
           privateKey: this.privateKey!,
@@ -372,11 +378,15 @@ export class AgentDevice {
           }
         })
       );
-      try { this.assertAccountActive?.(); }
-      catch (error) { key.fill(0); throw error; }
-      return key;
     } catch {
+      throw new ToolError('space_key_unreadable');
+    }
+    try {
+      this.assertAccountActive?.();
+    } catch {
+      key.fill(0);
       throw new ToolError('space_access_denied');
     }
+    return key;
   }
 }
