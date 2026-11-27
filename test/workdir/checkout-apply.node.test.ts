@@ -9,6 +9,8 @@
 import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { StoreError } from '../../src/store/errors';
+import { jsonTextBytes, NOTE_BODY_MAX_BYTES, noteBodyGrowsPastLimit } from '../../src/store/writes';
 import { LibraryInstance } from '../../src/sync/library-instance';
 import {
   applyCommand,
@@ -386,6 +388,43 @@ describe('casos límite de la carpeta de trabajo', () => {
     expect(await runWorkdirCommand('apply', [], right.io, opener(lib.dataDir))).toBe(0);
     expect(await readBody(lib.dataDir, lib.receta)).toBe('# Receta\n\nLumbre de pan\n\nmás\n');
   });
+
+  it('el tope del cuerpo es el de una nota, en bytes del JSON: 1,5 M de ASCII entra; 400 000 escapes, no', async () => {
+    const { lib, cwd, root, recetaFile } = await checkedOut();
+    const planFile = join(root, 'Proyectos', `Plan (${lib.plan.slice(0, 8)}).md`);
+    // Antes del 27 nov 2026 el tope eran 1 000 000 de unidades UTF-16: lo primero no entraba
+    // y lo segundo sí, aunque en el sobre del relé pasa de 2 MiB y no subiría nunca.
+    const ascii = `# Receta\n\n${'a'.repeat(1_500_000)}\n`;
+    const escapes = `# Plan\n\n${'\u0001'.repeat(400_000)}\n`;
+    writeFileSync(recetaFile, ascii);
+    writeFileSync(planFile, escapes);
+    const out = capture(cwd);
+    expect(await applyCommand(out.io, opener(lib.dataDir), { dir: 'trabajo', conflicto: 'copia', simular: false })).toBe(1);
+    expect(await readBody(lib.dataDir, lib.receta)).toBe(ascii);
+    expect(await readBody(lib.dataDir, lib.plan)).toBe('# Plan\n\nLumbre y Hebra\n');
+    expect(out.text()).toContain(
+      `demasiado grande para devolverla (${jsonTextBytes(escapes)} bytes; el tope es ${NOTE_BODY_MAX_BYTES})`
+    );
+  }, 60_000);
+
+  it('el escritor también lo mira en replaceBody, con el tamaño; uno que no crece pasa', async () => {
+    const dataDir = tempDir();
+    await withWriter(dataDir, async (writer) => {
+      const id = await createNote(writer, '# Nota\n');
+      const current = await writer.port.noteRead(id);
+      const body = `# Nota\n\n${'\u0001'.repeat(400_000)}\n`;
+      const error = await writer
+        .replaceBodyLocal({ id, body, baseBodySha256: current!.bodySha256, onConflict: 'reject', privacy: OPEN })
+        .then(() => null, (caught: unknown) => caught);
+      expect(error).toBeInstanceOf(StoreError);
+      expect((error as StoreError).code).toBe('invalid_input');
+      expect((error as StoreError).size).toEqual({ field: 'body', limit: NOTE_BODY_MAX_BYTES, received: jsonTextBytes(body) });
+      expect((await writer.port.noteRead(id))?.body).toBe('# Nota\n');
+    });
+    expect(noteBodyGrowsPastLimit('\u0001'.repeat(400_000), '\u0001'.repeat(400_001))).toBe(false);
+    expect(noteBodyGrowsPastLimit('\u0001'.repeat(400_001), '\u0001'.repeat(400_000))).toBe(true);
+    expect(noteBodyGrowsPastLimit('a'.repeat(1_500_000), '')).toBe(false);
+  }, 60_000);
 
   it('una nota bloqueada después del checkout, o una edición con etiqueta privada, no entran', async () => {
     const { lib, cwd, root, recetaFile } = await checkedOut();

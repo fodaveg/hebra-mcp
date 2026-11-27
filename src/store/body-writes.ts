@@ -48,7 +48,9 @@ import type { PrivacyConfig } from '../privacy/config';
 import { TrashFilter } from '../privacy/trash-filter';
 import {
   LOCKED_BODY_PREFIX,
+  noteBodyGrowsPastLimit,
   privacyInTurnFor,
+  requireNoteBodyFits,
   saveInputFor,
   type NoteWriteStore,
   type NoteWriteTarget
@@ -173,6 +175,9 @@ export async function replaceBodyInTurn(
       wrote: false
     };
   }
+  // El tope de una nota con la regla de editar: uno que no subiría nunca no se escribe
+  // (`invalid_input` con el tamaño); uno que no crece respecto del actual, sí.
+  if (noteBodyGrowsPastLimit(input.body, note.body)) requireNoteBodyFits(input.body);
   const changedUnderneath = note.bodySha256 !== input.baseBodySha256;
   if (changedUnderneath && input.onConflict === 'reject') {
     return { result: { outcome: 'conflict_rejected' }, wrote: false };

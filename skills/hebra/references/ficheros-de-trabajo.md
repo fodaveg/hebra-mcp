@@ -114,7 +114,8 @@ Límites:
 - Solo cuerpos de nota: sin adjuntos, sin `.base` ni otros ficheros sueltos. Un `![[…]]` editado
   viaja como texto.
 - No salen notas privadas, bloqueadas, archivadas, de la papelera ni copias de conflicto. Un
-  cuerpo de más de 1 000 000 de unidades UTF-16 no se devuelve.
+  cuerpo que pasa del tope de una nota (2 031 588 bytes en JSON, el mismo que al crearla) no se
+  devuelve: `apply` lo lista con sus bytes y el tope.
 - No es una biblioteca permanente de ficheros: sacar, trabajar y devolver. Lo sacado queda en
   claro en el disco de esa máquina. No se ha probado en Windows (`SPEC.md` §13.7).
 - No toques `.hebra-d/`: son metadatos y bases de la copia, y los gestiona la orden.

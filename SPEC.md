@@ -184,7 +184,15 @@ Reglas comunes:
   escritor sobre el cuerpo que va a guardar al crear, al añadir y al editar (una edición que lo
   deja más pequeño siempre pasa), con `field: "body"`. El texto de una llamada a
   `hebra_append_to_note` va aparte, hasta 1 MiB (`APPEND_TEXT_MAX_BYTES`). Antes: 100 000 y 20 000
-  unidades UTF-16, que rechazaban notas que el relé admite.
+  unidades UTF-16, que rechazaban notas que el relé admite. Los ficheros de trabajo siguen el mismo
+  tope (§13.7). En `capabilities.limits` son `noteBodyBytes` y `appendTextBytes`; los nombres de
+  antes, `createNoteBodyChars` y `appendTextChars`, siguen saliendo con el mismo valor (ya en
+  bytes) y están **deprecados**: no rompen a ningún cliente, y uno nuevo lee los de ahora.
+- Adjuntos, 5 MiB por llamada (`addAttachmentBytes`), a propósito: el tope real es el transporte,
+  no el relé (que admite blobs de hasta 1 GiB). El adjunto va en base64 dentro de los argumentos
+  de una herramienta que escribe un modelo, así que cada byte cuesta 4/3 de contexto y de salida
+  del modelo, y la petición entera tiene que caber en una línea de `writer.sock` y en el cuerpo
+  de `POST /mcp` (`MAX_WRITE_MESSAGE_BYTES`).
 
 | Herramienta | Entrada | Salida |
 |---|---|---|
@@ -300,7 +308,7 @@ Paginación, campos y capacidades (30 sep 2026, «Recursos y escala»):
   en el orden de siempre; un nombre desconocido lo rechaza el esquema. Ausente, salida completa.
 - **Capacidades**: el `initialize` lleva `instructions` fijas (qué hace el servidor, cómo paginar, cómo
   editar, qué no permite) y `hebra_status.capabilities` da `{server: {name, version}, tools, pagination,
-  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listProperties`, `queryProperties` con sus topes de filtros y claves, `searchFilters` con los de `props` y `linksTo`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
+  limits, notAllowed, privacyConfigured}`. `limits` recoge los máximos de `limit` por herramienta (`listNotes`, `listTags`, `listProperties`, `queryProperties` con sus topes de filtros y claves, `searchFilters` con los de `props` y `linksTo`, `listFolders`, `links`, `search`, `listTrash`, `listFiles`, `listOrganizations`, `listVersions`, `listAttachments`, `noteOutline`), `grep` (D13: `default` 20, `max` 100, `contextLines` 5, `patternChars` 1 000, `lineChars` 300, `timeBudgetMs` 2 000 y `responseChars` 100 000), `readNoteLines` (2 000, D13: líneas por lectura con `lines`), `replaceInNotes` (D14: `maxNotes` 200, `pageDefault` 50, `pageMax` 200, `replacementChars` 10 000, `planResultChars` 5 000 000, `previewChangesPerNote` 3, `responseChars` 100 000, `simulateTimeBudgetMs` 2 000, `applyTimeBudgetMs` y `undoTimeBudgetMs` 20 000, `applyWithinMs` una hora, `undoWithinMs` 7 días, `storedPlans` 20 y `storedPlanChars` 50 000 000), los tamaños de las escrituras (`noteBodyBytes` y `appendTextBytes`, con sus nombres deprecados `createNoteBodyChars` y `appendTextChars`, del mismo valor; también `folderNameChars` y `attachmentNameChars`, 255, y `addAttachmentBytes`, 5 MiB, D9), `attachmentBytes` (5 MiB) y `attachmentTextChars` (100 000), `writeProofTailChars` (200, D11: los caracteres finales de la prueba de lo guardado), `readFile` (D15: `bytes` 5 MiB y `textChars` 100 000), `replaceFileText` (D15: `bytes` 1 000 000 y `undoWithinMs` 7 días), `createFile` (D17: `bytes` 1 000 000, `nameChars` 255 y `extensions`, las que se pueden crear), `duplicateFile` (D17: `bytes` 5 MiB), `jdNewId` (D18: `applyWithinMs` una hora y `storedPlans` 50), `jdAudit` (D18: `default` 200, `max` 500) y `jdMove` (D19: `applyWithinMs` una hora y `undoWithinMs` 7 días); `notAllowed` lista lo que no hace (purgar o vaciar la
   papelera, borrar carpetas, `folder_delete`, y moverlas salvo con `hebra_jd_move`,
   `folder_move_outside_jd_move`, ambos desde D19, antes `folder_move_or_delete`; cambiar o
   borrar adjuntos, y purgar un fichero suelto:
@@ -524,7 +532,8 @@ Detalle de las escrituras (D2):
     primera de la llamada) se salta y sale en `skipped` con `too_slow`; si ya se había
     avanzado, el corte cae en ella y `continueAfter` (detrás de la última mirada entera,
     §6.3) la reintenta. Una cuyo resultado
-    pasaría de 1 000 000 de caracteres sale en `skipped` con `too_large`, y ese resultado
+    pasaría de 1 000 000 de caracteres, o del tope de una nota creciendo (`NOTE_BODY_MAX_BYTES`,
+    §5, que el escritor no escribiría al aplicar), sale en `skipped` con `too_large`, y ese resultado
     nunca se construye entero: `replaceBodyLines` deja de construir en cuanto lo pasaría,
     también a mitad de una línea (cada sustitución suma lo que crece), en el hilo
     principal y en el de la expresión (que nunca devuelve un resultado enorme), antes de
@@ -3433,7 +3442,11 @@ dispositivo, no otro:
 - No salen: notas bloqueadas, papelera, copias de conflicto, archivadas y privadas (D3). Las
   ocultas del listado general sí salen con `--all` (es una preferencia de vista, no de
   privacidad).
-- Un cuerpo de más de 1 000 000 de unidades UTF-16 no se devuelve (cabe en una línea del socket).
+- Un cuerpo que pasa del tope de una nota (`NOTE_BODY_MAX_BYTES`, 2 031 588 bytes en JSON, §5,
+  medido igual que al crearla) no se devuelve: `apply` lo lista con sus bytes y el tope. El
+  escritor lo comprueba otra vez en el turno de `replaceBody` con la regla de editar (un cuerpo
+  que no crece respecto del actual pasa) y responde `invalid_input` con `field`, `limit` y
+  `received`. Hasta el 27 nov 2026, 1 000 000 de unidades UTF-16.
 - Copia en claro de lo sacado en el disco del agente, como cualquier fichero suyo.
 - Rutas largas de Windows (260 caracteres) sin tratar; tampoco se ha corrido en Windows.
 - Sin vigilancia de cambios: lo editado y olvidado lo cuenta `status` (con el aviso de 24 h).

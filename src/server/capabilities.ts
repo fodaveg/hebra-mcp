@@ -203,6 +203,11 @@ export interface Capabilities {
     /** Tope del cuerpo de una nota (crear, añadir y editar), en bytes del JSON del sobre. */
     noteBodyBytes: number;
     appendTextBytes: number;
+    /** @deprecated Desde el 27 nov 2026: `noteBodyBytes`. El mismo valor, para quien lea el
+     *  nombre viejo (que medía unidades UTF-16 al crear; el tope ya es en bytes). */
+    createNoteBodyChars: number;
+    /** @deprecated Desde el 27 nov 2026: `appendTextBytes`, con el mismo valor. */
+    appendTextChars: number;
     editNote: { maxEdits: number; maxTotalChars: number; operationIdChars: number };
     /** Leer adjuntos: bytes descifrados por adjunto. */
     attachmentBytes: number;
@@ -307,6 +312,9 @@ export function buildCapabilities(version: string, privacy: PrivacyConfig): Capa
       },
       noteBodyBytes: NOTE_BODY_MAX_BYTES,
       appendTextBytes: APPEND_TEXT_MAX_BYTES,
+      // Nombres de antes del 27 nov 2026, con el valor nuevo: no rompen a quien los lea.
+      createNoteBodyChars: NOTE_BODY_MAX_BYTES,
+      appendTextChars: APPEND_TEXT_MAX_BYTES,
       editNote: {
         maxEdits: EDITS_MAX_COUNT,
         maxTotalChars: EDITS_TOTAL_MAX_LENGTH,

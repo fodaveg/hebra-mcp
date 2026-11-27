@@ -11,6 +11,7 @@ import {
   type WriterSocketHandlers
 } from '../../src/ipc/writer-socket';
 import type { ReplaceBodyInput, TrashConflictCopiesInput } from '../../src/store/body-writes';
+import { CREATE_BODY_MAX_LENGTH } from '../../src/store/writes';
 import { createNote, OPEN, removeTempDirs, tempDir, withWriter } from './helpers';
 
 const servers: WriterSocketServer[] = [];
@@ -90,6 +91,10 @@ describe('validación de replaceBody, trashConflictCopies y syncRound en writer.
     expect(await requestWriter(path, 'trashConflictCopies', trash, 2_000)).toEqual({ trashed: 0, already: 0, changed: 0 });
     expect(await requestWriter(path, 'syncRound', {}, 2_000)).toEqual({ kind: 'no_sync' });
     expect(seen).toEqual([{ ...replace }, { ...trash }, 'round']);
+    // La cota del cuerpo es la de una nota (antes, 1 000 000 de unidades UTF-16).
+    const large = { ...replace, body: 'x'.repeat(1_500_000) };
+    expect(await requestWriter(path, 'replaceBody', large, 5_000)).toMatchObject({ outcome: 'already' });
+    seen.pop();
 
     const bad: Array<[op: 'replaceBody' | 'trashConflictCopies', params: Record<string, unknown>]> = [
       ['replaceBody', { ...replace, privacy: undefined }],
@@ -97,7 +102,7 @@ describe('validación de replaceBody, trashConflictCopies y syncRound en writer.
       ['replaceBody', { ...replace, onConflict: 'pisar' }],
       ['replaceBody', { ...replace, id: '' }],
       ['replaceBody', { ...replace, body: 42 }],
-      ['replaceBody', { ...replace, body: 'x'.repeat(1_000_001) }],
+      ['replaceBody', { ...replace, body: 'x'.repeat(CREATE_BODY_MAX_LENGTH + 1) }],
       ['trashConflictCopies', { ...trash, privacy: undefined }],
       ['trashConflictCopies', { ...trash, bodySha256: 'A'.repeat(64) }],
       ['trashConflictCopies', { ...trash, copyId: 7 }],

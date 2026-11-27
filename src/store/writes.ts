@@ -365,11 +365,19 @@ export function requireNoteBodyFits(body: string): void {
 export const CREATE_BODY_MAX_LENGTH = NOTE_BODY_MAX_BYTES;
 export const APPEND_TEXT_MAX_LENGTH = APPEND_TEXT_MAX_BYTES;
 
-/** Límite del cuerpo entero que devuelven los ficheros de trabajo (`replaceBody`,
- *  SPEC.md §13; `./body-writes.ts`), en unidades UTF-16. Vive aquí y no en
- *  `./body-writes.ts` para entrar en `MAX_WRITE_MESSAGE_BYTES` sin una importación
- *  circular. Con el peor escape JSON son 6 000 000 bytes: por debajo del base64 de un
- *  adjunto, así que el tope de la línea no cambia. */
+/** `body` no cabe en una nota y además crece respecto de `previous`: la regla de editar
+ *  (`editNoteLocal`), que comparten los ficheros de trabajo (`replaceBody`, SPEC.md §13).
+ *  Una nota que ya pasaba del tope (escrita en la app) se puede devolver si no crece. */
+export function noteBodyGrowsPastLimit(body: string, previous: string): boolean {
+  const received = jsonTextBytes(body);
+  return received > NOTE_BODY_MAX_BYTES && received > jsonTextBytes(previous);
+}
+
+/** Tope del cuerpo resultante de una nota en `hebra_replace_in_notes` (`./replace-batch.ts`),
+ *  en unidades UTF-16. Hasta el 27 nov 2026 era también el de los ficheros de trabajo, que
+ *  ahora siguen `NOTE_BODY_MAX_BYTES`. Vive aquí para entrar en `MAX_WRITE_MESSAGE_BYTES`
+ *  sin una importación circular. Con el peor escape JSON son 6 000 000 bytes: por debajo del
+ *  base64 de un adjunto, así que el tope de la línea no cambia. */
 export const REPLACE_BODY_MAX_LENGTH = 1_000_000;
 
 /**

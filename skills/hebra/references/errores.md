@@ -42,7 +42,7 @@ diga otra cosa, un error de escritura no ha escrito nada.
 
 | Código | Qué significa | Qué hacer |
 |---|---|---|
-| `attachment_too_large` | El adjunto pasa de 5 MiB (`byteLength`). | No se puede leer ni añadir desde aquí; díselo con el tamaño. |
+| `attachment_too_large` | El adjunto pasa de 5 MiB (`byteLength`). El tope es del transporte, no del relé (que admite mucho más): el adjunto viaja en base64 dentro de los argumentos de una herramienta que escribe el modelo, y más grande no cabe con holgura ni en el contexto ni en la petición. | No se puede leer ni añadir desde aquí; díselo con el tamaño y que lo añada desde Hebra. |
 | `attachment_type_not_allowed` | Tipo fuera de la lista (imágenes PNG, JPEG, GIF, WebP, PDF, texto, Markdown, CSV, JSON), decidido por el contenido. | Díselo; que lo abra o lo adjunte en Hebra. |
 | `attachment_unavailable` | Los bytes no están aquí ni se pudieron bajar (sin sync, sin red, o el relé no lo tiene). | `hebra_status` para ver el sync; reintenta una vez más tarde. |
 | `folder_unavailable` | Ese nombre de carpeta no se puede usar ahí, esa carpeta no se puede renombrar así, o (en `hebra_jd_move`) esa carpeta no se puede mover así o ese nombre o subcarpeta no se pueden usar en el destino, por la configuración de privacidad del dueño. | No insistas con variantes del nombre ni especules por qué: díselo y ofrece otro nombre u otra carpeta. |

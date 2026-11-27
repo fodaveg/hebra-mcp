@@ -18,8 +18,8 @@ import { deriveNote, type NoteRow } from '../hebra';
 import { hasPrivates } from '../privacy/config';
 import { PrivacyFilter } from '../privacy/filter';
 import { isBusyOtherInstance, StoreError } from '../store/errors';
-import { REPLACE_BODY_MAX_LENGTH, type ReplaceBodyResult } from '../store/body-writes';
-import { LOCKED_BODY_PREFIX } from '../store/writes';
+import type { ReplaceBodyResult } from '../store/body-writes';
+import { jsonTextBytes, LOCKED_BODY_PREFIX, NOTE_BODY_MAX_BYTES } from '../store/writes';
 import { GATE_ATTEMPTS, GateUsage, passGate, samePrivacyConfig } from '../server/privacy-gate';
 import type { RoundWait } from '../server/write-context';
 import type { WriterRole } from '../sync/library-instance';
@@ -690,8 +690,10 @@ async function applyLocked(
     .sort((a, b) => (a.ruta < b.ruta ? -1 : a.ruta > b.ruta ? 1 : 0));
   const damaged = entries.filter((entry) => entry.state === 'base_danada');
   const stillConflicted = entries.filter((entry) => entry.state === 'editada' && entry.meta?.conflicto);
-  const tooLarge = candidates.filter((entry) => entry.edited!.length > REPLACE_BODY_MAX_LENGTH);
-  const toApply = candidates.filter((entry) => entry.edited!.length <= REPLACE_BODY_MAX_LENGTH);
+  // El tope de una nota (`NOTE_BODY_MAX_BYTES`), medido como al crearla: lo que no subiría.
+  const bodyBytes = new Map(candidates.map((entry) => [entry.id, jsonTextBytes(entry.edited!)]));
+  const tooLarge = candidates.filter((entry) => bodyBytes.get(entry.id)! > NOTE_BODY_MAX_BYTES);
+  const toApply = candidates.filter((entry) => bodyBytes.get(entry.id)! <= NOTE_BODY_MAX_BYTES);
   let unclean = damaged.length > 0 || stillConflicted.length > 0 || tooLarge.length > 0;
 
   // `hidden`: tras abrir la biblioteca, las notas que la puerta final ya no deja nombrar
@@ -704,7 +706,12 @@ async function applyLocked(
     for (const entry of shownSide(stillConflicted)) {
       io.out(`  ${shown(io, workdir, entry.ruta)}  en conflicto de antes: no se devuelve hasta otro checkout`);
     }
-    for (const entry of shownSide(tooLarge)) io.out(`  ${shown(io, workdir, entry.ruta)}  demasiado grande para devolverla`);
+    for (const entry of shownSide(tooLarge)) {
+      io.out(
+        `  ${shown(io, workdir, entry.ruta)}  demasiado grande para devolverla ` +
+          `(${bodyBytes.get(entry.id)} bytes; el tope es ${NOTE_BODY_MAX_BYTES})`
+      );
+    }
     const missing = entries.filter((entry) => entry.state === 'falta');
     if (missing.length > 0) io.out(`  ${missing.length} faltan (renombradas o borradas): no se devuelven`);
     if (untracked.length > 0) io.out(`  ${untracked.length} sin seguimiento: D no crea notas desde ficheros`);
@@ -765,7 +772,9 @@ async function applyLocked(
           onConflict: args.conflicto === 'copia' ? 'copy' : 'reject'
         }));
       } catch (error) {
-        failure = writeFailure(errorCode(error));
+        failure = error instanceof StoreError && error.size !== undefined
+          ? `el cuerpo no cabe en una nota (${error.size.received} bytes; el tope es ${error.size.limit})`
+          : writeFailure(errorCode(error));
         break;
       }
       await hooks.afterWrite?.(index, entry.id);

@@ -79,6 +79,16 @@ describe('M1: un resultado enorme se corta mientras se construye', () => {
     }, 60_000);
   }
 
+  it('un resultado que no cabría en una nota (NOTE_BODY_MAX_BYTES en JSON) tampoco entra en el plan', async () => {
+    const { instance } = await library();
+    // 400 000 caracteres de control: dentro del tope en caracteres, 2,4 MB en JSON (\u0001).
+    const big = await createNote(instance, `# Escapes\n${'e'.repeat(400_000)}\n`);
+    const batch = new ReplaceBatch(instance.port, instance);
+    const plan = (await batch.run(simulate('e', '\u0001'))).result as ReplacePlanView;
+    expect(plan.skipped).toEqual([{ id: big, title: 'Escapes', reason: 'too_large' }]);
+    expect(plan.notes).toEqual([]);
+  }, 60_000);
+
   it('el plazo se mira también dentro de una nota grande con un literal', async () => {
     const { instance } = await library();
     const big = await createNote(instance, `# Muchas líneas\n${'a\n'.repeat(400_000)}`);

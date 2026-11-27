@@ -203,7 +203,6 @@ import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
   MAX_WRITE_MESSAGE_BYTES,
-  REPLACE_BODY_MAX_LENGTH,
   type AddAttachmentInput,
   type AppendToNoteInput,
   type AppendToNoteResult,
@@ -1061,11 +1060,12 @@ function replaceRequestOf(params: Record<string, unknown>): ReplaceRequest {
   }
 }
 
-/** `replaceBody` (ficheros de trabajo, SPEC.md §13): el cuerpo con su tope, la base que se
+/** `replaceBody` (ficheros de trabajo, SPEC.md §13): el cuerpo con la cota del de una nota
+ *  (como `createNote`; el tope en bytes, con el tamaño, lo da el escritor), la base que se
  *  sacó (SHA-256 y `local_seq`) y qué hacer con un conflicto. */
 function replaceBodyInputOf(params: Record<string, unknown>): ReplaceBodyInput {
   const { id, body, baseBodySha256, onConflict } = params;
-  if (!isId(id) || typeof body !== 'string' || body.length > REPLACE_BODY_MAX_LENGTH) {
+  if (!isId(id) || typeof body !== 'string' || body.length > CREATE_BODY_MAX_LENGTH) {
     throw new InvalidRequest();
   }
   if (typeof baseBodySha256 !== 'string' || !SHA256_HEX.test(baseBodySha256)) throw new InvalidRequest();

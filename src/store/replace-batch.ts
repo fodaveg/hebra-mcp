@@ -76,6 +76,7 @@ import type { HebraLibraryPort } from './types';
 import {
   LOCKED_BODY_PREFIX,
   hiddenOperationTarget,
+  noteBodyGrowsPastLimit,
   priorOperation,
   privacyInTurnFor,
   REPLACE_BODY_MAX_LENGTH,
@@ -821,7 +822,9 @@ export class ReplaceBatch {
           // Regla 4 de D2: nunca una etiqueta privada en una nota visible. Fuera del plan,
           // sin decir por qué: como una nota que no existe.
           if (filter.hidesAnyTag(resultTags)) return true;
-          if (body.length > REPLACE_BODY_MAX_LENGTH) {
+          // También el tope de una nota (`NOTE_BODY_MAX_BYTES`, regla de editar): el escritor no
+          // lo escribiría al aplicar, así que no entra en el plan.
+          if (body.length > REPLACE_BODY_MAX_LENGTH || noteBodyGrowsPastLimit(body, base)) {
             if (skipped.length < SKIPPED_MAX) {
               skipped.push({ id: note.id, title: capHeading(note.title), reason: 'too_large' });
             }
