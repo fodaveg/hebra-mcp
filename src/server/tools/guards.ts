@@ -6,7 +6,7 @@ import { ROOT_FOLDER_ID } from '../../hebra';
 import { OPERATION_ID_MAX_LENGTH } from '../../store/operations';
 import { REVISION_MAX_LENGTH } from '../../store/revision';
 import { usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 
 /**
  * La nota existe y es visible para el filtro de privados; si no, `not_found`. Visible, queda
@@ -56,13 +56,14 @@ export function declareWriteUsage(
  *  `invalid_request`, que esas ops traducen a `writer_outdated`. No va en el esquema: un `.max()`
  *  saldría como el error de validación del SDK (`-32602`, con eco), no como `invalid_input`. */
 export function requireValidRevision(revision: string | undefined): void {
-  if (revision !== undefined && revision.length > REVISION_MAX_LENGTH) throw new ToolError('invalid_input');
+  if (revision !== undefined && revision.length > REVISION_MAX_LENGTH) throw tooLarge('expectedRevision', REVISION_MAX_LENGTH, revision.length);
 }
 
 /** `operationId` no vacío y de a lo sumo `OPERATION_ID_MAX_LENGTH`; si no, `invalid_input`. */
 export function requireValidOperationId(operationId: string): void {
-  if (operationId.length === 0 || operationId.length > OPERATION_ID_MAX_LENGTH) {
-    throw new ToolError('invalid_input');
+  if (operationId.length === 0) throw new ToolError('invalid_input');
+  if (operationId.length > OPERATION_ID_MAX_LENGTH) {
+    throw tooLarge('operationId', OPERATION_ID_MAX_LENGTH, operationId.length);
   }
 }
 

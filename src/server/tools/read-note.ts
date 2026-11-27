@@ -41,7 +41,7 @@ import {
   type SectionRef
 } from '../../store/sections';
 import { LOCKED_BODY_PREFIX } from '../../store/writes';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { loadNoteStates, stateFields, type NoteStateFields } from './note-state';
 import { resolveNoteId } from './note-ref';
@@ -80,7 +80,7 @@ export function requireValidHeadingInput(input: {
     if (input.headingOccurrence !== undefined) throw new ToolError('invalid_input');
     return;
   }
-  if (input.heading.length > HEADING_INPUT_MAX_LENGTH) throw new ToolError('invalid_input');
+  if (input.heading.length > HEADING_INPUT_MAX_LENGTH) throw tooLarge('heading', HEADING_INPUT_MAX_LENGTH, input.heading.length);
   if (
     input.headingOccurrence !== undefined &&
     (!Number.isSafeInteger(input.headingOccurrence) || input.headingOccurrence < 1)

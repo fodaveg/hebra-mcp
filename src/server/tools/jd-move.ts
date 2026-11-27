@@ -27,7 +27,7 @@
 import { logEvent } from '../../log/logger';
 import { JD_MOVE_NAME_MAX_LENGTH, type JdMoveKind, type JdMoveRequest } from '../../store/jd-move';
 import { afterGate, usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import type { JdMoveOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
@@ -69,8 +69,8 @@ function requestOf(input: JdMoveInput, ctx: ToolContext): JdMoveRequest {
   if (input.kind !== 'note' && input.kind !== 'file' && input.kind !== 'folder') throw new ToolError('invalid_input');
   if (typeof input.id !== 'string' || input.id.length === 0) throw new ToolError('invalid_input');
   if (typeof input.toId !== 'string' || input.toId.length === 0 || input.toId.length > 32) throw new ToolError('invalid_input');
-  for (const text of [input.subfolder, input.as]) {
-    if (text !== undefined && text.length > JD_MOVE_NAME_MAX_LENGTH) throw new ToolError('invalid_input');
+  for (const [field, text] of [['subfolder', input.subfolder], ['as', input.as]] as const) {
+    if (text !== undefined && text.length > JD_MOVE_NAME_MAX_LENGTH) throw tooLarge(field, JD_MOVE_NAME_MAX_LENGTH, text.length);
   }
   return {
     mode: 'simulate',

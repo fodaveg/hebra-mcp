@@ -426,7 +426,7 @@ describe('reenvío lector→escritor (D17)', () => {
       ['hebra_trash_note', { id: noteId, expectedRevision: tooLong }],
       ['hebra_restore_note', { id: noteId, expectedRevision: tooLong }]
     ] as const) {
-      expect(await call(tool, input), tool).toEqual({ isError: true, value: { error: 'invalid_input' } });
+      expect(await call(tool, input), tool).toEqual({ isError: true, value: { error: 'invalid_input', field: 'expectedRevision', limit: REVISION_MAX_LENGTH, received: REVISION_MAX_LENGTH + 1, unit: 'chars' } });
     }
     // Ni los demás campos de las herramientas nuevas: la herramienta los corta antes del socket
     // con su error de siempre, así que un escritor al día nunca parece uno anterior.
@@ -443,7 +443,8 @@ describe('reenvío lector→escritor (D17)', () => {
       ['hebra_trash_note', { id: long, expectedRevision: 'r' }, 'not_found'],
       ['hebra_restore_note', { id: long, expectedRevision: 'r' }, 'not_found']
     ] as const) {
-      expect(await call(tool, input), `${tool} ${JSON.stringify(input).slice(0, 40)}`).toEqual({
+      // Un `operationId` de más lleva además su límite (`tooLarge`); el código es el mismo.
+      expect(await call(tool, input), `${tool} ${JSON.stringify(input).slice(0, 40)}`).toMatchObject({
         isError: true,
         value: { error }
       });

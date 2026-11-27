@@ -23,6 +23,22 @@ export class ToolError extends Error {
   }
 }
 
+/**
+ * `invalid_input` por tamaño: qué campo, su límite y cuánto llegó, para que quien llama sepa
+ * cuánto recortar (tarea de Lumbre 48e8e6f6, 27 nov 2026; antes salía el código a secas). Son
+ * números, nunca el valor: sin eco de la entrada. `unit`: `chars` cuenta unidades UTF-16
+ * (`string.length`: un emoji o un carácter fuera del plano básico cuenta 2), `items` elementos y
+ * `bytes` bytes.
+ */
+export function tooLarge(
+  field: string,
+  limit: number,
+  received: number,
+  unit: 'chars' | 'items' | 'bytes' = 'chars'
+): ToolError {
+  return new ToolError('invalid_input', { field, limit, received, unit });
+}
+
 export function toErrorResult(error: ToolError): CallToolResult {
   return {
     content: [{ type: 'text', text: JSON.stringify({ error: error.code, ...error.extra }) }],

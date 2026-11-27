@@ -31,8 +31,8 @@
 import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
 import { PrivacyFilter } from '../../privacy/filter';
-import { planCreateFolder, planRenameFolder } from '../../store/folders';
-import { ToolError } from '../errors';
+import { FOLDER_NAME_MAX_LENGTH, planCreateFolder, planRenameFolder } from '../../store/folders';
+import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { syncOf, type FolderOutcome, type SyncFields } from '../write-context';
 import { mapWriteError } from './write-errors';
@@ -71,6 +71,14 @@ function declarePlan(ctx: ToolContext, parentId: string, folderId?: string): voi
   }
 }
 
+/** Un nombre que, sin los espacios de los extremos (como lo recorta `validFolderName`), pasa
+ *  de `FOLDER_NAME_MAX_LENGTH` es `invalid_input` con el límite; los demás fallos del nombre
+ *  los decide el plan, a secas. */
+function requireFolderNameSize(name: string): void {
+  const length = name.trim().length;
+  if (length > FOLDER_NAME_MAX_LENGTH) throw tooLarge('name', FOLDER_NAME_MAX_LENGTH, length);
+}
+
 /** El padre: `parentId` (`"root"` es la raíz) o `parent` (ruta, como `path` de
  *  `hebra_list_folders`), como mucho uno; sin ninguno, la raíz. Una ruta que no existe es
  *  `not_found`, igual que una oculta (lo decide el plan). */
@@ -92,6 +100,7 @@ export async function runCreateFolder(
   input: { name: string; parent?: string; parentId?: string }
 ): Promise<CreateFolderOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
+  requireFolderNameSize(input.name);
   const parentId = parentOf(ctx, input);
   const plan = planCreateFolder(ctx.privacy, parentId, input.name);
   if (ctx.privacy.folderExists(parentId) && !ctx.privacy.isFolderHidden(parentId)) declarePlan(ctx, parentId);
@@ -119,6 +128,7 @@ export async function runRenameFolder(
   input: { folderId: string; name: string }
 ): Promise<RenameFolderOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
+  requireFolderNameSize(input.name);
   const plan = planRenameFolder(ctx.privacy, input.folderId, input.name);
   if (ctx.privacy.folderExists(input.folderId) && !ctx.privacy.isFolderHidden(input.folderId)) {
     declarePlan(ctx, ctx.privacy.folderParent(input.folderId) ?? ROOT_FOLDER_ID, input.folderId);

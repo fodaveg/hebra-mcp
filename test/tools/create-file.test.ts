@@ -132,7 +132,7 @@ describe('hebra_create_file (D17)', () => {
     expect(await call('hebra_create_file', { name: 'x.txt', text: 'x', operationId: '' })).toEqual(invalid);
     expect(
       await call('hebra_create_file', { name: 'x.txt', text: 'x', operationId: 'o'.repeat(201) })
-    ).toEqual(invalid);
+    ).toEqual({ isError: true, value: { error: 'invalid_input', field: 'operationId', limit: 200, received: 201, unit: 'chars' } });
     expect(
       await call('hebra_create_file', { folder: 'Proyectos', folderId: 'root', name: 'x.txt', text: 'x', operationId: 'op-2' })
     ).toEqual(invalid);

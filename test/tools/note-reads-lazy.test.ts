@@ -410,6 +410,6 @@ describe('hebra_create_note con privacyLoad lazy: igual que con la biblioteca en
     all = await lazyHarness(AUDIT_CONFIG);
     lazy = await lazyHarness(AUDIT_CONFIG);
     const calls = await create({ body: 'x'.repeat(100_001) });
-    expect(calls.lazy.json).toEqual({ error: 'invalid_input' });
+    expect(calls.lazy.json).toEqual({ error: 'invalid_input', field: 'body', limit: 100_000, received: 100_001, unit: 'chars' });
   });
 });

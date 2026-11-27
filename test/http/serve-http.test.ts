@@ -206,7 +206,10 @@ describe('todas las herramientas por el cliente HTTP del SDK', () => {
       expectedRevision: reread.value.revision,
       operationId: 'op-http-3'
     });
-    expect(overLimit).toEqual({ isError: true, value: { error: 'invalid_input' } });
+    expect(overLimit).toEqual({
+      isError: true,
+      value: { error: 'invalid_input', field: 'edits', limit: EDITS_TOTAL_MAX_LENGTH, received: EDITS_TOTAL_MAX_LENGTH + 1, unit: 'chars' }
+    });
   });
 });
 

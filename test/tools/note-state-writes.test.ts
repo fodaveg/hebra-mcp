@@ -268,7 +268,7 @@ describe('cambios de estado de una nota (D23)', () => {
       const { call, test } = harness;
       const tooLong = 'r'.repeat(REVISION_MAX_LENGTH + 1);
       const reached = vi.spyOn(test.serverContext.write!, 'noteState');
-      const invalid = { isError: true, value: { error: 'invalid_input' } };
+      const invalid = { isError: true, value: { error: 'invalid_input', field: 'expectedRevision', limit: REVISION_MAX_LENGTH, received: REVISION_MAX_LENGTH + 1, unit: 'chars' } };
       for (const id of [test.library.publicNote2Id, ...hiddenIds(harness)]) {
         expect(await call('hebra_move_note', { id, folderId: 'root', expectedRevision: tooLong }), id).toEqual(invalid);
         expect(await call('hebra_trash_note', { id, expectedRevision: tooLong }), id).toEqual(invalid);
@@ -280,7 +280,7 @@ describe('cambios de estado de una nota (D23)', () => {
       const atLimit = 'r'.repeat(REVISION_MAX_LENGTH);
       expect(
         await call('hebra_move_note', { id: test.library.publicNote2Id, folderId: 'root', expectedRevision: atLimit })
-      ).toEqual(invalid);
+      ).toEqual({ isError: true, value: { error: 'invalid_input' } });
     });
 
     it('una revisión ilegible o de otra nota: invalid_input; de otra biblioteca: revision_conflict', async () => {

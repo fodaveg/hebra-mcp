@@ -25,7 +25,7 @@ import { logEvent } from '../../log/logger';
 import { runJdAudit, JD_AUDIT_NOT_CHECKED, type JdAuditFinding } from '../../store/jd-audit';
 import { JD_TITLE_MAX_LENGTH, type JdNewIdRequest } from '../../store/jd-new-id';
 import { afterGate, usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import { effectiveLimit, LIMITS, slicePage } from '../pagination';
 import type { JdNewIdOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
@@ -64,7 +64,8 @@ function requestOf(input: JdNewIdInput, ctx: ToolContext): JdNewIdRequest {
     return { mode: 'apply', planId: input.planId, operationId: input.operationId, privacy };
   }
   if (typeof input.category !== 'string' || !/^\d{2}$/u.test(input.category)) throw new ToolError('invalid_input');
-  if (typeof input.title !== 'string' || input.title.length > JD_TITLE_MAX_LENGTH) throw new ToolError('invalid_input');
+  if (typeof input.title !== 'string') throw new ToolError('invalid_input');
+  if (input.title.length > JD_TITLE_MAX_LENGTH) throw tooLarge('title', JD_TITLE_MAX_LENGTH, input.title.length);
   return {
     mode: 'simulate',
     category: input.category,

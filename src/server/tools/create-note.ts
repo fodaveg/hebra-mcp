@@ -24,7 +24,7 @@
  */
 import { ROOT_FOLDER_ID } from '../../hebra';
 import { logEvent } from '../../log/logger';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { CREATE_BODY_MAX_LENGTH as BODY_MAX_LENGTH } from '../../store/writes';
 import { mapWriteError } from './write-errors';
@@ -40,7 +40,7 @@ export async function runCreateNote(
   input: { body: string; folder?: string }
 ): Promise<CreateNoteOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (input.body.length > BODY_MAX_LENGTH) throw new ToolError('invalid_input');
+  if (input.body.length > BODY_MAX_LENGTH) throw tooLarge('body', BODY_MAX_LENGTH, input.body.length);
 
   const folderId =
     input.folder === undefined ? ROOT_FOLDER_ID : ctx.privacy.folderIdForPath(input.folder);

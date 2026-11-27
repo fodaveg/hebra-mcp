@@ -31,8 +31,8 @@
  * (`noteIdsOf`). Equivalencia con `'all'` en `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
-import { compileGrepPattern } from '../../store/grep';
-import { compileReplacement, REPLACE_MAX_NOTES } from '../../store/replace';
+import { compileGrepPattern, GREP_PATTERN_MAX_CHARS } from '../../store/grep';
+import { compileReplacement, REPLACE_MAX_NOTES, REPLACEMENT_MAX_CHARS } from '../../store/replace';
 import {
   continueAfterId,
   REPLACE_PAGE_DEFAULT,
@@ -41,7 +41,7 @@ import {
   type ReplaceScope
 } from '../../store/replace-batch';
 import { afterGate, usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import type { ReplaceOutcome } from '../write-context';
 import { requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
@@ -101,6 +101,12 @@ function requestOf(input: ReplaceInNotesInput, ctx: ToolContext): ReplaceRequest
     case 'simulate': {
       if (typeof input.pattern !== 'string' || typeof input.replacement !== 'string') {
         throw new ToolError('invalid_input');
+      }
+      if (input.pattern.length > GREP_PATTERN_MAX_CHARS) {
+        throw tooLarge('pattern', GREP_PATTERN_MAX_CHARS, input.pattern.length);
+      }
+      if (input.replacement.length > REPLACEMENT_MAX_CHARS) {
+        throw tooLarge('replacement', REPLACEMENT_MAX_CHARS, input.replacement.length);
       }
       const regex = input.regex === true;
       const caseSensitive = input.caseSensitive === true;

@@ -57,6 +57,7 @@ import {
   clipContext,
   compileGrepPattern,
   GREP_CONTEXT_MAX_LINES,
+  GREP_PATTERN_MAX_CHARS,
   lineStarts,
   lineText,
   scanBody,
@@ -73,7 +74,7 @@ import {
 } from '../../store/regex-worker';
 import { headingAtLine, parseHeadings, type HeadingInfo } from '../../store/sections';
 import { usageOf, type ToolContext } from '../context';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import { LIMITS, effectiveLimit, unwrapCursor, wrapCursor } from '../pagination';
 
 /** Plazo para recorrer los cuerpos, en milisegundos. */
@@ -299,6 +300,9 @@ export async function runGrep(
   options: GrepOptions = {}
 ): Promise<GrepOutput> {
   if (typeof input.pattern !== 'string') throw new ToolError('invalid_input');
+  if (input.pattern.length > GREP_PATTERN_MAX_CHARS) {
+    throw tooLarge('pattern', GREP_PATTERN_MAX_CHARS, input.pattern.length);
+  }
   const pattern = compileGrepPattern(input.pattern, {
     regex: input.regex === true,
     caseSensitive: input.caseSensitive === true

@@ -35,7 +35,7 @@
  */
 import { logEvent } from '../../log/logger';
 import { APPEND_TEXT_MAX_LENGTH as TEXT_MAX_LENGTH, type AppendedProof } from '../../store/writes';
-import { ToolError } from '../errors';
+import { ToolError, tooLarge } from '../errors';
 import { usageOf, type ToolContext } from '../context';
 import { appendAndAwaitRound } from '../write-context';
 import { requireLoadedVisibleNote, requireValidOperationId } from './guards';
@@ -70,7 +70,7 @@ export async function runAppendToNote(
   }
 ): Promise<AppendToNoteOutput> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (input.text.length > TEXT_MAX_LENGTH) throw new ToolError('invalid_input');
+  if (input.text.length > TEXT_MAX_LENGTH) throw tooLarge('text', TEXT_MAX_LENGTH, input.text.length);
   requireValidHeadingInput(input);
   if (input.operationId !== undefined) requireValidOperationId(input.operationId);
 

@@ -26,19 +26,28 @@
  * `test/tools/note-writes-lazy.test.ts`.
  */
 import { logEvent } from '../../log/logger';
-import { editsWithinLimits, type TextEdit } from '../../store/edits';
-import { ToolError } from '../errors';
+import { EDITS_MAX_COUNT, EDITS_TOTAL_MAX_LENGTH, editsWithinLimits, type TextEdit } from '../../store/edits';
+import { ToolError, tooLarge } from '../errors';
 import type { ToolContext } from '../context';
 import type { EditNoteOutcome } from '../write-context';
 import { declareWriteUsage, requireLoadedVisibleNote, requireValidOperationId } from './guards';
 import { mapWriteError } from './write-errors';
+
+/** Por qué `edits` no pasa `editsWithinLimits`: demasiadas sustituciones o demasiado texto
+ *  sumado llevan su límite; sin ninguna o con un `find` vacío, `invalid_input` a secas. */
+function editsLimitError(edits: readonly TextEdit[]): ToolError {
+  if (edits.length > EDITS_MAX_COUNT) return tooLarge('edits', EDITS_MAX_COUNT, edits.length, 'items');
+  const total = edits.reduce((sum, edit) => sum + edit.find.length + edit.replace.length, 0);
+  if (total > EDITS_TOTAL_MAX_LENGTH) return tooLarge('edits', EDITS_TOTAL_MAX_LENGTH, total);
+  return new ToolError('invalid_input');
+}
 
 export async function runEditNote(
   ctx: ToolContext,
   input: { id: string; edits: TextEdit[]; expectedRevision: string; operationId: string }
 ): Promise<EditNoteOutcome> {
   if (!ctx.write) throw new ToolError('invalid_input');
-  if (!editsWithinLimits(input.edits)) throw new ToolError('invalid_input');
+  if (!editsWithinLimits(input.edits)) throw editsLimitError(input.edits);
   requireValidOperationId(input.operationId);
   await requireLoadedVisibleNote(ctx, input.id);
 
