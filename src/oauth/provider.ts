@@ -524,9 +524,10 @@ export class HebraOAuthProvider implements OAuthServerProvider {
       res.status(503).json({ error: 'temporarily_unavailable' }); return;
     }
     if (binding && this.pairing.isRevoked(binding.pairedCredentialId)) {
-      // Con el 410 de Lumbre, reemparejar; si solo lo rechaza el relé, se recupera solo (D24).
+      // Con el 410 de Lumbre, reemparejar; si solo lo rechaza el relé, reactivar el agente o, si se
+      // revocó, volver a conectar (D24).
       if (this.pairing.revokedByLumbre(binding.pairedCredentialId)) sendPairingRevokedPage(res);
-      else sendAgentRevokedPage(res);
+      else sendAgentRevokedPage(res, this.multiuser);
       return;
     }
     this.makeRoomForPending(ip);

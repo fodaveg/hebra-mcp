@@ -11,7 +11,7 @@
  * `'self'` solo el 302 final al cliente quedaría bloqueado.
  */
 import type { Response } from 'express';
-import { AGENT_REVOKED_REASON, PAIRING_REVOKED_REASON, PAIRING_REVOKED_REMOTE_REASON } from '../status/pairing-revocation';
+import { AGENT_REVOKED_REASON, AGENT_REVOKED_REMOTE_REASON, PAIRING_REVOKED_REASON, PAIRING_REVOKED_REMOTE_REASON } from '../status/pairing-revocation';
 import { SUMEGO_CONSENT_PATH } from './sumego';
 
 const BASE_CSP = "default-src 'none'; form-action 'self'; style-src 'unsafe-inline'";
@@ -111,8 +111,10 @@ export function sendPairingRevokedPage(res: Response, remote = false): void {
   send(res, 503, htmlDocument('Conexión con la biblioteca cortada', `<p>${escapeHtml(reason)}</p>`));
 }
 
-/** El relé rechaza la credencial sin un `410` de Lumbre (D24): agente revocado o desactivado desde
- *  Hebra, que se recupera solo al reactivarlo. No pide reemparejar. */
-export function sendAgentRevokedPage(res: Response): void {
-  send(res, 503, htmlDocument('Conexión con la biblioteca cortada', `<p>${escapeHtml(AGENT_REVOKED_REASON)}</p>`));
+/** El relé rechaza la credencial sin un `410` de Lumbre (D24): agente desactivado, que se
+ *  recupera solo al reactivarlo, o revocado o caducado, que pide volver a conectar. `remote`:
+ *  desde el conector, sin CLI, como `sendPairingRevokedPage`. */
+export function sendAgentRevokedPage(res: Response, remote = false): void {
+  const reason = remote ? AGENT_REVOKED_REMOTE_REASON : AGENT_REVOKED_REASON;
+  send(res, 503, htmlDocument('Conexión con la biblioteca cortada', `<p>${escapeHtml(reason)}</p>`));
 }

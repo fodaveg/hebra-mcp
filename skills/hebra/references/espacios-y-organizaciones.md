@@ -15,9 +15,16 @@ biblioteca personal de otro miembro.
 ## Espacios
 
 - `hebra_list_spaces` devuelve los espacios que vería la persona de esta cuenta:
-  `{spaces: [{spaceId, name, organization: {orgId, name} | null, granted}], organizationsAvailable}`.
+  `{spaces: [{spaceId, name, organization: {orgId, name} | null, granted, openError}], organizationsAvailable}`.
   `name` es `null` si no se pudo leer. Solo los de `granted: true` tienen membresía, concesión y
   permiso propio del agente, y solo esos se pasan como `space`.
+- `granted: true` dice que hay concesión, no que el espacio ya abra. Abrirlo además pide dar de
+  alta a este agente en la bóveda del espacio y abrir la clave sellada para él. Si eso falla, la
+  herramienta responde `space_quota_exceeded`, `space_key_unreadable` o `space_unavailable`, no
+  `space_access_denied`, y desde ese intento `openError` lo repite en `hebra_list_spaces` (es
+  `null` si el espacio abrió o aún no se intentó en este proceso). Nada de eso se recuerda como
+  decisión: la llamada siguiente lo vuelve a intentar entero. Qué decirle a la persona, en
+  [errores](errores.md).
 - Para trabajar en uno, pasa su `spaceId` como `space` en cada llamada; `personal` (u omitirlo)
   elige la biblioteca personal. Todas las herramientas aceptan `space` salvo
   `hebra_list_spaces` y `hebra_list_organizations`.
@@ -32,8 +39,8 @@ biblioteca personal de otro miembro.
   apagados o revocados responden así sin usar la caché. La biblioteca personal puede seguir
   disponible aunque el camino compartido esté cerrado. El relé y el permiso del agente en ese
   espacio son requisitos del contenido compartido, no de la biblioteca personal.
-- `space_unavailable` (con `retryAfterSeconds`) es falta de cupo del relé, no una denegación:
-  espera y reintenta. `space_not_ready` y `client_outdated` solo salen al escribir en un
+- `space_unavailable` (con `reason` y `retryAfterSeconds`) es falta de cupo o de servicio del
+  relé, no una denegación: espera y reintenta. `space_not_ready` y `client_outdated` solo salen al escribir en un
   espacio. Detalle en [errores](errores.md).
 
 ## Escrituras combinadas (`merged`)
@@ -84,16 +91,21 @@ de conflicto, `lastEditor` es `null`. Una nota oculta, en la papelera o inexiste
 
 ## Credencial revocada o agente desactivado
 
-Si `hebra_status` dice `revoked: true`, la credencial de esta cuenta está revocada o el agente
-está desactivado en Hebra (el servidor no los distingue), y `revokedReason` dice qué hacer.
+Si `hebra_status` dice `revoked: true`, el relé rechaza la credencial de este agente: está
+desactivado en Hebra, revocado o caducado (el servidor no los distingue), y `revokedReason` dice
+qué hacer.
 Mientras dure, la biblioteca personal responde con lo que ya estaba descargado y los espacios
 compartidos no: `space_access_denied`, ningún espacio con `granted: true` y
 `organizations_unavailable` con `reason: "credential_revoked"`. No lo arregles tú ni pruebes
-otras cuentas, y no pidas reiniciar:
+otras cuentas, y no pidas reiniciar para lo que vuelve solo:
 
-- Si el motivo habla de un agente revocado o desactivado desde Hebra, basta con que la persona
-  lo reactive en Ajustes de Hebra. hebra-mcp lo reintenta solo y vuelve sin reiniciar, sin
-  volver a emparejar y sin otro login; puede tardar hasta 15 minutos.
+- Si el motivo habla de un agente desactivado, revocado o caducado, que la persona lo reactive
+  primero en Ajustes de Hebra. Si solo estaba desactivado, hebra-mcp lo reintenta solo y vuelve
+  sin reiniciar ni volver a emparejar; puede tardar hasta 15 minutos. Reactivar no sirve para uno
+  revocado o caducado: Lumbre borra la credencial revocada, así que no aparece para reactivarla o
+  sigue en `revoked: true` tras reactivar y reiniciar. Entonces hay que volver a emparejar
+  (`hebra-mcp pair` en local; en el conector remoto, volver a conectar Hebra desde la aplicación)
+  y conceder de nuevo los espacios a ese agente.
 - Si el motivo habla de cerrar sesión en todas partes, dile que reconecte el conector con `/mcp`
   (o lo quite y lo vuelva a añadir), que inicie sesión en Sumego y apruebe el dispositivo en
   Hebra; con la misma biblioteca conserva sus datos.

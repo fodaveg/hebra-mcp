@@ -183,7 +183,8 @@ describe('credencial revocada o agente desactivado (D24)', () => {
     expect(text(await call(alice, 'hebra_read_note', { id: 'personal-note' }))).toContain('Personal de Alice');
     const status = payload(await call(alice, 'hebra_status'));
     expect(status).toMatchObject({ revoked: true, revokedReason: AGENT_REVOKED_REASON });
-    expect(status.revokedReason).not.toContain('hebra-mcp pair');
+    // En stdio, `hebra-mcp pair` solo como salida si reactivar no basta (revocado o caducado).
+    expect(status.revokedReason).toContain('Si solo está desactivado, reactívalo');
     expect(alice.scheduler.liveTimeouts()).toEqual([60_000]);
   });
 

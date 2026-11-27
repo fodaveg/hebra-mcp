@@ -21,7 +21,7 @@ import { httpConfigFor } from '../../src/http/config';
 import { bindPairingRevocation } from '../../src/http/serve-http';
 import type { SpaceLifecycleControl } from '../../src/server/context';
 import type { ServeContext } from '../../src/server/serve';
-import { AGENT_REVOKED_REASON, PAIRING_REVOKED_REMOTE_REASON, PairingRevocation } from '../../src/status/pairing-revocation';
+import { AGENT_REVOKED_REASON, AGENT_REVOKED_REMOTE_REASON, PAIRING_REVOKED_REMOTE_REASON, PairingRevocation } from '../../src/status/pairing-revocation';
 import { runStatus } from '../../src/server/tools/status';
 import { deferred } from '../fixtures/deferred';
 
@@ -1684,9 +1684,9 @@ describe('marca de revocación compartida (bindPairingRevocation)', () => {
     // El runner nuevo no sabe nada: la marca viene de la credencial.
     const reopened = await statusNow('mikel');
     expect(libraries.opened).toEqual(['mikel', 'mikel']);
-    expect(reopened.revoked).toBe(true);
+    // Solo lo rechazó el relé: el motivo del agente (D24) en remoto, no el de renovar la sesión.
     // Solo lo rechazó el relé: el motivo del agente revocado o desactivado (D24), no el de renovar.
-    expect(reopened.revokedReason).toBe(AGENT_REVOKED_REASON);
+    expect(reopened.revokedReason).toBe(AGENT_REVOKED_REMOTE_REASON);
     await contexts.close();
   });
 
@@ -1734,16 +1734,17 @@ describe('marca de revocación compartida (bindPairingRevocation)', () => {
     const lease = await contexts.acquire(account('mikel'));
     runners.get('mikel')!.revoked = true;
     const relay = await runStatus({ status: lease.ctx.status, privacyConfig } as never);
-    expect(relay.revokedReason).toBe(AGENT_REVOKED_REASON);
+    expect(relay.revokedReason).toBe(AGENT_REVOKED_REMOTE_REASON);
+    expect(relay.revokedReason).not.toContain('hebra-mcp pair');
     pairing.markRevoked('mikel-credential');
     const lumbre = await runStatus({ status: lease.ctx.status, privacyConfig } as never);
     expect(lumbre.revokedReason).toBe(PAIRING_REVOKED_REMOTE_REASON);
     expect(lumbre.revokedReason).not.toContain('hebra-mcp pair');
     lease.release();
-    // En stdio solo puede ser el relé: el mismo motivo, sin pedir reemparejar.
+    // En stdio solo puede ser el relé: reactivar o, si se revocó, `hebra-mcp pair` (hay CLI).
     const stdio = await runStatus({ status: statusOf(true), privacyConfig } as never);
     expect(stdio.revokedReason).toBe(AGENT_REVOKED_REASON);
-    expect(stdio.revokedReason).not.toContain('hebra-mcp pair');
+    expect(stdio.revokedReason).toContain('hebra-mcp pair');
     await contexts.close();
   });
 });

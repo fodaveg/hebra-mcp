@@ -98,13 +98,15 @@ describe('emparejado revocado en /authorize', () => {
     expect(requestBodies[0]).not.toHaveProperty('sumegoNonceSha256');
   });
 
-  it('el revoked del relé: página HTML sin llamar a Lumbre ni pedir reemparejar (D24); /healthz sigue en 204', async () => {
+  it('el revoked del relé: página HTML sin llamar a Lumbre, reactivar primero (D24); /healthz sigue en 204', async () => {
     const { origin, config } = await start(new PairingRevocation(() => true));
     const res = await authorize(origin, config.resourceUrl);
     expect(res.status).toBe(503);
     const page = await res.text();
     expect(page).toContain('Ajustes de Hebra');
-    expect(page).not.toContain('hebra-mcp pair');
+    // Un solo usuario: hay CLI, así que `hebra-mcp pair` es la salida si reactivar no basta.
+    expect(page).toContain('Si solo está desactivado, reactívalo');
+    expect(page).toContain('hebra-mcp pair');
     expect(requestBodies).toHaveLength(0);
     expect((await fetch(`${origin}/healthz`)).status).toBe(204);
   });

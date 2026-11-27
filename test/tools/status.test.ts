@@ -31,11 +31,14 @@ describe('hebra_status', () => {
       errorsByCode: {}, writer: 'this' as const, revoked: true };
     const { revokedReason } = await runStatus({ ...test.ctx, status: { getStatus: () => revoked } });
     expect(revokedReason).toBe(AGENT_REVOKED_REASON);
-    expect(revokedReason).toContain('revocado o desactivado desde Hebra');
+    expect(revokedReason).toContain('desactivado, revocado o caducado');
     expect(revokedReason).toContain('lo vuelve a intentar solo');
     expect(revokedReason).toContain('Ajustes de Hebra');
-    expect(revokedReason).toContain('sin reiniciar ni volver a emparejar');
-    expect(revokedReason).not.toContain('hebra-mcp pair');
+    // Reactivar solo vale para un agente desactivado: uno revocado o caducado no vuelve así, y
+    // el motivo no puede prometer que basta (fallo 1 de la tarea de Lumbre 48e8e6f6).
+    expect(revokedReason).not.toContain('sin reiniciar ni volver a emparejar');
+    expect(revokedReason).toContain('Si solo está desactivado, reactívalo en Ajustes de Hebra');
+    expect(revokedReason).toContain('vuelve a emparejar con `hebra-mcp pair`');
     // Castellano llano: sin rayas largas, puntos centrados ni comillas latinas.
     expect(revokedReason).not.toMatch(/[—·«»]/u);
     // Sin revocar, sin motivo.

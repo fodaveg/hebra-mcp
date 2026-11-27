@@ -24,14 +24,28 @@ import type { HebraStatus, StatusSource } from './status-source';
 
 /**
  * El motivo cuando el relé (o Lumbre al registrar la clave de agente) rechaza la credencial
- * (D24): agente revocado o desactivado desde Hebra, que no se distinguen. Igual en stdio y en
- * remoto, porque no pide nada a quien lo lee salvo reactivar el agente.
+ * (D24), en stdio. El relé responde lo mismo (401) a un agente desactivado, a uno revocado y a
+ * una credencial caducada, y solo el primero vuelve con reactivarlo en Ajustes de Hebra: Lumbre
+ * borra la credencial revocada (`revokeCredentialsInTransaction`) y reactivar solo vale para
+ * una que sigue existiendo (`setHebraAgentEnabled`). Por eso no promete que reactivar baste: dice
+ * qué hace el reintento y qué hacer si no vuelve (27 nov 2026, tarea de Lumbre 48e8e6f6).
  */
 export const AGENT_REVOKED_REASON =
-  'Hebra no acepta ahora la conexión de este agente porque está revocado o desactivado desde Hebra. ' +
-  'hebra-mcp lo vuelve a intentar solo y recupera el acceso en cuanto lo reactives en Ajustes de Hebra, ' +
-  'sin reiniciar ni volver a emparejar. Mientras tanto, la biblioteca personal responde con lo que ya tenía ' +
-  'descargado y los espacios compartidos no están disponibles.';
+  'Hebra no acepta ahora la credencial de este agente: está desactivado, revocado o caducado, y el relé no dice cuál. ' +
+  'Si solo está desactivado, reactívalo en Ajustes de Hebra: hebra-mcp lo vuelve a intentar solo (al minuto y ' +
+  'después cada vez más espaciado, hasta cada 15 minutos) y recupera el acceso sin reiniciar. Si en Ajustes no ' +
+  'aparece o, tras reactivarlo y reiniciar, hebra_status sigue con revoked: true, la credencial se revocó o caducó: ' +
+  'vuelve a emparejar con `hebra-mcp pair` y concede de nuevo los espacios a ese agente. Mientras tanto, la ' +
+  'biblioteca personal responde con lo que ya tenía descargado y los espacios compartidos no están disponibles.';
+
+/** El mismo rechazo en el conector remoto, donde nadie puede lanzar `hebra-mcp pair` (D22). */
+export const AGENT_REVOKED_REMOTE_REASON =
+  'Hebra no acepta ahora la credencial de este agente: está desactivado, revocado o caducado, y el relé no dice cuál. ' +
+  'Si solo está desactivado, reactívalo en Ajustes de Hebra: hebra-mcp lo vuelve a intentar solo (al minuto y ' +
+  'después cada vez más espaciado, hasta cada 15 minutos) y recupera el acceso sin reconectar. Si en Ajustes no ' +
+  'aparece o sigue sin acceso pasados 15 minutos desde reactivarlo, la credencial se revocó o caducó: vuelve a ' +
+  'conectar Hebra desde tu aplicación y concede de nuevo los espacios a ese agente. Mientras tanto, la biblioteca ' +
+  'personal responde con lo que ya tenía descargado y los espacios compartidos no están disponibles.';
 
 /** El motivo del `410 pairing_revoked` de Lumbre (cierre de sesión en todas partes) en `hebra_status`
  *  y en la página de `/authorize`, donde se puede lanzar `hebra-mcp pair`. */
@@ -189,10 +203,10 @@ export function withRevokedReason(status: HebraStatus, reason = AGENT_REVOKED_RE
     ? { ...status, revokedReason: reason } : status;
 }
 
-/** Un `StatusSource` de `serve-http`: si dice revocado sin motivo, el del relé. */
+/** Un `StatusSource` de `serve-http`: si dice revocado sin motivo, el del relé en remoto. */
 export class RemoteStatusSource implements StatusSource {
   constructor(private readonly inner: StatusSource) {}
-  async getStatus(): Promise<HebraStatus> { return withRevokedReason(await this.inner.getStatus()); }
+  async getStatus(): Promise<HebraStatus> { return withRevokedReason(await this.inner.getStatus(), AGENT_REVOKED_REMOTE_REASON); }
 }
 
 /**
@@ -212,6 +226,6 @@ export class PairingStatusSource implements StatusSource {
     const credentialId = await this.credentialId();
     const revoked = this.pairing.isRevoked(credentialId) ? { ...status, revoked: true } : status;
     return withRevokedReason(revoked,
-      this.pairing.revokedByLumbre(credentialId) ? PAIRING_REVOKED_REMOTE_REASON : AGENT_REVOKED_REASON);
+      this.pairing.revokedByLumbre(credentialId) ? PAIRING_REVOKED_REMOTE_REASON : AGENT_REVOKED_REMOTE_REASON);
   }
 }

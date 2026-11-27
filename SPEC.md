@@ -1028,6 +1028,14 @@ El dispositivo acumula tres secretos:
   credencial: la primera ronda que va bien pone `revoked: false`, vuelve el bucle de 30 s, reabre
   el sync de los espacios, sube lo pendiente y emite `pairing.restored`. No hace falta reiniciar
   ni volver a emparejar. Antes de D24, el bucle se paraba hasta reiniciar el proceso.
+- **Revocado o caducado no es desactivado** (27 nov 2026, tarea de Lumbre 48e8e6f6): el relé da el
+  mismo 401 a un agente desactivado, a uno revocado y a una credencial caducada. Solo el primero
+  vuelve al reactivarlo: Lumbre borra la fila de una credencial revocada (`revokeHebraCredential`,
+  también la del tope de 20 instalaciones por cuenta) y `PUT /agents/{id}` solo reactiva una que
+  sigue existiendo y sin caducar. Por eso `AGENT_REVOKED_REASON` (stdio) y
+  `AGENT_REVOKED_REMOTE_REASON` (`serve-http`) dicen que se reactive primero y, si no aparece en
+  Ajustes o sigue revocado, que se vuelva a emparejar (`hebra-mcp pair` en stdio, volver a
+  conectar desde la aplicación en remoto) y se concedan otra vez los espacios.
 - **Límite conocido**: revocar borra la credencial en Lumbre (`hebra-integration.ts:224-238`) y
   corta el relé, pero **no rota la clave de biblioteca** ni borra lo que el dispositivo ya descargó.
   `keyEpoch` está fijo a 1 en todo Hebra y la rotación está aplazada a una fase posterior
@@ -2999,6 +3007,7 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   es miembro no sale.
 - Una herramienta nueva de solo lectura lista las organizaciones de la persona con sus miembros.
 - Un 429 de Lumbre en el catálogo o en el registro de la clave no es una denegación: la herramienta responde `space_unavailable` con `reason: rate_limited` y `retryAfterSeconds` (el `Retry-After` de Lumbre en segundos, o 5). No se guarda ni marca nada: la siguiente llamada vuelve a preguntar al relé.
+- Abrir un espacio con concesión (27 nov 2026, tarea de Lumbre 48e8e6f6): `granted: true` dice que el catálogo trae la concesión, no que el espacio ya abra. Abrirlo abre además la clave sellada para el agente y lo da de alta en la bóveda del espacio (`POST …/blob-v2/vaults/{id}/devices`). Si el sobre no abre con su privada, `space_key_unreadable`. Si el alta recibe 507 `quota_exceeded` (hoy, `SPACE_MAX_ACTIVE_DEVICES_PER_MEMBER` del relé: 10 dispositivos activos por miembro y espacio), `space_quota_exceeded`. Sin red, plazo agotado, 5xx o 429 en el alta, `space_unavailable` con `reason: relay_unavailable` o `rate_limited` y `retryAfterSeconds: 5`. Solo un rechazo de la credencial o un fallo sin causa conocida siguen siendo `space_access_denied`. Ningún fallo de apertura se recuerda como decisión: la llamada siguiente vuelve a intentarlo entero. `hebra_list_spaces` lleva `openError` en cada espacio: `space_quota_exceeded` o `space_key_unreadable` si el último intento de este proceso falló así (el de la clave también lo ve el propio listado al leer el nombre), `null` si abrió, si aún no se intentó o sin concesión.
 - Pasar a un `space` sin permiso sigue dando `space_access_denied`. Ser miembro de la organización no
   concede contenido.
 - Contrato con el relé: `GET /api/integrations/hebra/agent-directory`, solo credencial de agente, en
@@ -3018,7 +3027,8 @@ contenido ni es un selector: el contenido se elige siempre por `spaceId`, o `per
   nombre descifrado de un espacio con concesión gana al publicado. Una concesión del catálogo que el
   directorio aún no trae sale en `hebra_list_spaces` sin organización.
 - Salida de `hebra_list_spaces`: `{spaces: [{spaceId, name, organization: {orgId, name} | null,
-  granted}], organizationsAvailable}`. Con el directorio no disponible, quedan los espacios con concesión,
+  granted, openError}], organizationsAvailable}`. `openError` es `null` o lo que impidió abrir un
+  espacio con concesión la última vez en este proceso (ver arriba). Con el directorio no disponible, quedan los espacios con concesión,
   `organization: null` y `organizationsAvailable: false`: nunca rompe el acceso a los espacios ni a la
   biblioteca personal. Un 401 responde `space_access_denied`, como el catálogo.
 - `hebra_list_organizations` (`limit`, `cursor`) añade `isSelf` a cada miembro, comparando con el
