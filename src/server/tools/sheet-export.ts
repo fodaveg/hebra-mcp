@@ -21,6 +21,7 @@
  */
 import * as Y from 'yjs';
 import { createNodeFormulaEngine, createSheetAdapter, prepareSheetBase, type FormulaEngine } from '../../sheets';
+import { projectionBaseSha256 } from '../../store/document-base';
 import { setDocumentExporter, type DocumentExporter } from '../../store/document-channel';
 import { SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
 
@@ -36,7 +37,7 @@ export function createSheetDocumentExporter(options: SheetDocumentExporterOption
   const engine = options.engine ?? (() => createNodeFormulaEngine({ workerUrl: ENGINE_WORKER_URL }));
   return async (context, fileId, head) => {
     if (head.format !== 'ods') throw new Error('document-export-unavailable');
-    const base = await context.blobRead(head.baseSha256);
+    const base = await context.blobRead(projectionBaseSha256(head));
     if (!base) throw new Error('blob_missing');
     const read = await context.store.docRead(fileId);
     const recent = (read.head ?? head).recent;

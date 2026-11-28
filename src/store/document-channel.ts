@@ -23,6 +23,7 @@
 import type { DatabaseSync } from 'node:sqlite';
 import * as Y from 'yjs';
 import type { SqliteConn, SqliteLibraryEngine } from '../hebra';
+import { projectionBaseSha256 } from './document-base';
 import { writeRejected } from './errors';
 import type { BlobPutOptions, BlobPutResult, FileRow } from './writes';
 import { syncDocClearExternal, syncDocExternalMarks } from '../../vendor/hebra/src/lib/library/sync-store';
@@ -351,10 +352,11 @@ export function sessionPortOf(source: DocumentChannelSource): DocStoreAtomicPort
  * `engine.docAppendWith`, en la conexión del turno, así que el update y lo que escriba `inTx`
  * (el registro de operaciones y el de deshacer) se confirman juntos.
  *
- * El estado sale de `docRead` del motor (segmentos y pendientes en V2) y la base, del punto de
- * control más reciente (o de la base de la que nació). Tras cada append confirmado avisa al canal
- * (`notifyLocalChange`, si hay cableado) para que la edición suba. Solo para quien ya está dentro
- * de un turno; fuera de él, `sessionPortOf`. No toma el cerrojo de escritura del cableado: el
+ * El estado sale de `docRead` del motor (segmentos y pendientes en V2) y los bytes, del fichero
+ * BASE de la generación (`projectionBaseSha256`), nunca del punto de control. Tras cada append
+ * confirmado avisa al canal (`notifyLocalChange`, si hay cableado) para que la edición suba. Solo
+ * para quien ya está dentro de un turno; fuera de él, `sessionPortOf`. No toma el cerrojo de
+ * escritura del cableado: el
  * turno de la cola ya es exclusivo y entrar en el cerrojo desde dentro podría esperar a un punto
  * de control que a su vez espera a la cola.
  */
@@ -375,7 +377,8 @@ export async function openSessionInTurn<Model, Op>(
   if (!head) throw new Error('doc_head_missing');
   // Un `.odp` no se edita con el adaptador de hojas ni al revés.
   if (head.format !== adapter.format) throw writeRejected('file_type_not_allowed');
-  const base = await turn.engine.blobRead(head.checkpointSha256 ?? head.baseSha256);
+  // Sobre la base de la generación, como la lectura y la app (`./document-base.ts`).
+  const base = await turn.engine.blobRead(projectionBaseSha256(head));
   if (!base) throw new Error('blob_missing');
   const doc = new Y.Doc();
   try {

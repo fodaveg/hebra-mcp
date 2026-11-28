@@ -31,6 +31,7 @@ import {
   type SheetModel,
   type SheetModelSheet
 } from '../../sheets';
+import { projectionBaseSha256 } from '../../store/document-base';
 import type { DocumentPort } from '../../store/document-channel';
 import { openDocumentRead, type DocumentRead, type DocumentReadSource } from '../../store/document-read';
 import { SHEET_DOCUMENT_MAX_BYTES, SHEET_ODS_INVENTORY_LIMITS, SHEET_ODS_READ_LIMITS } from '../../store/sheet-limits';
@@ -128,7 +129,8 @@ export async function openSheetRead(
   const stored = await source.port.docRead(file.id);
   const head = stored.head ?? newDocumentHead('ods', 'file', file.sha256);
   if (head.format !== 'ods') throw new ToolError('document_invalid');
-  const baseSha = head.checkpointSha256 ?? head.baseSha256;
+  // La base de la generación, como la app: el `Y.Doc` va con ids relativos a ella.
+  const baseSha = projectionBaseSha256(head);
   const base = await blobOf(source, baseSha);
   if (!base) throw new ToolError('file_unavailable');
   if (base.byteLength > SHEET_DOCUMENT_MAX_BYTES) {

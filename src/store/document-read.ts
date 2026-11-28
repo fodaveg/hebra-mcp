@@ -28,6 +28,7 @@ import type { DocFormatAdapter, DocHeadRecord, DocStoreAtomicPort } from '../../
 import { createDocSession } from '../../vendor/hebra/src/lib/documents/session';
 import type { PrivacyConfig } from '../privacy/config';
 import type { DocumentChannelSource } from './document-channel';
+import { projectionBaseSha256 } from './document-base';
 import { guardDocumentRead, guardDocumentWrite } from './document-privacy';
 import type { NoteWriteStore } from './writes';
 
@@ -110,8 +111,9 @@ export async function openDocumentRead<Model, Op>(
   const stored = await source.port.docRead(fileId);
   const head = stored.head;
   if (!head) throw new DocumentReadError('doc_head_missing');
-  // Los bytes del punto de control más reciente; sin ninguno, la base con la que nació.
-  const baseSha256 = head.checkpointSha256 ?? head.baseSha256;
+  // El fichero BASE de la generación, nunca el punto de control: el `Y.Doc` lleva ids relativos a
+  // la base y el punto de control ya lo lleva dentro (`./document-base.ts`).
+  const baseSha256 = projectionBaseSha256(head);
   const base = (await source.port.blobRead(baseSha256)) ?? (await source.readBlob?.(baseSha256)) ?? null;
   if (!base) throw new DocumentReadError('blob_missing');
 

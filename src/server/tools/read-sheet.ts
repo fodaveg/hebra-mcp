@@ -43,6 +43,7 @@ import { z } from 'zod';
 import { logDocumentEvent, documentLogCode } from '../../log/logger';
 import { FileFilter } from '../../privacy/file-filter';
 import { DocumentJobError, runDocumentJob, type DocumentJobContext } from '../../store/document-jobs';
+import { exposedBytesSha256, projectionBaseSha256 } from '../../store/document-base';
 import { odfMimetypeOf } from '../../store/document-create';
 import { DOCUMENT_RESPONSE_MAX_CHARS, READ_SHEET_DEFAULT_CELLS, READ_SHEET_MAX_CELLS } from '../../store/document-limits';
 import type { DocumentReadSource } from '../../store/document-read';
@@ -265,9 +266,12 @@ async function readStored(ctx: ToolContext, deps: ReadSheetDeps, id: string, req
   // Estado sin cabecera: de una generación ajena cuyo `/h` aún no ha llegado. Se espera a ella.
   if (!head && (stored.segments.length > 0 || stored.pending.length > 0)) throw new ToolError('file_unavailable');
 
-  const sha256 = (head ? (head.checkpointSha256 ?? head.baseSha256) : content.sha256).toLowerCase();
-  // Bytes que no son los del fichero: si algo oculto los tiene, no se leen.
-  if (sha256 !== content.sha256 && filter.hidesContent(sha256)) throw new ToolError('not_found');
+  // Se proyecta sobre la base de la generación, como la app (`document-base.ts`).
+  const sha256 = (head ? projectionBaseSha256(head) : content.sha256).toLowerCase();
+  // Bytes que no son los del fichero: si algo oculto los tiene, no se leen. Los que se abren (la
+  // base) y los que el documento enseña (el punto de control), que llevan lo mismo.
+  const judged = head ? [sha256, exposedBytesSha256(head).toLowerCase()] : [sha256];
+  if (judged.some((hash) => hash !== content.sha256 && filter.hidesContent(hash))) throw new ToolError('not_found');
   let bytes = await localBlob(source, sha256);
   if (!bytes && sha256 === content.sha256) {
     await fetchFileBytes(ctx, id, knownLength);

@@ -110,6 +110,7 @@ import {
   type SheetModelSheet,
   type SheetOp
 } from '../../sheets';
+import { exposedBytesSha256, projectionBaseSha256 } from '../../store/document-base';
 import type { DocumentChannelSource } from '../../store/document-channel';
 import { DocumentJobError } from '../../store/document-jobs';
 import { DOCUMENT_QUEUE_WAIT_MS } from '../../store/document-limits';
@@ -1034,8 +1035,11 @@ async function requireVisibleSheet(ctx: ToolContext, id: string, assets: readonl
   if (typeof port.documentSource !== 'function') return byteLength;
   const { head } = await port.documentSource().port.docRead(id);
   if (head && head.format !== 'ods') throw new ToolError('file_type_not_allowed');
-  const sha256 = (head ? (head.checkpointSha256 ?? head.baseSha256) : content.sha256).toLowerCase();
-  if (sha256 !== content.sha256 && filter.hidesContent(sha256)) throw new ToolError('not_found');
+  // Privacidad, no proyección: los bytes que el documento enseña y la base sobre la que se edita.
+  const judged = head ? [exposedBytesSha256(head), projectionBaseSha256(head)] : [content.sha256];
+  for (const sha256 of judged.map((hash) => hash.toLowerCase())) {
+    if (sha256 !== content.sha256 && filter.hidesContent(sha256)) throw new ToolError('not_found');
+  }
   return byteLength;
 }
 
