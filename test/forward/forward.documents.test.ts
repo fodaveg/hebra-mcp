@@ -187,6 +187,21 @@ describe('hojas desde un lector: crear y editar van por el socket (H-177)', () =
     expect(localDocumentOps).not.toHaveBeenCalled();
   });
 
+  it('D30: setValidation desde un lector llega al escritor y entra (el escritor revalida con el esquema de hebra_edit_sheet)', async () => {
+    const { client, socketOps, localDocumentOps } = await documentPair();
+    const created = await createBook(client);
+    const edited = await call(client, 'hebra_edit_sheet', {
+      id: created.id,
+      ops: [{ type: 'setValidation', sheet: 'Hoja 1', range: 'C2:C5', list: ['David', 'Mikel'] }],
+      expectedRevision: created.revision,
+      operationId: randomUUID()
+    });
+    expect(edited.isError, JSON.stringify(edited.value)).toBe(false);
+    expect(edited.value).toMatchObject({ id: created.id, outcome: 'saved' });
+    expect(socketOps.filter((op) => op === 'documentOps')).toHaveLength(2);
+    expect(localDocumentOps).not.toHaveBeenCalled();
+  });
+
   it('leer y pintar no piden turno de escritura ni tocan el socket; la lectura aparta en la compuerta del contexto', async () => {
     const { writer, reader, client, socketOps, localDocumentOps, capacity } = await documentPair();
     const created = await createBook(client);

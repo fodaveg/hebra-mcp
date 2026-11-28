@@ -62,7 +62,7 @@ va a la papelera puede volver, y la papelera no se vacía desde aquí.
 | Crear y renombrar carpetas; mandar una a la papelera con todo lo que tiene y sacarla | Purgar carpetas, o moverlas salvo dentro de un ID con `hebra_jd_move` |
 | Ficheros sueltos: listar, leer, reemplazar el texto de uno de texto, crear de texto, renombrar, mover, duplicar, papelera | Purgarlos; reemplazar uno que no sea de texto; crear con `hebra_create_file` uno que no sea de texto; leer uno de la papelera; cambiar la extensión |
 | Importar un `.xlsx`, `.pptx` o `.docx` con `hebra_import_office`: nota o fichero convertido y original, según `mode` | Importar `.doc`, `.xls`, `.ppt` u otra extensión; convertir un formato sin convertidor (hoy, todos) |
-| Hojas de cálculo `.ods`: leer, crear, editar por lotes (entran enteros o no entran, con deshacer durante 7 días) y pintar un rango como imagen | Editar un `.xlsx` sin importarlo; gráficos, tablas dinámicas e imágenes flotantes; leerlas con `hebra_read_file` |
+| Hojas de cálculo `.ods`: leer, crear, editar por lotes (entran enteros o no entran, con deshacer durante 7 días), poner o quitar una lista desplegable por rango A1 (`setValidation`, `clearValidation`) y pintar un rango como imagen | Editar un `.xlsx` sin importarlo; gráficos, tablas dinámicas e imágenes flotantes; leerlas con `hebra_read_file` |
 | Espacios con concesión; ver organizaciones, miembros y autores | Entrar sin `granted: true`; mover entre bibliotecas; Johnny.Decimal o ficheros de trabajo en un espacio |
 | Johnny.Decimal: ID nuevo, archivar nota, fichero o carpeta en un ID, auditar | Crear categorías, áreas o hijos "+"; que la auditoría arregle algo |
 

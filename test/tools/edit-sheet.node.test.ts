@@ -72,6 +72,7 @@ import { sheetJobSlot } from '../../src/store/sheet-jobs';
 import { SHEET_DOCUMENT_MAX_BYTES, SHEET_JOB_RESERVE_BYTES, SHEET_ODS_READ_LIMITS } from '../../src/store/sheet-limits';
 import type { SyncStorePort } from '../../src/store/sync-port';
 import { buildOds } from '../../vendor/hebra/src/lib/sheets/adapter/sheet-adapter.fixture';
+import { formatA1, validationBoxes, validationRules } from '../../vendor/hebra/src/lib/sheets/grid/validation';
 import { IDENTITY } from '../sync/devices';
 import { PHOTO_ODS_MEDIA_BYTES, photoOds } from '../fixtures/photo-ods';
 
@@ -1055,5 +1056,160 @@ describe('hebra_edit_sheet con los bloques opcionales (H-171)', () => {
       expect(h.calls()).toBe(0);
     }
     expect(await stored(h)).toEqual({ head: null, updates: 0 });
+  });
+});
+
+/** Las validaciones de la hoja `Datos` como las lee la app: id, rango A1 y cuerpo. */
+async function validationsOf(h: { port: NodeLibraryPort; fileId: string; bytes: Uint8Array }) {
+  const opened = await openSheetRead(h.port.documentSource(), { id: h.fileId, sha256: sha(h.bytes) }, live, 'empty');
+  try {
+    const sheet = opened.read.model.sheets.find((s) => s.name === 'Datos')!;
+    return validationRules(sheet).map((entry) => ({
+      id: entry.id,
+      ranges: validationBoxes(sheet, entry.body).map((box) => formatA1(box)),
+      body: entry.body
+    }));
+  } finally {
+    await opened.close();
+  }
+}
+
+/**
+ * Validación de datos por dirección (D30): `setValidation` y `clearValidation`. Pruebas negativas
+ * hechas a mano al escribirlo (se rompe, el test cae, se restaura): no exigir `expect` sin
+ * `expectedRevision` (cae «la garantía de los comandos por dirección»), no comprobar el `expect`
+ * con `compileBatch` (cae el mismo, por el `precondition_failed`), y sustituir siempre la regla que
+ * toca el rango (cae «sustituye la del mismo rango»).
+ */
+describe('hebra_edit_sheet: setValidation y clearValidation (D30)', () => {
+  const lista = ['David', 'Mikel', 'Miguel Ángel'];
+
+  it('pone una lista desplegable en un rango A1, como la guarda el panel de la app', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const out = await h.edit({
+      operationId: 'val-1',
+      expectedRevision: before.revision,
+      ops: [{ type: 'setValidation', sheet: 'Datos', range: 'C2:C4', list: lista }]
+    });
+    expect(out).toMatchObject({ outcome: 'saved' });
+    const rules = await validationsOf(h);
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.ranges).toEqual(['C2:C4']);
+    expect(rules[0]!.body).toMatchObject({
+      type: 'list',
+      formula1: '"David,Mikel,Miguel Ángel"',
+      allowBlank: true,
+      showList: true,
+      showError: true,
+      errorStyle: 'stop'
+    });
+    // Un origen por rango, con `showList` y `allowBlank` explícitos, en otro rango.
+    const after = await readState(h);
+    await h.edit({
+      operationId: 'val-2',
+      expectedRevision: after.revision,
+      ops: [{ type: 'setValidation', sheet: 'Datos', range: 'D2', source: 'A1:A5', showList: false, allowBlank: false }]
+    });
+    const both = await validationsOf(h);
+    expect(both.find((rule) => rule.ranges[0] === 'D2')?.body).toMatchObject({
+      formula1: '$A$1:$A$5',
+      showList: false,
+      allowBlank: false
+    });
+  });
+
+  it('sustituye la del mismo rango, rechaza si toca otra y clearValidation la quita entera', async () => {
+    const h = await world();
+    const first = await readState(h);
+    await h.edit({
+      operationId: 'val-1',
+      expectedRevision: first.revision,
+      ops: [{ type: 'setValidation', sheet: 'Datos', range: 'C2:C4', list: lista }]
+    });
+    const [original] = await validationsOf(h);
+    const second = await readState(h);
+    await h.edit({
+      operationId: 'val-2',
+      expectedRevision: second.revision,
+      ops: [{ type: 'setValidation', sheet: 'Datos', range: 'C2:C4', list: ['Sí', 'No'] }]
+    });
+    const replaced = await validationsOf(h);
+    expect(replaced).toHaveLength(1);
+    expect(replaced[0]!.id).toBe(original!.id);
+    expect(replaced[0]!.body.formula1).toBe('"Sí,No"');
+
+    const third = await readState(h);
+    const updates = (await stored(h)).updates;
+    const overlap = await expectCode(
+      h.edit({
+        operationId: 'val-3',
+        expectedRevision: third.revision,
+        ops: [{ type: 'setValidation', sheet: 'Datos', range: 'C3:C9', list: ['x'] }]
+      }),
+      'batch_invalid'
+    );
+    expect(overlap.extra).toMatchObject({ issues: [{ opIndex: 0, path: 'ops.0.range' }] });
+    expect((await stored(h)).updates).toBe(updates);
+
+    await h.edit({
+      operationId: 'val-4',
+      expectedRevision: third.revision,
+      ops: [{ type: 'clearValidation', sheet: 'Datos', range: 'C3' }]
+    });
+    expect(await validationsOf(h)).toEqual([]);
+  });
+
+  it('la garantía de los comandos por dirección: expectedRevision, o expect y expectedLayout', async () => {
+    const h = await world();
+    const before = await readState(h);
+    const command = { type: 'setValidation', sheet: 'Datos', range: 'C2:C4', list: lista };
+    const bare = await expectCode(h.edit({ operationId: 'g-1', ops: [command] }), 'batch_invalid');
+    expect(bare.extra).toMatchObject({ issues: [{ opIndex: 0, path: 'ops.0' }] });
+    const noLayout = await expectCode(
+      h.edit({ operationId: 'g-2', ops: [{ ...command, expect: { 'C2:C4': null } }] }),
+      'batch_invalid'
+    );
+    expect(noLayout.extra).toMatchObject({ issues: [{ opIndex: 0, path: 'expectedLayout' }] });
+    const stale = await expectCode(
+      h.edit({ operationId: 'g-3', expectedLayout: before.layoutRevision, ops: [{ ...command, expect: { A1: 'otro' } }] }),
+      'precondition_failed'
+    );
+    expect(stale.extra).toMatchObject({ opIndex: 0, target: 'ops.0' });
+    expect((await stored(h)).updates).toBe(0);
+    const out = await h.edit({
+      operationId: 'g-4',
+      expectedLayout: before.layoutRevision,
+      ops: [{ ...command, expect: { A1: before.cells.A1 as string } }]
+    });
+    expect(out).toMatchObject({ outcome: 'saved' });
+    expect((await validationsOf(h))[0]!.ranges).toEqual(['C2:C4']);
+  });
+
+  it('lo que no se puede traducir es batch_invalid sin escribir: forma, hoja, rango y ejes cambiados', async () => {
+    const h = await world();
+    const before = await readState(h);
+    for (const [ops, path] of [
+      [[{ type: 'setValidation', sheet: 'Datos', range: 'C2', list: ['a,b'] }], 'ops.0.list.0'],
+      [[{ type: 'setValidation', sheet: 'Datos', range: 'C2', list: ['a'], source: 'A1:A2' }], 'ops.0.list'],
+      [[{ type: 'setValidation', sheet: 'Datos', range: 'C2' }], 'ops.0.list'],
+      [[{ type: 'setValidation', sheet: 'Datos', range: 'C2', source: 'A:A' }], 'ops.0.source'],
+      [[{ type: 'setValidation', sheet: 'Otra', range: 'C2', list: ['a'] }], 'ops.0.sheet'],
+      [[{ type: 'setValidation', sheet: 'Datos', range: `C2:C${before.rows + 5}`, list: ['a'] }], 'ops.0.range'],
+      [
+        [
+          { type: 'insertAxis', sheet: 'Datos', axis: 'row', at: 1, count: 1 },
+          { type: 'setValidation', sheet: 'Datos', range: 'C2', list: ['a'] }
+        ],
+        'ops.1'
+      ]
+    ] as const) {
+      const error = await expectCode(
+        h.edit({ operationId: `bad-${path}`, expectedRevision: before.revision, ops: ops as unknown as EditSheetInput['ops'] }),
+        'batch_invalid'
+      );
+      expect((error.extra as { issues: { path: string }[] }).issues[0]!.path, JSON.stringify(ops)).toBe(path);
+    }
+    expect((await stored(h)).updates).toBe(0);
   });
 });
