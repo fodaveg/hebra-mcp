@@ -54,6 +54,7 @@ import type {
   DocumentServiceHooks
 } from '../store/document-service';
 import type { NoteStateInput, NoteStateSaved } from '../store/note-state';
+import type { FolderTrashInput } from '../store/folder-trash';
 import type { JdApplyReport, JdNewIdRequest, JdNewIdResult } from '../store/jd-new-id';
 import type { JdMoveApplyReport, JdMoveRequest, JdMoveResult, JdMoveUndoReport } from '../store/jd-move';
 import type { SyncConflictCopy } from '../sync/runner';
@@ -98,6 +99,9 @@ export interface WriteContextSources {
   /** Cambios de estado de una nota de D23 en local (`LibraryInstance.noteStateLocal`), sin
    *  esperar ronda. Opcional: sin él, esas llamadas responden `invalid_input`. */
   noteState?(input: NoteStateInput): Promise<LocalWrite<NoteStateSaved>>;
+  /** Mandar una carpeta a la papelera o sacarla en local (D29, `LibraryInstance.organizeFolderLocal`),
+   *  sin esperar ronda. Opcional: sin él, las dos herramientas responden `invalid_input`. */
+  organizeFolder?(input: FolderTrashInput): Promise<LocalWrite<FolderSaved>>;
   /** `hebra_jd_new_id` en local (D18, `LibraryInstance.jdNewIdLocal`): simular, aplicar o
    *  descartar un plan, sin esperar ronda. Opcional: sin él, la herramienta responde
    *  `invalid_input`. */
@@ -282,6 +286,10 @@ export interface WriteContext {
    *  devuelve el estado de sync; sin escritura, sin ronda. En un lector, todo ocurre en el
    *  escritor (`./forward.ts`). Opcional. */
   noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
+  /** Mandar una carpeta a la papelera o sacarla (D29), como `createFolder`: escribe, espera la
+   *  ronda y devuelve el estado de sync de la fila de la carpeta; sin escritura, sin ronda. En un
+   *  lector, todo ocurre en el escritor (`./forward.ts`). Opcional. */
+  organizeFolder?(input: FolderTrashInput): Promise<FolderOutcome>;
   /** Un ID nuevo del JDex (D18): simular o descartar, tal cual; aplicar escribe, espera la
    *  ronda si creó algo y devuelve el estado de sync. En un lector, todo ocurre en el
    *  escritor (`./forward.ts`). Opcional. */
@@ -614,6 +622,7 @@ export function buildWriteContext(
   }
 
   const noteState = sources.noteState?.bind(sources);
+  const organizeFolder = sources.organizeFolder?.bind(sources);
 
   /** `hebra_jd_new_id` (D18): la simulación tal cual; aplicar, con UNA ronda si creó algo y
    *  el estado de sync de la nota y la carpeta que nombra el informe. */
@@ -744,6 +753,7 @@ export function buildWriteContext(
       ? { looseFileWrite: (input: LooseFileWriteInput) => looseFileWrite(looseFile, input) }
       : {}),
     ...(noteState ? { noteState: (input: NoteStateInput) => noteStateWrite(noteState, input) } : {}),
+    ...(organizeFolder ? { organizeFolder: (input: FolderTrashInput) => folderWrite(organizeFolder(input)) } : {}),
     ...(replace ? { replaceInNotes: (request: ReplaceRequest) => replaceWrite(replace, request) } : {}),
     ...(replaceFile
       ? { replaceFileText: (input: ReplaceFileTextInput) => replaceFileWrite(replaceFile, input) }

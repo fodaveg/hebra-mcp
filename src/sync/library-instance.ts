@@ -81,6 +81,7 @@ import {
   type LooseFileWriteInput
 } from '../store/file-verbs';
 import { writeNoteState, type NoteStateInput, type NoteStateSaved } from '../store/note-state';
+import { writeFolderTrash, type FolderTrashInput } from '../store/folder-trash';
 import {
   runJdNewId,
   type JdNewIdRequest,
@@ -843,6 +844,12 @@ export class LibraryInstance implements NoteWriteTarget {
    *  Pide la ronda de después sin esperarla. */
   noteStateLocal(input: NoteStateInput): Promise<LocalWrite<NoteStateSaved>> {
     return writeNoteState(this, input, () => this.afterWrite());
+  }
+
+  /** Mandar una carpeta a la papelera, con su contenido, o sacarla (D29,
+   *  `../store/folder-trash.ts`). Pide la ronda de después sin esperarla. */
+  organizeFolderLocal(input: FolderTrashInput): Promise<LocalWrite<FolderSaved>> {
+    return writeFolderTrash(this, input, () => this.afterWrite());
   }
 
   /** `hebra_jd_new_id` (D18, `../store/jd-new-id.ts`): simular, aplicar o descartar un plan

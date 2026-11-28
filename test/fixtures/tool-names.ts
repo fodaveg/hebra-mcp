@@ -38,6 +38,9 @@ export const TOOL_NAMES: readonly string[] = [
   'hebra_create_folder',
   'hebra_rename_folder',
   'hebra_add_attachment',
+  // Carpetas a la papelera y de vuelta (D29, 28 nov 2026).
+  'hebra_trash_folder',
+  'hebra_restore_folder',
   // Ficheros sueltos (D10, 9 oct 2026).
   'hebra_list_files',
   'hebra_trash_file',
@@ -84,11 +87,13 @@ export const FORBIDDEN_TRASH_TOOLS: readonly string[] = [
 /** Lo que sigue fuera del MCP tras D9 (3 oct 2026, que trajo crear y renombrar carpetas
  *  y añadir adjuntos): mover y borrar carpetas, y cambiar o borrar adjuntos. Ningún
  *  transporte las lista. D19 (19 oct 2026) mueve carpetas, pero solo dentro de un ID del
- *  JDex con `hebra_jd_move`: un `hebra_move_folder` genérico sigue fuera. */
+ *  JDex con `hebra_jd_move`: un `hebra_move_folder` genérico sigue fuera. D29 (28 nov 2026)
+ *  manda carpetas a la papelera y las saca (`hebra_trash_folder`, `hebra_restore_folder`):
+ *  borrarlas o purgarlas sigue fuera. */
 export const REMOVED_FOLDER_TOOLS: readonly string[] = [
   'hebra_move_folder',
   'hebra_delete_folder',
-  'hebra_trash_folder',
+  'hebra_purge_folder',
   'hebra_delete_attachment',
   'hebra_replace_attachment'
 ];

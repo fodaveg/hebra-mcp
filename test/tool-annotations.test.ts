@@ -66,6 +66,9 @@ const EXPECTED: Record<string, Record<string, boolean>> = {
   // adjunto se reintenta con su `operationId` sin duplicarlo.
   hebra_create_folder: WRITE_IDEMPOTENT,
   hebra_rename_folder: WRITE_IDEMPOTENT,
+  // D29: a la papelera y de vuelta, reversibles; repetirlas no vuelve a escribir.
+  hebra_trash_folder: WRITE_IDEMPOTENT,
+  hebra_restore_folder: WRITE_IDEMPOTENT,
   hebra_add_attachment: WRITE_IDEMPOTENT,
   // D10: mandar a la papelera un fichero que ya está en ella, o sacar uno vivo, no escribe.
   hebra_trash_file: WRITE_IDEMPOTENT,

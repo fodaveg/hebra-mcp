@@ -224,6 +224,7 @@ export function localWriteContext(
     replaceFileText: (input) => instance.replaceFileTextLocal(input),
     looseFileWrite: (input) => instance.looseFileWriteLocal(input),
     noteState: (input) => instance.noteStateLocal(input),
+    organizeFolder: (input) => instance.organizeFolderLocal(input),
     jdNewId: (request) => instance.jdNewIdLocal(request),
     jdMove: (request) => instance.jdMoveLocal(request),
     noteRead: (id) => instance.port.noteRead(id),

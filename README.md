@@ -3,18 +3,18 @@
 Servidor MCP que da a Claude acceso de lectura y escritura (crear, añadir, leer y añadir
 por apartados, editar por sustituciones puntuales, mover a carpetas existentes, marcar como favoritas, archivar,
 mandar a la papelera y sacar de ella, restaurar versiones anteriores de notas, leer y
-añadir adjuntos, crear y renombrar carpetas, listar los ficheros sueltos, mandarlos a
+añadir adjuntos, crear y renombrar carpetas, mandarlas a la papelera y sacarlas, listar los ficheros sueltos, mandarlos a
 la papelera o sacarlos, leer su contenido, reemplazar el texto de uno, crear uno de texto
 y renombrarlos, moverlos o duplicarlos, importar un .xlsx, .pptx o .docx, crear un ID nuevo del JDex, auditar el sistema
 Johnny.Decimal y archivar notas, ficheros o carpetas dentro de un ID; nunca purgar ni vaciar
-la papelera, borrar carpetas ni moverlas fuera de un ID, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
+la papelera, purgar carpetas ni moverlas fuera de un ID, cambiar ni borrar adjuntos, ni purgar un fichero suelto; `SPEC.md` §5) a
 la biblioteca de notas de [Hebra](https://github.com/fodaveg/hebra), sin pasar por un
 relé que pueda leer el contenido: el sync va cifrado de punta a punta y hebra-mcp se
 vincula como un dispositivo más de la biblioteca. En el conector remoto, el servidor es
 ese dispositivo y custodia las claves: quien tenga acceso root al servidor puede leer las
 notas de las cuentas conectadas. Detalle completo en `SPEC.md`.
 
-Estado a 22 de noviembre de 2026: el servidor MCP tiene 51 herramientas
+Estado a 28 de noviembre de 2026: el servidor MCP tiene 53 herramientas
 (detalle en `SPEC.md` §5):
 
 - Lectura: `hebra_search`, `hebra_grep`, `hebra_list_notes`, `hebra_read_note`,
@@ -94,7 +94,9 @@ Estado a 22 de noviembre de 2026: el servidor MCP tiene 51 herramientas
   `hebra_add_attachment` (D9: los mismos tipos y tope, en base64; queda como
   `![[sha256:H|nombre]]` al final de la nota, o de un apartado con `heading`, y sube con el sync). Sin cambiar ni borrar.
 - Carpetas (D9): `hebra_create_folder` y `hebra_rename_folder`, con un único
-  `folder_unavailable` para todo lo privado. Sin borrar; moverlas, solo con `hebra_jd_move`.
+  `folder_unavailable` para todo lo privado; y (D29) `hebra_trash_folder` y
+  `hebra_restore_folder`, que mandan una carpeta a la papelera con todo lo que tiene, como la app,
+  y la sacan. Sin purgar; moverlas, solo con `hebra_jd_move`.
 - Johnny.Decimal (D18, 19 oct 2026), con el motor de
   [jdex-manager](https://github.com/fodaveg/jdex-manager) (submódulo `vendor/jdex-manager`):
   `hebra_jd_new_id` crea un ID nuevo en una categoría que ya existe (la nota del JDex con

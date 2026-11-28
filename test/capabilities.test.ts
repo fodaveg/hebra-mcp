@@ -73,10 +73,11 @@ describe('capacidades', () => {
     // ficheros sueltos y mandarlos a la papelera sí; D15 (10 oct 2026): leer su contenido
     // y reemplazar el texto de uno, también; D17 (12 oct 2026): crearlos, renombrarlos,
     // moverlos y duplicarlos, también; purgarlos, no. D19 (19 oct 2026): mover carpetas sí,
-    // pero solo dentro de un ID del JDex (`hebra_jd_move`); borrarlas, no.
+    // pero solo dentro de un ID del JDex (`hebra_jd_move`). D29 (28 nov 2026): mandarlas a la
+    // papelera y sacarlas sí; purgarlas, no.
     expect(capabilities.notAllowed).toEqual([
       'purge_notes_or_empty_trash_or_irreversible_delete',
-      'folder_delete',
+      'folder_purge',
       'folder_move_outside_jd_move',
       'attachment_change_or_delete',
       'file_purge'
@@ -112,6 +113,8 @@ describe('capacidades', () => {
         'hebra_add_attachment',
         'hebra_create_folder',
         'hebra_rename_folder',
+        'hebra_trash_folder',
+        'hebra_restore_folder',
         'hebra_list_files',
         'hebra_trash_file',
         'hebra_restore_file',
@@ -186,7 +189,10 @@ describe('capacidades', () => {
     expect(SERVER_INSTRUCTIONS).not.toContain('ni gestionar carpetas');
     expect(SERVER_INSTRUCTIONS).not.toContain('ni añadir, cambiar o borrar adjuntos');
     // D19 (19 oct 2026): mover carpetas, solo dentro de un ID con `hebra_jd_move`.
-    expect(SERVER_INSTRUCTIONS).toContain('ni borrar carpetas ni moverlas salvo dentro de un ID del JDex con hebra_jd_move');
+    // D29 (28 nov 2026): a la papelera y de vuelta sí; purgarlas, no.
+    expect(SERVER_INSTRUCTIONS).toContain('ni purgar carpetas ni moverlas salvo dentro de un ID del JDex con hebra_jd_move');
+    expect(SERVER_INSTRUCTIONS).toContain('hebra_trash_folder, hebra_restore_folder');
+    expect(SERVER_INSTRUCTIONS).not.toContain('ni borrar carpetas');
     expect(SERVER_INSTRUCTIONS).toContain('ni cambiar o borrar adjuntos');
   });
 

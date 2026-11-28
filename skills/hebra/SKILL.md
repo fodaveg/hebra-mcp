@@ -11,7 +11,7 @@ description: >-
   Johnny.Decimal, crear IDs del JDex, archivar en un ID y auditar el sistema. Usar
   cuando el usuario nombre Hebra o sus notas: "busca en Hebra", "apúntalo en Hebra",
   "añade esto a la nota Y", "crea un ID nuevo en la 21", "audita el JDex". No sirve
-  para borrado definitivo, cambiar o borrar adjuntos, borrar carpetas ni moverlas
+  para borrado definitivo, cambiar o borrar adjuntos, purgar carpetas ni moverlas
   fuera de un ID, ni para tareas (van a Lumbre).
 ---
 
@@ -59,7 +59,7 @@ va a la papelera puede volver, y la papelera no se vacía desde aquí.
 | Mover una nota a una carpeta que existe; favorita; archivar; ocultar del listado general; quitar la marca de copia de conflicto | Editar una nota bloqueada (`note_locked`); sí organizarla |
 | Papelera de notas: mandar, sacar, listar (también sus carpetas); ver y restaurar versiones anteriores (las de este dispositivo; en un espacio, las del historial del servidor, con quién las editó) | Purgar ni vaciar la papelera; ver versiones de otros dispositivos en la biblioteca personal |
 | Leer y añadir adjuntos (imágenes, PDF, texto, Markdown, CSV, JSON; hasta 5 MiB) | Cambiar o borrar un adjunto; más de 5 MiB u otros tipos (ZIP, vídeo, audio, Office...) |
-| Crear y renombrar carpetas | Borrar carpetas, o moverlas salvo dentro de un ID con `hebra_jd_move` |
+| Crear y renombrar carpetas; mandar una a la papelera con todo lo que tiene y sacarla | Purgar carpetas, o moverlas salvo dentro de un ID con `hebra_jd_move` |
 | Ficheros sueltos: listar, leer, reemplazar el texto de uno de texto, crear de texto, renombrar, mover, duplicar, papelera | Purgarlos; reemplazar uno que no sea de texto; crear con `hebra_create_file` uno que no sea de texto; leer uno de la papelera; cambiar la extensión |
 | Importar un `.xlsx`, `.pptx` o `.docx` con `hebra_import_office`: nota o fichero convertido y original, según `mode` | Importar `.doc`, `.xls`, `.ppt` u otra extensión; convertir un formato sin convertidor (hoy, todos) |
 | Hojas de cálculo `.ods`: leer, crear, editar por lotes (entran enteros o no entran, con deshacer durante 7 días) y pintar un rango como imagen | Editar un `.xlsx` sin importarlo; gráficos, tablas dinámicas e imágenes flotantes; leerlas con `hebra_read_file` |
@@ -86,7 +86,9 @@ Las listas se paginan con el `nextCursor` recibido; `null` es el final.
   ([sustituir en varias notas](references/sustituir-en-varias-notas.md)).
 - Organizar: `hebra_move_note`, `hebra_set_favorite`, `hebra_set_archived`, `hebra_set_hidden`
   (vista, no privacidad), `hebra_clear_conflict` (tras llevar a la original lo que haga falta).
-  Carpetas: `hebra_create_folder` (idempotente), `hebra_rename_folder`.
+  Carpetas: `hebra_create_folder` (idempotente), `hebra_rename_folder`, `hebra_trash_folder`
+  (se lleva subcarpetas, notas y ficheros: confírmalo antes con el usuario si no está vacía),
+  `hebra_restore_folder`.
 - Papelera: `hebra_trash_note`, `hebra_restore_note`, `hebra_list_trash` (`kind: "folders"`).
   Versiones: `hebra_list_versions`, `hebra_read_version`, `hebra_restore_version` (edición nueva).
 - Adjuntos: `hebra_list_attachments`, `hebra_read_attachment`, `hebra_add_attachment` ("Reglas al escribir", 6).

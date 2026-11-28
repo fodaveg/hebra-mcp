@@ -26,6 +26,7 @@ import { ReplaceBatch } from '../../src/store/replace-batch';
 import { fetchFileBytes, replaceFileText } from '../../src/store/file-writes';
 import { writeLooseFile } from '../../src/store/file-verbs';
 import { writeNoteState } from '../../src/store/note-state';
+import { writeFolderTrash } from '../../src/store/folder-trash';
 import { importOfficeLocal, type OfficeConversionRunner } from '../../src/store/office-writes';
 import { ConversionError } from '../../vendor/hebra/src/lib/office-import/types';
 import { runJdNewId } from '../../src/store/jd-new-id';
@@ -86,6 +87,8 @@ export function testWriteContext(port: NodeLibraryPort): WriteContext {
     looseFileWrite: (input) => writeLooseFile(port, input, null, () => {}),
     // D23: cambios de estado de una nota.
     noteState: (input) => writeNoteState(port, input, () => {}),
+    // D29: una carpeta a la papelera o de vuelta.
+    organizeFolder: (input) => writeFolderTrash(port, input, () => {}),
     // Un ID nuevo del JDex (D18): simular y aplicar sobre el mismo puerto.
     jdNewId: (request) => runJdNewId(port, request, () => {}),
     // Mover a un ID (D19): igual, sobre el mismo puerto.

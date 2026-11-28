@@ -116,6 +116,8 @@ servidor no da la versión, `history_unavailable` sin escribir nada. Con `author
 |---|---|---|
 | `hebra_create_folder` | `name` (hasta 255, sin `/`), `parent?` (ruta) **o** `parentId?` (`"root"` = raíz); sin ninguno, la raíz | `{id, path, created, sync}`. Si ya hay una con ese nombre ahí (sin distinguir mayúsculas), la devuelve con `created: false`: sirve para replicar una estructura sin comprobar antes. Para anidar, encadena con el `id` devuelto (`parentId`), de arriba abajo. |
 | `hebra_rename_folder` | `folderId`, `name` | `{id, path, renamed, sync}`. El mismo nombre: `renamed: false`. Lo que el MCP no ve dentro de la carpeta se queda dentro, oculto. |
+| `hebra_trash_folder` | `folderId` (de `hebra_list_folders`; la raíz no) | `{id, trashed: true, changed, sync}`. Manda a la papelera la carpeta con sus subcarpetas, notas y ficheros sueltos, como la app; lo que el MCP no ve va con ella y sigue oculto. Una que ya está en la papelera: `changed: false`. Una carpeta con una carpeta privada debajo: `folder_unavailable`. No purga nada. |
+| `hebra_restore_folder` | `folderId` (de `hebra_list_trash` con `kind: "folders"`) | `{id, path, restored, sync}`. Saca la carpeta con lo que entró con ella y las carpetas de encima que también estuvieran en la papelera; lo que ya estaba en la papelera antes se queda. Una viva: `restored: false`. |
 
 ## Importar Office
 
