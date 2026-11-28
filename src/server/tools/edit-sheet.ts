@@ -71,6 +71,14 @@
  * Los comandos de los bloques no llevan `expect`: un lote con alguno (salvo `clearSpillBlockers`,
  * que es un `setCells`) necesita `expectedRevision` o `expectedLayout`.
  *
+ * Validación de datos por dirección (D30): `setValidation` y `clearValidation` no son del contrato
+ * de la app. Cada uno va en su tramo y se traduce en la fase 2 (`compileValidationAt`): el rango A1
+ * a los ids de fila y columna del libro de ese tramo, y de ahí a las operaciones que guarda el panel
+ * de validación de la app (`planPutValidation`, `planDeleteValidation`). Llevan la regla de
+ * direcciones de `compileBatch` (`expectedRevision`, o `expect` en el comando y `expectedLayout`);
+ * su `expect` se comprueba con `compileBatch` sobre el mismo libro y entra en las guardas de la fase
+ * 3 como el de cualquier comando con hoja (`guardsOf`).
+ *
  * Imágenes del lote: `assets` solo vale con `insertImage` o `replaceImage`, y cada una tiene que
  * citarse por su `ref`. La herramienta las juzga con el filtro de la llamada (oculta o
  * inexistente, `not_found`, como un `.ods` oculto), y el escritor otra vez en las fases 1 y 3
@@ -98,6 +106,15 @@ import type { ImageCommand } from '../../../vendor/hebra/src/lib/sheets/opt/img/
 import type { TableCommand } from '../../../vendor/hebra/src/lib/sheets/opt/tab/llm';
 import type { ChartCommand } from '../../../vendor/hebra/src/lib/sheets/opt/cht/llm-write';
 import type { PivotCommand } from '../../../vendor/hebra/src/lib/sheets/opt/piv/llm-write';
+import {
+  isValidationInvalid,
+  planDeleteValidation,
+  planPutValidation,
+  validationBoxes,
+  validationRules,
+  type ValidationBody,
+  type ValidationRange
+} from '../../../vendor/hebra/src/lib/sheets/grid/validation';
 import {
   compileBatch,
   createFormulaLocale,
@@ -129,11 +146,13 @@ import { ToolError } from '../errors';
 import { requireValidOperationId } from './guards';
 import {
   inactiveOptCommand,
+  isValidationCommand,
   optBlockOf,
   parseSheetEditCommands,
   sheetEditAssetsField,
   sheetEditOpsField,
-  type SheetEditCommand
+  type SheetEditCommand,
+  type ValidationCommand
 } from './sheet-op-schemas';
 import {
   baseObjectsOf,
@@ -691,7 +710,7 @@ async function computeBatch(
       if (k > 0 && ops.length > 0) model = await adapter.project(read.base, copy, signal);
       // El primer tramo con la semilla del lote: un lote sin bloques da los mismos ids de siempre.
       const seed = k === 0 ? envelope.seed : `${envelope.seed}\u0000t${k}`;
-      const step = await compileSegment(segment, { model, copy, read, seed, guards, engineOf, signal, assets });
+      const step = await compileSegment(segment, { model, copy, read, seed, guards, engineOf, signal, assets, commands });
       if (!step.ok) return { ok: false, error: step.error };
       try {
         copy.transact(() => {
@@ -757,16 +776,22 @@ type Segment =
   | { kind: 'img'; items: Indexed<ImageCommand>[] }
   | { kind: 'tab'; items: Indexed<TableCommand>[] }
   | { kind: 'cht'; items: Indexed<ChartCommand>[] }
-  | { kind: 'piv'; items: Indexed<PivotCommand>[] };
+  | { kind: 'piv'; items: Indexed<PivotCommand>[] }
+  | { kind: 'val'; items: Indexed<ValidationCommand>[] };
 
-/** Parte el lote en tramos: seguidos del mismo bloque, salvo las tablas, que van de una en una. */
+/** Parte el lote en tramos: seguidos del mismo bloque, salvo las tablas y las validaciones por
+ *  dirección (D30), que van de una en una. */
 export function segmentsOf(commands: readonly SheetEditCommand[]): Segment[] {
   const out: Segment[] = [];
   commands.forEach((command, index) => {
     const block = optBlockOf(command.type);
-    const kind: Segment['kind'] = block === null || block === 'arr' ? 'base' : block;
+    const kind: Segment['kind'] = isValidationCommand(command)
+      ? 'val'
+      : block === null || block === 'arr'
+        ? 'base'
+        : block;
     const last = out[out.length - 1];
-    if (last && last.kind === kind && kind !== 'tab') (last.items as Indexed<SheetEditCommand>[]).push({ command, index });
+    if (last && last.kind === kind && kind !== 'tab' && kind !== 'val') (last.items as Indexed<SheetEditCommand>[]).push({ command, index });
     else out.push({ kind, items: [{ command, index }] } as Segment);
   });
   return out;
@@ -782,6 +807,8 @@ interface SegmentContext {
   engineOf: () => FormulaEngine;
   signal: AbortSignal;
   assets: (ref: string) => ReturnType<typeof resolveLotAsset>;
+  /** El lote entero, para lo que un tramo mira de los comandos de antes (D30). */
+  commands: readonly SheetEditCommand[];
 }
 
 type SegmentResult =
@@ -813,6 +840,7 @@ function withAnchorArrays(command: SheetCommand): SheetCommand {
 
 async function compileSegment(segment: Segment, context: SegmentContext): Promise<SegmentResult> {
   if (segment.kind === 'base') return compileBaseSegment(segment.items, context);
+  if (segment.kind === 'val') return compileValidationAt(segment.items[0]!, context);
   // El motor de un tramo de un bloque, solo si lo pide (filtrar u ordenar columnas con fórmulas).
   const slot: { loading: Promise<FormulaEngine | null> | null } = { loading: null };
   const state: OptCompileState = {
@@ -900,6 +928,127 @@ async function compileBaseSegment(items: readonly Indexed<BaseItem>[], context: 
       return at === null ? null : (origin[at] ?? null);
     }
   };
+}
+
+// --- Validación de datos por dirección (D30) --------------------------------------------------------
+
+/** Lo que cambia los ejes de una hoja: después, sus direcciones van en otro lote (como `compileBatch`). */
+const RESTRUCTURING = new Set<string>(['insertAxis', 'deleteAxis']);
+
+/** Una celda A1 absoluta (`$A$1`), como la escribe el panel de validación de la app. */
+function absoluteCell(row: number, col: number): string {
+  return `$${columnLetters(col)}$${row + 1}`;
+}
+
+function sameRange(left: ValidationRange, right: ValidationRange): boolean {
+  return left.top === right.top && left.bottom === right.bottom && left.left === right.left && left.right === right.right;
+}
+
+/**
+ * `setValidation` o `clearValidation` sobre el libro de su tramo (ver la cabecera). En orden: la
+ * hoja (por su nombre, nunca un `$alias` del lote) y que el lote no haya cambiado antes sus ejes; la
+ * garantía de las direcciones y su `expect`; el rango dentro de la hoja; y las reglas de validación
+ * que ya tocan el rango. `setValidation` sustituye la que tenga exactamente ese rango (misma regla,
+ * mismo id) y rechaza si lo toca otra (se quita antes con `clearValidation`, que las quita enteras);
+ * guarda una lista desplegable (`list`: valores literales; `source`: un rango de la hoja) con los
+ * avisos que pone por defecto el panel de la app (error que detiene la escritura en la app).
+ */
+function compileValidationAt(item: Indexed<ValidationCommand>, context: SegmentContext): SegmentResult {
+  const { command, index } = item;
+  const { model, guards } = context;
+  const at = `ops.${index}`;
+  const fail = (path: string, reason: string): SegmentResult => ({ ok: false, error: batchInvalid(index, path, reason) });
+  if (command.sheet.startsWith('$')) {
+    return fail(`${at}.sheet`, `La hoja "${command.sheet}" se crea en este lote: usa otro lote para su validación`);
+  }
+  const sheet = model.sheets.find((candidate) => candidate.name === command.sheet);
+  if (!sheet) return fail(`${at}.sheet`, `La hoja "${command.sheet}" no existe`);
+  const restructured = context.commands
+    .slice(0, index)
+    .some((other) => RESTRUCTURING.has(other.type) && 'sheet' in other && other.sheet === command.sheet);
+  if (restructured) {
+    return fail(at, `Tras insertar o borrar filas o columnas de "${command.sheet}", sus direcciones van en otro lote`);
+  }
+  // La regla de direcciones de `compileBatch` (`checkAddressRule`), con sus mismos motivos.
+  const expect = command.expect !== undefined && Object.keys(command.expect).length > 0 ? command.expect : undefined;
+  if (guards.expectedRevision === undefined) {
+    if (!expect) return fail(at, `El comando ${command.type} usa direcciones y necesita "expect" o "expectedRevision" en el lote`);
+    if (guards.expectedLayout === undefined) {
+      return fail(
+        'expectedLayout',
+        'Un lote con direcciones y sin "expectedRevision" necesita "expectedLayout" (la "layoutRevision" leída) además de cada "expect"'
+      );
+    }
+  }
+  const rect = rectOf(command.range, sheet);
+  if (!rect || rect.r2 >= sheet.rows.length() || rect.c2 >= sheet.cols.length()) {
+    return fail(`${at}.range`, `El rango "${command.range}" cae fuera de la hoja`);
+  }
+  if (expect) {
+    // `expect` con la comprobación de `compileBatch` sobre este mismo libro: un comando que no
+    // escribe nada aquí (sus operaciones se descartan) y que solo lleva el `expect` del LLM. La
+    // garantía del lote ya se miró arriba, así que se le da una revisión cualquiera.
+    const probe = compileBatch(model, {
+      ops: [
+        {
+          type: 'setFormat',
+          sheet: command.sheet,
+          range: `${columnLetters(rect.c1)}${rect.r1 + 1}`,
+          format: { bold: null },
+          expect
+        }
+      ],
+      expectedRevision: 'validacion'
+    });
+    if ('error' in probe) {
+      if (probe.error === 'precondition_failed') return { ok: false, error: { code: 'precondition_failed', opIndex: index, target: at } };
+      return fail(at, probe.reason);
+    }
+  }
+  const touches = (box: { from: { row: number; col: number }; to: { row: number; col: number } }): boolean =>
+    box.from.row <= rect.r2 && box.to.row >= rect.r1 && box.from.col <= rect.c2 && box.to.col >= rect.c1;
+  const touching = validationRules(sheet).filter((entry) => validationBoxes(sheet, entry.body).some(touches));
+  const done = (ops: SheetOp[]): SegmentResult => ({ ok: true, ops, createdIds: {}, locate: () => index });
+  if (command.type === 'clearValidation') return done(touching.flatMap((entry) => planDeleteValidation(entry.id)));
+
+  const range: ValidationRange = {
+    top: sheet.rows.idAt(rect.r1),
+    bottom: sheet.rows.idAt(rect.r2),
+    left: sheet.cols.idAt(rect.c1),
+    right: sheet.cols.idAt(rect.c2)
+  };
+  const same = touching.length === 1 && touching[0]!.body.ranges.length === 1 && sameRange(touching[0]!.body.ranges[0]!, range);
+  if (touching.length > 0 && !same) {
+    return fail(`${at}.range`, 'El rango ya tiene otra validación que no coincide con él: quítala antes con clearValidation');
+  }
+  let formula1: string;
+  if (command.list !== undefined) {
+    formula1 = `"${command.list.map((value) => value.trim()).join(',').replace(/"/g, '""')}"`;
+  } else {
+    const source = rectOf(command.source ?? '', sheet);
+    if (!source) return fail(`${at}.source`, 'El origen de la lista no es un rango de esta hoja');
+    const one = source.r1 === source.r2 && source.c1 === source.c2;
+    formula1 = one
+      ? absoluteCell(source.r1, source.c1)
+      : `${absoluteCell(source.r1, source.c1)}:${absoluteCell(source.r2, source.c2)}`;
+  }
+  // Los valores por defecto del panel de validación de la app.
+  const body: ValidationBody = {
+    v: 1,
+    ranges: [range],
+    type: 'list',
+    operator: 'between',
+    formula1,
+    allowBlank: command.allowBlank ?? true,
+    showList: command.showList ?? true,
+    showError: true,
+    showPrompt: false,
+    errorStyle: 'stop'
+  };
+  const id = same ? touching[0]!.id : seededIds(`${context.seed}\u0000validacion`)();
+  const planned = planPutValidation(sheet, { id, body });
+  if (isValidationInvalid(planned)) return fail(at, planned.reason);
+  return done(planned);
 }
 
 // --- La herramienta ----------------------------------------------------------------------------------

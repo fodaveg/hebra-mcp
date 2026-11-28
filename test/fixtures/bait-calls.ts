@@ -384,6 +384,11 @@ export function baitCalls(library: TestLibrary): BaitCall[] {
       arguments: { folderId: library.folders.diario2026, name: BAIT_FOLDER }
     },
     { name: 'hebra_rename_folder', arguments: { folderId: library.folders.historial, name: 'Diario' } },
+    // D29: la carpeta privada y su subcarpeta, a la papelera o de vuelta: `not_found`, sin
+    // escribir nada.
+    { name: 'hebra_trash_folder', arguments: { folderId: library.folders.diario2026 } },
+    { name: 'hebra_restore_folder', arguments: { folderId: library.folders.diario2026 } },
+    { name: 'hebra_trash_folder', arguments: { folderId: library.folders.diario } },
     {
       name: 'hebra_add_attachment',
       arguments: {

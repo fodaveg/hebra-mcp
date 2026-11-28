@@ -37,7 +37,11 @@
  *   disco, con su filtro.
  * - `createFolder` `{parentId, name, privacy}` y `renameFolder` `{id, name, privacy}` (D9,
  *   3 oct 2026) → `FolderOutcome` (`{id, changed, sync, syncError?}`), con la ronda ya
- *   esperada. Sin acciones de mover ni borrar carpetas.
+ *   esperada. Sin acciones de mover carpetas.
+ * - `organizeFolder` `{action: "trashFolder" | "restoreFolder", id, privacy}` (D29, 28 nov 2026) →
+ *   `FolderOutcome`, con la ronda ya esperada: mandar una carpeta a la papelera, con lo que tiene,
+ *   o sacarla (`../store/folder-trash.ts`). Op propia: un escritor anterior la rechaza sin
+ *   escribir (`invalid_request`, que el lector traduce a `writer_outdated`). Nunca purga.
  * - `addAttachment` `{id, name, dataBase64, mimeType, operationId, privacy}` (D9) y
  *   `addAttachmentInSection` (11 oct 2026), lo mismo más `heading` y `headingOccurrence?`
  *   → `AddAttachmentOutcome` (con `placed` en la segunda), con la ronda ya esperada. Son
@@ -199,6 +203,7 @@ import { DOCUMENT_OPS_VERSION } from '../store/document-types';
 import { EDIT_OPS_MAX, EDIT_OPS_MAX_BYTES } from '../store/document-limits';
 import type { OfficeFormat, OfficeImportMode } from '../../vendor/hebra/src/lib/office-import/types';
 import type { NoteStateInput } from '../store/note-state';
+import type { FolderTrashInput } from '../store/folder-trash';
 import {
   APPEND_TEXT_MAX_LENGTH,
   CREATE_BODY_MAX_LENGTH,
@@ -278,6 +283,7 @@ export type WriterSocketOp =
   | 'importOffice'
   | 'documentOps'
   | 'noteState'
+  | 'organizeFolder'
   | 'jdNewId'
   | 'jdMove'
   | 'replaceBody'
@@ -293,6 +299,7 @@ const OPS: ReadonlySet<string> = new Set<WriterSocketOp>([
   'importOffice',
   'documentOps',
   'noteState',
+  'organizeFolder',
   'jdNewId',
   'jdMove',
   'createNote',
@@ -382,6 +389,9 @@ export interface WriterSocketHandlers {
   /** Cambios de estado de una nota de D23, con la ronda ya esperada. Opcional: un escritor
    *  sin él responde `invalid_request`. */
   noteState?(input: NoteStateInput): Promise<NoteStateOutcome>;
+  /** Mandar una carpeta a la papelera o sacarla (D29), con la ronda ya esperada. Opcional: un
+   *  escritor sin él responde `invalid_request`. */
+  organizeFolder?(input: FolderTrashInput): Promise<FolderOutcome>;
   /** Un ID nuevo del JDex (D18, 19 oct 2026): simular, aplicar (con la ronda ya esperada) o
    *  descartar un plan. Opcional: un escritor sin él responde `invalid_request`. */
   jdNewId?(request: JdNewIdRequest): Promise<JdNewIdOutcome>;
@@ -553,6 +563,13 @@ function renameFolderInputOf(params: Record<string, unknown>): RenameFolderInput
   const { id, name } = params;
   if (!isId(id) || !isName(name)) throw new InvalidRequest();
   return { id, name, privacy: privacyOf(params.privacy) };
+}
+
+/** `organizeFolder` (D29): una de sus dos acciones y el id, nada más. */
+function organizeFolderInputOf(params: Record<string, unknown>): FolderTrashInput {
+  const { action, id } = params;
+  if ((action !== 'trashFolder' && action !== 'restoreFolder') || !isId(id)) throw new InvalidRequest();
+  return { action, id, privacy: privacyOf(params.privacy) };
 }
 
 /** `addAttachment` (D9): el base64 se decodifica aquí con la regla estricta de la
@@ -1406,6 +1423,12 @@ export class WriterSocketServer {
           const input = noteStateInputOf(envelope.params);
           if (!handlers.noteState) throw new InvalidRequest();
           result = await handlers.noteState(input);
+          break;
+        }
+        case 'organizeFolder': {
+          const input = organizeFolderInputOf(envelope.params);
+          if (!handlers.organizeFolder) throw new InvalidRequest();
+          result = await handlers.organizeFolder(input);
           break;
         }
         case 'jdNewId': {

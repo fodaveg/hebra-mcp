@@ -96,6 +96,7 @@ import type { DocumentUndoStore } from './document-undo';
 import type { DocSessionLike } from './document-types';
 import type { DocFormatAdapter, DocHeadRecord } from '../../vendor/hebra/src/lib/documents/contract';
 import type { FolderNoteTitle } from './visible-sql';
+import type { FolderTrashEntry } from './state-reads';
 import type {
   BlobNoteRef,
   FilesIndex,
@@ -109,6 +110,12 @@ import type {
  *  `node.ts` no los reexporta, así que salen de la firma de `SqliteLibraryEngine`. */
 export type FolderRow = Awaited<ReturnType<SqliteLibraryEngine['folderCreate']>>;
 export type FileRow = Awaited<ReturnType<SqliteLibraryEngine['fileTrash']>>;
+/** El recibo de mandar una carpeta a la papelera y lo que cambió al sacarla (D29), como los tipa
+ *  el motor (`library/types.ts`; `node.ts` no los reexporta). Por el módulo de tipos y no por la
+ *  firma de `SqliteLibraryEngine`: así ningún texto de aquí nombra el método
+ *  (`test/store/surface.node.test.ts`). */
+import type { FolderChangeResult, FolderTrashResult } from '../../vendor/hebra/src/lib/library/types';
+export type { FolderChangeResult, FolderTrashResult };
 export type BlobPutOptions = NonNullable<Parameters<SqliteLibraryEngine['blobPut']>[1]>;
 export type BlobPutResult = Awaited<ReturnType<SqliteLibraryEngine['blobPut']>>;
 /** Las guardas de las mutaciones de mover a un ID (D19), como las tipa el motor
@@ -131,11 +138,17 @@ export interface NoteWriteStore extends Pick<LibraryPort, 'noteCreate' | 'noteRe
    *  `hasHidden` del JDex (D18, `./jd-port.ts`; pieza A9a del plan de memoria), solo títulos. */
   titlesInFolders(folderIds: readonly string[]): FolderNoteTitle[];
   /** Carpetas (D9, 3 oct 2026): crear y renombrar, solo desde `NoteWriter` y con el plan
-   *  de `./folders.ts` rehecho en el turno. Mover y borrar carpetas (`folderMove`,
-   *  `folderTrash`) NO están, ni aquí ni en ningún sitio de hebra-mcp
-   *  (`test/store/surface.node.test.ts`). */
+   *  de `./folders.ts` rehecho en el turno. Mover carpetas a secas (`folderMove`) NO está, ni
+   *  aquí ni en ningún sitio de hebra-mcp (`test/store/surface.node.test.ts`). */
   folderCreate(parentId: string, name: string): Promise<FolderRow>;
   folderRename(id: string, name: string): Promise<FolderRow>;
+  /** Mandar una carpeta a la papelera y sacarla (D29, 28 nov 2026): los métodos del mismo nombre
+   *  del motor, con su contenido, como la app. Solo los llama `./folder-trash.ts`, con el plan
+   *  rehecho en el turno; `foldersTrash` es la lista de la papelera de ese turno. Purgar
+   *  (`folderPurge`, `folderUndoTrash`, `folderTrashEmpty`) sigue sin estar. */
+  folderTrash(id: string): Promise<FolderTrashResult>;
+  folderRestore(id: string): Promise<FolderChangeResult>;
+  foldersTrash(): FolderTrashEntry[];
   /** Mover a un ID (D19, 19 oct 2026): las versiones con guarda del motor (`null` si la
    *  nota o la carpeta ya no está como se esperaba). Solo las llama `./jd-move-port.ts`,
    *  dentro del turno y con el filtro aplicado; mover carpetas no tiene otra vía en el MCP. */
@@ -455,7 +468,8 @@ export type EditNoteSaved =
  * nada irreversible: ni purga ni vaciar la papelera.
  *
  * Crear y renombrar CARPETAS (D9, 3 oct 2026) no son acciones de nota: van por
- * `createFolderLocal`/`renameFolderLocal`. Mover y borrar carpetas siguen fuera del MCP.
+ * `createFolderLocal`/`renameFolderLocal`. Mandar una carpeta a la papelera y sacarla (D29)
+ * va por `./folder-trash.ts`; moverlas a secas y purgarlas siguen fuera del MCP.
  */
 export type OrganizeAction =
   | { action: 'moveNote'; id: string; folderId: string }

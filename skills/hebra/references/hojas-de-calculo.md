@@ -145,7 +145,8 @@ garantia`). El `expect` vacío (`{}`) no cuenta. Si la `expectedLayout` caducó,
 `precondition_failed` con `target: "expectedLayout"` y no se escribe nada: relee y rehaz el lote.
 
 Comandos con direcciones (necesitan garantía): `setCells`, `setFormat`, `insertAxis`, `deleteAxis`,
-`hideAxis`, `showAxis`, `setAxisSize`, `merge` y `unmerge`. Los demás (`addSheet`,
+`hideAxis`, `showAxis`, `setAxisSize`, `merge`, `unmerge`, y en `hebra_edit_sheet` también
+`setValidation` y `clearValidation`. Los demás (`addSheet`,
 `setSheetHidden`, `deleteSheet`, `renameSheet`, `moveSheet`, `freeze`, `putRule`, `deleteRule`)
 no las necesitan.
 
@@ -263,7 +264,9 @@ o la columna A); `to` de `moveSheet`, en 0.
 | `moveSheet` | `sheet`, `to` | Posición final, desde 0, entre las hojas |
 | `freeze` | `sheet`, `rows`, `cols` | Inmoviliza las primeras filas y columnas; `0` y `0` las suelta |
 | `merge`, `unmerge` | `sheet`, `range`, `expect?` | `merge` pide al menos dos celdas |
-| `putRule`, `deleteRule` | `kind` (`name`, `filter`, `validation`, `conditional`, `comment`), `id?`, `body?`, `as?` | Reglas del libro. El cuerpo va en JSON (hasta 64 KiB). Con `deleteRule`, el `id` es obligatorio. Úsalas sobre todo con nombres definidos (`kind: "name"`, cuerpo `{"name": "Gastos", "expr": "Hoja 1!$B$2:$B$3"}`); los demás cuerpos llevan ids internos de fila y columna que el MCP no entrega, así que no inventes uno |
+| `putRule`, `deleteRule` | `kind` (`name`, `filter`, `validation`, `conditional`, `comment`), `id?`, `body?`, `as?` | Reglas del libro. El cuerpo va en JSON (hasta 64 KiB). Con `deleteRule`, el `id` es obligatorio. Úsalas sobre todo con nombres definidos (`kind: "name"`, cuerpo `{"name": "Gastos", "expr": "Hoja 1!$B$2:$B$3"}`); los demás cuerpos llevan ids internos de fila y columna que el MCP no entrega, así que no inventes uno; una validación, con `setValidation` |
+| `setValidation` | `sheet`, `range` (`"C4:C103"`, también `"C:C"`), `list` (los valores, sin comas) **o** `source` (`"A1:A5"`, un rango de la misma hoja), `allowBlank?` (`true`), `showList?` (`true`), `expect?` | Solo en `hebra_edit_sheet`. Una lista desplegable en el rango, como la guarda el panel de validación de la app (en la app no deja escribir otro valor). El servidor traduce el rango a los ids de la hoja que leíste: lleva la misma garantía que los comandos con direcciones (`expectedRevision`, o `expect` y `expectedLayout`). Si el rango ya tiene exactamente esa validación, la sustituye; si lo toca otra distinta, `batch_invalid` (quítala antes con `clearValidation`). No va detrás de un `insertAxis` o `deleteAxis` de la misma hoja en el mismo lote |
+| `clearValidation` | `sheet`, `range`, `expect?` | Solo en `hebra_edit_sheet`. Quita entera cada validación que toque el rango, como "Cualquier valor" en la app. Sin ninguna, no hace nada. La misma garantía que `setValidation` |
 
 `setAxisSize`, `setSheetHidden` y `addSheet` con `hidden` son comandos del mismo contrato que usa la
 rejilla de la app: lo que ves allí (ancho de una columna, una hoja oculta) se puede pedir aquí.

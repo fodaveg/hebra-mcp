@@ -310,6 +310,81 @@ export const sheetCommandSchema = z.discriminatedUnion('type', [
   SHEET_COMMAND_SCHEMAS.deleteRule
 ]);
 
+// --- Validación de datos por dirección (D30, 28 nov 2026) ------------------------------------------
+//
+// `putRule` con `kind: "validation"` pide el cuerpo de la app (`ValidationBody` de
+// `vendor/hebra/src/lib/sheets/grid/validation.ts`), con los rangos por ids internos de fila y
+// columna que el MCP no entrega. Estos dos comandos son del MCP, no del contrato de la app: dicen
+// el rango en A1 y el servidor lo traduce a ids sobre el libro que leyó el LLM
+// (`./edit-sheet.ts`, `compileValidationAt`), con la misma garantía que los comandos por dirección
+// (`expectedRevision`, o `expect` en el comando y `expectedLayout`). Lo que guardan es lo que
+// guarda el panel de validación de la app (`planPutValidation`, `planDeleteValidation`).
+
+/** Tope de valores de una lista literal: el de caracteres de la app (255) lo mira `planPutValidation`. */
+const VALIDATION_LIST_MAX_ITEMS = 255;
+/** Una celda o dos esquinas A1, sin columnas ni filas enteras: lo que entiende `parseA1` de la app. */
+const A1_CELL_RANGE_RE = new RegExp(`^${A1_CELL}(?::${A1_CELL})?$`);
+
+/** Los comandos de validación de datos por dirección (D30). */
+export type ValidationCommand =
+  | {
+      type: 'setValidation';
+      sheet: string;
+      range: string;
+      list?: string[];
+      source?: string;
+      allowBlank?: boolean;
+      showList?: boolean;
+      expect?: z.infer<typeof expectSchema>;
+    }
+  | { type: 'clearValidation'; sheet: string; range: string; expect?: z.infer<typeof expectSchema> };
+
+export const VALIDATION_COMMAND_SCHEMAS = {
+  /**
+   * Una lista desplegable en `range`: `list` (los valores, sin comas, como los escribe el panel de
+   * la app) o `source` (un rango de la misma hoja con los valores), exactamente uno.
+   */
+  setValidation: z
+    .strictObject({
+      type: z.literal('setValidation'),
+      sheet: sheetRefSchema,
+      range: a1RangeSchema,
+      list: z
+        .array(z.string().min(1).max(255).refine((item) => !/[,\r\n]/.test(item), 'un valor no puede llevar comas ni saltos de línea'))
+        .min(1)
+        .max(VALIDATION_LIST_MAX_ITEMS)
+        .optional(),
+      source: z.string().regex(A1_CELL_RANGE_RE, 'rango A1 no válido').optional(),
+      allowBlank: z.boolean().optional(),
+      showList: z.boolean().optional(),
+      expect: expectSchema.optional()
+    })
+    .refine((command) => (command.list === undefined) !== (command.source === undefined), {
+      message: 'exactamente uno de list o source',
+      path: ['list']
+    }),
+  /** Quita entera cada regla de validación que toque `range` (como «Cualquier valor» en la app). */
+  clearValidation: z.strictObject({
+    type: z.literal('clearValidation'),
+    sheet: sheetRefSchema,
+    range: a1RangeSchema,
+    expect: expectSchema.optional()
+  })
+} as const satisfies CommandSchemaTable<ValidationCommand>;
+
+export const VALIDATION_COMMAND_TYPES = Object.keys(VALIDATION_COMMAND_SCHEMAS) as ValidationCommand['type'][];
+
+/** Si el comando es de validación por dirección (D30). */
+export function isValidationCommand(command: { type: string }): command is ValidationCommand {
+  return (VALIDATION_COMMAND_TYPES as readonly string[]).includes(command.type);
+}
+
+/** Cómo se describen en `ops` de `hebra_edit_sheet`. */
+export const SHEET_VALIDATION_DESCRIPTION =
+  'Validación de datos por dirección: `setValidation` {sheet, range:"C4:C103", list:["David","Mikel"] (valores sin comas) | source:"A1:A5" (rango de la misma hoja), allowBlank?:true, showList?:true, expect?} pone una lista desplegable; ' +
+  'si el rango ya tiene otra validación distinta, quítala antes con `clearValidation` {sheet, range, expect?}, que quita entera cada validación que toque el rango. ' +
+  'Llevan la garantía de los comandos por dirección (expectedRevision, o expect y expectedLayout). ';
+
 // --- Bloques opcionales ---------------------------------------------------------------------------
 //
 // Un bloque opcional aporta, en este orden (el patrón que siguió PIV, el último en entrar):
@@ -645,8 +720,9 @@ export const PIVOT_COMMAND_SCHEMAS = {
 /** Los comandos de los bloques opcionales. Un bloque nuevo añade aquí el suyo (paso 3). */
 export type OptCommand = ImageCommand | TableCommand | ChartCommand | SpillCommand | PivotCommand;
 export type OptCommandType = OptCommand['type'];
-/** Lo que admite `hebra_edit_sheet`: los comandos de la base y los de los bloques. */
-export type SheetEditCommand = SheetCommand | OptCommand;
+/** Lo que admite `hebra_edit_sheet`: los comandos de la base, los de los bloques y los de
+ *  validación por dirección (D30). */
+export type SheetEditCommand = SheetCommand | OptCommand | ValidationCommand;
 export type SheetEditCommandType = SheetEditCommand['type'];
 
 /**
@@ -895,8 +971,8 @@ type CommandSet = { types: readonly string[]; schemas: Readonly<Record<string, z
 
 const BASE_COMMANDS: CommandSet = { types: SHEET_COMMAND_TYPES, schemas: SHEET_COMMAND_SCHEMAS };
 const EDIT_COMMANDS: CommandSet = {
-  types: [...SHEET_COMMAND_TYPES, ...OPT_COMMAND_TYPES],
-  schemas: { ...SHEET_COMMAND_SCHEMAS, ...OPT_COMMAND_SCHEMAS }
+  types: [...SHEET_COMMAND_TYPES, ...OPT_COMMAND_TYPES, ...VALIDATION_COMMAND_TYPES],
+  schemas: { ...SHEET_COMMAND_SCHEMAS, ...OPT_COMMAND_SCHEMAS, ...VALIDATION_COMMAND_SCHEMAS }
 };
 
 /** El primer fallo de forma de un comando, con la ruta de zod sin el valor. */
@@ -969,6 +1045,11 @@ function parseCommands(rawOps: unknown, rawAssets: unknown, set: CommandSet): Sh
       ops.push(raw as OptCommand);
       continue;
     }
+    if (isValidationCommand(raw as { type: string })) {
+      // Valores de una lista y un rango A1: ni fórmulas ni un cuerpo que el LLM escriba.
+      ops.push(raw as ValidationCommand);
+      continue;
+    }
     const command = raw as SheetCommand;
     const network = networkPathOf(command);
     if (network !== null) {
@@ -1036,7 +1117,7 @@ export const SHEET_OPS_DESCRIPTION =
   '`insertAxis`, `deleteAxis`, `hideAxis`, `showAxis` {sheet, axis:"row"|"col", at (desde 1), count}; ' +
   '`setAxisSize` {sheet, axis, at, count, size (px, o pt con unit:"pt"; null quita la medida), unit?}; ' +
   '`addSheet` {sheet:nombre, as?, hidden?:true crea la hoja oculta}, `setSheetHidden` {sheet, hidden:true|false} (nunca la última hoja visible), `deleteSheet` {sheet}, `renameSheet` {sheet, name}, `moveSheet` {sheet, to (desde 0)}, `freeze` {sheet, rows, cols}; ' +
-  '`merge`, `unmerge` {sheet, range}; `putRule`, `deleteRule` {kind:"name"|"filter"|"validation"|"conditional"|"comment", id?, body?, as?}. ' +
+  '`merge`, `unmerge` {sheet, range}; `putRule`, `deleteRule` {kind:"name"|"filter"|"validation"|"conditional"|"comment", id?, body?, as?} (una validación por rango A1, mejor con setValidation en hebra_edit_sheet). ' +
   'Una hoja creada en el lote se cita como "$alias". Ninguna fórmula puede usar WEBSERVICE, IMAGE, RTD ni DDE.';
 
 /** El campo `ops` del registro: laxo a propósito (ver `SHEET_OPS_DESCRIPTION`). */
@@ -1088,7 +1169,7 @@ export function activeOptBlocks(registered?: (type: string) => boolean): SheetOp
  */
 export function sheetEditOpsDescription(registered?: (type: string) => boolean): string {
   const blocks = activeOptBlocks(registered).map((id) => SHEET_OPT_DESCRIPTIONS[id]);
-  return blocks.length === 0 ? SHEET_OPS_DESCRIPTION : `${SHEET_OPS_DESCRIPTION} ${blocks.join('')}`.trim();
+  return `${SHEET_OPS_DESCRIPTION} ${SHEET_VALIDATION_DESCRIPTION}${blocks.join('')}`.trim();
 }
 
 /** El campo `ops` de `hebra_edit_sheet`, laxo como `sheetOpsField`: lo valida `parseSheetEditCommands`. */

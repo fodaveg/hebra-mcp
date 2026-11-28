@@ -69,6 +69,8 @@ import {
   renameFileInputShape,
   createNoteInputShape,
   renameFolderInputShape,
+  trashFolderInputShape,
+  restoreFolderInputShape,
   editNoteInputShape,
   grepInputShape,
   jdAuditInputShape,
@@ -108,6 +110,7 @@ import {
 import { runAddAttachment } from './tools/add-attachment';
 import { runAppendToNote } from './tools/append-to-note';
 import { runCreateFolder, runRenameFolder } from './tools/folders';
+import { runRestoreFolder, runTrashFolder } from './tools/folder-trash';
 import { runListAttachments, runReadAttachment } from './tools/attachments';
 import { runCreateNote } from './tools/create-note';
 import { runEditNote } from './tools/edit-note';
@@ -424,6 +427,9 @@ const GATE_POLICIES: Record<
   hebra_read_attachment: read(),
   hebra_create_folder: (input) => folderWrite(input),
   hebra_rename_folder: (input) => folderWrite(input),
+  // D29: si la carpeta ya no se ve, `not_found`; cualquier otro error ligado a ella, el de D9.
+  hebra_trash_folder: (input) => folderWrite(input),
+  hebra_restore_folder: (input) => folderWrite(input),
   hebra_add_attachment: WRITE_WITH_COPY,
   hebra_replace_in_notes: (input, server) =>
     input.mode === 'apply' || input.mode === 'undo'
@@ -1208,6 +1214,30 @@ export function registerTools(
       annotations: WRITE_IDEMPOTENT
     },
     gated('hebra_rename_folder', (toolCtx, input) => runRenameFolder(toolCtx, input), { privacyLoad: 'lazy' })
+  );
+
+  server.registerTool(
+    'hebra_trash_folder',
+    {
+      title: 'Mandar una carpeta a la papelera',
+      description:
+        'Manda una carpeta (id de hebra_list_folders) a la papelera de Hebra con todo lo que tiene: subcarpetas, notas y ficheros sueltos, como la app. Se saca con hebra_restore_folder o desde Hebra: no borra nada. Una que ya está en la papelera responde `changed: false`. folder_unavailable: esa carpeta no se puede mandar a la papelera desde aquí. La raíz no: invalid_input.',
+      inputSchema: scoped(trashFolderInputShape),
+      annotations: WRITE_IDEMPOTENT
+    },
+    gated('hebra_trash_folder', (toolCtx, input) => runTrashFolder(toolCtx, input), { privacyLoad: 'lazy' })
+  );
+
+  server.registerTool(
+    'hebra_restore_folder',
+    {
+      title: 'Sacar una carpeta de la papelera',
+      description:
+        'Saca de la papelera una carpeta (id de hebra_list_trash con kind "folders") con lo que entró con ella, y las carpetas de encima que también estuvieran en la papelera. Devuelve su `path`. Una que ya está fuera responde `restored: false`. folder_unavailable: esa carpeta no se puede sacar desde aquí.',
+      inputSchema: scoped(restoreFolderInputShape),
+      annotations: WRITE_IDEMPOTENT
+    },
+    gated('hebra_restore_folder', (toolCtx, input) => runRestoreFolder(toolCtx, input), { privacyLoad: 'lazy' })
   );
 
   server.registerTool(

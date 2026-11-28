@@ -19,8 +19,10 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  * `fileCreate`, `fileRename` y `fileMove`, igual (último test).
  * Siguen fuera: purgar (`notePurge`), vaciar la papelera (`trashEmpty`), su recuento
  * (`trashCounts`, contaría las privadas), purgar versiones, todo lo demás de los recursos
- * sueltos (`file*`: purgar, `filePurge`), renombrar etiquetas, y
- * mover y borrar carpetas (`folderMove`, `folderTrash`).
+ * sueltos (`file*`: purgar, `filePurge`), renombrar etiquetas, mover carpetas a secas
+ * (`folderMove`) y purgarlas (`folderPurge`, `folderUndoTrash`, `folderTrashEmpty`). Desde D29
+ * (28 nov 2026) manda carpetas a la papelera y las saca: `folderTrash` y `folderRestore`, solo
+ * en el turno y desde `src/store/folder-trash.ts` (su test, abajo).
  * Tres comprobaciones sobre lo que el servidor puede alcanzar de
  * `src/store`, `src/sync`, `src/lock`, `src/ipc`, `src/http` y `src/oauth`:
  * 1. Ningún módulo EXPORTA un nombre así.
@@ -44,7 +46,7 @@ import { LibraryInstance } from '../../src/sync/library-instance';
  */
 const FILE_ALLOWED = 'Trash\\b|Restore\\b|Replace\\b|Create\\b|Rename\\b|RenameAndRelink\\b|Move\\b';
 const FORBIDDEN_FILE = `file(?!${FILE_ALLOWED})[A-Z]\\w*`;
-const FORBIDDEN = `notePurge|noteVersionsPurge\\w*|folderMove|folderTrash|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
+const FORBIDDEN = `notePurge|noteVersionsPurge\\w*|folderMove|folderPurge|folderUndoTrash|folderTrashEmpty|${FORBIDDEN_FILE}|trashEmpty|trashCounts|tagRename`;
 const FORBIDDEN_NAME = new RegExp(`^(${FORBIDDEN})$`);
 
 /**
@@ -115,8 +117,10 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'trashEmpty',
       'trashCounts',
       'noteVersionsPurgeExpired',
-      'folderTrash',
       'folderMove',
+      'folderPurge',
+      'folderUndoTrash',
+      'folderTrashEmpty',
       'filePurge',
       // Cerrado por defecto: ni un `file*` que no exista hoy, ni uno que solo EMPIECE
       // como los permitidos.
@@ -141,6 +145,9 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       'noteVersionsList',
       'noteVersionRead',
       'noteVersionSnapshot',
+      // D29: a la papelera y de vuelta (su propio test, abajo).
+      'folderTrash',
+      'folderRestore',
       // D10, D15, D17 y D23: los siete únicos `file*` que pasan.
       'fileTrash',
       'fileRestore',
@@ -304,7 +311,10 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
         // D19: mover a un ID, con guarda (test de abajo). D23 no añade ningún `folder*`.
         'folderMoveIfUnchanged',
         'folderRename',
-        'folderRenameIfUnchanged'
+        'folderRenameIfUnchanged',
+        // D29: a la papelera y de vuelta (test de abajo).
+        'folderRestore',
+        'folderTrash'
       ]);
     } finally {
       port.close();
@@ -536,9 +546,50 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
       const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
       for (const [name] of reach) expect(storeKeys, name).toContain(name);
       // Y lo que sigue fuera, también del turno.
-      for (const name of ['notePurge', 'trashEmpty', 'filePurge', 'tagRename', 'folderMove', 'folderTrash']) {
+      for (const name of ['notePurge', 'trashEmpty', 'filePurge', 'tagRename', 'folderMove', 'folderPurge', 'folderUndoTrash', 'folderTrashEmpty']) {
         expect(storeKeys, name).not.toContain(name);
       }
+    } finally {
+      port.close();
+    }
+  });
+
+  /**
+   * Carpetas a la papelera y de vuelta (D29, 28 nov 2026): `folderTrash` y `folderRestore` solo
+   * los tiene el turno de escritura, los pone ahí `src/store/node-port.ts` y solo los llama
+   * `src/store/folder-trash.ts`, que antes rehace el plan con el filtro del turno. Pasan por la
+   * guarda de cada mutación de un espacio (la lista `mutations` de `node-port.ts`). Fuera del
+   * turno nadie los tiene, y purgar sigue cerrado (test de arriba y el último de este fichero).
+   */
+  it('carpetas a la papelera (D29): folderTrash y folderRestore solo en el turno y en folder-trash.ts', async () => {
+    const allowed = ['src/store/folder-trash.ts', 'src/store/node-port.ts'];
+    const sources = allSourceFiles().map((file) => [
+      relative(root, file).split(sep).join('/'),
+      readFileSync(file, 'utf8')
+    ] as const);
+    for (const name of ['folderTrash', 'folderRestore']) {
+      const pattern = reachPattern(name);
+      for (const form of reachForms(name)) expect(pattern.test(form), form).toBe(true);
+      // `foldersTrash` (la lista de la papelera, una lectura) no es `folderTrash`.
+      expect(pattern.test('store.foldersTrash()'), name).toBe(false);
+      const callers = sources.filter(([, text]) => pattern.test(text)).map(([path]) => path).sort();
+      expect(callers, name).toEqual(allowed);
+    }
+    const nodePort = readFileSync(join(root, 'src/store/node-port.ts'), 'utf8');
+    const mutations = /const mutations = new Set\(\[([\s\S]*?)\]\)/.exec(nodePort)?.[1] ?? '';
+    for (const name of ['folderTrash', 'folderRestore']) expect(mutations, name).toContain(`'${name}'`);
+
+    const port = await openNodeLibraryPort({ sqlitePath: ':memory:' });
+    try {
+      for (const [label, value] of [
+        ['NodeLibraryPort', port],
+        ['SyncStorePort', port.syncStorePort()]
+      ] as Array<[string, object]>) {
+        const names = methodNames(value);
+        for (const name of ['folderTrash', 'folderRestore']) expect(names, `${label}.${name}`).not.toContain(name);
+      }
+      const storeKeys = await port.writeExclusive(async (store) => Object.keys(store));
+      for (const name of ['folderTrash', 'folderRestore', 'foldersTrash']) expect(storeKeys, name).toContain(name);
     } finally {
       port.close();
     }
@@ -550,7 +601,8 @@ describe('superficie de src/store, src/sync y src/lock (D2)', () => {
  * motor son LECTURAS y solo las alcanza `src/store/state-reads.ts`, que el puerto
  * (`node-port.ts`) llama por métodos propios (`noteStates`, `foldersTrash`, `noteAuthors`).
  * Ninguna herramienta ni otro módulo las toca; y siguen cerradas las que purgan una carpeta
- * de la papelera o la restauran (`folderPurge`, `folderRestore`, `folderUndoTrash`).
+ * de la papelera o deshacen un borrado por recibo (`folderPurge`, `folderUndoTrash`,
+ * `folderTrashEmpty`). Sacar una carpeta de la papelera (`folderRestore`) entró con D29.
  */
 describe('lecturas de estado (D23)', () => {
   /** Rutas (desde la raiz) de las fuentes de `src` que casan `reach`. */
@@ -596,8 +648,8 @@ describe('lecturas de estado (D23)', () => {
     expect(callersOf(reach)).toEqual(['src/store/file-relink.ts']);
   });
 
-  it('purgar o restaurar una carpeta de la papelera sigue fuera', () => {
-    const reach = reachPattern('folderPurge|folderRestore|folderUndoTrash|folderTrashEmpty');
+  it('purgar una carpeta de la papelera sigue fuera', () => {
+    const reach = reachPattern('folderPurge|folderUndoTrash|folderTrashEmpty');
     for (const file of allSourceFiles()) {
       const path = relative(root, file).split(sep).join('/');
       expect(reach.exec(readFileSync(file, 'utf8'))?.[0] ?? null, path).toBeNull();

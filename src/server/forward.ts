@@ -110,8 +110,9 @@ import {
   DOCUMENT_QUEUE_WAIT_MS,
   EDIT_OPS_MAX
 } from '../store/document-limits';
-import { parseSheetCommands } from './tools/sheet-op-schemas';
+import { parseSheetEditCommands } from './tools/sheet-op-schemas';
 import type { NoteStateInput } from '../store/note-state';
+import type { FolderTrashInput } from '../store/folder-trash';
 import type { JdNewIdRequest } from '../store/jd-new-id';
 import type { JdMoveItem, JdMoveRequest } from '../store/jd-move';
 import type { CreatedItem, PlanWrite } from '../jd';
@@ -170,6 +171,8 @@ export const FORWARD_TIMEOUT_MS: Record<WriterSocketOp, number> = {
   // H-177: la cola y el cálculo de un lote, los dos turnos, el punto de control y la ronda.
   documentOps: DOCUMENT_QUEUE_WAIT_MS + DOCUMENT_EDIT_TIMEOUT_MS + AWAIT_ROUND_TIMEOUT_MS + 60_000,
   noteState: AWAIT_ROUND_TIMEOUT_MS + 15_000,
+  // D29: una carpeta con su contenido a la papelera (o de vuelta) y la ronda.
+  organizeFolder: AWAIT_ROUND_TIMEOUT_MS + 15_000,
   // Un ID nuevo del JDex (D18): leer la biblioteca, escribir nota y carpeta y la ronda.
   jdNewId: AWAIT_ROUND_TIMEOUT_MS + 30_000,
   // Mover a un ID (D19): leer la biblioteca, crear carpetas, mover y la ronda.
@@ -1372,6 +1375,28 @@ export function buildRoutedWriteContext(
             })
         }
       : {}),
+    // Una carpeta a la papelera o de vuelta (D29): op propia, para fallar cerrado igual. Un
+    // escritor anterior no la conoce y la rechaza sin escribir.
+    ...(local.organizeFolder
+      ? {
+          organizeFolder: (input: FolderTrashInput) =>
+            routed(
+              'organizeFolder',
+              { action: input.action, id: input.id, privacy: input.privacy },
+              (value) => {
+                const outcome = asFolderOutcome(value);
+                if (outcome.id !== input.id) throw new Error('writer_protocol');
+                return outcome;
+              },
+              () => local.organizeFolder!(input)
+            ).catch((error: unknown) => {
+              if (error instanceof WriterRemoteError && error.code === 'invalid_request') {
+                throw new ToolError('writer_outdated');
+              }
+              throw error;
+            })
+        }
+      : {}),
     // Un ID nuevo del JDex (D18): todo en el escritor, que guarda los planes, con la
     // privacidad de ESTE lector. Si la conexión se corta tras enviar `apply`, no se repite:
     // el agente reintenta con el mismo `operationId` y el escritor completa lo que falte.
@@ -1414,7 +1439,9 @@ function hasWorkdirWrites(instance: object): instance is WorkdirWriterInstance {
 /**
  * Un `documentOps` que llega por el socket. Un lote de hojas es UNA operación `sheet.batch` con
  * los comandos del LLM (`SheetBatchOp` de `./tools/edit-sheet.ts`): sus comandos pasan otra vez
- * por `parseSheetCommands`, y uno que no pase es `batch_invalid` sin llegar al almacén.
+ * por `parseSheetEditCommands`, el esquema de `hebra_edit_sheet` (con los bloques opcionales y la
+ * validación por dirección, D30; antes, `parseSheetCommands`, que los rechazaba al llegar de un
+ * lector), y uno que no pase es `batch_invalid` sin llegar al almacén.
  */
 async function documentOpsChecked(
   run: NonNullable<WriteContext['documentOps']>,
@@ -1426,7 +1453,7 @@ async function documentOpsChecked(
   if (rest.length > 0 || !envelope || envelope.type !== 'sheet.batch' || typeof envelope.seed !== 'string') {
     return { ok: false, error: { code: 'batch_invalid', issues: [{ opIndex: 0, path: 'ops', reason: 'lote de hojas mal formado' }] } };
   }
-  const parsed = parseSheetCommands(envelope.commands);
+  const parsed = parseSheetEditCommands(envelope.commands);
   if (!parsed.ok) return { ok: false, error: parsed.error };
   const batchOp: unknown = { type: 'sheet.batch', seed: envelope.seed, commands: parsed.ops };
   const ops = [batchOp] as typeof request.input.ops;
@@ -1475,6 +1502,8 @@ export function writerSocketHandlers(
       : {}),
     // D23: cambios de estado de una nota, con la privacidad del lector y la ronda aquí.
     ...(local.noteState ? { noteState: (input: NoteStateInput) => local.noteState!(input) } : {}),
+    // D29: una carpeta a la papelera o de vuelta, con la privacidad del lector y la ronda aquí.
+    ...(local.organizeFolder ? { organizeFolder: (input: FolderTrashInput) => local.organizeFolder!(input) } : {}),
     // D18: un ID nuevo del JDex, con la privacidad del lector y, al aplicar, la ronda aquí.
     ...(local.jdNewId ? { jdNewId: (request: JdNewIdRequest) => local.jdNewId!(request) } : {}),
     // D19: mover a un ID, con la privacidad del lector y, al aplicar o deshacer, la ronda aquí.

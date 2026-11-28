@@ -1015,6 +1015,11 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
         // D9: solo aquí, dentro del turno, y solo para `NoteWriter`.
         folderCreate: (parentId, name) => this.engine.folderCreate(parentId, name),
         folderRename: (id, name) => this.engine.folderRename(id, name),
+        // D29: mandar una carpeta a la papelera y sacarla, con su contenido. Solo para
+        // `./folder-trash.ts`, que antes aplica el filtro en el turno.
+        folderTrash: (id) => this.engine.folderTrash(id),
+        folderRestore: (id) => this.engine.folderRestore(id),
+        foldersTrash: () => foldersTrashOf(this.engine),
         // D19: mover a un ID, con las guardas del motor. Solo para `./jd-move-port.ts`.
         noteMoveIfUnchanged: (id, folderId, expected) => this.engine.noteMoveIfUnchanged(id, folderId, expected),
         folderMoveIfUnchanged: (id, parentId, expected) => this.engine.folderMoveIfUnchanged(id, parentId, expected),
@@ -1094,7 +1099,8 @@ export class NodeLibraryPort implements HebraLibraryPort, NoteWriteTarget {
           'noteMoveIfUnchanged', 'folderMoveIfUnchanged', 'folderRenameIfUnchanged', 'blobPut', 'libraryImportBatch',
           'fileTrash', 'fileRestore', 'fileCreate', 'fileRename', 'fileMove', 'fileReplace',
           'noteMove', 'noteSetFavorite', 'noteArchive', 'noteUnarchive', 'noteTrash', 'noteRestore', 'noteVersionSnapshot',
-          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink', 'openDocumentSession']);
+          'noteHide', 'noteUnhide', 'noteClearConflict', 'noteTrashIfUnchanged', 'noteRestoreRowIfUnchanged', 'fileRenameAndRelink', 'openDocumentSession',
+          'folderTrash', 'folderRestore']);
         const records = new Set(['operations', 'replacePlans', 'jdPlans', 'looseFilePrevious', 'documentUndo']);
         // Síncrona: no cambia el tipo de lo que devuelve cada método (los registros lo son).
         const guard = <T extends object>(target: T, all: boolean): T => new Proxy(target, { get: (object, property) => {

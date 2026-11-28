@@ -1,7 +1,8 @@
 /**
  * `hebra_create_folder` y `hebra_rename_folder` (D9, decisión de David del 3 oct 2026,
- * que sustituye en esto la opción A del 28 sep 2026). Mover y borrar carpetas siguen
- * fuera del MCP: no hay herramienta para ellas.
+ * que sustituye en esto la opción A del 28 sep 2026). Mandar una carpeta a la papelera y
+ * sacarla (D29) están en `./folder-trash.ts`; moverlas (salvo a un ID del JDex) y purgarlas
+ * siguen fuera del MCP.
  *
  * Privacidad, en tres sitios, como la organización de notas (`./organize.ts`):
  * 1. Aquí, antes de escribir, con el filtro de esta llamada: el plan de

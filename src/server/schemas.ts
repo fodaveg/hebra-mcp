@@ -321,6 +321,18 @@ export const renameFolderInputShape = {
   name: z.string().describe(FOLDER_NAME_HINT)
 };
 
+/** Mandar una carpeta a la papelera y sacarla (D29, 28 nov 2026). */
+export const trashFolderInputShape = {
+  folderId: z.string().max(200).describe('Id de carpeta de hebra_list_folders (no la raíz).')
+};
+
+export const restoreFolderInputShape = {
+  folderId: z
+    .string()
+    .max(200)
+    .describe('Id de una carpeta de la papelera: hebra_list_trash con kind "folders".')
+};
+
 /** Añadir un adjunto (D9). Sin `.max()`: el tamaño (5 MiB decodificados), el nombre y
  *  `operationId` los aplica `add-attachment.ts` con sus códigos, sin eco de la entrada. */
 export const addAttachmentInputShape = {
